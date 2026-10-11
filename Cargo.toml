@@ -34,4 +34,9 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [profile.release]
-lto = "thin"
+# rgx's measured release shape (insights-from-rgx.md): fat LTO + one
+# codegen unit; pgo.sh adds the trained profile on top.
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true

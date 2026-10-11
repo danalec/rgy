@@ -18,10 +18,9 @@
 //! went away. The first build is just a sync of $HOME.
 
 use crate::live::{Live, join};
-use crate::name_index::{HDR, as_bytes, fields, header, layout, sec};
+use crate::name_index::{Blob, HDR, as_bytes, fields, header, layout, sec};
 use crate::name_query::{GrepMode, Query, fold};
 use discovery::walk::KIND_FILE;
-use memmap2::Mmap;
 use rayon::prelude::*;
 // Per-file confirmation runs on the rgx engine (IMPLEMENTATION_PLAN.md
 // 4.3: literal/hybrid/fixed/VM + SIMD prefilter replace memchr/regex
@@ -114,7 +113,7 @@ const TEXT_EXTS: &[&[u8]] = &[
 ];
 
 pub struct Segment {
-    map: std::sync::Arc<Mmap>,
+    map: std::sync::Arc<Blob>,
     pub id: u64,
     pub ndocs: usize,
     ndocs1: usize,
@@ -340,7 +339,12 @@ impl Segment {
 
     fn load(dir: &Path, id: u64) -> Option<Segment> {
         let f = std::fs::File::open(seg_path(dir, id)).ok()?;
-        let map = std::sync::Arc::new(unsafe { Mmap::map(&f) }.ok()?);
+        // Blob::from_file: mmap first, owned bytes when mapping fails
+        // (rgx lesson — see name_index::Blob). Segments are scanned per
+        // query, and on Windows a mapping measured 1.51x slower than a
+        // read for scans; the owned fallback at least keeps a map failure
+        // from meaning "no index".
+        let map = std::sync::Arc::new(Blob::from_file(&f).ok()?);
         let [ndocs, ntri, plen, paths_len, nwords, nown, nlong] = fields(&map, MAGIC)?.map(|v| v as usize);
         let (off, total) = layout(&lens(ndocs, ntri, plen, paths_len, nwords, nown, nlong));
         if map.len() < total {
@@ -583,7 +587,7 @@ struct Dedup {
 
 /// A segment's own contents, findable by hash while a sync builds.
 struct Held {
-    map: std::sync::Arc<Mmap>,
+    map: std::sync::Arc<Blob>,
     nown: usize,
     off: [usize; NS],
 }

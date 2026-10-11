@@ -18,6 +18,99 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 
+/// Index storage: a file mapping or an owned buffer.
+///
+/// Lessons from rgx (see `docs/insights-from-rgx.md`):
+/// - `Mmap::map` can FAIL (Windows sharing/commit limits, empty files,
+///   network paths) — a load that only maps turns that into "no index".
+///   `Blob::from_file` falls back to reading the bytes.
+/// - A mapping is a promise about the file: truncation after load is a
+///   SIGBUS/access violation, not an error. The header's `total` is
+///   checked against the file length at load (below) and Windows refuses
+///   `SetEndOfFile` on a mapped section (`ERROR_USER_MAPPED_FILE` 1224),
+///   so the residual race is a replace/shrink on unix — stated here, not
+///   claimed away (rgx `src/mmap.rs`'s `live_len` rule).
+/// - On Windows a mapping costs two kernel objects and measured 1.51x
+///   SLOWER than `read()` for scans; this index is random-access (bitmaps,
+///   per-entry tables), where on-demand paging is the point, so mapping
+///   stays first and the owned buffer is the fallback — never the other
+///   way around, and never a threshold constant nothing calls (rgx's
+///   `AUTO_MMAP_THRESHOLD` trap).
+pub enum Blob {
+    Mapped(Mmap),
+    Owned(Box<[u8]>),
+}
+
+impl std::ops::Deref for Blob {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match self {
+            Blob::Mapped(m) => m,
+            Blob::Owned(v) => v,
+        }
+    }
+}
+
+impl Blob {
+    /// Map the file; if mapping fails, read it into memory instead.
+    pub fn from_file(f: &std::fs::File) -> std::io::Result<Blob> {
+        match unsafe { Mmap::map(f) } {
+            Ok(m) => Ok(Blob::Mapped(m)),
+            Err(_) => {
+                use std::io::Read;
+                let mut out = Vec::new();
+                let mut f = f.try_clone()?;
+                f.read_to_end(&mut out)?;
+                Ok(Blob::Owned(out.into_boxed_slice()))
+            }
+        }
+    }
+}
+
+/// The write side of [`Blob`]'s build path: an anonymous map where the OS
+/// grants one (the big-block rule — returned to the OS on drop), a plain
+/// Vec where it does not (Windows under commit pressure must not panic a
+/// 5M-name build).
+pub enum BlobMut {
+    Mapped(MmapMut),
+    Owned(Vec<u8>),
+}
+
+impl std::ops::Deref for BlobMut {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match self {
+            BlobMut::Mapped(m) => m,
+            BlobMut::Owned(v) => v,
+        }
+    }
+}
+
+impl std::ops::DerefMut for BlobMut {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        match self {
+            BlobMut::Mapped(m) => m,
+            BlobMut::Owned(v) => v,
+        }
+    }
+}
+
+impl BlobMut {
+    pub fn anon(len: usize) -> BlobMut {
+        match MmapMut::map_anon(len) {
+            Ok(m) => BlobMut::Mapped(m),
+            Err(_) => BlobMut::Owned(vec![0u8; len]),
+        }
+    }
+
+    pub fn freeze(self) -> Blob {
+        match self {
+            BlobMut::Mapped(m) => Blob::Mapped(m.make_read_only().expect("freeze map")),
+            BlobMut::Owned(v) => Blob::Owned(v.into_boxed_slice()),
+        }
+    }
+}
+
 const MAGIC: &[u8; 8] = b"FSIDX011";
 
 #[derive(Clone, Copy)]
@@ -47,7 +140,7 @@ enum Sec {
 const NSEC: usize = 21;
 
 pub struct Index {
-    map: Mmap,
+    map: Blob,
     pub n: usize,
     pub d: usize,
     /// Distinct names.
@@ -498,7 +591,7 @@ impl Index {
         // Write the blob, freeing each array once its last reader is done:
         // the build's peak is here, the blob beside the arrays it copies.
         let (off, total) = layout(&section_lens(n, d, u, unames.len()));
-        let mut m = MmapMut::map_anon(total).expect("anon map");
+        let mut m = BlobMut::anon(total);
         let mut put = |s: Sec, v: &[u8]| m[off[s as usize]..][..v.len()].copy_from_slice(v);
         put(Sec::NameBits, as_bytes(&ubits));
         drop(ubits);
@@ -538,10 +631,10 @@ impl Index {
         put(Sec::NameExt, &slots);
         put(Sec::Exts, as_bytes(&table));
         m[..HDR].copy_from_slice(&header(MAGIC, &[n as u64, d as u64, u as u64, unames.len() as u64, event_id, synced_at as u64]));
-        Index::from_map(m.make_read_only().unwrap()).unwrap()
+        Index::from_blob(m.freeze()).unwrap()
     }
 
-    fn from_map(map: Mmap) -> Option<Index> {
+    fn from_blob(map: Blob) -> Option<Index> {
         let [n, d, u, names_len, event_id, synced_at] = fields(&map, MAGIC)?.map(|v| v as usize);
         let (off, total) = layout(&section_lens(n, d, u, names_len));
         let words = u.div_ceil(64);
@@ -589,7 +682,10 @@ impl Index {
 
     pub fn load(path: &Path) -> Option<Index> {
         let f = std::fs::File::open(path).ok()?;
-        Index::from_map(unsafe { Mmap::map(&f) }.ok()?)
+        // mmap first (random-access bitmaps page in on demand), owned
+        // bytes when mapping fails (Windows sharing/commit limits, empty
+        // files) — rgx lesson: a map failure is not "no index".
+        Index::from_blob(Blob::from_file(&f).ok()?)
     }
 
     pub fn bytes(&self) -> usize {
@@ -912,5 +1008,43 @@ fn prior_adjust(name: &[u8], depth: u8) -> i32 {
         b"folders" | b"Containers" | b"Group Containers" => -10,
         b"Application Support" => -5,
         _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod blob_tests {
+    use super::*;
+
+    #[test]
+    fn blob_from_file_reads_the_bytes() {
+        let dir = std::env::temp_dir().join(format!("rgy_blob_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let p = dir.join("b.bin");
+        std::fs::write(&p, b"hello blob").unwrap();
+        let f = std::fs::File::open(&p).unwrap();
+        let b = Blob::from_file(&f).unwrap();
+        assert_eq!(&b[..], b"hello blob");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn index_save_load_round_trips_through_blob() {
+        // Build -> freeze -> save -> load exercises both Blob arms: the
+        // anonymous map on build and the file map (or owned fallback) on
+        // load, with the header size check in between.
+        use discovery::walk::{KIND_FILE, Listing, NONE, RawEnt};
+        let mut names = b"hi.txt".to_vec();
+        let ents = vec![RawEnt { name_off: 0, name_len: 6, kind: KIND_FILE, size: 3, mtime: 7, child: NONE }];
+        let ls = vec![Listing { id: 0, names: std::mem::take(&mut names), ents }];
+        let idx = Index::build(ls, 42, 1, b"/");
+        let dir = std::env::temp_dir().join(format!("rgy_idx_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let p = dir.join("i.fsi");
+        idx.save(&p).unwrap();
+        let loaded = Index::load(&p).expect("load after save");
+        assert_eq!(loaded.n, idx.n);
+        assert_eq!(loaded.u, idx.u);
+        assert_eq!(Index::saved_event_id(&p), Some(42));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
