@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! rgx-tv CLI application.
 //!
 //! Subcommands:

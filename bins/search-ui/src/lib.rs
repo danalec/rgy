@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Terminal search UI (zen-rs `ui.rs`, transported).
 //!
 //! Per `IMPLEMENTATION_PLAN.md` §3 this becomes `search-ui`, backed by the

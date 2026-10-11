@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The `std`-bound half of the pack store: the filesystem surface of the
 //! format tables, the inspector, the builder, the searcher and the store
 //! itself. Everything in this module is gated on the `tv-runtime` feature

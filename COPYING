@@ -1,0 +1,57 @@
+Licensing
+=========
+
+This project uses two licenses, split by what the code does.
+
+Zen components — Apache-2.0 only
+--------------------------------
+
+The NTFS/indexing/terminal layer that came from the zen project is licensed
+under the Apache License 2.0 only:
+
+    bins/zen-rs/                        the zen CLI (NTFS indexer)
+    bins/search-ui/                     the terminal UI
+    crates/discovery-windows/           MFT + USN discovery (ntfs, volume, indexer, seam)
+    crates/name-core/src/index.rs       the ERI2 on-disk index and its query layer
+
+Every file in those trees carries `SPDX-License-Identifier: Apache-2.0`.
+This portion is not available under the MIT license. Apache-2.0 was chosen
+for it because it carries an express patent grant and an explicit limitation
+of liability, which a distinctive, independently valuable subsystem should
+have.
+
+Tesla Valve pack store — Apache-2.0 only
+----------------------------------------
+
+The pack-store subsystem is licensed under the Apache License 2.0 only
+(inherited from rgx, which marks it the same way):
+
+    crates/rgx-core/src/tv/             the format, the query vocabulary, the planner
+    crates/rgx-core/src/tv_runtime/     the builder, searcher, store and inspector
+    crates/rgx-core/src/bin/rgx-tv.rs   the rgx-tv CLI
+
+Every file in those directories carries `SPDX-License-Identifier: Apache-2.0`.
+This portion is not available under the MIT license.
+
+Everything else — MIT OR Apache-2.0
+-----------------------------------
+
+All remaining code in this repository is dual-licensed under the MIT License
+and the Apache License 2.0. You may use that code under the terms of either
+license. Commercial use of it is licensed under Apache-2.0, which is the
+license this project intends for commercial deployment; the MIT option remains
+available to anyone who prefers its terms.
+
+Full texts: LICENSE-APACHE and LICENSE-MIT. Third-party notices: NOTICE.
+
+Consequence for the distributed binaries
+----------------------------------------
+
+`zen-rs` and `search-ui` are Apache-2.0-only code end to end, so
+distributing either binary is governed by Apache-2.0. `searchd` links the
+Tesla Valve pack store by default (`--tv-dir`), so distributing it likewise
+distributes Apache-2.0 code and Apache-2.0 governs that distribution. The
+same applies to any binary that includes `discovery-windows` or
+`name_core::index`. A binary built from only the dual-licensed remainder
+(for example `searchctl` without the TV store) is available under MIT or
+Apache-2.0 as above.

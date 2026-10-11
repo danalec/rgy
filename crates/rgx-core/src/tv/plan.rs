@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Which files a query searches, which packs they live in, and how those packs
 //! are cut into claimable pieces.
 //!

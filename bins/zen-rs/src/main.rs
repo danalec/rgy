@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! zen-rs — an NTFS file indexer built on the MFT and the USN journal.
 //!
 //! Grounding for the approach came from the decompiled Zen 1.4.1.1032

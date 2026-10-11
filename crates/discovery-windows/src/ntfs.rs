@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! NTFS on-disk structure parsing.
 //!
 //! Everything here reads little-endian values out of raw buffers. NTFS internals

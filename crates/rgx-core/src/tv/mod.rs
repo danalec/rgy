@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The Tesla Valve pack store, as a format and a plan.
 //!
 //! `rgx-tv` is the `std` crate that owns the filesystem, the threads and the

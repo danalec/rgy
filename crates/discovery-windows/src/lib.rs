@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Windows discovery backend: NTFS MFT scan + USN journal tail.
 //!
 //! Transported from zen-rs (`ntfs.rs`, `volume.rs`, `indexer.rs`) with

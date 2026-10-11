@@ -29,6 +29,10 @@ members = [
 # One workspace, thin bins, one protocol (IMPLEMENTATION_PLAN.md §3).
 # crates/rgx-* are transported verbatim from ../rgx; name-core and
 # discovery-windows hold the zen-rs code with the RE-audit fixes.
+#
+# The Zen components and the Tesla Valve pack store are Apache-2.0 only;
+# the rest is MIT OR Apache-2.0. See COPYING — distributing a binary that
+# links either is governed by Apache-2.0.
 [workspace.package]
 edition = "2021"
 license = "MIT OR Apache-2.0"

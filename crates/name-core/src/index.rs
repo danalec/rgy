@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! In-memory path index built from MFT file references.
 //!
 //! A USN record identifies a file by reference number and names its parent, but

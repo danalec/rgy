@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The Windows backends behind the `discovery::Source`/`Watch` seam.
 //!
 //! `MftSource` enumerates the volume as DFS directory blocks via the MFT

@@ -3,6 +3,8 @@ name = "name-core"
 version = "0.1.0"
 edition = "2024"
 description = "Name index, query filters, fuzzy ranking (zen-rs layer; fsearch engine merges here)"
+# Dual except `src/index.rs` (the ERI2 index and query layer), which is
+# Zen-origin and Apache-2.0 only — it carries its SPDX header. See COPYING.
 license = "MIT OR Apache-2.0"
 
 [dependencies]

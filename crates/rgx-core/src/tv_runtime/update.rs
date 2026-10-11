@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Incremental update and generation publishing engine for rgx-tv.
 //!
 //! Compares the live filesystem state against the stored generation, appending

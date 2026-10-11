@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Win32 volume access: raw NTFS file records and USN journal reads.
 
 use crate::ntfs::{self, FileRecordInput, ReadUsnJournalData};

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Search engine for aggregated packs preserving strict file boundaries.
 //!
 //! # Critical Correctness Invariant

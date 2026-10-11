@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The `std` shell over [`super::format`]: everything there, plus the
 //! filesystem.
 //!

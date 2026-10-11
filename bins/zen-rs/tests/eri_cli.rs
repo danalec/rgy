@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! End-to-end coverage for the `.eri` index file: the binary must be able to
 //! read a hand-built ERI2 stream off disk and answer queries against it.
 //!

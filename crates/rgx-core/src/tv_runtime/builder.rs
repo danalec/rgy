@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Aggregated pack builder and ingestion engine.
 //!
 //! Converts raw directory trees into contiguous, verified `.tvp` packs and

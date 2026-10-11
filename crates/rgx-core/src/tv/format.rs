@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Format definitions for rgx-tv packs and manifests.
 //!
 //! The codec is bytes in and bytes out: [`PackHeader::decode`] takes the 32

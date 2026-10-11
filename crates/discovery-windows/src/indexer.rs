@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! MFT walk and USN tailing: the two ways this indexer learns about files.
 
 use crate::ntfs;

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! A warm, bounded pool of pack mappings for long-lived processes.
 //!
 //! `search_store` pays three costs on every call that a long-lived process pays

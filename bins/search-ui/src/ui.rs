@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Interactive full-screen search over a loaded [`Index`].
 //!
 //! The whole MFT-derived index already sits in memory, so every keystroke can

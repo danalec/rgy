@@ -60,3 +60,16 @@ stderr, zero matches, exit 1.
 | `rgx` | `../rgx` | content search engine, adapters, Tesla Valve packs |
 | `fsearch` | `../fsearch` | macOS name discovery + fzf-v1 scoring |
 | `zen-rs` | `../zen/zen-rs` | Windows NTFS MFT/USN indexer |
+
+## License
+
+Split-licensed — the full map is in `COPYING`:
+
+- **Apache-2.0 only**: the Zen components (`bins/zen-rs`, `bins/search-ui`,
+  `crates/discovery-windows`, `name_core::index`) and the Tesla Valve pack
+  store (`rgx-core` `tv`/`tv_runtime`). Each file carries its
+  `SPDX-License-Identifier: Apache-2.0` header.
+- **MIT OR Apache-2.0**: everything else. Commercial use is intended
+  under Apache-2.0; the MIT option remains for anyone who prefers it.
+
+Full texts: `LICENSE-APACHE`, `LICENSE-MIT`. Third-party notices: `NOTICE`.

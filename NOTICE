@@ -1,0 +1,32 @@
+rgy — Notices
+=============
+
+Lineage
+-------
+rgy merges three prior projects into one workspace:
+
+- `fsearch` (Rust) — name indexing, fuzzy ranking, and the query engine in
+  `crates/name-core` (name_index, name_query, fuzzy, live, content). MIT
+  licensed; its license text and copyright remain in force for that code.
+- the `zen` project (this workspace's `zen-rs`, `search-ui`,
+  `discovery-windows`, and `name_core::index`) — Windows NTFS discovery,
+  the ERI2 index format, and the terminal UI. Apache-2.0 only here; see
+  COPYING.
+- `rgx` — the content-search engine, adapters, and Tesla Valve pack store
+  in `crates/rgx-*`. Dual MIT OR Apache-2.0 except the TV pack store,
+  which is Apache-2.0 only (as upstream marks it).
+
+Ideas, protocols, and behavioral parity (query syntax, rg-compatible
+flags, on-disk format layouts) are not code and are not subject to
+copyright. Named projects are referenced nominatively; no affiliation is
+implied.
+
+Third-party components
+----------------------
+This project is split-licensed — MIT OR Apache-2.0 for most code and
+Apache-2.0-only for the Zen components and the Tesla Valve pack store
+(see COPYING). Its Rust dependencies carry their own permissive licenses.
+The full dependency license set can be reproduced with:
+
+    cargo metadata --format-version 1 --locked \
+      | jq -r '.packages[].license' | sort -u

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Inspection and integrity verification engine for the pack store.
 //!
 //! Validates CRC32 checksums of manifest and pack files, checking for

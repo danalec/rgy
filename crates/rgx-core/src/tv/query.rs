@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The vocabulary of one pack query: which engine, where the bytes come from,
 //! what a hit looks like.
 //!
