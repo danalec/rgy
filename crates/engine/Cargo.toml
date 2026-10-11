@@ -1,8 +1,13 @@
 [package]
 name = "engine"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "Orchestration: index lifecycle, sync, pools, keep-warm (skeleton)"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+discovery = { path = "../discovery" }
+name-core = { path = "../name-core" }
+
+[[example]]
+name = "name_bench"
