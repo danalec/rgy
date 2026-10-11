@@ -1,15 +1,15 @@
 # On-disk index formats
 
-Consumers: this workspace, `everything-c` (C port), and anything that reads
+Consumers: this workspace, `zen-c` (C port), and anything that reads
 a saved index without the daemon. Source of truth is the code named below —
 this file is the cross-language contract, not a second implementation.
 
 ## ERI2 (legacy, still read)
 
-The everything-rs binary index (`name_core::index`, `ERI_MAGIC = "ERI2"`).
-Everything-c reads and writes the same format — keep it readable. Layout
+The zen-rs binary index (`name_core::index`, `ERI_MAGIC = "ERI2"`).
+Zen-c reads and writes the same format — keep it readable. Layout
 lives in `crates/name-core/src/index.rs` (`Index::read_from`/`write_to`)
-and `everything-c`'s port of it. Multi-volume: a root table of
+and `zen-c`'s port of it. Multi-volume: a root table of
 `(volume ordinal, root string)` pairs precedes the record stream; FRN keys
 carry the volume ordinal in their high 16 bits.
 

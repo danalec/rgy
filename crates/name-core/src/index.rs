@@ -12,7 +12,7 @@ use discovery as ntfs;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 
-/// Magic header bytes for the Everything-Rs Index v2 on-disk format ("ERI2").
+/// Magic header bytes for the Zen-Rs Index v2 on-disk format ("ERI2").
 pub const ERI_MAGIC: [u8; 4] = *b"ERI2";
 /// Format version for the ERI on-disk index format.
 pub const ERI_VERSION: u32 = 2;
@@ -1711,7 +1711,7 @@ mod tests {
     #[test]
     fn bare_terms_are_substrings_but_wildcards_are_globs() {
         // A bare term matches anywhere in the path; a wildcard term must cover
-        // the whole path, which is what `*.rs` and `report*` mean in Everything.
+        // the whole path, which is what `*.rs` and `report*` mean in Zen.
         assert!(term_matches("C:\\src\\report.txt", "report"));
         assert!(!term_matches("C:\\src\\report.txt", "report*"));
         assert!(term_matches("C:\\src\\report.txt", "*report*"));

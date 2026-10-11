@@ -1,7 +1,7 @@
-# Implementation Plan: merging fsearch + everything-rs + rgx into one search stack
+# Implementation Plan: merging fsearch + zen-rs + rgx into one search stack
 
 Goal: one Rust workspace, one daemon, one CLI — **whole-filesystem name search**
-(fsearch's engine + everything-rs's Windows discovery) and **search inside files**
+(fsearch's engine + zen-rs's Windows discovery) and **search inside files**
 (rgx's engine + adapter families + pack/index stores), on Windows, Linux, and
 macOS, at fsearch-grade interactive latency and rgx-grade content throughput.
 
@@ -12,16 +12,16 @@ named reason.
 
 Sources of truth for this plan:
 - `C:\Users\danalec\Documents\src\fsearch` — macOS whole-disk name + content search (Rust, MIT)
-- `C:\Users\danalec\Documents\src\everything\everything-rs` — Windows NTFS MFT/USN indexer (Rust)
+- `C:\Users\danalec\Documents\src\zen\zen-rs` — Windows NTFS MFT/USN indexer (Rust)
 - `../rgx` — content search engine, adapters, Tesla Valve packs, `--serve`
-- `C:\Users\danalec\Documents\src\everything\everything-c` — C port; **out of scope**
+- `C:\Users\danalec\Documents\src\zen\zen-c` — C port; **out of scope**
   except as a consumer of shared format specs (keep ERIs/packs readable)
 
 ---
 
 ## 1. What each project brings (capability map)
 
-| Layer | fsearch | everything-rs | rgx |
+| Layer | fsearch | zen-rs | rgx |
 |---|---|---|---|
 | Name discovery (crawl) | `getattrlistbulk` walk (macOS) | **MFT scan + USN journal (Windows)** | generic walker (rg-compatible) |
 | Live updates | FSEvents | USN tail (`tail_usn`) | none (re-walk) |
@@ -39,11 +39,11 @@ Sources of truth for this plan:
 Three takeaways that shape everything below:
 
 1. **The name-search engine and the content-search engine do not overlap at
-   all.** fsearch owns names; rgx owns content. everything-rs contributes the
+   all.** fsearch owns names; rgx owns content. zen-rs contributes the
    best discovery backend (MFT/USN) and a query-filter vocabulary.
 2. **There are three regex engines in the tree today.** rgx-core is the
-   original; everything-rs (and everything-c) vendor copies of it. The merge
-   deletes the copies and depends on the original. (everything-c keeps its C
+   original; zen-rs (and zen-c) vendor copies of it. The merge
+   deletes the copies and depends on the original. (zen-c keeps its C
    copy — it is a separate budget.)
 3. **Content indexing has two mature, complementary designs** (see §4.3) —
    the merge does not pick a winner between them, it layers them.
@@ -82,15 +82,15 @@ sha256 fingerprints, min-of-N with warmups, counts proven equal before timing).
 
 One workspace, thin bins, one protocol. `rgx-core` stays a clean crate (it is
 already `no_std`-aware and feature-gated); fsearch's engine and
-everything-rs's discovery enter as crates of their own.
+zen-rs's discovery enter as crates of their own.
 
 ```
 search/  (new root workspace — or extend `../rgx`'s workspace; decide once)
 ├── crates/
 │   ├── name-core            # from fsearch: index, bitmaps, scoring, typos, SIMD
-│   │                        #   + everything-rs Query filters merged into the parser
+│   │                        #   + zen-rs Query filters merged into the parser
 │   ├── discovery             # Source/Watch traits (the platform seam)
-│   ├── discovery-windows    # from everything-rs: ntfs.rs, volume.rs, indexer.rs (MFT+USN)
+│   ├── discovery-windows    # from zen-rs: ntfs.rs, volume.rs, indexer.rs (MFT+USN)
 │   ├── discovery-macos      # from fsearch: walk.rs (getattrlistbulk), fsevents.rs
 │   ├── discovery-linux      # new: getdents64 bulk walk + inotify
 │   ├── live                 # from fsearch live.rs: overlay (dead bits + overrides)
@@ -102,32 +102,32 @@ search/  (new root workspace — or extend `../rgx`'s workspace; decide once)
 ├── bins/
 │   ├── searchctl            # the merged CLI (fsearch-style + rg-compatible flags)
 │   ├── searchd              # daemon (named pipe / UDS / stdio)
-│   └── search-ui            # terminal UI (from everything-rs ui.rs)
+│   └── search-ui            # terminal UI (from zen-rs ui.rs)
 └── docs/formats/            # ERI v3, pack v3, content-segment specs (C port follows)
 ```
 
 Binaries keep the old names as aliases for one release (`fsearch`, `rgx`,
-`everything-rs` shim bins calling the merged engine) so existing scripts and
+`zen-rs` shim bins calling the merged engine) so existing scripts and
 the sibling C port do not break while the dust settles.
 
 ---
 
 ## 4. The merge decisions (the hard part)
 
-### 4.1 Name search: fsearch's engine wins, everything-rs's syntax wins
+### 4.1 Name search: fsearch's engine wins, zen-rs's syntax wins
 
 - Adopt fsearch `index.rs`/`query.rs` wholesale: interned names, DFS range
   layout, `name_mask` + class bitmaps, fzf-v1 scoring, typo regime, NEON + a
   **new x86_64 SSE2 wide scorer** (fsearch is NEON-only; Windows/Linux are
   x86-first), top-k with score floor, NameCache + pools.
-- Adopt everything-rs's filter vocabulary on top of fsearch's token modes:
+- Adopt zen-rs's filter vocabulary on top of fsearch's token modes:
   `ext/dir/type` (incl. `type:link`, media kinds), `size:` semantics
   (dirs never match size bounds), `|` alternation, globs, fail-closed unknown
   `type:` + warning, `re:` path regex via rgx-core (not the vendored copy —
   see §4.4).
 - Persistence: ERI evolves to **v3** (names blob + rows + masks + bitmaps +
   meta + event_id, mmap-loadable in ≤ 50 ms @ 5M). Keep the ERI2 reader.
-  everything-rs's atomic-replace save trap (`MoveFileExA`) and fsearch's
+  zen-rs's atomic-replace save trap (`MoveFileExA`) and fsearch's
   single-owner lock discipline both survive.
 
 ### 4.2 Discovery: three backends behind one seam
@@ -135,10 +135,10 @@ the sibling C port do not break while the dust settles.
 `discovery::Source` (full enumeration as DFS directory blocks) +
 `discovery::Watch` (change batches, or `Rescan` when the feed loses history):
 
-- **Windows**: everything-rs MFT streaming + USN. Carry its trap suite
+- **Windows**: zen-rs MFT streaming + USN. Carry its trap suite
   verbatim (FRN = `stream_offset / rec_size`, echoed-FRN rejection,
   `OVERLAPPED` reads, 44-byte USN input, resume-USN peel, record-size
-  derivation). Fold the `everything-c` RE-AUDIT fixes (M1 cluster floor, M2
+  derivation). Fold the `zen-c` RE-AUDIT fixes (M1 cluster floor, M2
   resident `ValueOffset`, D1 USN offsets, M3 extension records, D2 resume
   advance) into this crate — they are shared bugs.
 - **macOS**: fsearch `walk.rs` + `fsevents.rs` (incl. `no_materialize`
@@ -177,11 +177,11 @@ regex pass at query time.
 
 ### 4.4 One regex engine, one daemon, one allocator
 
-- **Delete the vendored regex copies.** everything-rs `src/regex/` becomes a
+- **Delete the vendored regex copies.** zen-rs `src/regex/` becomes a
   dependency on `rgx-core` (same MIT OR Apache-2.0 lineage it was copied
   from). fsearch keeps its `regex` crate only where the byte-regex crate's
   Unicode mode is needed for `regex:` content queries; path `re:` uses
-  rgx-core. *Everything-c keeps its C copy — noted in docs/formats as a
+  rgx-core. *Zen-c keeps its C copy — noted in docs/formats as a
   frozen fork.*
 - **One protocol:** fsearch's JSON-lines op model (`{"q", "limit"}`,
   `{"op":"grep"|"status"|"…}`) becomes `proto`, spoken over named pipe
@@ -198,9 +198,9 @@ regex pass at query time.
 
 ### 4.5 UX surfaces
 
-- `searchctl` (name): fsearch one-shot ergonomics + everything-rs filters +
+- `searchctl` (name): fsearch one-shot ergonomics + zen-rs filters +
   rg-compatible exit codes where they don't conflict; `--json` from rgx.
-- `search-ui`: everything-rs terminal UI (sparkline stays; add p50/p90 and
+- `search-ui`: zen-rs terminal UI (sparkline stays; add p50/p90 and
   candidates-skipped), backed by the new name searcher + content grep.
 - `searchd`: owns the indexes, keep-warm, follower takeover (fsearch
   `try_upgrade` + single-instance lock).
@@ -212,10 +212,10 @@ regex pass at query time.
 | # | Work item | Source of truth | Lands in | Phase |
 |---|---|---|---|---|
 | 1 | Bench harness (names + content + walk, corpus digests) | rgx harness rules + fsearch tables | `engine` benches | 0 |
-| 2 | RE-AUDIT fixes applied to shared Windows discovery | everything-c `RE-AUDIT.md` | `discovery-windows` | 0 |
+| 2 | RE-AUDIT fixes applied to shared Windows discovery | zen-c `RE-AUDIT.md` | `discovery-windows` | 0 |
 | 3 | Delete vendored regex; depend on rgx-core | rgx-core | `discovery-windows`, `name-core` | 1 |
 | 4 | Name index v2 (intern, DFS, masks, bitmaps, ERI v3) | fsearch `index.rs` | `name-core` | 1 |
-| 5 | Query syntax merge (fsearch modes + everything-rs filters) | both | `name-core` | 1 |
+| 5 | Query syntax merge (fsearch modes + zen-rs filters) | both | `name-core` | 1 |
 | 6 | fzf-v1 scoring + typos + SSE2/NEON SIMD + top-k + NameCache | fsearch `query.rs` | `name-core` | 2 |
 | 7 | mtime in index + `mtime:` | fsearch + MFT `$STANDARD_INFORMATION` | `name-core`, `discovery-*` | 2 |
 | 8 | `Source`/`Watch` seam; MFT+USN and mac walk behind it | new (spec §4.2) | `discovery*` | 3 |
@@ -283,7 +283,7 @@ degraded (documented limit) · **G** gap (work required, see §6.5) · **—** N
 | 2.8 | Query modes (`'` `^` `$` `!`) | **P** | **P** | **N** | Pure. |
 | 2.9 | Filters `ext/type/kind/in/size/mtime/limit` | **P** | **P** | **N** | `type:link` maps per row 1.10; `type:app` is macOS-shaped (map per-OS, §6.5). |
 | 2.10 | `re:` path regex | **P** rgx-core | **P** | **P** | One engine everywhere (the vendored copies die in the merge). |
-| 2.11 | Globs `*`/`?` + `\|` alternation | **P** | **P** | **N** | Everything-rs syntax, pure. |
+| 2.11 | Globs `*`/`?` + `\|` alternation | **P** | **P** | **N** | Zen-rs syntax, pure. |
 | 2.12 | `sym:` (definitions) | **P** | **P** | **N** | Content-layer index (§6.3); same bytes on all OSes. |
 
 ### 6.3 Content search
@@ -308,8 +308,8 @@ degraded (documented limit) · **G** gap (work required, see §6.5) · **—** N
 | 4.2 | Single-instance ownership | **P** lock file + `LockFileEx` | **P** `flock` | **P** `flock` | Follower attach + takeover (fsearch `try_upgrade`) is portable. |
 | 4.3 | stdio mode | **P** | **P** | **P** | Pure. |
 | 4.4 | rgx `--serve` compat front | **P** | **N** | **P** | Pure protocol shim. |
-| 4.5 | Terminal UI | **P** VT + `ReadConsoleInputW` | **G** termios + ANSI | **P** termios + ANSI | Win32 console path is the odd one (everything-rs `ui.rs` already owns it). |
-| 4.6 | UTF-16 argv fidelity | **N** `GetCommandLineW` | — UTF-8 argv | — UTF-8 argv | Fixes the known everything-rs gap on Windows only; N/A elsewhere. |
+| 4.5 | Terminal UI | **P** VT + `ReadConsoleInputW` | **G** termios + ANSI | **P** termios + ANSI | Win32 console path is the odd one (zen-rs `ui.rs` already owns it). |
+| 4.6 | UTF-16 argv fidelity | **N** `GetCommandLineW` | — UTF-8 argv | — UTF-8 argv | Fixes the known zen-rs gap on Windows only; N/A elsewhere. |
 | 4.7 | Console output encoding | **G** UTF-8 codepage / `WriteConsoleW` | **N** UTF-8 | **N** UTF-8 | Windows-only footgun (CP 65001 vs legacy console). |
 | 4.8 | keep-warm spinner (250 ms) | **P** `SetThreadPriority` + `timeBeginPeriod` | **P** spinner thread | **P** spinner + QoS | Same policy; different priority knobs. Cap + headless-off on all. |
 | 4.9 | Big-block allocator (≥1 MiB → map, free returns) | **P** `VirtualAlloc` | **P** `mmap` | **P** `mmap` | fsearch rule, one `platform` module. |
@@ -367,7 +367,7 @@ degraded (documented limit) · **G** gap (work required, see §6.5) · **—** N
 
 1. **Case sensitivity (row 1.11)** — the same query means different things per FS. Rule: query strings carry smart-case; the index stores a folded mask plus the original; exact-mode (`'`) matches FS semantics of the host OS and the docs say so.
 2. **Unicode normalization (row 1.12)** — macOS NFD vs typed NFC; Windows preserves case but collapses some legacy short names; Linux is raw bytes. Rule: all comparisons run on a fold of the path (ASCII case-fold + NFC); display and I/O keep the original bytes/UTF-16.
-3. **Separator and prefix shapes (rows 1.13/1.14)** — `C:\`, `\\?\C:\`, `/`, and trailing `\`/`/` must collapse to one internal identity (fsearch `normalize` + everything-rs `volume_key` both survive; extend, don't replace).
+3. **Separator and prefix shapes (rows 1.13/1.14)** — `C:\`, `\\?\C:\`, `/`, and trailing `\`/`/` must collapse to one internal identity (fsearch `normalize` + zen-rs `volume_key` both survive; extend, don't replace).
 4. **Link identity (rows 1.9/1.10)** — 8.3 names, hardlinks, firmlinks, junctions, and symlinks are alias rows over one identity on their own OS; the merge must not pretend an NTFS junction equals a POSIX symlink in `type:`.
 5. **Live-feed honesty (rows 1.2/1.3)** — "reflected ≤ 200 ms" is true on Windows/macOS; on Linux after a reboot it means "relisted", not "replayed". The API distinguishes `Replayed` vs `Relisted` in `Status`.
 6. **Privilege surfaces (row 4.14)** — Admin (Windows raw volume), Full Disk Access (macOS gated dirs), nothing (Linux walk). The daemon never prompts; it degrades to `skipped` lists like fsearch already does.
@@ -385,14 +385,14 @@ degraded (documented limit) · **G** gap (work required, see §6.5) · **—** N
 - Bench harness reproducing both families of numbers: fsearch name/content
   tables and rgx's rg-parity tables (thread-matched, corpus-sha256, counts
   proven equal first). Checked-in "before" table.
-- Apply the everything-c RE-AUDIT criticals (M1, M2, D1, M3, D2) to
-  `discovery-windows` — same bugs exist in everything-rs's copy of the code.
+- Apply the zen-c RE-AUDIT criticals (M1, M2, D1, M3, D2) to
+  `discovery-windows` — same bugs exist in zen-rs's copy of the code.
 - **Gate**: harness ±5% run-to-run; trap suites of both parents green.
 
 ### Phase 1 — Name core converges
 - `name-core` crate from fsearch; ERI v3; query syntax merge; delete vendored
   regex (depend on rgx-core); `searchctl name` path replaces
-  everything-rs's linear SearchTable scan (API-compatible with `ui.rs`).
+  zen-rs's linear SearchTable scan (API-compatible with `ui.rs`).
 - **Gate**: name search p50 ≤ 2 ms @ 1M (pre-SIMD); ERI load ≤ 50 ms @ 5M;
   query-visible behaviour change only where the merge deliberately unified
   semantics (listed in the changelog); both parents' test suites green.
@@ -442,8 +442,8 @@ degraded (documented limit) · **G** gap (work required, see §6.5) · **—** N
   crate (406 cells), CLI differential vs ripgrep, adapter fixtures, pack
   round-trips, corpus sha256 discipline. fsearch: typo suite, scoring goldens,
   bloom zero-false-negative tests, MFT/USN trap regressions (from
-  everything-rs + RE-AUDIT fixes).
-- **Merge-specific:** query-semantic diff table (old everything-rs query →
+  zen-rs + RE-AUDIT fixes).
+- **Merge-specific:** query-semantic diff table (old zen-rs query →
   new unified query → same result sets on a fixture volume image);
   name-cache extension property tests; ERI v2→v3 migration round-trips;
   protocol golden files (`proto` request → reply) for daemon/stdio/`--serve`.
@@ -473,7 +473,7 @@ degraded (documented limit) · **G** gap (work required, see §6.5) · **—** N
 2. RE-AUDIT criticals (M1/M2/D1/M3/D2) in the shared Windows discovery code.
 3. Workspace skeleton: `name-core`, `discovery`, `engine`, `proto` crates; old
    bins compile against them unchanged.
-4. Delete vendored regex in everything-rs's code path; depend on rgx-core.
+4. Delete vendored regex in zen-rs's code path; depend on rgx-core.
 5. Name index v2 (interning, DFS, masks, bitmaps, ERI v3) + syntax merge.
 6. SSE2/NEON scorer + fzf-v1 + typos + top-k + NameCache.
 7. mtime + `Source`/`Watch` seam + live overlay (Windows + macOS first).

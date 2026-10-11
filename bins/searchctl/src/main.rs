@@ -1,6 +1,6 @@
 //! searchctl — the merged name-search CLI.
 //!
-//! fsearch one-shot ergonomics + everything-rs's filter vocabulary (see
+//! fsearch one-shot ergonomics + zen-rs's filter vocabulary (see
 //! `name_core::name_query`), over the v2 name index. Today it enumerates a
 //! directory tree (`--root`, portable walk / no privileges); the Windows
 //! MFT fast path (`--volume`) and content `grep:` land with the engine and
@@ -28,7 +28,7 @@ fn usage() -> ! {
            --limit <n>        max hits (default: 50)\n  \
            --json             one JSON object per hit\n\n\
          query: fsearch tokens (bare=fuzzy, 'x exact, ^x prefix, x$ suffix,\n\
-         !x negate) + everything-rs filters (ext: dir: type: size: re:),\n\
+         !x negate) + zen-rs filters (ext: dir: type: size: re:),\n\
          | alternates, * and ? glob the whole path."
     );
     std::process::exit(2);

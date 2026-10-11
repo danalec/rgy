@@ -20,7 +20,7 @@ members = [
     "crates/rgx-adapters-mail",
     "crates/rgx-adapters-inspect",
     "crates/rgx-adapters-pdf",
-    "bins/everything-rs",
+    "bins/zen-rs",
     "bins/searchctl",
     "bins/searchd",
     "bins/search-ui",
@@ -28,7 +28,7 @@ members = [
 
 # One workspace, thin bins, one protocol (IMPLEMENTATION_PLAN.md §3).
 # crates/rgx-* are transported verbatim from ../rgx; name-core and
-# discovery-windows hold the everything-rs code with the RE-audit fixes.
+# discovery-windows hold the zen-rs code with the RE-audit fixes.
 [workspace.package]
 edition = "2021"
 license = "MIT OR Apache-2.0"

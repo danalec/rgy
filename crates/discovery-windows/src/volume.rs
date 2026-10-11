@@ -15,14 +15,14 @@ use windows::Win32::System::Ioctl::{
 use windows::core::PCWSTR;
 
 /// `GENERIC_READ`. The NTFS driver rejects volume reads opened with anything
-/// weaker; Everything uses the same value (0x80000000) for its volume handles.
+/// weaker; Zen uses the same value (0x80000000) for its volume handles.
 const GENERIC_READ_ACCESS: u32 = 0x8000_0000;
 
 /// `DRIVE_FIXED` — `GetDriveTypeW` returns this as a bare `u32` and the
 /// `windows` crate does not declare the constant.
 const DRIVE_FIXED: u32 = 3;
 
-/// USN read buffer size, matching what Everything uses (64 KiB).
+/// USN read buffer size, matching what Zen uses (64 KiB).
 pub const USN_BUFFER_SIZE: usize = 0x1_0000;
 /// `FSCTL_READ_USN_JOURNAL` output begins with the resume USN (i64) before any
 /// `USN_RECORD`. Records start after this prefix.
@@ -220,7 +220,7 @@ impl Volume {
         };
 
         let input_bytes = input.to_bytes();
-        // Everything sizes this as BytesPerFileRecordSegment + 15, which must
+        // Zen sizes this as BytesPerFileRecordSegment + 15, which must
         // also cover the 12-byte prefix; keep a margin so the driver never
         // answers ERROR_MORE_DATA.
         let mut out = vec![0u8; ntfs::FILE_RECORD_OUTPUT_PREFIX + record_size + 64];
@@ -259,7 +259,7 @@ impl Volume {
         // The driver echoes the file reference of the record it actually
         // returned in the first 8 bytes of the output. When the requested slot
         // is free it hands back some other record's bytes instead of failing —
-        // everything's walker treats exactly this case as "FRN not in use".
+        // zen's walker treats exactly this case as "FRN not in use".
         // Without the check a free slot is silently replaced by a neighbour,
         // every slot looks live, and a scan invents paths that do not exist.
         let echoed = ntfs::frn_number(u64::from_le_bytes(
@@ -622,7 +622,7 @@ mod tests {
         use windows::core::PCWSTR;
 
         let path = std::env::temp_dir().join(format!(
-            "everything-rs-read-at-{}-{:?}.bin",
+            "zen-rs-read-at-{}-{:?}.bin",
             std::process::id(),
             std::thread::current().id()
         ));

@@ -1,12 +1,12 @@
 [package]
-name = "everything-rs"
+name = "zen-rs"
 version = "0.1.0"
 edition = "2024"
-description = "The everything-rs CLI/TUI, unchanged behaviour, now built on the rgy workspace crates"
+description = "The zen-rs CLI/TUI, unchanged behaviour, now built on the rgy workspace crates"
 license = "MIT OR Apache-2.0"
 
 [[bin]]
-name = "everything-rs"
+name = "zen-rs"
 path = "src/main.rs"
 
 [dependencies]

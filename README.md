@@ -1,6 +1,6 @@
 # rgy
 
-Unified search stack: whole-filesystem name search (fsearch + everything-rs) and content search (rgx), on Windows, Linux, and macOS.
+Unified search stack: whole-filesystem name search (fsearch + zen-rs) and content search (rgx), on Windows, Linux, and macOS.
 
 See `IMPLEMENTATION_PLAN.md` for the full architecture and feature matrix.
 
@@ -13,7 +13,7 @@ verification on machines this host does not have.
 | Piece | Where | State |
 |---|---|---|
 | Name index v2 (intern, DFS, bitmaps, mmap blob) | `crates/name-core` (`name_index`) | ✅ from fsearch |
-| Query syntax merge (fsearch tokens + everything-rs filters) | `crates/name-core` (`name_query`) | ✅ `type:`/`dir:`/`size:`/`re:`/globs/\|, fail-closed |
+| Query syntax merge (fsearch tokens + zen-rs filters) | `crates/name-core` (`name_query`) | ✅ `type:`/`dir:`/`size:`/`re:`/globs/\|, fail-closed |
 | fzf-v1 scorer + typos + top-k + NameCache + **SSE2 wide scorer** | `crates/name-core` (`name_query`) | ✅ parity-tested vs scalar |
 | Live overlay | `crates/name-core` (`live`) | ✅ portable `lstat` |
 | One regex engine (vendored copy deleted) | `crates/name-core` (`regex`) → `rgx-core` | ✅ (`rgx-core` stays `no_std`) |
@@ -26,7 +26,7 @@ verification on machines this host does not have.
 | `searchctl` (name + content CLI, rg exit codes, `--json`) | `bins/searchctl` | ✅ |
 | `searchd` (JSON-lines daemon) | `bins/searchd` | ✅ name + `grep:`/`regex:`/`sym:` ops |
 | Named pipe / UDS fronts, `--serve` compat, `--tv-dir` | `bins/searchd` | ✅ |
-| everything-rs bin / TUI (unchanged behaviour) | `bins/everything-rs`, `bins/search-ui` | ✅ |
+| zen-rs bin / TUI (unchanged behaviour) | `bins/zen-rs`, `bins/search-ui` | ✅ |
 | keep-warm / mimalloc / big-alloc (`BlobMut::anon`) | `crates/engine`, `crates/name-core` | ✅ |
 | PGO (trained on the name bench) | `pgo.sh` (unix), `pgo.ps1` (Windows) | ✅ validated end to end on Windows |
 | Bench harness + baselines | `crates/engine/examples`, `crates/name-core/examples`, `benchmark/` | ✅ |
@@ -59,4 +59,4 @@ stderr, zero matches, exit 1.
 |---|---|---|
 | `rgx` | `../rgx` | content search engine, adapters, Tesla Valve packs |
 | `fsearch` | `../fsearch` | macOS name discovery + fzf-v1 scoring |
-| `everything-rs` | `../everything/everything-rs` | Windows NTFS MFT/USN indexer |
+| `zen-rs` | `../zen/zen-rs` | Windows NTFS MFT/USN indexer |

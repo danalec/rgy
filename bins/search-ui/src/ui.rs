@@ -432,11 +432,7 @@ impl App {
             self.root.as_str().with(palette::dim()),
             thousands(self.indexed).with(palette::dim())
         );
-        let header = format!(
-            "{}  {}",
-            "everything-rs".with(palette::ink()).bold(),
-            subtitle
-        );
+        let header = format!("{}  {}", "zen-rs".with(palette::ink()).bold(), subtitle);
         self.write_line(out, 0, width, header)?;
 
         // The per-keystroke latency is the headline number. No label: the
@@ -1346,7 +1342,7 @@ mod tests {
             "the list and footer must cover the whole terminal"
         );
 
-        assert!(rows[0].1.contains("everything-rs"), "{}", rows[0].1);
+        assert!(rows[0].1.contains("zen-rs"), "{}", rows[0].1);
         assert!(rows[0].1.contains("4 files and folders"), "{}", rows[0].1);
         assert!(rows[1].1.starts_with('❯'), "{}", rows[1].1);
         assert!(rows[1].1.contains("maintenance"), "{}", rows[1].1);

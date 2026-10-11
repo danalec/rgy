@@ -5,7 +5,7 @@
 //! module carries everything Query::match_path needs.
 //!
 //! Merged query syntax (IMPLEMENTATION_PLAN.md 4.1): fsearch's token modes
-//! on top of everything-rs's filter vocabulary.
+//! on top of zen-rs's filter vocabulary.
 
 use crate::live::Live;
 use crate::name_index::{BM_DOUBLE, BM_FIRST, BM_SECOND, BM_START, CLASSES, Index, ZONE, Zone, char_bit, start_bit};
@@ -60,14 +60,14 @@ pub struct Query {
     /// `type:app`: a folder kind also takes symlinks, since the system apps
     /// in /Applications link into the cryptex (/Applications/Safari.app).
     pub apps: bool,
-    /// `type:link` (everything-rs): a reparse point / symlink, orthogonal to
+    /// `type:link` (zen-rs): a reparse point / symlink, orthogonal to
     /// `kind` — `type:dir type:link` asks for a directory junction.
     pub link: bool,
     pub exts: Vec<Vec<u8>>,
     pub scope: Option<Vec<u8>>,
     pub size: (u64, u64),
     /// True once any `size:` bound was given: directories then match **no**
-    /// size bound (everything-rs semantics — a directory's entry size is
+    /// size bound (zen-rs semantics — a directory's entry size is
     /// meaningless, so it fails the filter rather than passing it).
     pub size_set: bool,
     pub mtime: (u32, u32),
@@ -78,12 +78,12 @@ pub struct Query {
     /// query string can say everything.
     pub grep: Option<String>,
     pub grep_mode: GrepMode,
-    /// Whole-path globs from terms carrying `*`/`?` (everything-rs rule:
+    /// Whole-path globs from terms carrying `*`/`?` (zen-rs rule:
     /// only such terms glob; a bare term stays a fsearch token). Each entry
     /// is `(negated, lowercase pattern)`.
     pub globs: Vec<(bool, Vec<u8>)>,
     /// Fail-closed: an unknown `type:` or an uncompilable `re:` rejects the
-    /// whole alternative (everything-rs), rather than silently admitting
+    /// whole alternative (zen-rs), rather than silently admitting
     /// everything the filter was meant to exclude.
     pub never: bool,
     /// Why `never` was set, for the CLI to print as `warning:` lines.
@@ -150,7 +150,7 @@ impl Query {
                 continue;
             }
             // A wildcard term is one whole-path glob — never split on `/`
-            // (everything-rs: `*/src/*.rs` covers the whole path).
+            // (zen-rs: `*/src/*.rs` covers the whole path).
             if word.contains('*') || word.contains('?') {
                 q.push_token(&word);
                 continue;
@@ -174,7 +174,7 @@ impl Query {
         } else if let Some(r) = t.strip_suffix('$') {
             (t, mode) = (r, Mode::Suffix);
         }
-        // Everything-rs: a term carrying `*`/`?` globs the WHOLE PATH; bare
+        // Zen-rs: a term carrying `*`/`?` globs the WHOLE PATH; bare
         // terms stay fsearch tokens (the name engine wins, the filter
         // vocabulary is layered on top).
         if t.contains('*') || t.contains('?') {
@@ -197,7 +197,7 @@ impl Query {
             "ext" => self.exts.extend(v.split(',').map(|e| e.trim_start_matches('.').to_ascii_lowercase().into_bytes())),
             "type" => {
                 for t in v.split(',') {
-                    // everything-rs `type:` takes the kind words and its
+                    // zen-rs `type:` takes the kind words and its
                     // media aliases on top of fsearch's extension kinds.
                     // Unknown kinds FAIL CLOSED — the alternative matches
                     // nothing and a warning is recorded, because silently
@@ -245,7 +245,7 @@ impl Query {
                 })
             }
             "in" | "dir" => {
-                // `dir:` is everything-rs's name for the scope filter.
+                // `dir:` is zen-rs's name for the scope filter.
                 let p = v.strip_prefix('~').map_or(v.to_string(), |r| format!("{home}{r}"));
                 self.scope = Some(real_path(p).trim_end_matches('/').as_bytes().to_vec());
             }
@@ -262,7 +262,7 @@ impl Query {
                     self.mtime.0 = 0;
                 }
             }
-            // everything-rs `re:` is a PATH regex (and `path:` is its
+            // zen-rs `re:` is a PATH regex (and `path:` is its
             // fsearch alias). An uncompilable pattern fails closed — the
             // alternative matches nothing and a warning is recorded — same
             // as a positive `re:` that rejects everything rather than
@@ -308,7 +308,7 @@ impl Query {
         if self.never {
             return None;
         }
-        // `type:link` is orthogonal to kind (everything-rs): a reparse
+        // `type:link` is orthogonal to kind (zen-rs): a reparse
         // point / symlink. On fsearch's walk the symlink kind carries it;
         // a combined `type:dir type:link` needs a backend reparse flag and
         // matches nothing until one exists.
@@ -323,7 +323,7 @@ impl Query {
         let cut = path.iter().rposition(|&b| b == b'/').unwrap_or(0);
         let name = &path[cut + 1..];
         // `size:` bounds are statements about files: a directory satisfies
-        // NO size bound rather than all of them (everything-rs).
+        // NO size bound rather than all of them (zen-rs).
         if name.is_empty()
             || !self.kind_ok(kind)
             || (!self.exts.is_empty() && !ext_ok(name, &self.exts))
@@ -917,7 +917,7 @@ fn ext_ok(name: &[u8], exts: &[Vec<u8>]) -> bool {
 }
 
 /// Whole-path glob: `*` runs, `?` one byte, ASCII-case-insensitive
-/// (everything-rs rule — the pattern was lowercased at parse). `pat` must
+/// (zen-rs rule — the pattern was lowercased at parse). `pat` must
 /// contain a wildcard (that is the only way a term becomes a glob).
 fn glob_match(pat: &[u8], path: &[u8]) -> bool {
     fn go(p: &[u8], s: &[u8]) -> bool {
@@ -948,7 +948,7 @@ fn starts_query_syntax(s: &str) -> bool {
 }
 
 /// Split a query string on `|`, but not inside a `re:` / `regex:` pattern
-/// (everything-rs rule). `re:(a|b)` and `re:a|b` stay one alternative;
+/// (zen-rs rule). `re:(a|b)` and `re:a|b` stay one alternative;
 /// `re:foo | re:bar`, `re:a\.rs$|re:b\.rs$`, and `ext:rs|ext:txt` split at
 /// the query level.
 fn split_alternatives(input: &str) -> Vec<&str> {
@@ -983,7 +983,7 @@ fn split_alternatives(input: &str) -> Vec<&str> {
 }
 
 /// The merged query language's top level: `|`-separated alternatives
-/// (everything-rs `OrQuery` semantics over fsearch alternatives). Each
+/// (zen-rs `OrQuery` semantics over fsearch alternatives). Each
 /// alternative is an AND of tokens and filters; a hit is any alternative
 /// matching. An empty parse matches everything.
 #[derive(Default)]
@@ -1040,7 +1040,7 @@ mod tests {
         let a = q("type:image");
         assert_eq!(a.kind, Some(KIND_FILE));
         assert!(ext_ok(b"x.png", &a.exts));
-        // everything-rs aliases.
+        // zen-rs aliases.
         for alias in ["picture", "img"] {
             let b = q(&format!("type:{alias}"));
             assert_eq!(b.exts, a.exts, "{alias} aliases image");
@@ -1158,7 +1158,7 @@ mod tests {
 
     #[test]
     fn glob_terms_match_the_whole_path() {
-        // everything-rs: a wildcard term must cover the WHOLE path.
+        // zen-rs: a wildcard term must cover the WHOLE path.
         assert!(hit("*/src/*.rs", "/p/src/main.rs", KIND_FILE, 0));
         assert!(!hit("*/src/*.rs", "/p/lib/main.rs", KIND_FILE, 0));
         assert!(!hit("src/*.rs", "/p/src/main.rs", KIND_FILE, 0));
@@ -1566,7 +1566,7 @@ impl Searcher<'_> {
         // Fail closed at the door. Every fast path below must agree with
         // match_path's `never` answer; a unit test on match_path alone let
         // `walk type:banana` leak through `ranked` once (the CLI returned
-        // hits and exit 0 where everything-rs promises nothing + a warning).
+        // hits and exit 0 where zen-rs promises nothing + a warning).
         if q.never {
             return Vec::new();
         }

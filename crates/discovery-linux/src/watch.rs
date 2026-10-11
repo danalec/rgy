@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use discovery::{ChangeBatch, UsnRecord, Watch};
 
-/// fsearch/Everything path-reason equivalents, folded into the shared
+/// fsearch/Zen path-reason equivalents, folded into the shared
 /// `USN_REASON_*` bits so `Index::apply_usn` filters them the same way.
 const REASON_CREATE: u32 = discovery::USN_REASON_FILE_CREATE;
 const REASON_DELETE: u32 = discovery::USN_REASON_FILE_DELETE;

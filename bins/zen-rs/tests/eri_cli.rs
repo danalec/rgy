@@ -101,7 +101,7 @@ fn sample_records() -> Vec<Record<'static>> {
 
 fn write_temp_eri(bytes: &[u8], label: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!(
-        "everything-rs-{label}-{}-{:?}.eri",
+        "zen-rs-{label}-{}-{:?}.eri",
         std::process::id(),
         std::thread::current().id()
     ));
@@ -111,7 +111,7 @@ fn write_temp_eri(bytes: &[u8], label: &str) -> PathBuf {
 }
 
 fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_everything-rs")
+    env!("CARGO_BIN_EXE_zen-rs")
 }
 
 #[test]
@@ -121,7 +121,7 @@ fn load_reports_stats_for_an_eri_file() {
         .arg("load")
         .arg(&path)
         .output()
-        .expect("run everything-rs load");
+        .expect("run zen-rs load");
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
@@ -160,7 +160,7 @@ fn search_queries_the_loaded_index() {
         .arg(&path)
         .arg("ext:rs")
         .output()
-        .expect("run everything-rs search");
+        .expect("run zen-rs search");
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
@@ -182,7 +182,7 @@ fn search_negative_term_excludes_matches() {
         .arg(&path)
         .arg("src !notes")
         .output()
-        .expect("run everything-rs search");
+        .expect("run zen-rs search");
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success());
@@ -211,7 +211,7 @@ fn search_type_filter_narrows_to_one_kind() {
             .arg(&path)
             .arg(filter)
             .output()
-            .expect("run everything-rs search");
+            .expect("run zen-rs search");
 
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(out.status.success());
@@ -230,7 +230,7 @@ fn load_rejects_a_file_with_the_wrong_magic() {
         .arg("load")
         .arg(&path)
         .output()
-        .expect("run everything-rs load");
+        .expect("run zen-rs load");
 
     assert!(!out.status.success(), "a bad magic must not exit 0");
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -249,7 +249,7 @@ fn load_rejects_an_unsupported_version() {
         .arg("load")
         .arg(&path)
         .output()
-        .expect("run everything-rs load");
+        .expect("run zen-rs load");
 
     assert!(!out.status.success(), "a bad version must not exit 0");
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -300,7 +300,7 @@ fn load_restores_every_volume_root() {
         .arg(&path)
         .arg(".txt")
         .output()
-        .expect("run everything-rs search");
+        .expect("run zen-rs search");
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
@@ -334,7 +334,7 @@ fn load_rejects_an_index_with_no_volume_roots() {
         .arg("load")
         .arg(&path)
         .output()
-        .expect("run everything-rs load");
+        .expect("run zen-rs load");
 
     assert!(!out.status.success(), "a root-less index must not exit 0");
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -361,7 +361,7 @@ fn load_rejects_a_truncated_file_with_an_absurd_record_count() {
         .arg("load")
         .arg(&path)
         .output()
-        .expect("run everything-rs load");
+        .expect("run zen-rs load");
 
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(

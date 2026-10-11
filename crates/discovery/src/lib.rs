@@ -46,7 +46,7 @@ pub const USN_REASON_JOURNAL_DELETE: u32 = 0x0001_0000;
 /// Reasons that change which paths exist. Anything else (size/metadata writes)
 /// does not affect the path index. Deliberately excluded from the journal
 /// *request*: the reader asks for every reason (all-ones mask, like
-/// Everything) and `Index::apply_usn` filters per record against the bits
+/// Zen) and `Index::apply_usn` filters per record against the bits
 /// above. Kept as the documented grouping and for tests.
 #[allow(dead_code)]
 pub const USN_REASON_PATH_RELEVANT: u32 = USN_REASON_FILE_CREATE

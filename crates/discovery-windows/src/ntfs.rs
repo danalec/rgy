@@ -161,7 +161,7 @@ pub const MFT_SECTOR_SIZE: usize = 512;
 /// Takes no sector size: see [`MFT_SECTOR_SIZE`] for why that is not a choice.
 ///
 /// Returns `false` when a protected sector tail does not carry the record's
-/// USN (Everything's bulk walk logs "bad US %x != %x" and abandons the record
+/// USN (Zen's bulk walk logs "bad US %x != %x" and abandons the record
 /// — `FUN_1400d0820`), or when the USA claims more sectors than the buffer
 /// holds. Matching sectors are still restored before returning `false`, so the
 /// single-record FSCTL path can ignore the result and keep its historically
@@ -446,7 +446,7 @@ pub fn parse_usn_record(buf: &[u8]) -> Option<UsnRecord> {
         return None;
     }
     // USN_RECORD_V2 tail fields: FileAttributes@52, FileNameLength@56,
-    // FileNameOffset@58 (SDK layout, confirmed against Everything's own
+    // FileNameOffset@58 (SDK layout, confirmed against Zen's own
     // reader). The previous 52/54 read FileAttributes' two halves as the name
     // fields — names decoded as header garbage on live journals, and every
     // fixture used an empty name so the misread stayed invisible.
@@ -511,7 +511,7 @@ pub fn walk_usn_buffer(buf: &[u8]) -> Vec<UsnRecord> {
 /// Layout, from the `windows` crate's `READ_USN_JOURNAL_DATA_V1`:
 /// `StartUsn` is **i64**, `Timeout` and `BytesToWaitFor` are **u64**, and
 /// `UsnJournalID` is **u64**. V0 is the same without the trailing version
-/// window and is 40 bytes — the 0x28 Everything passes. This struct was
+/// window and is 40 bytes — the 0x28 Zen passes. This struct was
 /// previously built from an all-DWORD layout and produced 32 bytes, which the
 /// driver rejects with `ERROR_INVALID_USER_BUFFER`.
 #[derive(Debug, Clone, Copy, Default)]
@@ -598,7 +598,7 @@ impl UsnJournalData {
 ///
 /// Despite the conventional `VolumeSerialNumber` + `FileReferenceNumber` layout,
 /// the NTFS driver actually takes a single 64-bit file reference number. This
-/// matches Everything's `FUN_1400cfe80`, which loads `frn & 0xFFFFFFFFFFFF` into
+/// matches Zen's `FUN_1400cfe80`, which loads `frn & 0xFFFFFFFFFFFF` into
 /// a `DWORDLONG` and passes 8 bytes.
 #[derive(Debug, Clone, Copy)]
 pub struct FileRecordInput {
@@ -614,7 +614,7 @@ impl FileRecordInput {
 /// Size of the header the driver prepends to the returned `FILE_RECORD`.
 ///
 /// `FSCTL_GET_NTFS_FILE_RECORD` writes an 8-byte file reference and 4 bytes of
-/// context, then the MFT record itself at offset 12. Everything reads the record
+/// context, then the MFT record itself at offset 12. Zen reads the record
 /// magic at output+0x0C and the in-use flag at 0x22 = 0x0C + 0x16.
 pub const FILE_RECORD_OUTPUT_PREFIX: usize = 12;
 
@@ -705,7 +705,7 @@ impl NtfsVolumeData {
     /// the driver reports on every real volume. The `ClustersPerFileRecordSegment`
     /// fallback exists only for a buffer that left the field zero.
     ///
-    /// That fallback follows Everything's boot reader (`FUN_1400cfa70`):
+    /// That fallback follows Zen's boot reader (`FUN_1400cfa70`):
     /// `val < 1` means `2^(-val)` **bytes** (0xF6 = -10 -> 1024), `val >= 1`
     /// means that many **clusters** (1 -> cluster, 2 -> 2*cluster). The old
     /// formula read it as a signed exponent of the *cluster size* in both
@@ -876,7 +876,7 @@ fn decode_run_int(b: &[u8], signed: bool) -> i64 {
 /// record 0: when the run list overflows, the continuation records each carry
 /// an extent whose attribute header's `StartingVCN` says where in the stream
 /// its runs begin. The run deltas inside one extent are relative to LCN 0
-/// (the previous LCN starts at zero for each extent) — everything's own MFT
+/// (the previous LCN starts at zero for each extent) — zen's own MFT
 /// walker resets its LCN accumulator per extent the same way.
 pub fn extract_data_runs(record: &[u8]) -> Result<Vec<MftRun>, String> {
     let hdr = parse_file_record(record).ok_or_else(|| "invalid MFT record header".to_string())?;
@@ -1180,7 +1180,7 @@ mod tests {
     #[test]
     fn the_record_size_fallback_reads_the_signed_byte_encoding() {
         // `ClustersPerFileRecordSegment` is a SIGNED BYTE exponent of a fixed
-        // size, per Everything's boot reader (FUN_1400cfa70): `val < 1` means
+        // size, per Zen's boot reader (FUN_1400cfa70): `val < 1` means
         // `2^(-val)` BYTES (0xF6 = -10 -> 1024), `val >= 1` means that many
         // clusters. The old formula read it as an exponent of the CLUSTER size
         // in both directions, which computes 8192 where the record is 4096.

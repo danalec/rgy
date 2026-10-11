@@ -1,6 +1,6 @@
-//! everything-rs — an NTFS file indexer built on the MFT and the USN journal.
+//! zen-rs — an NTFS file indexer built on the MFT and the USN journal.
 //!
-//! Grounding for the approach came from the decompiled Everything 1.4.1.1032
+//! Grounding for the approach came from the decompiled Zen 1.4.1.1032
 //! binary, specifically its NTFS monitor state machine, which drives
 //! `FSCTL_READ_USN_JOURNAL` (0x900bb) with a 40-byte input and a 64 KiB output
 //! buffer and tails journal deltas via overlapped reads.
@@ -16,7 +16,7 @@ use volume::Volume;
 
 fn usage() -> ! {
     eprintln!(
-        "everything-rs <command> [args]\n\n\
+        "zen-rs <command> [args]\n\n\
          commands:\n  \
            index <volume|file>      inspect volume or .eri file statistics\n  \
            index-all               index every fixed NTFS volume into one index\n  \
@@ -486,7 +486,7 @@ mod tests {
 
     fn temp_path(label: &str) -> String {
         let p = std::env::temp_dir().join(format!(
-            "everything-rs-{label}-{}-{:?}.eri",
+            "zen-rs-{label}-{}-{:?}.eri",
             std::process::id(),
             std::thread::current().id()
         ));

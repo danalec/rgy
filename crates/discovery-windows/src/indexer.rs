@@ -37,7 +37,7 @@ pub struct NameRow {
     pub mtime: u32,
 }
 
-/// Is this `$FILE_NAME` entry one a user search should see? Everything drops
+/// Is this `$FILE_NAME` entry one a user search should see? Zen drops
 /// DOS-only 8.3 names (namespace 2) and names pointing inside the internal
 /// NTFS folders (parent 0..15 except the volume root at 5) — "ignore name attr
 /// for internal ntfs folder". Filtering at index time keeps them out of
@@ -92,7 +92,7 @@ pub fn listings_from_rows(rows: &[NameRow], root_frn: u64) -> Vec<discovery::wal
             let name_off = names.len() as u32;
             names.extend_from_slice(&r.name);
             // fsearch's walk model: a symlink/reparse point is its own kind,
-            // not a file or dir. Everything's `type:link` rides on it.
+            // not a file or dir. Zen's `type:link` rides on it.
             let kind = if r.link {
                 KIND_LINK
             } else if r.is_dir {
@@ -394,7 +394,7 @@ impl<'a> Indexer<'a> {
                         // Fixups are 512-byte for MFT records regardless of
                         // volume sector size (see ntfs::MFT_SECTOR_SIZE). A
                         // record whose USN tails do not match is abandoned
-                        // here — same as the Everything bulk walk ("bad US
+                        // here — same as the Zen bulk walk ("bad US
                         // %x != %x", FUN_1400d0820).
                         if ntfs::apply_fixups(&mut fixed) {
                             self.ingest_record(&fixed, frn, resolver, stats, rows);
@@ -486,7 +486,7 @@ impl<'a> Indexer<'a> {
 
         // Extension record: `$ATTRIBUTE_LIST` spill targets carry their extra
         // `$FILE_NAME` values here, and the record's base reference (offset
-        // 0x20) points at the base FRN that owns them. Everything queues these
+        // 0x20) points at the base FRN that owns them. Zen queues these
         // ("found extended MFT file record %016I64x base %016I64x") and merges
         // the names into the base record's name set (FUN_1400d0820 /
         // FUN_1400d13a0). Indexing the extension FRN standalone is a phantom
@@ -726,7 +726,7 @@ impl<'a> Indexer<'a> {
 
         let request = ntfs::ReadUsnJournalData {
             start_usn: *start_usn,
-            // Everything's journal reader (FUN_1400cfe80) asks for every
+            // Zen's journal reader (FUN_1400cfe80) asks for every
             // reason with an all-ones mask. Filtering happens per record in
             // `Index::apply_usn` (create/delete/rename bits) — narrowing the
             // *request* to PATH_RELEVANT | JOURNAL_DELETE hid non-path activity
@@ -857,7 +857,7 @@ mod tests {
     #[test]
     fn extension_record_names_attach_to_the_base_frn() {
         // M3: an extension record (base_frn != 0 and != own FRN) owns names for
-        // its base file. Everything queues these ("found extended MFT file
+        // its base file. Zen queues these ("found extended MFT file
         // record") and merges them into the base — the extension FRN itself
         // must never become an index entry, or the file shows up twice.
         let base = build_record(0, ROOT_FRN, ntfs::NAMESPACE_WIN32, "long-name.dat");
@@ -876,7 +876,7 @@ mod tests {
 
     #[test]
     fn dos_and_internal_names_are_dropped() {
-        // M5: Everything drops DOS-only 8.3 names (namespace 2) and names whose
+        // M5: Zen drops DOS-only 8.3 names (namespace 2) and names whose
         // parent is an internal NTFS folder (0..15 except root 5) — "ignore
         // name attr for internal ntfs folder".
         let rec = build_record(0, ROOT_FRN, ntfs::NAMESPACE_DOS, "HELLO~1.TXT");

@@ -32,7 +32,7 @@ pub enum Response {
     /// `{"op":"error","message":…}` — the request failed; the stream lives.
     Error { message: String },
     /// `{"op":"warning","message":…}` — fail-closed query warning (unknown
-    /// `type:`, bad `re:`), matching everything-rs's `warning:` lines.
+    /// `type:`, bad `re:`), matching zen-rs's `warning:` lines.
     Warning { message: String },
 }
 
