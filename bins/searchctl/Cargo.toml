@@ -1,0 +1,14 @@
+[package]
+name = "searchctl"
+version = "0.1.0"
+edition = "2024"
+description = "The merged name-search CLI (fsearch ergonomics + everything-rs filters)"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "searchctl"
+path = "src/main.rs"
+
+[dependencies]
+discovery = { path = "../../crates/discovery" }
+name-core = { path = "../../crates/name-core" }

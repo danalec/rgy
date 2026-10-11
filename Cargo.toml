@@ -19,6 +19,7 @@ members = [
     "crates/rgx-adapters-inspect",
     "crates/rgx-adapters-pdf",
     "bins/everything-rs",
+    "bins/searchctl",
     "bins/search-ui",
 ]
 
