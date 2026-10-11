@@ -3249,14 +3249,21 @@ pub fn open_regular(path: &[u8]) -> Option<std::fs::File> {
 
 /// `open()` flags that keep a FIFO from hanging and refuse a symlink final
 /// component. ABI-stable per OS; values match the libc crate's tables
-/// (linux x86_64: 0o4000/0o200000; Darwin/BSD: 0x4/0x100). Declared here
-/// rather than pulled from libc — name-core carries no libc dependency.
+/// (linux: O_NONBLOCK 0o4000, O_NOFOLLOW 0o400000; Darwin/BSD: 0x4/0x100).
+/// Declared here rather than pulled from libc — name-core carries no libc
+/// dependency.
+///
+/// TRAP: on Linux `0o200000` is O_DIRECTORY, not O_NOFOLLOW. With it,
+/// open_regular fails ENOTDIR on every regular file and the grep pipeline
+/// silently finds nothing — the content tests only caught it when they
+/// first ran on a real Linux kernel (WSL). O_NOFOLLOW refuses a symlink
+/// with ELOOP and still opens regular files; O_DIRECTORY does the reverse.
 #[cfg(unix)]
 mod open_flags {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     pub const O_NONBLOCK: i32 = 0o4000;
     #[cfg(any(target_os = "linux", target_os = "android"))]
-    pub const O_NOFOLLOW: i32 = 0o200000;
+    pub const O_NOFOLLOW: i32 = 0o400000;
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     pub const O_NONBLOCK: i32 = 0x4;
     #[cfg(any(target_os = "macos", target_os = "ios"))]

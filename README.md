@@ -19,7 +19,7 @@ verification on machines this host does not have.
 | One regex engine (vendored copy deleted) | `crates/name-core` (`regex`) → `rgx-core` | ✅ (`rgx-core` stays `no_std`) |
 | Discovery seam (`Source`/`Watch`, DFS `Listing` blocks) | `crates/discovery` | ✅ portable walk |
 | Windows backend (MFT + USN, RE-audit fixes) | `crates/discovery-windows` | ✅ `MftSource` / `UsnWatch` |
-| Linux backend (getdents64 + inotify) | `crates/discovery-linux` | ✅ built + measured under WSL |
+| Linux backend (getdents64 + inotify) | `crates/discovery-linux` | ✅ suite green under WSL (real kernel) |
 | Content index (trigram + bloom) | `crates/name-core` (`content`) | ✅ transported from fsearch |
 | Content confirm via rgx engine + `grep:`/`regex:`/`sym:` | `crates/name-core` (`content`), `crates/rgx-core` | ✅ |
 | rgx engine, TV packs, adapters | `crates/rgx-*` | ✅ verbatim (`rar-codec` re-sync pending its upstream) |

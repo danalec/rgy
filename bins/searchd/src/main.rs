@@ -479,7 +479,9 @@ fn serve_uds(path: &str, ctx: &std::sync::Arc<Ctx>, serve: bool) {
         let Ok(stream) = conn else { continue };
         let ctx = ctx.clone();
         let _ = std::thread::spawn(move || {
-            let (r, w) = stream.into_split();
+            // std UnixStream has no into_split (that is tokio's); clone the
+            // handle the way serve_pipe does and split the directions.
+            let (r, w) = (stream.try_clone().unwrap(), stream);
             run_stream(std::io::BufReader::new(r), w, &ctx, serve);
         });
     }
