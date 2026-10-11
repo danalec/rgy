@@ -1055,6 +1055,75 @@ mod tests {
         assert!(!hit("type:banana", "/a/b.txt", KIND_FILE, 0));
     }
 
+    /// A tiny in-memory index for the Searcher fast paths. `hit()` above
+    /// only covers `match_path`; the CLI runs `Searcher::search`, whose
+    /// `ranked`/`Scan` paths once ignored `never`, `globs`, and `link` —
+    /// `walk type:banana` returned hits and exit 0. These pin that level.
+    fn tiny_live() -> Live {
+        let mut names = Vec::new();
+        let mut ents = Vec::new();
+        for (name, kind) in [("readme.md", KIND_FILE), ("walk.rs", KIND_FILE), ("alias", KIND_LINK), ("notes.txt", KIND_FILE)] {
+            let off = names.len() as u32;
+            names.extend_from_slice(name.as_bytes());
+            ents.push(discovery::walk::RawEnt {
+                name_off: off,
+                name_len: name.len() as u16,
+                kind,
+                size: 10,
+                mtime: 1_700_000_000,
+                child: discovery::walk::NONE,
+            });
+        }
+        let listing = discovery::walk::Listing { id: 0, names, ents };
+        Live::new(Index::build(vec![listing], 0, 1_700_000_000, b"/"))
+    }
+
+    fn searched(query: &str) -> Vec<u32> {
+        let live = tiny_live();
+        let parsed = Query::parse(query, "").expect("parses");
+        let s = Searcher { live: &live };
+        s.search(&parsed).into_iter().map(|h| h.idx).collect()
+    }
+
+    /// Hit paths (not entry indices — `Index::build` DFS-orders entries).
+    fn searched_paths(query: &str) -> Vec<String> {
+        let live = tiny_live();
+        let parsed = Query::parse(query, "").expect("parses");
+        let s = Searcher { live: &live };
+        let mut out = Vec::new();
+        let mut buf = Vec::new();
+        for h in s.search(&parsed) {
+            buf.clear();
+            live.base.path(h.idx as usize, &mut buf);
+            out.push(String::from_utf8_lossy(&buf).into_owned());
+        }
+        out
+    }
+
+    #[test]
+    fn searcher_fails_closed_on_unknown_type() {
+        assert!(searched("type:banana").is_empty(), "never must gate every Searcher path");
+        assert!(searched("walk type:banana").is_empty(), "a token plus never must not rank");
+    }
+
+    #[test]
+    fn searcher_applies_whole_path_globs() {
+        let md = searched_paths("*.md");
+        assert_eq!(md.len(), 1, "only readme.md: {md:?}");
+        assert!(md[0].ends_with("readme.md"), "{md:?}");
+        let walk = searched_paths("*walk.rs");
+        assert_eq!(walk.len(), 1, "only walk.rs: {walk:?}");
+        assert!(walk[0].ends_with("walk.rs"), "{walk:?}");
+    }
+
+    #[test]
+    fn searcher_honors_type_link() {
+        let links = searched_paths("type:link");
+        assert_eq!(links.len(), 1, "only the symlink entry: {links:?}");
+        assert!(links[0].ends_with("alias"), "{links:?}");
+        assert!(searched("type:link type:file").is_empty(), "file ∧ link is impossible");
+    }
+
     #[test]
     fn dir_is_an_alias_of_in() {
         let a = q("dir:foo");
@@ -1494,6 +1563,13 @@ impl Searcher<'_> {
     }
 
     pub fn search(&self, q: &Query) -> Vec<Hit> {
+        // Fail closed at the door. Every fast path below must agree with
+        // match_path's `never` answer; a unit test on match_path alone let
+        // `walk type:banana` leak through `ranked` once (the CLI returned
+        // hits and exit 0 where everything-rs promises nothing + a warning).
+        if q.never {
+            return Vec::new();
+        }
         let mut hits = self.search_base(q);
         hits.extend(self.search_overlay(q));
         hits.sort_by(|a, b| b.score.cmp(&a.score).then(a.idx.cmp(&b.idx)));
@@ -2390,6 +2466,10 @@ impl Scan<'_> {
         if !q.kind_ok(k) {
             return None;
         }
+        // `type:link` is orthogonal to kind (same rule as match_path_with).
+        if q.link && k & 3 != KIND_LINK {
+            return None;
+        }
         if q.size != (0, u64::MAX) {
             let sz = crate::name_index::dec_size(idx.size_raw()[i]);
             if sz < q.size.0 || sz > q.size.1 {
@@ -2422,10 +2502,20 @@ impl Scan<'_> {
         if key <= floor {
             return None;
         }
-        if let Some(re) = re {
+        if q.path_re.is_some() || !q.globs.is_empty() {
+            // Whole-path predicates share one path build (match_path_with
+            // applies the same `re:` + glob rules; this entry path used to
+            // skip the globs entirely, so `*walk.rs` returned every name).
             idx.path(i, pbuf);
-            if !re.is_match(pbuf) {
+            if let Some(re) = re
+                && !re.is_match(pbuf)
+            {
                 return None;
+            }
+            for (neg, pat) in &q.globs {
+                if *neg == glob_match(pat, pbuf) {
+                    return None;
+                }
             }
         }
         Some(key)

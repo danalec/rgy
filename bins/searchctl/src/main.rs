@@ -107,7 +107,7 @@ fn run(root: &str, query: &str, limit: usize, json: bool) -> Result<(), String> 
         for alt in &alts.alts {
             let Some(pat) = &alt.grep else { continue };
             let g = Grep::new(pat, alt.grep_mode)?;
-            let paths = content::scan_paths(root.as_bytes(), &searcher.live, alt.clone_for_scan());
+            let paths = content::scan_paths(root.as_bytes(), searcher.live, alt.clone_for_scan());
             let res = content::verify(&g, &paths, limit);
             for f in &res.files {
                 let path = String::from_utf8_lossy(&f.path);

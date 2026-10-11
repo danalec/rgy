@@ -252,7 +252,7 @@ fn grep(q: &str, limit: usize, ctx: &Ctx) -> Vec<Response> {
                 let Ok(g) = Grep::new(&pat, mode) else {
                     continue;
                 };
-                let paths = content::scan_paths(&ctx.root, &searcher.live, filt);
+                let paths = content::scan_paths(&ctx.root, searcher.live, filt);
                 let res = content::verify(&g, &paths, limit);
                 for f in res.files {
                     files.push(GrepFile {
@@ -376,7 +376,7 @@ fn serve_stream(mut input: impl BufRead, mut out: impl Write, ctx: &Ctx) {
                 }
             };
             let searcher = Searcher { live: &ctx.live };
-            let paths = content::scan_paths(&ctx.root, &searcher.live, Query::default());
+            let paths = content::scan_paths(&ctx.root, searcher.live, Query::default());
             let res = content::verify(&g, &paths, 100);
             for f in &res.files {
                 matched = true;

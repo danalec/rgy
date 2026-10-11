@@ -352,8 +352,9 @@ impl Segment {
         }
         let mut dead = vec![0u64; ndocs.div_ceil(64)];
         if let Ok(b) = std::fs::read(dead_path(dir, id)) {
-            for (w, c) in dead.iter_mut().zip(b.chunks_exact(8)) {
-                *w = u64::from_le_bytes(c.try_into().unwrap());
+            let (chunks, _) = b.as_chunks::<8>();
+            for (w, c) in dead.iter_mut().zip(chunks) {
+                *w = u64::from_le_bytes(*c);
             }
         }
         let live_docs = ndocs - dead.iter().map(|w| w.count_ones() as usize).sum::<usize>();
@@ -424,12 +425,12 @@ fn content_hash(b: &[u8]) -> [u64; 2] {
         let x = [word(w, 0), word(w, 1), word(w, 2), word(w, 3)];
         s = [mix(x[0] ^ K[0], x[1] ^ s[0]), mix(x[1] ^ K[1], x[0] ^ s[1]), mix(x[2] ^ K[2], x[3] ^ s[2]), mix(x[3] ^ K[3], x[2] ^ s[3])];
     };
-    let mut blocks = b.chunks_exact(32);
-    for w in &mut blocks {
+    let (blocks, rem) = b.as_chunks::<32>();
+    for w in blocks {
         step(w);
     }
     let mut last = [0u8; 32];
-    last[..blocks.remainder().len()].copy_from_slice(blocks.remainder());
+    last[..rem.len()].copy_from_slice(rem);
     step(&last);
     let h0 = mix(mix(s[0] ^ K[1], s[2] ^ K[2]) ^ s[1], s[3] ^ K[0]);
     let h1 = mix(mix(s[1] ^ K[3], s[3] ^ K[1]) ^ s[0], s[2] ^ K[2]);
@@ -2164,10 +2165,7 @@ fn helpers() -> &'static Helpers {
                 // Someone is waiting: keep off the slow cores and out of the
                 // throttled IO tiers, and never download iCloud placeholders.
                 // macOS QoS: keep reader helpers off the slow cores.
-                #[cfg(target_os = "macos")]
-                unsafe {
-                    libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INITIATED, 0)
-                };
+                set_qos_user_initiated();
                 crate::no_materialize();
                 let mut seen = 0;
                 loop {
@@ -2321,8 +2319,11 @@ pub struct Grep {
 /// (some character-class shapes) falls back to the regex crate, which is
 /// what `regex:` content queries keep it around for (4.4).
 enum Confirm {
-    Rgx(ByteRegex),
-    Crate(regex::bytes::Regex),
+    // Both boxed: a compiled regex is over a KiB and lives in this enum for
+    // the life of a Grep, one per worker lane — stack-cheap variants keep it
+    // Copy-free but small (clippy::large_enum_variant otherwise).
+    Rgx(Box<ByteRegex>),
+    Crate(Box<regex::bytes::Regex>),
 }
 
 impl Confirm {
@@ -2373,7 +2374,7 @@ impl Grep {
 
     fn build(&self) -> Result<Confirm, String> {
         match ByteRegex::new_multiline(self.src.as_bytes(), self.case_insensitive, false) {
-            Ok(re) => Ok(Confirm::Rgx(re)),
+            Ok(re) => Ok(Confirm::Rgx(Box::new(re))),
             Err(e) => {
                 let re = regex::bytes::RegexBuilder::new(&self.src)
                     .case_insensitive(self.case_insensitive)
@@ -2381,7 +2382,7 @@ impl Grep {
                     .size_limit(1 << 26)
                     .build()
                     .map_err(|_| e.to_string())?;
-                Ok(Confirm::Crate(re))
+                Ok(Confirm::Crate(Box::new(re)))
             }
         }
     }
@@ -2453,6 +2454,23 @@ fn without_materializing<T>(f: impl FnOnce() -> T) -> T {
     }
     r
 }
+
+/// macOS QoS for the reader helpers: keep them off the slow cores and out
+/// of the throttled IO tiers. Declared inline like `without_materializing`
+/// above — name-core carries no libc dependency.
+#[cfg(target_os = "macos")]
+fn set_qos_user_initiated() {
+    unsafe extern "C" {
+        fn pthread_set_qos_class_self_np(cls: u32, relative_priority: u32) -> i32;
+    }
+    // Darwin qos.h: QOS_CLASS_USER_INITIATED = 0x19.
+    unsafe {
+        pthread_set_qos_class_self_np(0x19, 0);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_qos_user_initiated() {}
 
 #[cfg(not(target_os = "macos"))]
 fn without_materializing<T>(f: impl FnOnce() -> T) -> T {
@@ -3229,13 +3247,39 @@ pub fn open_regular(path: &[u8]) -> Option<std::fs::File> {
     open_sized(path).map(|(f, _)| f)
 }
 
+/// `open()` flags that keep a FIFO from hanging and refuse a symlink final
+/// component. ABI-stable per OS; values match the libc crate's tables
+/// (linux x86_64: 0o4000/0o200000; Darwin/BSD: 0x4/0x100). Declared here
+/// rather than pulled from libc — name-core carries no libc dependency.
+#[cfg(unix)]
+mod open_flags {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub const O_NONBLOCK: i32 = 0o4000;
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub const O_NOFOLLOW: i32 = 0o200000;
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    pub const O_NONBLOCK: i32 = 0x4;
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    pub const O_NOFOLLOW: i32 = 0x100;
+    // Not rgy targets: flags off; `is_file()` in open_sized is still the
+    // directory guard, but a FIFO could block open() here.
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "ios")))]
+    pub const O_NONBLOCK: i32 = 0;
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "ios")))]
+    pub const O_NOFOLLOW: i32 = 0;
+}
+
 /// `open_regular`, and the file's size.
 fn open_sized(path: &[u8]) -> Option<(std::fs::File, u64)> {
     #[cfg(unix)]
     let f = {
         use std::os::unix::ffi::OsStrExt;
         use std::os::unix::fs::OpenOptionsExt;
-        std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW).open(std::ffi::OsStr::from_bytes(path)).ok()?
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(open_flags::O_NONBLOCK | open_flags::O_NOFOLLOW)
+            .open(std::ffi::OsStr::from_bytes(path))
+            .ok()?
     };
     #[cfg(not(unix))]
     let f = {
@@ -3253,12 +3297,21 @@ fn open_sized(path: &[u8]) -> Option<(std::fs::File, u64)> {
 fn open_ahead(path: &[u8]) -> Option<std::fs::File> {
     let (f, len) = open_sized(path)?;
     // macOS F_RDADVISE: tell the kernel to start reading now. Elsewhere the
-    // plain open is the whole story.
+    // plain open is the whole story. Declared inline (no libc dep).
     #[cfg(target_os = "macos")]
     {
         use std::os::unix::io::AsRawFd;
-        let ra = libc::radvisory { ra_offset: 0, ra_count: len.min(MAX_FILE + 1) as libc::c_int };
-        unsafe { libc::fcntl(f.as_raw_fd(), libc::F_RDADVISE, &ra) };
+        #[repr(C)]
+        struct Radvisory {
+            ra_offset: i64, // Darwin off_t
+            ra_count: i32,
+        }
+        unsafe extern "C" {
+            fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+        }
+        // Darwin fcntl.h: F_RDADVISE = 44.
+        let ra = Radvisory { ra_offset: 0, ra_count: len.min(MAX_FILE + 1) as i32 };
+        unsafe { fcntl(f.as_raw_fd(), 44, &ra) };
     }
     #[cfg(not(target_os = "macos"))]
     let _ = len;
@@ -3289,9 +3342,7 @@ mod grep_pipeline_tests {
     #[test]
     fn empty_token_scan_still_lists_every_file() {
         let (live, dir) = tiny_live("scan");
-        let mut q = Query::default();
-        q.grep = Some("alpha".into());
-        q.grep_mode = GrepMode::Literal;
+        let q = Query { grep: Some("alpha".into()), grep_mode: GrepMode::Literal, ..Default::default() };
         let paths = scan_paths(&dir.to_string_lossy().into_owned().into_bytes(), &live, q.clone_for_scan());
         assert_eq!(paths.len(), 2, "scan_paths over no name tokens must return every file: {paths:?}");
         let _ = std::fs::remove_dir_all(&dir);
@@ -3301,8 +3352,7 @@ mod grep_pipeline_tests {
     fn verify_finds_a_literal_in_a_file() {
         let (live, dir) = tiny_live("lit");
         let g = Grep::new("alpha", GrepMode::Literal).expect("grep compiles");
-        let mut q = Query::default();
-        q.grep = Some("alpha".into());
+        let q = Query { grep: Some("alpha".into()), ..Default::default() };
         let paths = scan_paths(&dir.to_string_lossy().into_owned().into_bytes(), &live, q.clone_for_scan());
         let res = verify(&g, &paths, 10);
         assert_eq!(res.files.len(), 1, "alpha.rs holds the literal");
@@ -3317,7 +3367,7 @@ mod grep_pipeline_tests {
         // memchr fast path does (4.3: verification runs on rgx).
         let (live, dir) = tiny_live("rgx");
         let g = Grep::new("alpha", GrepMode::Regex).expect("regex compiles");
-        let mut q = Query::default();
+        let q = Query::default();
         let paths = scan_paths(&dir.to_string_lossy().into_owned().into_bytes(), &live, q.clone_for_scan());
         let res = verify(&g, &paths, 10);
         assert_eq!(res.files.len(), 1, "rgx confirm finds alpha.rs");

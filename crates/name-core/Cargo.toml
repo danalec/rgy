@@ -24,6 +24,7 @@ memchr = "2.8"
 # Searcher's re_literals/path_suffixes prefilter inspects regex ASTs.
 regex-syntax = "0.8"
 
-# macOS-only: QoS for the content read helpers, F_RDADVISE readahead.
-[target.'cfg(target_os = "macos")'.dependencies]
-libc = "0.2"
+# No libc (and no new platform crates): the few Darwin/unix bits in
+# content.rs declare their own `extern "C"` and ABI constants inline —
+# the same pattern `without_materializing` already used for
+# getiopolicy_np. rgx-core stays `no_std`; this crate is std (file I/O).
