@@ -1,0 +1,8 @@
+[package]
+name = "discovery"
+version = "0.1.0"
+edition = "2021"
+description = "Platform discovery seam (Source/Watch) and the shared change vocabulary"
+license = "MIT OR Apache-2.0"
+
+[dependencies]

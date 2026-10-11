@@ -1,0 +1,21 @@
+[package]
+name = "rgx-adapters-tabular"
+version = "0.1.0"
+edition = "2021"
+description = "rgx adapters for tabular & geospatial data (SQLite, DBF, Shapefile)"
+license = "MIT OR Apache-2.0"
+
+[features]
+# The SQLite adapter materialises the DB into %TEMP% and shells out via
+# rusqlite (which itself is std-only). The hand-rolled readers for the
+# other formats are pure byte slicing and stay no_std + alloc; the std
+# feature re-adds rusqlite and the Sqlite adapter when present.
+default = ["std"]
+std = ["dep:rusqlite"]
+
+[dependencies]
+rgx-core = { path = "../rgx-core" }
+rusqlite = { version = "0.40", features = ["bundled", "serialize"], optional = true }
+
+# Parquet is covered by a hand-rolled Thrift-compact footer reader above —
+# no arrow/parquet stack, keeping with the "fast and extremely light" rule.

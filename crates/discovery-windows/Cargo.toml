@@ -1,0 +1,18 @@
+[package]
+name = "discovery-windows"
+version = "0.1.0"
+edition = "2024"
+description = "Windows discovery backend: NTFS MFT streaming + USN journal (from everything-rs)"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+discovery = { path = "../discovery" }
+name-core = { path = "../name-core" }
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+    "Win32_System_Threading",
+] }

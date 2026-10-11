@@ -1,0 +1,12 @@
+[package]
+name = "rar-codec"
+version = "0.1.0"
+edition = "2021"
+description = "Pure-Rust, no_std RAR codec: RAR4/RAR5 parsing, LZ+Huffman and PPMd decode (solid, multivolume, VM filters), RAR5 store encode. Zero dependencies."
+license = "MIT OR Apache-2.0"
+
+[features]
+default = []
+# `std` only relaxes nothing critical today; reserved for future IO adapters.
+std = []
+

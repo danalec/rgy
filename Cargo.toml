@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/discovery",
+    "crates/name-core",
+    "crates/discovery-windows",
+    "crates/engine",
+    "crates/proto",
+    "crates/rgx-core",
+    "crates/rar-codec",
+    "crates/rgx-adapters-archive",
+    "crates/rgx-adapters-office",
+    "crates/rgx-adapters-threed",
+    "crates/rgx-adapters-llm",
+    "crates/rgx-adapters-media",
+    "crates/rgx-adapters-tabular",
+    "crates/rgx-adapters-docs",
+    "crates/rgx-adapters-mail",
+    "crates/rgx-adapters-inspect",
+    "crates/rgx-adapters-pdf",
+    "bins/everything-rs",
+    "bins/search-ui",
+]
+
+# One workspace, thin bins, one protocol (IMPLEMENTATION_PLAN.md §3).
+# crates/rgx-* are transported verbatim from ../rgx; name-core and
+# discovery-windows hold the everything-rs code with the RE-audit fixes.
+[workspace.package]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[profile.release]
+lto = "thin"

@@ -1,0 +1,23 @@
+[package]
+name = "rgx-adapters-archive"
+version = "0.1.0"
+edition = "2021"
+description = "rgx adapters: zip, tar, cpio, 7z, single-file decompressors"
+license = "MIT OR Apache-2.0"
+
+[features]
+default = ["std"]
+# Feature names declared so the vendored upstream compression sources keep their
+# original `cfg(feature = ...)` attributes byte-identical. `isa-huffman`
+# (ISA-L encoder acceleration) is declared but not vendored.
+# `std` also pulls in `zstd` (used for testing our zstd decoder against
+# libzstd), `std::env::var` (for the producer-budget overrides) and the
+# `std::io::Read` shape the decompression adapter implements to feed the
+# zip-family callers. With `std` off, the crate is `#![no_std] + alloc`.
+std = ["dep:zstd", "rar-codec/std"]
+isa-huffman = []
+
+[dependencies]
+rgx-core = { path = "../rgx-core" }
+rar-codec = { path = "../rar-codec" }
+zstd = { version = "0.13", optional = true }

@@ -1,0 +1,13 @@
+[package]
+name = "name-core"
+version = "0.1.0"
+edition = "2024"
+description = "Name index, query filters, fuzzy ranking (everything-rs layer; fsearch engine merges here)"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+discovery = { path = "../discovery" }
+# One regex engine (§4.4): the vendored everything-rs copy is gone; `re:`
+# path patterns compile through rgx-core's syntax/nfa/vm, the same engine
+# the copy was taken from (MIT OR Apache-2.0).
+rgx-core = { path = "../rgx-core" }

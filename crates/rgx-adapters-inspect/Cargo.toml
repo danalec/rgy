@@ -1,0 +1,9 @@
+[package]
+name = "rgx-adapters-inspect"
+version = "0.1.0"
+edition = "2021"
+description = "rgx adapter: forensic binary inspection — magic identification, embedded-structure carving, strings, entropy"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+rgx-core = { path = "../rgx-core" }

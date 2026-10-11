@@ -1,0 +1,15 @@
+[package]
+name = "everything-rs"
+version = "0.1.0"
+edition = "2024"
+description = "The everything-rs CLI/TUI, unchanged behaviour, now built on the rgy workspace crates"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "everything-rs"
+path = "src/main.rs"
+
+[dependencies]
+name-core = { path = "../../crates/name-core" }
+discovery-windows = { path = "../../crates/discovery-windows" }
+search-ui = { path = "../search-ui" }

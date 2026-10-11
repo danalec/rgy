@@ -1,0 +1,17 @@
+[package]
+name = "rgx-adapters-mail"
+version = "0.1.0"
+edition = "2021"
+description = "rgx adapters for e-mail archives (mbox, eml) with MIME attachment recursion"
+license = "MIT OR Apache-2.0"
+
+[features]
+# The empty `std::error::Error` impl on PstErr is gated here. The
+# adapter itself never needs it; the gate exists so the crate stays
+# buildable with `--no-default-features` (no_std + alloc) and the `std`
+# feature re-enables Error when the consumer wants it.
+default = []
+std = []
+
+[dependencies]
+rgx-core = { path = "../rgx-core" }
