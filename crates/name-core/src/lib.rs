@@ -12,4 +12,11 @@ pub mod name_index;
 pub mod name_query;
 
 pub mod index;
+/// fsearch's live overlay (dead bits + overrides).
+pub mod live;
 pub mod regex;
+
+/// fsearch's `engine::no_materialize`: on macOS it marks files so a scan
+/// does not materialize cloud placeholders. Portable no-op — the platform
+/// backends can set their own policy.
+pub fn no_materialize() {}

@@ -322,6 +322,27 @@ pub fn parse_file_names(buf: &[u8], _own_frn: u64) -> Vec<FileNameEntry> {
         .collect()
 }
 
+/// The record's last-write time from its resident `$STANDARD_INFORMATION`
+/// (value offset 0x08, a FILETIME), as unix seconds — the `mtime:` filter
+/// and the name index's per-entry mtime. `None` when the attribute is
+/// missing or non-resident (rare; a non-resident SI would need the run
+/// chase, which the index path does not do).
+pub fn standard_info_mtime(buf: &[u8]) -> Option<u32> {
+    let hdr = parse_file_record(buf)?;
+    let end = (hdr.bytes_in_use as usize).min(buf.len());
+    let si = scan_attributes(buf, hdr.attrs_offset as usize, end)
+        .into_iter()
+        .find(|a| a.attr_type == ATTR_STANDARD_INFORMATION)?;
+    if si.value_len < 0x10 {
+        return None;
+    }
+    let ft = u64le(si.value, 0x08);
+    // FILETIME is 100 ns ticks since 1601-01-01; unix epoch is 11644473600 s later.
+    const EPOCH_DIFF: u64 = 11_644_473_600;
+    let secs = ft / 10_000_000;
+    Some(secs.saturating_sub(EPOCH_DIFF).min(u32::MAX as u64) as u32)
+}
+
 /// True when the record's attributes spill into sibling records.
 pub fn attrs_split(buf: &[u8]) -> bool {
     let Some(hdr) = parse_file_record(buf) else {

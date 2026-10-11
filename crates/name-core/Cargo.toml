@@ -21,3 +21,5 @@ rayon = "1.12"
 regex = "1.12"
 # fsearch scorer's folded find (name_query.rs find_folded/rfind_folded).
 memchr = "2.8"
+# Searcher's re_literals/path_suffixes prefilter inspects regex ASTs.
+regex-syntax = "0.8"

@@ -69,15 +69,32 @@ pub enum ChangeBatch {
 }
 
 /// Full enumeration source: walks the filesystem as DFS directory blocks.
-///
-/// Marker only at the skeleton stage (PR 3); the block type and method land
-/// with the Phase 3 seam.
-pub trait Source {}
+pub trait Source {
+    /// Enumerate everything under the source root as [`walk::Listing`]s —
+    /// listing 0 is the root's children, `RawEnt::child` links into the
+    /// listing of each subdirectory. This is the block stream
+    /// `name_core::name_index::Index::build` consumes.
+    fn enumerate(&self) -> Result<Vec<walk::Listing>, String>;
+}
 
 /// Live change feed: produces [`ChangeBatch`]es.
-///
-/// Marker only at the skeleton stage (PR 3); `next_batch` lands with the
-/// Phase 3 seam.
+pub trait Watch {
+    /// The next batch of live changes. [`ChangeBatch::Rescan`] means the
+    /// feed lost history and the caller must rebuild from a [`Source`].
+    fn next_batch(&mut self) -> Result<ChangeBatch, String>;
+}
+
 pub mod walk;
 
-pub trait Watch {}
+/// The portable [`Source`]: a std-based DFS walk (see [`walk::scan`]).
+/// Correct on every platform; the macOS getattrlistbulk fast path and the
+/// Windows MFT walk return the same blocks from their own crates.
+pub struct PortableSource {
+    pub root: Vec<u8>,
+}
+
+impl Source for PortableSource {
+    fn enumerate(&self) -> Result<Vec<walk::Listing>, String> {
+        Ok(walk::scan(&self.root, 4))
+    }
+}

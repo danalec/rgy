@@ -18,6 +18,25 @@ fn resume_after_gap(gap_end: u64, rec_size: u64) -> (u64, u64) {
     (skip, gap_end + skip)
 }
 
+/// One indexed directory entry: the `discovery::Source` row a [`NameRow`]s
+/// scan produces, before the rows are grouped into DFS [`Listing`]s.
+#[derive(Clone, Debug)]
+pub struct NameRow {
+    /// Raw FRN (no volume ordinal) of the record owning this name — the
+    /// directory linkage when `is_dir`.
+    pub frn: u64,
+    /// Raw parent FRN the name sits under.
+    pub parent_frn: u64,
+    pub name: Vec<u8>,
+    pub is_dir: bool,
+    /// Reparse point (junction / symlink / mount): a `link` kind in the
+    /// name index, whatever the record's dir bit says.
+    pub link: bool,
+    pub size: u64,
+    /// Last-write time from `$STANDARD_INFORMATION`, unix seconds.
+    pub mtime: u32,
+}
+
 /// Is this `$FILE_NAME` entry one a user search should see? Everything drops
 /// DOS-only 8.3 names (namespace 2) and names pointing inside the internal
 /// NTFS folders (parent 0..15 except the volume root at 5) — "ignore name attr
@@ -29,6 +48,79 @@ fn name_is_indexable(e: &ntfs::FileNameEntry) -> bool {
     }
     let parent = ntfs::frn_number(e.parent_frn);
     !(parent < 0x10 && parent != ROOT_FRN)
+}
+
+/// Group [`NameRow`]s into DFS [`discovery::walk::Listing`]s for
+/// [`name_core::name_index::Index::build`]: one block per directory,
+/// listing 0 = the children of `root_frn`, each directory entry's `child`
+/// naming the listing of that directory's children.
+///
+/// Rows of a directory's aliases (same `frn`, different name) point at the
+/// same child listing — directories are not hard-linked on NTFS, so this is
+/// only a hard-link-style edge case in the data.
+pub fn listings_from_rows(rows: &[NameRow], root_frn: u64) -> Vec<discovery::walk::Listing> {
+    use discovery::walk::{KIND_DIR, KIND_FILE, KIND_LINK, Listing, NONE, RawEnt};
+    use std::collections::HashMap;
+
+    let mut by_parent: HashMap<u64, Vec<usize>> = HashMap::new();
+    for (i, r) in rows.iter().enumerate() {
+        by_parent.entry(r.parent_frn).or_default().push(i);
+    }
+
+    // (parent frn, slot in `out` that takes this listing's id)
+    let mut out: Vec<Listing> = Vec::new();
+    let mut next_id = 1u32;
+    // (parent_frn, Option<(listing index, ent index)> whose child field
+    // takes the id of the listing we are about to build)
+    let mut stack: Vec<(u64, Option<(usize, usize)>)> = vec![(root_frn, None)];
+    while let Some((parent, fix)) = stack.pop() {
+        let Some(indices) = by_parent.get(&parent) else {
+            continue;
+        };
+        let id = if fix.is_none() { 0 } else { next_id };
+        if fix.is_some() {
+            next_id += 1;
+        }
+        if let Some((li, ei)) = fix {
+            out[li].ents[ei].child = id;
+        }
+        let mut names = Vec::new();
+        let mut ents = Vec::new();
+        let mut kids = Vec::new();
+        for &ri in indices {
+            let r = &rows[ri];
+            let name_off = names.len() as u32;
+            names.extend_from_slice(&r.name);
+            // fsearch's walk model: a symlink/reparse point is its own kind,
+            // not a file or dir. Everything's `type:link` rides on it.
+            let kind = if r.link {
+                KIND_LINK
+            } else if r.is_dir {
+                KIND_DIR
+            } else {
+                KIND_FILE
+            };
+            let ei = ents.len();
+            ents.push(RawEnt {
+                name_off,
+                name_len: r.name.len() as u16,
+                kind,
+                size: r.size,
+                mtime: r.mtime,
+                child: NONE,
+            });
+            if r.is_dir && !r.link {
+                kids.push((r.frn, ei));
+            }
+        }
+        let li = out.len();
+        out.push(Listing { id, names, ents });
+        // Reverse push: pop order gives the first dirent first (stack).
+        for (child_frn, ei) in kids.into_iter().rev() {
+            stack.push((child_frn, Some((li, ei))));
+        }
+    }
+    out
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -99,6 +191,7 @@ impl<'a> Indexer<'a> {
     ) -> Result<IndexStats, VolumeError> {
         let mut stats = IndexStats::default();
         let mut resolver = PathResolver::new();
+        let mut rows = Vec::new();
 
         index.add_root(self.ordinal, &self.volume.root);
         let limit = self.volume.record_count.clamp(1, MAX_RECORDS);
@@ -115,7 +208,7 @@ impl<'a> Indexer<'a> {
         let streamed = std::env::var_os("ERS_USE_RECORDS").is_none()
             && match self.volume.read_mft_data_runs() {
                 Ok(runs) => self
-                    .scan_via_runs(&runs, limit, &mut resolver, &mut stats, progress)
+                    .scan_via_runs(&runs, limit, &mut resolver, &mut stats, progress, &mut rows)
                     .is_ok(),
                 Err(_) => false,
             };
@@ -124,7 +217,8 @@ impl<'a> Indexer<'a> {
         if !streamed {
             stats = IndexStats::default();
             resolver = PathResolver::new();
-            self.scan_via_records(limit, &mut resolver, &mut stats, progress)?;
+            rows.clear();
+            self.scan_via_records(limit, &mut resolver, &mut stats, progress, &mut rows)?;
         }
 
         let resolve_stats = resolver.resolve_into(index);
@@ -133,6 +227,35 @@ impl<'a> Indexer<'a> {
         stats.cycle_edges = resolve_stats.cycles;
 
         Ok(stats)
+    }
+
+    /// Walk the MFT and collect every indexed name as a [`NameRow`] — the
+    /// `discovery::Source` feed for the name index v2 (grouped into DFS
+    /// [`discovery::walk::Listing`]s by [`listings_from_rows`]). Same traps
+    /// and both scan paths as [`Self::scan_all`]; the rows come out beside
+    /// the PathResolver writes the old index still consumes.
+    pub fn scan_rows(
+        &self,
+        progress: &mut dyn FnMut(u64, u64, u64),
+    ) -> Result<(Vec<NameRow>, IndexStats), VolumeError> {
+        let mut stats = IndexStats::default();
+        let mut resolver = PathResolver::new();
+        let mut rows = Vec::new();
+        let limit = self.volume.record_count.clamp(1, MAX_RECORDS);
+
+        let streamed = std::env::var_os("ERS_USE_RECORDS").is_none()
+            && match self.volume.read_mft_data_runs() {
+                Ok(runs) => self
+                    .scan_via_runs(&runs, limit, &mut resolver, &mut stats, progress, &mut rows)
+                    .is_ok(),
+                Err(_) => false,
+            };
+        if !streamed {
+            stats = IndexStats::default();
+            rows.clear();
+            self.scan_via_records(limit, &mut resolver, &mut stats, progress, &mut rows)?;
+        }
+        Ok((rows, stats))
     }
 
     /// Fast path: stream the MFT's logical record space through its cluster
@@ -155,6 +278,7 @@ impl<'a> Indexer<'a> {
         resolver: &mut PathResolver,
         stats: &mut IndexStats,
         progress: &mut dyn FnMut(u64, u64, u64),
+        rows: &mut Vec<NameRow>,
     ) -> Result<(), VolumeError> {
         let rec_size = self.volume.record_size as u64;
         // No floor here: a 512- or 1 KiB-cluster volume must stream at its own
@@ -273,7 +397,7 @@ impl<'a> Indexer<'a> {
                         // here — same as the Everything bulk walk ("bad US
                         // %x != %x", FUN_1400d0820).
                         if ntfs::apply_fixups(&mut fixed) {
-                            self.ingest_record(&fixed, frn, resolver, stats);
+                            self.ingest_record(&fixed, frn, resolver, stats, rows);
                         }
                     }
                     carry.clear();
@@ -303,6 +427,7 @@ impl<'a> Indexer<'a> {
         resolver: &mut PathResolver,
         stats: &mut IndexStats,
         progress: &mut dyn FnMut(u64, u64, u64),
+        rows: &mut Vec<NameRow>,
     ) -> Result<(), VolumeError> {
         let mut frn: u64 = 0;
 
@@ -323,7 +448,7 @@ impl<'a> Indexer<'a> {
             // and move on. The volume is live and a record can be freed between
             // the MFT size query and this read.
             match self.volume.read_file_record(frn) {
-                Ok(Some(record)) => self.ingest_record(&record, frn, resolver, stats),
+                Ok(Some(record)) => self.ingest_record(&record, frn, resolver, stats, rows),
                 Ok(None) => {}
                 Err(_) => stats.read_errors += 1,
             }
@@ -347,6 +472,7 @@ impl<'a> Indexer<'a> {
         frn: u64,
         resolver: &mut PathResolver,
         stats: &mut IndexStats,
+        rows: &mut Vec<NameRow>,
     ) {
         let Some(hdr) = ntfs::parse_file_record(record) else {
             return;
@@ -355,6 +481,8 @@ impl<'a> Indexer<'a> {
             return;
         }
         stats.records_in_use += 1;
+        let mtime = ntfs::standard_info_mtime(record).unwrap_or(0);
+        let is_dir = hdr.flags & ntfs::MFT_RECORD_IS_DIRECTORY != 0;
 
         // Extension record: `$ATTRIBUTE_LIST` spill targets carry their extra
         // `$FILE_NAME` values here, and the record's base reference (offset
@@ -375,6 +503,16 @@ impl<'a> Indexer<'a> {
                 }
                 stats.names_seen += 1;
                 resolver.add_alias(base_key, volume_key(self.ordinal, n.parent_frn), &n.name);
+                let link = n.is_reparse_point();
+                rows.push(NameRow {
+                    frn: base_raw,
+                    parent_frn: ntfs::frn_number(n.parent_frn),
+                    name: n.name.into_bytes(),
+                    is_dir,
+                    link,
+                    size: n.file_size,
+                    mtime,
+                });
             }
             return;
         }
@@ -394,7 +532,6 @@ impl<'a> Indexer<'a> {
             return;
         }
 
-        let is_dir = hdr.flags & ntfs::MFT_RECORD_IS_DIRECTORY != 0;
         let kind = if is_dir {
             NodeKind::Directory
         } else {
@@ -425,12 +562,30 @@ impl<'a> Indexer<'a> {
             best.file_size,
             best.file_attributes,
         );
+        rows.push(NameRow {
+            frn,
+            parent_frn: ntfs::frn_number(best.parent_frn),
+            name: best.name.clone().into_bytes(),
+            is_dir,
+            link: best.is_reparse_point(),
+            size: best.file_size,
+            mtime,
+        });
 
         for n in &names {
             if n.name == best.name && n.parent_frn == best.parent_frn {
                 continue;
             }
             resolver.add_alias(key, volume_key(self.ordinal, n.parent_frn), &n.name);
+            rows.push(NameRow {
+                frn,
+                parent_frn: ntfs::frn_number(n.parent_frn),
+                name: n.name.clone().into_bytes(),
+                is_dir,
+                link: n.is_reparse_point(),
+                size: n.file_size,
+                mtime,
+            });
         }
     }
 
@@ -488,6 +643,58 @@ impl<'a> Indexer<'a> {
     /// a read against a recreated journal rather than silently serving the wrong
     /// one. `start_usn` is passed through as-is; the caller clamps it to the
     /// journal window first.
+    /// Read whatever USN records are pending, without applying them — the
+    /// `discovery::Watch` feed (`UsnWatch`). Same request as
+    /// [`Self::tail_usn`] (all-ones ReasonMask, V4 max version) and the same
+    /// resume rule: the returned `next_usn` is the resume point even when no
+    /// records matched.
+    pub fn read_usn_batch(
+        &self,
+        start_usn: &mut i64,
+        known_journal_id: &mut u64,
+        max_records: usize,
+    ) -> Result<(Vec<ntfs::UsnRecord>, bool), VolumeError> {
+        let journal = self.volume.query_usn_journal()?;
+        let mut journal_id_changed = false;
+        let mut wrapped = false;
+
+        if *known_journal_id != 0 && *known_journal_id != journal.usn_journal_id {
+            journal_id_changed = true;
+            *start_usn = journal.first_usn;
+        }
+        *known_journal_id = journal.usn_journal_id;
+        if !journal.covers(*start_usn) {
+            *start_usn = journal.lowest_valid_usn;
+        }
+        if journal_id_changed {
+            // The feed lost history with the journal; the caller rescans
+            wrapped = true;
+        }
+
+        let request = ntfs::ReadUsnJournalData {
+            start_usn: *start_usn,
+            reason_mask: u32::MAX,
+            return_only_on_close: 0,
+            timeout: 0,
+            bytes_to_wait_for: 0,
+            usn_journal_id: journal.usn_journal_id,
+            min_major_version: 2,
+            max_major_version: 4,
+        };
+        let (mut records, next_start) = self.volume.read_usn(&request)?;
+        if records.len() > max_records {
+            records.truncate(max_records);
+        }
+        if records
+            .iter()
+            .any(|r| r.reason & ntfs::USN_REASON_JOURNAL_DELETE != 0)
+        {
+            wrapped = true;
+        }
+        *start_usn = next_start;
+        Ok((records, wrapped))
+    }
+
     pub fn tail_usn(
         &self,
         index: &mut Index,
@@ -630,7 +837,7 @@ mod tests {
         let mut resolver = PathResolver::new();
         let mut stats = IndexStats::default();
         for (frn, rec) in records {
-            indexer.ingest_record(rec, *frn, &mut resolver, &mut stats);
+            indexer.ingest_record(rec, *frn, &mut resolver, &mut stats, &mut Vec::new());
         }
         let mut index = Index::new("C:\\");
         resolver.resolve_into(&mut index);
@@ -693,5 +900,95 @@ mod tests {
         let rec = build_record(0, ROOT_FRN, ntfs::NAMESPACE_WIN32_AND_DOS, "readme.txt");
         let (index, _) = ingest_and_resolve(&[(42, rec)]);
         assert_eq!(index.path_of(volume_key(0, 42)), Some("C:\\readme.txt"));
+    }
+}
+
+#[cfg(test)]
+mod listings_tests {
+    use super::*;
+    use discovery::walk::{KIND_DIR, KIND_FILE, NONE};
+
+    #[test]
+    fn rows_become_dfs_listings_with_child_links() {
+        // root(5) has "a" (dir, frn 10) and "b.txt" (file, frn 11);
+        // dir 10 has "c.txt" (frn 12).
+        let rows = vec![
+            NameRow {
+                frn: 10,
+                parent_frn: 5,
+                name: b"a".to_vec(),
+                is_dir: true,
+                link: false,
+                size: 0,
+                mtime: 1,
+            },
+            NameRow {
+                frn: 11,
+                parent_frn: 5,
+                name: b"b.txt".to_vec(),
+                is_dir: false,
+                link: false,
+                size: 7,
+                mtime: 2,
+            },
+            NameRow {
+                frn: 12,
+                parent_frn: 10,
+                name: b"c.txt".to_vec(),
+                is_dir: false,
+                link: false,
+                size: 9,
+                mtime: 3,
+            },
+        ];
+        let ls = listings_from_rows(&rows, 5);
+        assert_eq!(ls.len(), 2);
+        assert_eq!(ls[0].id, 0); // root's children first
+        assert_eq!(ls[0].ents.len(), 2);
+        // The dir dirent points at listing 1.
+        let dir_ent = ls[0].ents.iter().find(|e| e.kind & 3 == KIND_DIR).unwrap();
+        assert_eq!(dir_ent.child, 1);
+        let file_ent = ls[0].ents.iter().find(|e| e.kind & 3 == KIND_FILE).unwrap();
+        assert_eq!(file_ent.child, NONE);
+        assert_eq!(file_ent.size, 7);
+        assert_eq!(file_ent.mtime, 2);
+        // Listing 1 holds the dir's children.
+        assert_eq!(ls[1].id, 1);
+        assert_eq!(ls[1].ents.len(), 1);
+        assert_eq!(
+            &ls[1].names[ls[1].ents[0].name_off as usize..][..5],
+            b"c.txt"
+        );
+        assert_eq!(ls[1].ents[0].child, NONE);
+    }
+
+    #[test]
+    fn reparse_rows_are_link_kind_and_do_not_get_child_listings() {
+        // A junction: dir bit + reparse. fsearch's model calls it a link,
+        // and it does not own a children listing.
+        let rows = vec![
+            NameRow {
+                frn: 10,
+                parent_frn: 5,
+                name: b"j".to_vec(),
+                is_dir: true,
+                link: true,
+                size: 0,
+                mtime: 0,
+            },
+            NameRow {
+                frn: 12,
+                parent_frn: 10,
+                name: b"inside".to_vec(),
+                is_dir: false,
+                link: false,
+                size: 1,
+                mtime: 0,
+            },
+        ];
+        let ls = listings_from_rows(&rows, 5);
+        assert_eq!(ls.len(), 1, "the junction gets no child listing");
+        assert_eq!(ls[0].ents[0].kind, discovery::walk::KIND_LINK);
+        assert_eq!(ls[0].ents[0].child, NONE);
     }
 }

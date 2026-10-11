@@ -10,4 +10,7 @@
 
 pub mod indexer;
 pub mod ntfs;
+pub mod seam;
 pub mod volume;
+
+pub use seam::{MftSource, UsnWatch};

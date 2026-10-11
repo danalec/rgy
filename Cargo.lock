@@ -328,6 +328,7 @@ dependencies = [
  "memmap2",
  "rayon",
  "regex",
+ "regex-syntax",
  "rgx-core",
 ]
 
