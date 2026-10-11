@@ -28,29 +28,17 @@ pub struct Regex {
 impl Regex {
     /// Compile `pattern`, ASCII case-insensitively.
     pub fn new(pattern: &str) -> Result<Self, String> {
-        let parsed = syntax::parse_with(
-            pattern.as_bytes(),
-            syntax::Flags {
-                case_insensitive: true,
-                ..syntax::Flags::default()
-            },
-        )
-        .map_err(|e| e.to_string())?;
+        let parsed = syntax::parse_with(pattern.as_bytes(), syntax::Flags { case_insensitive: true, ..syntax::Flags::default() })
+            .map_err(|e| e.to_string())?;
         let prog = nfa::compile(&parsed.ast, parsed.groups);
-        Ok(Regex {
-            pattern: pattern.to_string(),
-            prog: Some(prog),
-        })
+        Ok(Regex { pattern: pattern.to_string(), prog: Some(prog) })
     }
 
     /// A pattern that never matches. Used to fail closed when a user's
     /// pattern does not compile: a positive `re:` filter then rejects
     /// everything rather than silently admitting everything.
     pub fn never() -> Self {
-        Regex {
-            pattern: String::new(),
-            prog: None,
-        }
+        Regex { pattern: String::new(), prog: None }
     }
 
     /// True when the pattern matches anywhere in `text`.
@@ -75,10 +63,7 @@ impl Eq for Regex {}
 
 impl Clone for Regex {
     fn clone(&self) -> Self {
-        Regex {
-            pattern: self.pattern.clone(),
-            prog: self.prog.clone(),
-        }
+        Regex { pattern: self.pattern.clone(), prog: self.prog.clone() }
     }
 }
 
@@ -93,9 +78,7 @@ mod tests {
     use super::*;
 
     fn m(pattern: &str, text: &str) -> bool {
-        Regex::new(pattern)
-            .expect("pattern must compile")
-            .is_match(text)
+        Regex::new(pattern).expect("pattern must compile").is_match(text)
     }
 
     #[test]

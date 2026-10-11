@@ -91,10 +91,7 @@ fn match_ascii(name: &[u8], needle: &[u8]) -> Option<Match> {
 
     // Contiguous first: the common case, and it ranks tighter than a scattered
     // match can.
-    if let Some(start) = name
-        .windows(needle.len())
-        .position(|window| window.eq_ignore_ascii_case(needle))
-    {
+    if let Some(start) = name.windows(needle.len()).position(|window| window.eq_ignore_ascii_case(needle)) {
         return Some(rank(start, needle.len(), name.len()));
     }
 
@@ -104,9 +101,7 @@ fn match_ascii(name: &[u8], needle: &[u8]) -> Option<Match> {
     let mut first = 0usize;
     for (i, c) in needle.iter().enumerate() {
         let lower = c.to_ascii_lowercase();
-        let offset = name[cursor..]
-            .iter()
-            .position(|h| h.to_ascii_lowercase() == lower)?;
+        let offset = name[cursor..].iter().position(|h| h.to_ascii_lowercase() == lower)?;
         cursor += offset;
         if i == 0 {
             first = cursor;
@@ -188,15 +183,9 @@ mod tests {
 
     #[test]
     fn matching_ignores_case() {
-        assert_eq!(
-            fuzzy_match("Wallpaper.tsx", "wall"),
-            fuzzy_match("Wallpaper.tsx", "WALL")
-        );
+        assert_eq!(fuzzy_match("Wallpaper.tsx", "wall"), fuzzy_match("Wallpaper.tsx", "WALL"));
         // `readme` is only a prefix of `README.md`, not the whole name.
-        assert_eq!(
-            fuzzy_match("README.md", "readme").map(|m| m.kind),
-            Some(MatchKind::Prefix)
-        );
+        assert_eq!(fuzzy_match("README.md", "readme").map(|m| m.kind), Some(MatchKind::Prefix));
     }
 
     #[test]
@@ -239,22 +228,13 @@ mod tests {
 
     #[test]
     fn an_empty_needle_matches_everything_exactly() {
-        assert_eq!(
-            fuzzy_match("", ""),
-            Some(Match::new(MatchKind::Exact, 0, 0))
-        );
-        assert_eq!(
-            fuzzy_match("anything.rs", ""),
-            Some(Match::new(MatchKind::Exact, 0, 0))
-        );
+        assert_eq!(fuzzy_match("", ""), Some(Match::new(MatchKind::Exact, 0, 0)));
+        assert_eq!(fuzzy_match("anything.rs", ""), Some(Match::new(MatchKind::Exact, 0, 0)));
     }
 
     #[test]
     fn score_requires_every_needle_to_match() {
-        let needles = needle("wall")
-            .into_iter()
-            .chain(needle("jpg"))
-            .collect::<Vec<_>>();
+        let needles = needle("wall").into_iter().chain(needle("jpg")).collect::<Vec<_>>();
         assert!(score("wallpaper.jpg", &needles).is_some());
         assert!(score("wallpaper.png", &needles).is_none());
     }
@@ -273,10 +253,7 @@ mod tests {
 
     #[test]
     fn score_with_no_needles_is_an_exact_match() {
-        assert_eq!(
-            score("whatever.txt", &[]),
-            Some(Match::new(MatchKind::Exact, 0, 0))
-        );
+        assert_eq!(score("whatever.txt", &[]), Some(Match::new(MatchKind::Exact, 0, 0)));
     }
 
     #[test]

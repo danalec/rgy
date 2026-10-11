@@ -11,3 +11,13 @@ discovery = { path = "../discovery" }
 # path patterns compile through rgx-core's syntax/nfa/vm, the same engine
 # the copy was taken from (MIT OR Apache-2.0).
 rgx-core = { path = "../rgx-core" }
+# fsearch's name index v2 mmaps its name blob (name_index.rs).
+memmap2 = "0.9"
+# fsearch's parallel scan/rank (name_query.rs, live.rs).
+rayon = "1.12"
+# fsearch's Searcher prefilter inspects regex internals (re_literals,
+# path_suffixes); the everything-rs `re:` path in `index.rs` stays on rgx-core
+# (one regex engine for the query layer, §4.4).
+regex = "1.12"
+# fsearch scorer's folded find (name_query.rs find_folded/rfind_folded).
+memchr = "2.8"

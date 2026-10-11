@@ -124,10 +124,7 @@ impl SearchTable {
         // Canonical paths plus aliases, so a file is findable by its 8.3 short
         // name or a hard-link name as well as its Win32 name. The root is the
         // synthetic seed and carries no searchable name.
-        let mut entries: Vec<(u64, &str)> = index
-            .iter_all_paths()
-            .filter(|(frn, _)| volume_frn(*frn) != ROOT_FRN)
-            .collect();
+        let mut entries: Vec<(u64, &str)> = index.iter_all_paths().filter(|(frn, _)| volume_frn(*frn) != ROOT_FRN).collect();
         entries.sort_unstable_by(|a, b| a.1.cmp(b.1));
 
         let capacity: usize = entries.iter().map(|(_, p)| p.len() + 24).sum();
@@ -156,15 +153,7 @@ impl SearchTable {
                 u16::try_from(path_len).expect("path exceeds 64 KiB"),
             );
 
-            rows.push(SearchRow {
-                name_start,
-                name_len,
-                path_start,
-                path_len,
-                is_dir: meta.is_dir,
-                size: meta.size,
-                attrs: meta.attrs,
-            });
+            rows.push(SearchRow { name_start, name_len, path_start, path_len, is_dir: meta.is_dir, size: meta.size, attrs: meta.attrs });
         }
 
         SearchTable { text, rows }
@@ -266,10 +255,7 @@ impl Index {
     /// leaves one root in the total on a multi-volume index — the same
     /// single-root assumption that used to truncate the ERI root count.
     pub fn entry_count(&self) -> usize {
-        self.paths
-            .keys()
-            .filter(|k| volume_frn(**k) != ROOT_FRN)
-            .count()
+        self.paths.keys().filter(|k| volume_frn(**k) != ROOT_FRN).count()
     }
 
     #[allow(dead_code)]
@@ -287,11 +273,7 @@ impl Index {
     }
 
     pub fn total_bytes(&self) -> u64 {
-        self.sizes
-            .iter()
-            .filter(|(frn, _)| !self.is_dir.get(frn).copied().unwrap_or(false))
-            .map(|(_, s)| *s)
-            .sum()
+        self.sizes.iter().filter(|(frn, _)| !self.is_dir.get(frn).copied().unwrap_or(false)).map(|(_, s)| *s).sum()
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (u64, &str)> {
@@ -303,10 +285,7 @@ impl Index {
     /// A record with three names yields three paths, which is what a user
     /// expects when they know the file by its 8.3 short name.
     pub fn iter_all_paths(&self) -> impl Iterator<Item = (u64, &str)> {
-        let extras = self
-            .aliases
-            .iter()
-            .flat_map(|(frn, list)| list.iter().map(move |p| (*frn, p.as_str())));
+        let extras = self.aliases.iter().flat_map(|(frn, list)| list.iter().map(move |p| (*frn, p.as_str())));
         self.iter().chain(extras)
     }
 
@@ -340,15 +319,7 @@ impl Index {
     ///
     /// `frn` and `parent_frn` are keys, not raw file references: the caller has
     /// already folded the volume ordinal into them. Masking here would strip it.
-    pub fn insert(
-        &mut self,
-        frn: u64,
-        parent_frn: u64,
-        name: &str,
-        kind: NodeKind,
-        size: u64,
-        attrs: u32,
-    ) {
+    pub fn insert(&mut self, frn: u64, parent_frn: u64, name: &str, kind: NodeKind, size: u64, attrs: u32) {
         if volume_frn(frn) == ROOT_FRN {
             return;
         }
@@ -391,32 +362,21 @@ impl Index {
     /// under its own reference and removing it would corrupt the index.
     pub fn apply_usn(&mut self, rec: &ntfs::UsnRecord, ordinal: u16) -> bool {
         use ntfs::{
-            USN_REASON_FILE_CREATE, USN_REASON_FILE_DELETE, USN_REASON_RENAME_DUPLICATE_SOURCE,
-            USN_REASON_RENAME_DUPLICATE_TARGET, USN_REASON_RENAME_NEW_NAME,
-            USN_REASON_RENAME_OLD_NAME,
+            USN_REASON_FILE_CREATE, USN_REASON_FILE_DELETE, USN_REASON_RENAME_DUPLICATE_SOURCE, USN_REASON_RENAME_DUPLICATE_TARGET,
+            USN_REASON_RENAME_NEW_NAME, USN_REASON_RENAME_OLD_NAME,
         };
 
-        if rec.reason & USN_REASON_RENAME_DUPLICATE_SOURCE != 0
-            || rec.reason & USN_REASON_RENAME_DUPLICATE_TARGET != 0
-        {
+        if rec.reason & USN_REASON_RENAME_DUPLICATE_SOURCE != 0 || rec.reason & USN_REASON_RENAME_DUPLICATE_TARGET != 0 {
             return false;
         }
 
-        if rec.reason & USN_REASON_FILE_DELETE != 0 || rec.reason & USN_REASON_RENAME_OLD_NAME != 0
-        {
-            return self
-                .remove(volume_key(ordinal, rec.file_reference))
-                .is_some();
+        if rec.reason & USN_REASON_FILE_DELETE != 0 || rec.reason & USN_REASON_RENAME_OLD_NAME != 0 {
+            return self.remove(volume_key(ordinal, rec.file_reference)).is_some();
         }
 
-        let kind = if rec.file_attributes & 0x10 != 0 {
-            NodeKind::Directory
-        } else {
-            NodeKind::File
-        };
+        let kind = if rec.file_attributes & 0x10 != 0 { NodeKind::Directory } else { NodeKind::File };
 
-        if rec.reason & USN_REASON_FILE_CREATE != 0 || rec.reason & USN_REASON_RENAME_NEW_NAME != 0
-        {
+        if rec.reason & USN_REASON_FILE_CREATE != 0 || rec.reason & USN_REASON_RENAME_NEW_NAME != 0 {
             let frn = volume_key(ordinal, rec.file_reference);
             let parent_frn = volume_key(ordinal, rec.parent_reference);
             let size = self.sizes.get(&frn).copied().unwrap_or(0);
@@ -428,10 +388,7 @@ impl Index {
     }
 
     pub fn root(&self) -> &str {
-        self.paths
-            .get(&ROOT_FRN)
-            .map(|s| s.as_str())
-            .unwrap_or("C:\\")
+        self.paths.get(&ROOT_FRN).map(|s| s.as_str()).unwrap_or("C:\\")
     }
 
     /// Serialize the entire resolved index to a binary stream using the ERI2
@@ -446,12 +403,8 @@ impl Index {
         // Roots first: every key whose masked FRN is the synthetic root. Sort
         // by ordinal so the byte stream is deterministic regardless of hash
         // map iteration order.
-        let mut roots: Vec<(u16, &str)> = self
-            .paths
-            .iter()
-            .filter(|(k, _)| volume_frn(**k) == ROOT_FRN)
-            .map(|(k, v)| (volume_ordinal(*k), v.as_str()))
-            .collect();
+        let mut roots: Vec<(u16, &str)> =
+            self.paths.iter().filter(|(k, _)| volume_frn(**k) == ROOT_FRN).map(|(k, v)| (volume_ordinal(*k), v.as_str())).collect();
         roots.sort_unstable();
         w.write_all(&(roots.len() as u16).to_le_bytes())?;
         for (ordinal, root) in &roots {
@@ -462,11 +415,7 @@ impl Index {
         }
 
         // Exclude every volume's synthetic root from the record stream
-        let count = self
-            .paths
-            .keys()
-            .filter(|k| volume_frn(**k) != ROOT_FRN)
-            .count() as u64;
+        let count = self.paths.keys().filter(|k| volume_frn(**k) != ROOT_FRN).count() as u64;
         w.write_all(&count.to_le_bytes())?;
 
         for (&frn, path) in &self.paths {
@@ -476,11 +425,7 @@ impl Index {
             let parent_frn = self.parents.get(&frn).copied().unwrap_or(ROOT_FRN);
             let size = self.sizes.get(&frn).copied().unwrap_or(0);
             let attrs = self.attributes.get(&frn).copied().unwrap_or(0);
-            let is_dir = if self.is_dir.get(&frn).copied().unwrap_or(false) {
-                1u8
-            } else {
-                0u8
-            };
+            let is_dir = if self.is_dir.get(&frn).copied().unwrap_or(false) { 1u8 } else { 0u8 };
             let name = self.names.get(&frn).map(|s| s.as_str()).unwrap_or("");
 
             w.write_all(&frn.to_le_bytes())?;
@@ -510,10 +455,7 @@ impl Index {
         } else if magic == ERI1_MAGIC {
             true
         } else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "invalid index magic: not an ERI file",
-            ));
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid index magic: not an ERI file"));
         };
 
         let mut ver_buf = [0u8; 4];
@@ -521,10 +463,7 @@ impl Index {
         let version = u32::from_le_bytes(ver_buf);
         let expected = if legacy { ERI1_VERSION } else { ERI_VERSION };
         if version != expected {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("unsupported index version: {version}"),
-            ));
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("unsupported index version: {version}")));
         }
 
         let mut index = Index::default();
@@ -537,8 +476,7 @@ impl Index {
             let root_len = u16::from_le_bytes(root_len_buf) as usize;
             let mut root_bytes = vec![0u8; root_len];
             r.read_exact(&mut root_bytes)?;
-            let root = String::from_utf8(root_bytes)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            let root = String::from_utf8(root_bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
             index.add_root(0, &root);
         } else {
             // Root table: every volume seeds its own root, or the second volume's
@@ -547,10 +485,7 @@ impl Index {
             r.read_exact(&mut root_count_buf)?;
             let root_count = u16::from_le_bytes(root_count_buf);
             if root_count == 0 {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "index has no volume roots",
-                ));
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "index has no volume roots"));
             }
 
             for _ in 0..root_count {
@@ -563,8 +498,7 @@ impl Index {
                 let root_len = u16::from_le_bytes(root_len_buf) as usize;
                 let mut root_bytes = vec![0u8; root_len];
                 r.read_exact(&mut root_bytes)?;
-                let root = String::from_utf8(root_bytes)
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+                let root = String::from_utf8(root_bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
                 index.add_root(ordinal, &root);
             }
         }
@@ -611,15 +545,13 @@ impl Index {
             let name_len = u16::from_le_bytes(u16_buf) as usize;
             let mut name_bytes = vec![0u8; name_len];
             r.read_exact(&mut name_bytes)?;
-            let name = String::from_utf8(name_bytes)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            let name = String::from_utf8(name_bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
             r.read_exact(&mut u16_buf)?;
             let path_len = u16::from_le_bytes(u16_buf) as usize;
             let mut path_bytes = vec![0u8; path_len];
             r.read_exact(&mut path_bytes)?;
-            let path = String::from_utf8(path_bytes)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            let path = String::from_utf8(path_bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
             index.paths.insert(frn, path);
             index.parents.insert(frn, parent_frn);
@@ -769,14 +701,7 @@ impl Query {
     /// substring test would reject. It therefore runs this and lets the fuzzy
     /// pass own those terms. Negations stay here — `!test` is a constraint, not
     /// a ranking signal.
-    pub fn matches_filters(
-        &self,
-        path: &str,
-        name: &str,
-        is_dir: bool,
-        size: u64,
-        attrs: u32,
-    ) -> bool {
+    pub fn matches_filters(&self, path: &str, name: &str, is_dir: bool, size: u64, attrs: u32) -> bool {
         // An unknown `type:` is a typo, not a wildcard. Failing closed keeps a
         // misspelling from turning into "every path on the volume".
         if !self.type_errors.is_empty() {
@@ -879,16 +804,10 @@ impl Query {
 /// is not one. The prefix is matched case-insensitively; the pattern itself is
 /// taken verbatim so class ranges like `[A-Z]` keep their case.
 fn re_pattern_of(token: &str) -> Option<&str> {
-    if token
-        .get(..6)
-        .is_some_and(|p| p.eq_ignore_ascii_case("regex:"))
-    {
+    if token.get(..6).is_some_and(|p| p.eq_ignore_ascii_case("regex:")) {
         return Some(&token[6..]);
     }
-    if token
-        .get(..3)
-        .is_some_and(|p| p.eq_ignore_ascii_case("re:"))
-    {
+    if token.get(..3).is_some_and(|p| p.eq_ignore_ascii_case("re:")) {
         return Some(&token[3..]);
     }
     None
@@ -917,10 +836,7 @@ fn push_regex(target: &mut Vec<Regex>, errors: &mut Vec<String>, pat: &str) {
 /// pattern is not mistaken for a query-level OR.
 fn re_prefix_at(input: &str, i: usize) -> bool {
     let rest = &input[i..];
-    let rest = rest
-        .strip_prefix('!')
-        .or_else(|| rest.strip_prefix('-'))
-        .unwrap_or(rest);
+    let rest = rest.strip_prefix('!').or_else(|| rest.strip_prefix('-')).unwrap_or(rest);
     re_pattern_of(rest).is_some()
 }
 
@@ -932,14 +848,8 @@ fn starts_query_syntax(s: &str) -> bool {
     if s.is_empty() || s.starts_with(char::is_whitespace) {
         return true;
     }
-    let t = s
-        .strip_prefix('!')
-        .or_else(|| s.strip_prefix('-'))
-        .unwrap_or(s);
-    re_pattern_of(t).is_some()
-        || ["ext:", "dir:", "type:", "size:"]
-            .iter()
-            .any(|p| t.get(..p.len()).is_some_and(|x| x.eq_ignore_ascii_case(p)))
+    let t = s.strip_prefix('!').or_else(|| s.strip_prefix('-')).unwrap_or(s);
+    re_pattern_of(t).is_some() || ["ext:", "dir:", "type:", "size:"].iter().any(|p| t.get(..p.len()).is_some_and(|x| x.eq_ignore_ascii_case(p)))
 }
 
 /// Split a query string on `|`, but not inside a `re:` / `regex:` pattern.
@@ -1037,11 +947,7 @@ fn wildcard_match(pattern: &str, text: &str) -> bool {
 /// otherwise. Both are case-insensitive because query terms are lowercased at
 /// parse time and paths are compared without allocating.
 fn term_matches(path: &str, term: &str) -> bool {
-    if term.contains('*') || term.contains('?') {
-        wildcard_match(term, path)
-    } else {
-        contains_ignore_case(path, term)
-    }
+    if term.contains('*') || term.contains('?') { wildcard_match(term, path) } else { contains_ignore_case(path, term) }
 }
 
 /// An OR of [`Query`] alternatives, which is how a query string containing `|`
@@ -1061,46 +967,27 @@ impl OrQuery {
     /// `re:` token is the regex engine's own alternation and does not split —
     /// `re:(a|b)` stays one alternative.
     pub fn parse(input: &str) -> Self {
-        let alternatives: Vec<Query> = split_alternatives(input)
-            .into_iter()
-            .map(Query::parse)
-            .filter(|q| !q.is_empty())
-            .collect();
+        let alternatives: Vec<Query> = split_alternatives(input).into_iter().map(Query::parse).filter(|q| !q.is_empty()).collect();
         if alternatives.is_empty() {
             // An empty query matches everything.
-            return OrQuery {
-                alternatives: vec![Query::default()],
-            };
+            return OrQuery { alternatives: vec![Query::default()] };
         }
         OrQuery { alternatives }
     }
 
     pub fn matches(&self, path: &str, name: &str, is_dir: bool, size: u64, attrs: u32) -> bool {
-        self.alternatives
-            .iter()
-            .any(|q| q.matches(path, name, is_dir, size, attrs))
+        self.alternatives.iter().any(|q| q.matches(path, name, is_dir, size, attrs))
     }
 
     /// Filters only, across every alternative: any alternative whose filters
     /// pass does. Used by the interactive UI, which fuzzy-scores the terms.
-    pub fn matches_filters(
-        &self,
-        path: &str,
-        name: &str,
-        is_dir: bool,
-        size: u64,
-        attrs: u32,
-    ) -> bool {
-        self.alternatives
-            .iter()
-            .any(|q| q.matches_filters(path, name, is_dir, size, attrs))
+    pub fn matches_filters(&self, path: &str, name: &str, is_dir: bool, size: u64, attrs: u32) -> bool {
+        self.alternatives.iter().any(|q| q.matches_filters(path, name, is_dir, size, attrs))
     }
 
     /// The term strings across every alternative, for fuzzy scoring.
     pub fn terms(&self) -> impl Iterator<Item = &str> {
-        self.alternatives
-            .iter()
-            .flat_map(|q| q.terms.iter().map(|s| s.as_str()))
+        self.alternatives.iter().flat_map(|q| q.terms.iter().map(|s| s.as_str()))
     }
 }
 
@@ -1130,19 +1017,11 @@ fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
 fn media_extensions(kind: &str) -> Option<&'static [&'static str]> {
     match kind {
         "image" | "picture" | "img" => Some(&[
-            "jpg", "jpeg", "png", "gif", "bmp", "tif", "tiff", "webp", "heic", "heif", "avif",
-            "ico", "svg", "psd", "raw", "cr2", "nef", "arw", "dng",
+            "jpg", "jpeg", "png", "gif", "bmp", "tif", "tiff", "webp", "heic", "heif", "avif", "ico", "svg", "psd", "raw", "cr2", "nef", "arw", "dng",
         ]),
-        "video" | "movie" | "film" => Some(&[
-            "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "mpg", "mpeg", "m2ts", "ts",
-            "3gp", "ogv",
-        ]),
-        "audio" | "sound" | "music" => Some(&[
-            "mp3", "wav", "flac", "aac", "m4a", "ogg", "wma", "opus", "aiff", "ape", "alac",
-        ]),
-        "archive" | "zip" | "compressed" => Some(&[
-            "zip", "rar", "7z", "tar", "gz", "bz2", "xz", "zst", "lz", "lzma", "cab", "iso",
-        ]),
+        "video" | "movie" | "film" => Some(&["mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "mpg", "mpeg", "m2ts", "ts", "3gp", "ogv"]),
+        "audio" | "sound" | "music" => Some(&["mp3", "wav", "flac", "aac", "m4a", "ogg", "wma", "opus", "aiff", "ape", "alac"]),
+        "archive" | "zip" | "compressed" => Some(&["zip", "rar", "7z", "tar", "gz", "bz2", "xz", "zst", "lz", "lzma", "cab", "iso"]),
         _ => None,
     }
 }
@@ -1188,32 +1067,16 @@ pub fn parse_size_str(s: &str) -> Option<u64> {
     }
 
     let (num_part, multiplier) = if s.ends_with("tb") || s.ends_with('t') {
-        let end = if s.ends_with("tb") {
-            s.len() - 2
-        } else {
-            s.len() - 1
-        };
+        let end = if s.ends_with("tb") { s.len() - 2 } else { s.len() - 1 };
         (&s[..end], 1024u64 * 1024 * 1024 * 1024)
     } else if s.ends_with("gb") || s.ends_with('g') {
-        let end = if s.ends_with("gb") {
-            s.len() - 2
-        } else {
-            s.len() - 1
-        };
+        let end = if s.ends_with("gb") { s.len() - 2 } else { s.len() - 1 };
         (&s[..end], 1024u64 * 1024 * 1024)
     } else if s.ends_with("mb") || s.ends_with('m') {
-        let end = if s.ends_with("mb") {
-            s.len() - 2
-        } else {
-            s.len() - 1
-        };
+        let end = if s.ends_with("mb") { s.len() - 2 } else { s.len() - 1 };
         (&s[..end], 1024u64 * 1024)
     } else if s.ends_with("kb") || s.ends_with('k') {
-        let end = if s.ends_with("kb") {
-            s.len() - 2
-        } else {
-            s.len() - 1
-        };
+        let end = if s.ends_with("kb") { s.len() - 2 } else { s.len() - 1 };
         (&s[..end], 1024u64)
     } else if s.ends_with('b') {
         (&s[..s.len() - 1], 1u64)
@@ -1241,38 +1104,17 @@ pub struct PathResolver {
 
 impl PathResolver {
     pub fn new() -> Self {
-        PathResolver {
-            edges: HashMap::new(),
-            resolved: HashMap::new(),
-            aliases: Vec::new(),
-        }
+        PathResolver { edges: HashMap::new(), resolved: HashMap::new(), aliases: Vec::new() }
     }
 
-    pub fn add(
-        &mut self,
-        frn: u64,
-        parent_frn: u64,
-        name: &str,
-        kind: NodeKind,
-        size: u64,
-        attributes: u32,
-    ) {
+    pub fn add(&mut self, frn: u64, parent_frn: u64, name: &str, kind: NodeKind, size: u64, attributes: u32) {
         // Keys are opaque here: the caller has already folded the volume ordinal
         // into the high bits, and masking again would strip it. Only the
         // synthetic root of any volume is skipped.
         if volume_frn(frn) == ROOT_FRN {
             return;
         }
-        self.edges.insert(
-            frn,
-            Edge {
-                parent_frn,
-                name: name.to_string(),
-                kind,
-                size,
-                attributes,
-            },
-        );
+        self.edges.insert(frn, Edge { parent_frn, name: name.to_string(), kind, size, attributes });
     }
 
     pub fn edge_count(&self) -> usize {
@@ -1407,10 +1249,7 @@ mod tests {
     #[test]
     fn join_normalises_separators() {
         assert_eq!(join("C:\\", "Windows"), "C:\\Windows");
-        assert_eq!(
-            join("C:\\Windows", "notepad.exe"),
-            "C:\\Windows\\notepad.exe"
-        );
+        assert_eq!(join("C:\\Windows", "notepad.exe"), "C:\\Windows\\notepad.exe");
         assert_eq!(join("C:\\Windows\\", "System32"), "C:\\Windows\\System32");
     }
 
@@ -1457,10 +1296,7 @@ mod tests {
 
         // Both members of the cycle are visited and each detects the loop once,
         // so the count is at least one regardless of iteration order.
-        assert!(
-            stats.cycles >= 1,
-            "expected a detected cycle, got {stats:?}"
-        );
+        assert!(stats.cycles >= 1, "expected a detected cycle, got {stats:?}");
         assert_eq!(stats.resolved, 0);
         assert_eq!(idx.len(), 1);
     }
@@ -1483,10 +1319,7 @@ mod tests {
         assert_eq!(stats.resolved, depth as usize);
         // Starts at "C:\" (3 chars); the first join adds one separator (4), and
         // every later level adds "\d" (2), giving 2*depth + 2.
-        assert_eq!(
-            idx.path_of(1_000 + depth - 1).map(str::len),
-            Some(depth as usize * 2 + 2)
-        );
+        assert_eq!(idx.path_of(1_000 + depth - 1).map(str::len), Some(depth as usize * 2 + 2));
     }
 
     #[test]
@@ -1516,10 +1349,7 @@ mod tests {
         assert!(idx.apply_usn(&rec, 0));
         assert_eq!(idx.path_of(0x42), Some("C:\\readme.txt"));
 
-        let del = ntfs::UsnRecord {
-            reason: ntfs::USN_REASON_FILE_DELETE,
-            ..rec.clone()
-        };
+        let del = ntfs::UsnRecord { reason: ntfs::USN_REASON_FILE_DELETE, ..rec.clone() };
         assert!(idx.apply_usn(&del, 0));
         assert!(!idx.contains(0x42));
     }
@@ -1650,22 +1480,8 @@ mod tests {
         let mut idx = Index::default();
         idx.add_root(0, "C:\\");
         idx.add_root(1, "D:\\");
-        idx.insert(
-            volume_key(0, 100),
-            volume_root_key(0),
-            "a.txt",
-            NodeKind::File,
-            1,
-            0x20,
-        );
-        idx.insert(
-            volume_key(1, 100),
-            volume_root_key(1),
-            "b.txt",
-            NodeKind::File,
-            2,
-            0x20,
-        );
+        idx.insert(volume_key(0, 100), volume_root_key(0), "a.txt", NodeKind::File, 1, 0x20);
+        idx.insert(volume_key(1, 100), volume_root_key(1), "b.txt", NodeKind::File, 2, 0x20);
 
         let mut buf = Vec::new();
         idx.write_to(&mut buf).expect("serialize");
@@ -1674,16 +1490,8 @@ mod tests {
 
         assert_eq!(loaded.root(), "C:\\");
         assert_eq!(loaded.len(), idx.len());
-        assert_eq!(
-            loaded.path_of(volume_key(0, 100)),
-            Some("C:\\a.txt"),
-            "volume 0 keeps its own prefix"
-        );
-        assert_eq!(
-            loaded.path_of(volume_key(1, 100)),
-            Some("D:\\b.txt"),
-            "volume 1 must not resolve against volume 0's root"
-        );
+        assert_eq!(loaded.path_of(volume_key(0, 100)), Some("C:\\a.txt"), "volume 0 keeps its own prefix");
+        assert_eq!(loaded.path_of(volume_key(1, 100)), Some("D:\\b.txt"), "volume 1 must not resolve against volume 0's root");
     }
 
     #[test]
@@ -1693,22 +1501,8 @@ mod tests {
         let mut idx = Index::default();
         idx.add_root(0, "C:\\");
         idx.add_root(1, "D:\\");
-        idx.insert(
-            volume_key(0, 100),
-            volume_root_key(0),
-            "a.txt",
-            NodeKind::File,
-            1,
-            0x20,
-        );
-        idx.insert(
-            volume_key(1, 100),
-            volume_root_key(1),
-            "b.txt",
-            NodeKind::File,
-            2,
-            0x20,
-        );
+        idx.insert(volume_key(0, 100), volume_root_key(0), "a.txt", NodeKind::File, 1, 0x20);
+        idx.insert(volume_key(1, 100), volume_root_key(1), "b.txt", NodeKind::File, 2, 0x20);
         assert_eq!(idx.entry_count(), 2);
     }
 
@@ -1735,13 +1529,7 @@ mod tests {
         assert!(!q.matches("C:\\project\\src\\main.rs", "main.rs", false, 500, 0));
 
         // Contains excluded term
-        assert!(!q.matches(
-            "C:\\project\\src\\main_test.rs",
-            "main_test.rs",
-            false,
-            2000,
-            0
-        ));
+        assert!(!q.matches("C:\\project\\src\\main_test.rs", "main_test.rs", false, 2000, 0));
 
         // Is directory but query asks for file
         assert!(!q.matches("C:\\project\\src\\main", "main", true, 2000, 0));
@@ -2074,22 +1862,8 @@ mod tests {
         let mut idx = Index::new("C:\\");
         idx.add_root(1, "D:\\");
 
-        idx.insert(
-            volume_key(0, 100),
-            volume_root_key(0),
-            "same.rs",
-            NodeKind::File,
-            1,
-            0x20,
-        );
-        idx.insert(
-            volume_key(1, 100),
-            volume_root_key(1),
-            "same.rs",
-            NodeKind::File,
-            2,
-            0x20,
-        );
+        idx.insert(volume_key(0, 100), volume_root_key(0), "same.rs", NodeKind::File, 1, 0x20);
+        idx.insert(volume_key(1, 100), volume_root_key(1), "same.rs", NodeKind::File, 2, 0x20);
 
         assert_eq!(idx.path_of(volume_key(0, 100)), Some("C:\\same.rs"));
         assert_eq!(idx.path_of(volume_key(1, 100)), Some("D:\\same.rs"));
@@ -2116,45 +1890,14 @@ mod tests {
         idx.add_root(1, "D:\\");
 
         let mut r = PathResolver::new();
-        r.add(
-            volume_key(0, 100),
-            volume_key(0, 5),
-            "a.txt",
-            NodeKind::File,
-            0,
-            0x20,
-        );
-        r.add(
-            volume_key(1, 100),
-            volume_key(1, 5),
-            "b.txt",
-            NodeKind::File,
-            0,
-            0x20,
-        );
+        r.add(volume_key(0, 100), volume_key(0, 5), "a.txt", NodeKind::File, 0, 0x20);
+        r.add(volume_key(1, 100), volume_key(1, 5), "b.txt", NodeKind::File, 0, 0x20);
         // A second-level entry on volume 1, whose parent is a volume-1 directory.
-        r.add(
-            volume_key(1, 200),
-            volume_key(1, 5),
-            "sub",
-            NodeKind::Directory,
-            0,
-            0x10,
-        );
-        r.add(
-            volume_key(1, 201),
-            volume_key(1, 200),
-            "c.txt",
-            NodeKind::File,
-            0,
-            0x20,
-        );
+        r.add(volume_key(1, 200), volume_key(1, 5), "sub", NodeKind::Directory, 0, 0x10);
+        r.add(volume_key(1, 201), volume_key(1, 200), "c.txt", NodeKind::File, 0, 0x20);
 
         let stats = r.resolve_into(&mut idx);
-        assert_eq!(
-            stats.resolved, 4,
-            "expected every edge resolved, got {stats:?}"
-        );
+        assert_eq!(stats.resolved, 4, "expected every edge resolved, got {stats:?}");
         assert_eq!(stats.orphans, 0);
         assert_eq!(idx.path_of(volume_key(0, 100)), Some("C:\\a.txt"));
         assert_eq!(idx.path_of(volume_key(1, 100)), Some("D:\\b.txt"));

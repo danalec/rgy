@@ -78,4 +78,6 @@ pub trait Source {}
 ///
 /// Marker only at the skeleton stage (PR 3); `next_batch` lands with the
 /// Phase 3 seam.
+pub mod walk;
+
 pub trait Watch {}
