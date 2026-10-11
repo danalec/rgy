@@ -38,7 +38,11 @@ fn synthetic_listings(n: usize, dirs: usize) -> Vec<Listing> {
             child: d as u32 + 1,
         });
     }
-    out.push(Listing { id: 0, names: root_names, ents: root_ents });
+    out.push(Listing {
+        id: 0,
+        names: root_names,
+        ents: root_ents,
+    });
     for d in 0..dirs {
         let mut names = Vec::new();
         let mut ents = Vec::new();
@@ -61,7 +65,11 @@ fn synthetic_listings(n: usize, dirs: usize) -> Vec<Listing> {
                 child: discovery::walk::NONE,
             });
         }
-        out.push(Listing { id: d as u32 + 1, names, ents });
+        out.push(Listing {
+            id: d as u32 + 1,
+            names,
+            ents,
+        });
     }
     out
 }
@@ -146,7 +154,10 @@ fn main() {
     let ls = discovery::walk::scan(tmp.to_string_lossy().as_bytes(), 4);
     let elapsed = t.elapsed().as_secs_f64();
     let entries: usize = ls.iter().map(|l| l.ents.len()).sum();
-    println!("walk: {entries} entries in {elapsed:.3} s ({:.0} entries/s)", entries as f64 / elapsed);
+    println!(
+        "walk: {entries} entries in {elapsed:.3} s ({:.0} entries/s)",
+        entries as f64 / elapsed
+    );
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
