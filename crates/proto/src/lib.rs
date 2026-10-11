@@ -27,6 +27,8 @@ pub enum Response {
     Done { count: usize },
     /// `{"op":"status","docs":…,"event_id":…}`.
     Status { docs: usize, event_id: u64 },
+    /// `{"op":"grep-files","files":[…],"took_us":…}` — content matches.
+    GrepFiles { files: Vec<GrepFile>, took_us: u64 },
     /// `{"op":"error","message":…}` — the request failed; the stream lives.
     Error { message: String },
     /// `{"op":"warning","message":…}` — fail-closed query warning (unknown
@@ -39,6 +41,14 @@ pub enum Response {
 pub struct Hit {
     pub path: String,
     pub score: i32,
+}
+
+/// One file's content matches: path and the matching lines as
+/// `(line number, text)` — the `grep:` result shape (rg's `path:line:text`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct GrepFile {
+    pub path: String,
+    pub lines: Vec<(usize, String)>,
 }
 
 impl Request {
@@ -96,6 +106,28 @@ impl Response {
             Response::Done { count } => format!(r#"{{"op":"done","count":{count}}}"#),
             Response::Status { docs, event_id } => {
                 format!(r#"{{"op":"status","docs":{docs},"event_id":{event_id}}}"#)
+            }
+            Response::GrepFiles { files, took_us } => {
+                let items: Vec<String> = files
+                    .iter()
+                    .map(|f| {
+                        let ls: Vec<String> = f
+                            .lines
+                            .iter()
+                            .map(|(n, t)| format!("[{n},\"{}\"]", esc(t)))
+                            .collect();
+                        format!(
+                            r#"{{"path":"{}","lines":[{}]}}"#,
+                            esc(&f.path),
+                            ls.join(",")
+                        )
+                    })
+                    .collect();
+                format!(
+                    r#"{{"op":"grep-files","files":[{}],"took_us":{}}}"#,
+                    items.join(","),
+                    took_us
+                )
             }
             Response::Error { message } => {
                 format!(r#"{{"op":"error","message":"{}"}}"#, esc(message))

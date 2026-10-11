@@ -12,6 +12,7 @@
 //! matches nothing — fail closed, never silent.
 
 use discovery::{PortableSource, Source};
+use name_core::content::{self, Grep};
 use name_core::live::Live;
 use name_core::name_index::Index;
 use name_core::name_query::{Alternatives, Hit, Query, Searcher};
@@ -93,6 +94,39 @@ fn run(root: &str, query: &str, limit: usize, json: bool) -> Result<(), String> 
     let alts = Alternatives::parse(query, &home)?;
     for w in &alts.warnings {
         eprintln!("warning: {w}");
+    }
+
+    // `grep:`/`regex:`/`sym:` content search (fsearch model: the name
+    // tokens and filters narrow WHICH files are read; the rgx engine
+    // confirms each one). rg-style `path:line:text` output.
+    if alts.alts.iter().any(|a| a.grep.is_some()) {
+        let mut shown = 0usize;
+        for alt in &alts.alts {
+            let Some(pat) = &alt.grep else { continue };
+            let g = Grep::new(pat, alt.grep_mode)?;
+            let paths = content::scan_paths(root.as_bytes(), &searcher.live, alt.clone_for_scan());
+            let res = content::verify(&g, &paths, limit);
+            for f in &res.files {
+                let path = String::from_utf8_lossy(&f.path);
+                for (ln, text) in &f.lines {
+                    shown += 1;
+                    if json {
+                        let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+                        println!(
+                            "{{\"path\":\"{}\",\"line\":{ln},\"text\":\"{}\"}}",
+                            esc(&path),
+                            esc(text)
+                        );
+                    } else {
+                        println!("{path}:{ln}:{text}");
+                    }
+                }
+            }
+        }
+        if shown == 0 {
+            std::process::exit(1);
+        }
+        return Ok(());
     }
 
     // Score every alternative; a hit is the best score over them.

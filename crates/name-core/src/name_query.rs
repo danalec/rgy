@@ -53,7 +53,7 @@ fn takes_typos(text: &[u8], mode: Mode) -> bool {
     mode == Mode::Fuzzy && text.len() >= TYPO_MIN_LEN
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Query {
     pub tokens: Vec<Token>,
     pub kind: Option<u8>,
@@ -108,6 +108,34 @@ const TYPES: &[(&str, &[&str])] = &[
     ("archive", &["zip", "tar", "gz", "tgz", "bz2", "xz", "7z", "rar", "dmg", "pkg", "iso", "zst", "lz4", "xip"]),
     ("font", &["ttf", "otf", "woff", "woff2", "ttc", "dfont"]),
 ];
+
+/// Defaults are the parse defaults, not the derive: `size`/`mtime` must be
+/// unbounded and `limit` must be nonzero, or a hand-built query (scan_paths,
+/// tests) silently matches nothing — `derive(Default)` gives (0,0)/0 there,
+/// which every file size rejects.
+impl Default for Query {
+    fn default() -> Self {
+        Query {
+            tokens: Vec::new(),
+            kind: None,
+            apps: false,
+            link: false,
+            exts: Vec::new(),
+            scope: None,
+            size: (0, u64::MAX),
+            size_set: false,
+            mtime: (0, u32::MAX),
+            name_re: None,
+            path_re: None,
+            limit: 50,
+            grep: None,
+            grep_mode: GrepMode::Literal,
+            globs: Vec::new(),
+            never: false,
+            warnings: Vec::new(),
+        }
+    }
+}
 
 impl Query {
     /// Parse the human query language. Plain words are fuzzy tokens;

@@ -23,8 +23,37 @@ use crate::name_query::{GrepMode, Query, fold};
 use discovery::walk::KIND_FILE;
 use memmap2::Mmap;
 use rayon::prelude::*;
-use regex::bytes::{Regex, RegexBuilder};
+// Per-file confirmation runs on the rgx engine (IMPLEMENTATION_PLAN.md
+// 4.3: literal/hybrid/fixed/VM + SIMD prefilter replace memchr/regex
+// verify). regex_syntax stays for plan()'s HIR; the regex crate remains
+// only as the fallback for patterns rgx's parser refuses (4.4 keeps it
+// for content `regex:` queries).
+use rgx_core::regex::ByteRegex;
 use regex_syntax::hir::{Class, Hir, HirKind};
+
+/// The `regex` crate's `escape`, which this module no longer links:
+/// escape every regex metacharacter in a literal.
+fn re_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        if matches!(c, '\\' | '.' | '+' | '*' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '^' | '$' | '|' | '#') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Every match start in hay, leftmost-first — the rgx engine's confirm.
+fn rgx_starts(re: &ByteRegex, hay: &[u8]) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    while let Some(m) = re.search(hay, at) {
+        out.push(m.start);
+        at = if m.end > m.start { m.end } else { m.start + 1 };
+    }
+    out
+}
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -511,17 +540,19 @@ fn plain_identifier(name: &[u8]) -> bool {
 /// Append the sorted distinct definition keys of a buffer to `out`: every
 /// identifier right after a declaring keyword, as `sym:` matches it.
 fn symbols(buf: &[u8], out: &mut Vec<u32>) {
-    static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    static RE: std::sync::OnceLock<ByteRegex> = std::sync::OnceLock::new();
     let re = RE.get_or_init(|| {
-        RegexBuilder::new(&format!(r"(?-u:\b)(?:{DEFINES})(?:<[^>\n]*>)?[ \t*&]+(?:mut[ \t]+)?[A-Za-z_][A-Za-z0-9_]*"))
-            .unicode(false)
-            .build()
-            .unwrap()
+        ByteRegex::new_multiline(
+            format!(r"(?-u:\b)(?:{DEFINES})(?:<[^>\n]*>)?[ \t*&]+(?:mut[ \t]+)?[A-Za-z_][A-Za-z0-9_]*").as_bytes(),
+            false,
+            false,
+        )
+        .expect("definition regex")
     });
     let mut keys = Vec::new();
     let mut at = 0;
-    while let Some(m) = re.find_at(buf, at) {
-        let end = m.end();
+    while let Some(m) = re.search(buf, at) {
+        let end = m.end;
         let begin = buf[..end].iter().rposition(|&b| !(b.is_ascii_alphanumeric() || b == b'_')).map_or(0, |p| p + 1);
         keys.push(symbol_key(&buf[begin..end]));
         // The name may itself be a keyword ("static func main"): look again
@@ -2277,24 +2308,42 @@ pub struct Grep {
     pub max_per_file: usize,
     /// Stop reading candidates after this long (None = read them all).
     pub budget: Option<std::time::Duration>,
-    /// The matching regex, compiled when first needed (a plain ASCII
-    /// literal mostly isn't: `literal` finds it).
-    re: std::sync::OnceLock<Regex>,
+    /// The matching regex on the rgx engine, compiled when first needed (a
+    /// plain ASCII literal mostly is not: the literal path finds those).
+    re: std::sync::OnceLock<Confirm>,
     src: String,
     case_insensitive: bool,
     literal: Option<Literal>,
+}
+
+/// The per-file confirm matcher. The rgx engine is the primary (4.3:
+/// literal/hybrid/fixed/VM + SIMD prefilter); a pattern its parser refuses
+/// (some character-class shapes) falls back to the regex crate, which is
+/// what `regex:` content queries keep it around for (4.4).
+enum Confirm {
+    Rgx(ByteRegex),
+    Crate(regex::bytes::Regex),
+}
+
+impl Confirm {
+    fn starts(&self, hay: &[u8]) -> Vec<usize> {
+        match self {
+            Confirm::Rgx(re) => rgx_starts(re, hay),
+            Confirm::Crate(re) => re.find_iter(hay).map(|m| m.start()).collect(),
+        }
+    }
 }
 
 impl Grep {
     pub fn new(pattern: &str, mode: GrepMode) -> Result<Grep, String> {
         let smart_ci = !pattern.chars().any(|c| c.is_uppercase());
         let src = match mode {
-            GrepMode::Literal => regex::escape(pattern),
+            GrepMode::Literal => re_escape(pattern),
             GrepMode::Regex => pattern.to_string(),
             // A definition: a declaring keyword, optional generics/modifiers,
             // then the name. ASCII word boundaries keep the regex on the fast
             // DFA path even in files with non-ASCII text.
-            GrepMode::Symbol => format!(r"(?-u:\b)(?:{DEFINES})(?:<[^>\n]*>)?[ \t*&]+(?:mut[ \t]+)?{}(?-u:\b)", regex::escape(pattern)),
+            GrepMode::Symbol => format!(r"(?-u:\b)(?:{DEFINES})(?:<[^>\n]*>)?[ \t*&]+(?:mut[ \t]+)?{}(?-u:\b)", re_escape(pattern)),
         };
         let case_insensitive = smart_ci && mode != GrepMode::Symbol;
         let short = (1..=4096).contains(&pattern.len());
@@ -2322,11 +2371,22 @@ impl Grep {
         Ok(g)
     }
 
-    fn build(&self) -> Result<Regex, String> {
-        RegexBuilder::new(&self.src).case_insensitive(self.case_insensitive).multi_line(true).size_limit(1 << 26).build().map_err(|e| e.to_string())
+    fn build(&self) -> Result<Confirm, String> {
+        match ByteRegex::new_multiline(self.src.as_bytes(), self.case_insensitive, false) {
+            Ok(re) => Ok(Confirm::Rgx(re)),
+            Err(e) => {
+                let re = regex::bytes::RegexBuilder::new(&self.src)
+                    .case_insensitive(self.case_insensitive)
+                    .multi_line(true)
+                    .size_limit(1 << 26)
+                    .build()
+                    .map_err(|_| e.to_string())?;
+                Ok(Confirm::Crate(re))
+            }
+        }
     }
 
-    fn re(&self) -> &Regex {
+    fn re(&self) -> &Confirm {
         // A literal's regex always compiles (it was 4096 bytes at most).
         self.re.get_or_init(|| self.build().expect("literal regex"))
     }
@@ -2474,7 +2534,7 @@ fn match_file(g: &Grep, path: &[u8]) -> Option<FileMatches> {
         }
         let lines = match g.literal.as_ref().filter(|l| !l.needs_regex(buf)) {
             Some(l) => lines_at(g, buf, l.starts(buf)),
-            None => lines_at(g, buf, g.re().find_iter(buf).map(|m| m.start())),
+            None => lines_at(g, buf, g.re().starts(buf).into_iter()),
         };
         (!lines.is_empty()).then(|| FileMatches { path: path.to_vec(), lines })
     })
@@ -2572,14 +2632,21 @@ impl Literal {
 /// after it, and before it on its line a declaring keyword, maybe generics,
 /// spaces or `*&`, maybe `mut` (what `sym:`'s regex asks, split at the name)?
 fn defined_at(hay: &[u8], p: usize, len: usize) -> bool {
-    static KEYWORD: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    static KEYWORD: std::sync::OnceLock<ByteRegex> = std::sync::OnceLock::new();
     let word = |b: Option<&u8>| b.is_some_and(|&b| b.is_ascii_alphanumeric() || b == b'_');
     if word(hay[..p + len].last()) == word(hay.get(p + len)) {
         return false;
     }
-    let re = KEYWORD.get_or_init(|| Regex::new(&format!(r"(?-u:\b)(?:{DEFINES})(?:<[^>\n]*>)?[ \t*&]+(?:mut[ \t]+)?\z")).unwrap());
+    let re = KEYWORD.get_or_init(|| {
+        ByteRegex::new_multiline(
+            format!(r"(?-u:\b)(?:{DEFINES})(?:<[^>\n]*>)?[ \t*&]+(?:mut[ \t]+)?\z").as_bytes(),
+            false,
+            false,
+        )
+        .unwrap()
+    });
     let line = memchr::memrchr(b'\n', &hay[..p]).map_or(0, |i| i + 1);
-    re.is_match(&hay[line..p])
+    re.search(&hay[line..p], 0).is_some()
 }
 
 /// The first place at or after `from` where `hay` holds `needle` (lower
@@ -3128,7 +3195,11 @@ fn regex_plan(h: &Hir) -> TQ {
 /// Files to grep where the content index does not reach (e.g. `in:/etc`),
 /// picked from the name index instead of crawling, newest first. `q` is the
 /// name query restricted to the files worth reading.
-pub fn scan_paths(live: &Live, mut q: Query) -> Vec<Vec<u8>> {
+/// Candidate files for a content scan. `root` is the tree the name index
+/// was built from: `Index::path` reconstructs scan-root-relative paths
+/// (fsearch's whole-disk root is `/`), so they are joined onto `root` here
+/// to become openable filesystem paths. Overlay paths are already real.
+pub fn scan_paths(root: &[u8], live: &Live, mut q: Query) -> Vec<Vec<u8>> {
     q.kind = Some(KIND_FILE);
     q.limit = 200_000;
     q.size = (q.size.0, q.size.1.min(MAX_FILE));
@@ -3141,7 +3212,13 @@ pub fn scan_paths(live: &Live, mut q: Query) -> Vec<Vec<u8>> {
             None => {
                 let mut p = Vec::new();
                 live.base.path(h.idx as usize, &mut p);
-                (p, live.base.mtime()[h.idx as usize])
+                let rel = p.strip_prefix(b"/").unwrap_or(&p);
+                let mut full = root.to_vec();
+                if !full.is_empty() && !full.ends_with(b"/") && !rel.is_empty() {
+                    full.push(b'/');
+                }
+                full.extend_from_slice(rel);
+                (full, live.base.mtime()[h.idx as usize])
             }
         })
         .collect();
@@ -3191,4 +3268,67 @@ fn open_ahead(path: &[u8]) -> Option<std::fs::File> {
     #[cfg(not(target_os = "macos"))]
     let _ = len;
     Some(f)
+}
+
+
+#[cfg(test)]
+mod grep_pipeline_tests {
+    use super::*;
+    use crate::live::Live;
+    use crate::name_index::Index;
+    use crate::name_query::{GrepMode, Query};
+    use discovery::PortableSource;
+    use discovery::Source;
+
+    fn tiny_live(tag: &str) -> (Live, std::path::PathBuf) {
+        // Unique per test: they run in parallel and share the temp root.
+        let dir = std::env::temp_dir().join(format!("rgy_grep_test_{}_{}", std::process::id(), tag));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("alpha.rs"), b"fn alpha() { let x = 1; }\n").unwrap();
+        std::fs::write(dir.join("beta.txt"), b"nothing here\n").unwrap();
+        let src = PortableSource {
+            root: dir.to_string_lossy().into_owned().into_bytes(),
+        };
+        let live = Live::new(Index::build(src.enumerate().unwrap(), 0, 1, b"/"));
+        (live, dir)
+    }
+
+    #[test]
+    fn empty_token_scan_still_lists_every_file() {
+        let (live, dir) = tiny_live("scan");
+        let mut q = Query::default();
+        q.grep = Some("alpha".into());
+        q.grep_mode = GrepMode::Literal;
+        let paths = scan_paths(&dir.to_string_lossy().into_owned().into_bytes(), &live, q.clone_for_scan());
+        assert_eq!(paths.len(), 2, "scan_paths over no name tokens must return every file: {paths:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_finds_a_literal_in_a_file() {
+        let (live, dir) = tiny_live("lit");
+        let g = Grep::new("alpha", GrepMode::Literal).expect("grep compiles");
+        let mut q = Query::default();
+        q.grep = Some("alpha".into());
+        let paths = scan_paths(&dir.to_string_lossy().into_owned().into_bytes(), &live, q.clone_for_scan());
+        let res = verify(&g, &paths, 10);
+        assert_eq!(res.files.len(), 1, "alpha.rs holds the literal");
+        assert!(String::from_utf8_lossy(&res.files[0].path).contains("alpha"));
+        assert!(!res.files[0].lines.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rgx_engine_confirm_agrees_with_the_literal_path() {
+        // The rgx engine's regex confirm must find the same literal the
+        // memchr fast path does (4.3: verification runs on rgx).
+        let (live, dir) = tiny_live("rgx");
+        let g = Grep::new("alpha", GrepMode::Regex).expect("regex compiles");
+        let mut q = Query::default();
+        let paths = scan_paths(&dir.to_string_lossy().into_owned().into_bytes(), &live, q.clone_for_scan());
+        let res = verify(&g, &paths, 10);
+        assert_eq!(res.files.len(), 1, "rgx confirm finds alpha.rs");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

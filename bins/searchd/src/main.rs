@@ -12,10 +12,11 @@
 use std::io::{BufRead, Write};
 
 use discovery::{PortableSource, Source};
+use name_core::content::{self, Grep};
 use name_core::live::Live;
 use name_core::name_index::Index;
 use name_core::name_query::{Alternatives, Hit, Query, Searcher};
-use proto::{Hit as WireHit, Request, Response};
+use proto::{GrepFile, Hit as WireHit, Request, Response};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -69,9 +70,49 @@ fn main() {
                 docs: 0,
                 event_id: 0,
             }),
-            Some(Request::Grep { .. }) => responses.push(Response::Error {
-                message: "content search lands with the Phase 4 engine".into(),
-            }),
+            Some(Request::Grep { q, limit }) => {
+                let t0 = std::time::Instant::now();
+                match Alternatives::parse(&q, &home) {
+                    Err(e) => responses.push(Response::Error { message: e }),
+                    Ok(alts) => {
+                        for w in &alts.warnings {
+                            responses.push(Response::Warning { message: w.clone() });
+                        }
+                        // `grep:`/`regex:`/`sym:` filters name the pattern;
+                        // without one the whole q is a literal pattern.
+                        let mut jobs: Vec<(String, name_core::name_query::GrepMode, Query)> =
+                            Vec::new();
+                        for alt in &alts.alts {
+                            match &alt.grep {
+                                Some(pat) => {
+                                    jobs.push((pat.clone(), alt.grep_mode, alt.clone_for_scan()))
+                                }
+                                None => jobs.push((
+                                    q.clone(),
+                                    name_core::name_query::GrepMode::Literal,
+                                    alt.clone_for_scan(),
+                                )),
+                            }
+                        }
+                        let mut files: Vec<GrepFile> = Vec::new();
+                        for (pat, mode, filt) in jobs {
+                            let Ok(g) = Grep::new(&pat, mode) else { continue };
+                            let paths = content::scan_paths(root.as_bytes(), &searcher.live, filt);
+                            let res = content::verify(&g, &paths, limit);
+                            for f in res.files {
+                                files.push(GrepFile {
+                                    path: String::from_utf8_lossy(&f.path).into_owned(),
+                                    lines: f.lines,
+                                });
+                            }
+                        }
+                        let took_us = t0.elapsed().as_micros() as u64;
+                        let count = files.len();
+                        responses.push(Response::GrepFiles { files, took_us });
+                        responses.push(Response::Done { count });
+                    }
+                }
+            }
             Some(Request::Search { q, limit }) => match Alternatives::parse(&q, &home) {
                 Err(e) => responses.push(Response::Error { message: e }),
                 Ok(alts) => {
