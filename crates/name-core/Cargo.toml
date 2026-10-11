@@ -23,3 +23,7 @@ regex = "1.12"
 memchr = "2.8"
 # Searcher's re_literals/path_suffixes prefilter inspects regex ASTs.
 regex-syntax = "0.8"
+
+# macOS-only: QoS for the content read helpers, F_RDADVISE readahead.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"

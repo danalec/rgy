@@ -106,6 +106,15 @@ name = "discovery"
 version = "0.1.0"
 
 [[package]]
+name = "discovery-linux"
+version = "0.1.0"
+dependencies = [
+ "discovery",
+ "libc",
+ "rayon",
+]
+
+[[package]]
 name = "discovery-windows"
 version = "0.1.0"
 dependencies = [
@@ -328,6 +337,7 @@ name = "name-core"
 version = "0.1.0"
 dependencies = [
  "discovery",
+ "libc",
  "memchr",
  "memmap2",
  "rayon",
@@ -619,6 +629,15 @@ version = "0.1.0"
 dependencies = [
  "discovery",
  "name-core",
+]
+
+[[package]]
+name = "searchd"
+version = "0.1.0"
+dependencies = [
+ "discovery",
+ "name-core",
+ "proto",
 ]
 
 [[package]]

@@ -16,6 +16,12 @@ pub mod index;
 pub mod live;
 pub mod regex;
 
+/// fsearch's content index (trigram postings + per-file 5/7-gram bloom).
+/// Kept inside name-core beside `live` for the same reason: it reads the
+/// name index's blob internals (`HDR`/`sec!`) and shares `Query`; a
+/// `content-core` crate splits out with the Phase 4 glue to rgx's engine.
+pub mod content;
+
 /// fsearch's `engine::no_materialize`: on macOS it marks files so a scan
 /// does not materialize cloud placeholders. Portable no-op — the platform
 /// backends can set their own policy.

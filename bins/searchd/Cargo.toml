@@ -1,0 +1,15 @@
+[package]
+name = "searchd"
+version = "0.1.0"
+edition = "2024"
+description = "The merged search daemon: JSON-lines over stdio (pipe/UDS fronts later)"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "searchd"
+path = "src/main.rs"
+
+[dependencies]
+discovery = { path = "../../crates/discovery" }
+name-core = { path = "../../crates/name-core" }
+proto = { path = "../../crates/proto" }
