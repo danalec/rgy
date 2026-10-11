@@ -64,10 +64,16 @@ rule; the Vec fallback covers map refusal.
 
 ## Still open (Phase 6 polish, named honestly)
 
-- PGO validated end-to-end on Windows (needs `llvm-tools`; the script is
-  POSIX).
-- A Linux measurement of the mmap-vs-read ordering — rgx's mmap path is
-  kept alive for exactly that ("Linux soft faults are an order of
-  magnitude cheaper").
+- ~~PGO validated end-to-end on Windows~~ — **done**: `pgo.ps1` drives the
+  same two-pass shape as `pgo.sh` (instrumented `name_bench` trainer →
+  `llvm-profdata` merge → profile-use release build); validated on
+  Windows. Both scripts `cd` to their own directory first.
+- ~~A Linux measurement of the mmap-vs-read ordering~~ — **done**:
+  `benchmark/mmap-vs-read.md`, bench at
+  `crates/name-core/examples/mmap_vs_read`. Linux reverses the Windows
+  ordering (mmap 0.72× the read() cost cold, 0.63× hot-inclusive), and
+  the resident-scan rows show the scan itself costs the same either way —
+  the delta is the read() copy vs page faults. Windows first-touch cold
+  stays unmeasured (needs a kernel driver to drop the standby list).
 - `discovery-macos` is imports-only transport, unverified (no macOS
   target on the machine that built this workspace).

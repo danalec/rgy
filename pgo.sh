@@ -7,6 +7,9 @@
 # (Windows: run under a POSIX shell, or drive the same two cargo builds
 # with RUSTFLAGS by hand — see docs/insights-from-rgx.md.)
 set -e
+# Build from the workspace root no matter where the script is invoked
+# from — `cargo -p engine` is meaningless outside it.
+cd "$(dirname "$0")"
 profdata=$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-profdata 2>/dev/null | head -1)
 [ -x "$profdata" ] || { echo "pgo.sh: needs llvm-profdata: rustup component add llvm-tools" >&2; exit 1; }
 tmp=$(mktemp -d)
