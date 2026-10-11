@@ -1,26 +1,59 @@
 //! searchd — the merged search daemon (`IMPLEMENTATION_PLAN.md` §5).
 //!
-//! Indexes `--root` once at startup and answers JSON-lines requests on
-//! stdio (the named-pipe / UDS fronts speak the same `proto` lines). The
-//! index stays warm in memory — the keep-warm spinner and follower
-//! takeover are Phase 6/`engine` work.
+//! Indexes `--root` once at startup and answers JSON-lines requests. Three
+//! fronts, two framings:
 //!
-//! Content `grep:` answers with an explicit "not yet" error until the
-//! content layer's rgx confirm path lands; the daemon never silently
-//! pretends a query succeeded.
+//! - transports: **stdio** (default), **`--listen uds:<path>`** (Unix),
+//!   **`--listen pipe:<name>`** (Windows named pipe `\\.\pipe\<name>`);
+//! - framings: the **proto** lines shared with `searchctl` (default) and
+//!   **`--serve`**, the rgx compatibility front (argv-array per line in,
+//!   `{"rgx":"begin"/"end"}` framing and rg `--json` match messages out).
+//!
+//! The index stays warm in memory: every query opens a 250 ms keep-warm
+//! window (the fsearch spinner) so typing stays at latency. Content
+//! `grep:` runs the trigram candidate scan + rgx-engine confirm; with
+//! `--tv-dir` it is answered by the TV pack store instead.
 
 use std::io::{BufRead, Write};
+use std::time::Duration;
 
 use discovery::{PortableSource, Source};
+use engine::{keep_warm, warm_stop};
 use name_core::content::{self, Grep};
 use name_core::live::Live;
 use name_core::name_index::Index;
 use name_core::name_query::{Alternatives, Hit, Query, Searcher};
 use proto::{GrepFile, Hit as WireHit, Request, Response};
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+struct Ctx {
+    root: Vec<u8>,
+    home: String,
+    tv_dir: Option<std::path::PathBuf>,
+    live: Live,
+}
+
+fn usage() -> ! {
+    eprintln!(
+        "searchd [--root <dir>] [--tv-dir <store>] [--listen stdio|uds:<path>|pipe:<name>] [--serve]\n\n\
+         proto framing (default): one JSON request per line\n  \
+           {{\"op\":\"search\",\"q\":\"...\",\"limit\":50}}\n  \
+           {{\"op\":\"grep\",\"q\":\"...\"}}\n  \
+           {{\"op\":\"status\"}}\n  \
+         --serve: rgx compat — a JSON argv-array per line, answers framed\n  \
+           by {{\"rgx\":\"begin\"}}/{{\"rgx\":\"end\"}} with rg --json match lines."
+    );
+    std::process::exit(2);
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut root = String::from(".");
+    let mut tv_dir = None;
+    let mut listen = String::from("stdio");
+    let mut serve = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -28,6 +61,17 @@ fn main() {
                 i += 1;
                 root = args.get(i).cloned().unwrap_or_else(|| usage());
             }
+            "--tv-dir" => {
+                i += 1;
+                tv_dir = Some(std::path::PathBuf::from(
+                    args.get(i).cloned().unwrap_or_else(|| usage()),
+                ));
+            }
+            "--listen" => {
+                i += 1;
+                listen = args.get(i).cloned().unwrap_or_else(|| usage());
+            }
+            "--serve" => serve = true,
             "-h" | "--help" => usage(),
             other => {
                 eprintln!("searchd: unknown argument {other}");
@@ -48,115 +92,43 @@ fn main() {
         }
     };
     let idx = Index::build(listings, 0, now_secs(), root.as_bytes());
-    let live = Live::new(idx);
-    let searcher = Searcher { live: &live };
-    let home = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .unwrap_or_default();
+    let ctx = std::sync::Arc::new(Ctx {
+        root: root.as_bytes().to_vec(),
+        home: std::env::var("USERPROFILE")
+            .or_else(|_| std::env::var("HOME"))
+            .unwrap_or_default(),
+        tv_dir,
+        live: Live::new(idx),
+    });
 
-    let stdin = std::io::stdin();
-    let mut out = std::io::stdout();
-    for line in stdin.lock().lines() {
+    match listen.split_once(':') {
+        None if listen == "stdio" => {
+            let stdin = std::io::stdin();
+            let stdout = std::io::stdout();
+            run_stream(stdin.lock(), stdout.lock(), &ctx, serve);
+        }
+        Some(("uds", path)) => serve_uds(path, &ctx, serve),
+        Some(("pipe", name)) => serve_pipe(name, &ctx, serve),
+        _ => usage(),
+    }
+}
+
+fn run_stream(input: impl BufRead, mut out: impl Write, ctx: &std::sync::Arc<Ctx>, serve: bool) {
+    if serve {
+        serve_stream(input, out, ctx);
+        return;
+    }
+    for line in input.lines() {
         let Ok(line) = line else { break };
         if line.trim().is_empty() {
             continue;
         }
-        let mut responses: Vec<Response> = Vec::new();
-        match Request::from_json(&line) {
-            None => responses.push(Response::Error {
+        let responses = match Request::from_json(&line) {
+            None => vec![Response::Error {
                 message: "malformed request".into(),
-            }),
-            Some(Request::Status) => responses.push(Response::Status {
-                docs: 0,
-                event_id: 0,
-            }),
-            Some(Request::Grep { q, limit }) => {
-                let t0 = std::time::Instant::now();
-                match Alternatives::parse(&q, &home) {
-                    Err(e) => responses.push(Response::Error { message: e }),
-                    Ok(alts) => {
-                        for w in &alts.warnings {
-                            responses.push(Response::Warning { message: w.clone() });
-                        }
-                        // `grep:`/`regex:`/`sym:` filters name the pattern;
-                        // without one the whole q is a literal pattern.
-                        let mut jobs: Vec<(String, name_core::name_query::GrepMode, Query)> =
-                            Vec::new();
-                        for alt in &alts.alts {
-                            match &alt.grep {
-                                Some(pat) => {
-                                    jobs.push((pat.clone(), alt.grep_mode, alt.clone_for_scan()))
-                                }
-                                None => jobs.push((
-                                    q.clone(),
-                                    name_core::name_query::GrepMode::Literal,
-                                    alt.clone_for_scan(),
-                                )),
-                            }
-                        }
-                        let mut files: Vec<GrepFile> = Vec::new();
-                        for (pat, mode, filt) in jobs {
-                            let Ok(g) = Grep::new(&pat, mode) else { continue };
-                            let paths = content::scan_paths(root.as_bytes(), &searcher.live, filt);
-                            let res = content::verify(&g, &paths, limit);
-                            for f in res.files {
-                                files.push(GrepFile {
-                                    path: String::from_utf8_lossy(&f.path).into_owned(),
-                                    lines: f.lines,
-                                });
-                            }
-                        }
-                        let took_us = t0.elapsed().as_micros() as u64;
-                        let count = files.len();
-                        responses.push(Response::GrepFiles { files, took_us });
-                        responses.push(Response::Done { count });
-                    }
-                }
-            }
-            Some(Request::Search { q, limit }) => match Alternatives::parse(&q, &home) {
-                Err(e) => responses.push(Response::Error { message: e }),
-                Ok(alts) => {
-                    let t0 = std::time::Instant::now();
-                    for w in &alts.warnings {
-                        responses.push(Response::Warning { message: w.clone() });
-                    }
-                    let mut hits: Vec<Hit> = Vec::new();
-                    for alt in &alts.alts {
-                        let mut a: Query = alt.clone();
-                        a.limit = limit;
-                        for h in searcher.search(&a) {
-                            match hits.iter_mut().find(|e| e.idx == h.idx) {
-                                Some(e) if e.score < h.score => *e = h,
-                                Some(_) => {}
-                                None => hits.push(h),
-                            }
-                        }
-                    }
-                    hits.sort_by(|a, b| b.score.cmp(&a.score).then(a.idx.cmp(&b.idx)));
-                    hits.truncate(limit);
-                    let mut buf = Vec::new();
-                    let wire: Vec<WireHit> = hits
-                        .iter()
-                        .map(|h| {
-                            searcher.live.base.path(h.idx as usize, &mut buf);
-                            let path = String::from_utf8_lossy(&buf).into_owned();
-                            buf.clear();
-                            WireHit {
-                                path,
-                                score: h.score,
-                            }
-                        })
-                        .collect();
-                    let took_us = t0.elapsed().as_micros() as u64;
-                    let count = wire.len();
-                    responses.push(Response::Hits {
-                        hits: wire,
-                        took_us,
-                    });
-                    responses.push(Response::Done { count });
-                }
-            },
-        }
+            }],
+            Some(req) => handle(req, ctx),
+        };
         for r in responses {
             let _ = writeln!(out, "{}", r.to_json());
         }
@@ -164,14 +136,435 @@ fn main() {
     }
 }
 
-fn usage() -> ! {
-    eprintln!(
-        "searchd --root <dir>\n\n\
-         Indexes <dir> and answers JSON-lines requests on stdio:\n  \
-           {{\"op\":\"search\",\"q\":\"...\",\"limit\":50}}\n  \
-           {{\"op\":\"grep\",\"q\":\"...\"}}   (Phase 4)\n  \
-           {{\"op\":\"status\"}}"
+fn handle(req: Request, ctx: &Ctx) -> Vec<Response> {
+    keep_warm(Duration::from_millis(250));
+    let mut responses = Vec::new();
+    match req {
+        Request::Status => responses.push(Response::Status {
+            docs: 0,
+            event_id: 0,
+        }),
+        Request::Search { q, limit } => match Alternatives::parse(&q, &ctx.home) {
+            Err(e) => responses.push(Response::Error { message: e }),
+            Ok(alts) => {
+                for w in &alts.warnings {
+                    responses.push(Response::Warning { message: w.clone() });
+                }
+                let searcher = Searcher { live: &ctx.live };
+                let mut hits: Vec<Hit> = Vec::new();
+                for alt in &alts.alts {
+                    let mut a: Query = alt.clone();
+                    a.limit = limit;
+                    for h in searcher.search(&a) {
+                        match hits.iter_mut().find(|e| e.idx == h.idx) {
+                            Some(e) if e.score < h.score => *e = h,
+                            Some(_) => {}
+                            None => hits.push(h),
+                        }
+                    }
+                }
+                hits.sort_by(|a, b| b.score.cmp(&a.score).then(a.idx.cmp(&b.idx)));
+                hits.truncate(limit);
+                let mut buf = Vec::new();
+                let wire: Vec<WireHit> = hits
+                    .iter()
+                    .map(|h| {
+                        ctx.live.base.path(h.idx as usize, &mut buf);
+                        let rel = String::from_utf8_lossy(&buf).into_owned();
+                        buf.clear();
+                        let mut full = String::from_utf8_lossy(&ctx.root).into_owned();
+                        let rel = rel.trim_start_matches(['/', '\\']);
+                        if !rel.is_empty() {
+                            full.push(std::path::MAIN_SEPARATOR);
+                            full.push_str(rel);
+                        }
+                        WireHit {
+                            path: full,
+                            score: h.score,
+                        }
+                    })
+                    .collect();
+                let count = wire.len();
+                responses.push(Response::Hits {
+                    hits: wire,
+                    took_us: 0,
+                });
+                responses.push(Response::Done { count });
+            }
+        },
+        Request::Grep { q, limit } => responses.extend(grep(&q, limit, ctx)),
+    }
+    warm_stop();
+    responses
+}
+
+fn grep(q: &str, limit: usize, ctx: &Ctx) -> Vec<Response> {
+    let mut files: Vec<GrepFile> = Vec::new();
+    // TV pack store answers when the daemon was given one: the corpus
+    // bytes are packed once and mmap'd (plan 4.3); the direct engine
+    // below stays for trees without a store.
+    if let Some(dir) = &ctx.tv_dir {
+        match Alternatives::parse(q, &ctx.home) {
+            Ok(alts) => {
+                for alt in &alts.alts {
+                    let pat = alt.grep.clone().unwrap_or_else(|| q.to_string());
+                    match engine::tv::grep_tv(dir, &pat) {
+                        Ok(fs) => files.extend(fs.into_iter().map(|f| GrepFile {
+                            path: f.path,
+                            lines: f.lines.into_iter().map(|(n, t)| (n as usize, t)).collect(),
+                        })),
+                        Err(e) => {
+                            return vec![Response::Error {
+                                message: format!("tv store: {e}"),
+                            }];
+                        }
+                    }
+                }
+            }
+            Err(e) => return vec![Response::Error { message: e }],
+        }
+        let count = files.len();
+        return vec![
+            Response::GrepFiles { files, took_us: 0 },
+            Response::Done { count },
+        ];
+    }
+    match Alternatives::parse(q, &ctx.home) {
+        Err(e) => vec![Response::Error { message: e }],
+        Ok(alts) => {
+            let mut out = Vec::new();
+            for w in &alts.warnings {
+                out.push(Response::Warning { message: w.clone() });
+            }
+            let searcher = Searcher { live: &ctx.live };
+            let mut jobs: Vec<(String, name_core::name_query::GrepMode, Query)> = Vec::new();
+            for alt in &alts.alts {
+                match &alt.grep {
+                    Some(pat) => jobs.push((pat.clone(), alt.grep_mode, alt.clone_for_scan())),
+                    None => jobs.push((
+                        q.to_string(),
+                        name_core::name_query::GrepMode::Literal,
+                        alt.clone_for_scan(),
+                    )),
+                }
+            }
+            for (pat, mode, filt) in jobs {
+                let Ok(g) = Grep::new(&pat, mode) else {
+                    continue;
+                };
+                let paths = content::scan_paths(&ctx.root, &searcher.live, filt);
+                let res = content::verify(&g, &paths, limit);
+                for f in res.files {
+                    files.push(GrepFile {
+                        path: String::from_utf8_lossy(&f.path).into_owned(),
+                        lines: f.lines,
+                    });
+                }
+            }
+            let count = files.len();
+            out.push(Response::GrepFiles { files, took_us: 0 });
+            out.push(Response::Done { count });
+            out
+        }
+    }
+}
+
+// --- the rgx --serve compatibility front -----------------------------------
+
+fn serve_stream(mut input: impl BufRead, mut out: impl Write, ctx: &Ctx) {
+    use rgx_core::djson;
+    let tag = format!("{:016x}", std::process::id());
+    let _ = writeln!(
+        out,
+        "{{\"rgx\":\"ready\",\"tag\":\"{tag}\",\"pid\":{}}}",
+        std::process::id()
     );
+    let _ = out.flush();
+    let mut seq = 0u64;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match input.read_line(&mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        if line.trim().is_empty() {
+            continue;
+        }
+        seq += 1;
+        let argv: Vec<String> = match djson::parse(&line) {
+            Ok(arena) => match arena.root() {
+                djson::Value::Array(idx) => arena
+                    .get_array(idx)
+                    .iter()
+                    .filter_map(|v| v.as_str(&arena).map(str::to_string))
+                    .collect(),
+                _ => {
+                    serve_end(
+                        &mut out,
+                        seq,
+                        &tag,
+                        2,
+                        false,
+                        Some("query must be a JSON array"),
+                    );
+                    continue;
+                }
+            },
+            Err(e) => {
+                serve_end(
+                    &mut out,
+                    seq,
+                    &tag,
+                    2,
+                    false,
+                    Some(&format!("invalid JSON query: {e}")),
+                );
+                continue;
+            }
+        };
+        let (pattern, fixed) = match serve_pattern(&argv) {
+            Some(p) => p,
+            None => {
+                serve_end(&mut out, seq, &tag, 2, false, Some("no pattern given"));
+                continue;
+            }
+        };
+        let _ = writeln!(out, "{{\"rgx\":\"begin\",\"seq\":{seq},\"tag\":\"{tag}\"}}");
+        let _ = out.flush();
+        // Compat mode always answers content search (rgx is a content
+        // grep); the pattern is literal under -F, regex otherwise.
+        let mode = if fixed {
+            name_core::name_query::GrepMode::Literal
+        } else {
+            name_core::name_query::GrepMode::Regex
+        };
+        let mut matched = false;
+        if let Some(dir) = &ctx.tv_dir {
+            match engine::tv::grep_tv(dir, &pattern) {
+                Ok(fs) => {
+                    for f in fs {
+                        matched = true;
+                        serve_file(
+                            &mut out,
+                            &f.path,
+                            &f.lines
+                                .iter()
+                                .map(|(n, t)| (*n as usize, t.clone()))
+                                .collect::<Vec<_>>(),
+                        );
+                    }
+                }
+                Err(e) => {
+                    serve_end(
+                        &mut out,
+                        seq,
+                        &tag,
+                        2,
+                        false,
+                        Some(&format!("tv store: {e}")),
+                    );
+                    continue;
+                }
+            }
+        } else {
+            let g = match Grep::new(&pattern, mode) {
+                Ok(g) => g,
+                Err(e) => {
+                    serve_end(&mut out, seq, &tag, 2, false, Some(&e));
+                    continue;
+                }
+            };
+            let searcher = Searcher { live: &ctx.live };
+            let paths = content::scan_paths(&ctx.root, &searcher.live, Query::default());
+            let res = content::verify(&g, &paths, 100);
+            for f in &res.files {
+                matched = true;
+                serve_file(&mut out, &String::from_utf8_lossy(&f.path), &f.lines);
+            }
+        }
+        serve_end(
+            &mut out,
+            seq,
+            &tag,
+            if matched { 0 } else { 1 },
+            matched,
+            None,
+        );
+    }
+}
+
+/// rgx argv: pattern is `-e`/`--regexp`'s value or the first positional;
+/// `-F`/`--fixed-strings` makes it literal.
+fn serve_pattern(argv: &[String]) -> Option<(String, bool)> {
+    let mut fixed = false;
+    let mut pattern = None;
+    let mut i = 0;
+    while i < argv.len() {
+        match argv[i].as_str() {
+            "-F" | "--fixed-strings" => fixed = true,
+            "-e" | "--regexp" => {
+                i += 1;
+                pattern = argv.get(i).cloned();
+            }
+            a if a.starts_with('-') => {}
+            a if pattern.is_none() => pattern = Some(a.to_string()),
+            _ => {}
+        }
+        i += 1;
+    }
+    pattern.map(|p| (p, fixed))
+}
+
+fn serve_file(out: &mut impl Write, path: &str, lines: &[(usize, String)]) {
+    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    let _ = writeln!(
+        out,
+        "{{\"type\":\"begin\",\"data\":{{\"path\":{{\"text\":\"{}\"}}}}}}",
+        esc(path)
+    );
+    for (n, text) in lines {
+        let _ = writeln!(
+            out,
+            "{{\"type\":\"match\",\"data\":{{\"path\":{{\"text\":\"{}\"}},\"lines\":{{\"text\":\"{}\\n\"}},\"line_number\":{n}}}}}",
+            esc(path),
+            esc(text)
+        );
+    }
+    let _ = writeln!(
+        out,
+        "{{\"type\":\"end\",\"data\":{{\"path\":{{\"text\":\"{}\"}}}}}}",
+        esc(path)
+    );
+    let _ = out.flush();
+}
+
+fn serve_end(
+    out: &mut impl Write,
+    seq: u64,
+    tag: &str,
+    status: i32,
+    matched: bool,
+    error: Option<&str>,
+) {
+    let err = error
+        .map(|e| {
+            format!(
+                ",\"error\":\"{}\"",
+                e.replace('\\', "\\\\").replace('"', "\\\"")
+            )
+        })
+        .unwrap_or_default();
+    let _ = writeln!(
+        out,
+        "{{\"rgx\":\"end\",\"seq\":{seq},\"tag\":\"{tag}\",\"status\":{status},\"matched\":{matched}{err}}}"
+    );
+    let _ = out.flush();
+}
+
+// --- transports -----------------------------------------------------------
+
+#[cfg(unix)]
+fn serve_uds(path: &str, ctx: &std::sync::Arc<Ctx>, serve: bool) {
+    use std::os::unix::net::UnixListener;
+    let _ = std::fs::remove_file(path);
+    let listener = match UnixListener::bind(path) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("searchd: bind {path}: {e}");
+            std::process::exit(2);
+        }
+    };
+    for conn in listener.incoming() {
+        let Ok(stream) = conn else { continue };
+        let ctx = ctx.clone();
+        let _ = std::thread::spawn(move || {
+            let (r, w) = stream.into_split();
+            run_stream(std::io::BufReader::new(r), w, &ctx, serve);
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn serve_uds(_path: &str, _ctx: &std::sync::Arc<Ctx>, _serve: bool) {
+    eprintln!("searchd: uds listen is unix-only; use pipe:<name> or stdio");
+    std::process::exit(2);
+}
+
+#[cfg(windows)]
+fn serve_pipe(name: &str, ctx: &std::sync::Arc<Ctx>, serve: bool) {
+    // Named pipe server: one connection at a time, proto framing.
+    let path = format!(r"\\.\pipe\{name}");
+    loop {
+        let listener = match open_pipe_server(&path) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("searchd: pipe {path}: {e}");
+                std::process::exit(2);
+            }
+        };
+        let ctx = ctx.clone();
+        let (r, w) = (listener.try_clone().unwrap(), listener);
+        run_stream(std::io::BufReader::new(r), w, &ctx, serve);
+    }
+}
+
+#[cfg(windows)]
+fn open_pipe_server(path: &str) -> std::io::Result<std::fs::File> {
+    use std::os::windows::io::FromRawHandle;
+    // CreateNamedPipeW + ConnectNamedPipe, the one-connection server.
+    unsafe extern "system" {
+        fn CreateNamedPipeW(
+            name: *const u16,
+            open_mode: u32,
+            pipe_mode: u32,
+            max_instances: u32,
+            out_size: u32,
+            in_size: u32,
+            timeout: u32,
+            sec: *mut core::ffi::c_void,
+        ) -> *mut core::ffi::c_void;
+        fn ConnectNamedPipe(
+            pipe: *mut core::ffi::c_void,
+            overlapped: *mut core::ffi::c_void,
+        ) -> i32;
+        fn CloseHandle(h: *mut core::ffi::c_void) -> i32;
+    }
+    const PIPE_ACCESS_DUPLEX: u32 = 0x3;
+    const PIPE_TYPE_BYTE: u32 = 0x0;
+    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+    let handle = unsafe {
+        CreateNamedPipeW(
+            wide.as_ptr(),
+            PIPE_ACCESS_DUPLEX,
+            PIPE_TYPE_BYTE,
+            1,
+            64 * 1024,
+            64 * 1024,
+            0,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle.is_null() {
+        return Err(std::io::Error::last_os_error());
+    }
+    let ok = unsafe { ConnectNamedPipe(handle, std::ptr::null_mut()) };
+    if ok == 0 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() != Some(535) {
+            // ERROR_PIPE_CONNECTED: a client connected during the call.
+            unsafe {
+                CloseHandle(handle);
+            }
+            return Err(err);
+        }
+    }
+    Ok(unsafe { std::fs::File::from_raw_handle(handle as *mut _) })
+}
+
+#[cfg(not(windows))]
+fn serve_pipe(name: &str, _ctx: &std::sync::Arc<Ctx>, _serve: bool) {
+    eprintln!("searchd: pipe:{name} is windows-only; use uds:<path> or stdio");
     std::process::exit(2);
 }
 

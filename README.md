@@ -36,7 +36,11 @@ regression on any `benchmark/baseline-names.md` row fails the PR.
 
 ```sh
 cargo run --release -p searchctl -- --root src "walk type:rs"
-echo '{"op":"search","q":"walk","limit":5}' | cargo run --release -p searchd -- --root src
+cargo run --release -p searchctl -- --root src "grep:Listing"
+echo '{"op":"grep","q":"regex:fn.list"}' | cargo run --release -p searchd -- --root src
+# rgx --serve compat: one JSON argv-array per line, begin/end framing
+echo '["-e","Listing"]' | cargo run --release -p searchd -- --root src --serve
+# transports: --listen uds:/tmp/rgy.sock (unix) or pipe:rgy-search (windows)
 ```
 
 ## Related projects

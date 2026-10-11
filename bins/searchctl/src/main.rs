@@ -17,6 +17,9 @@ use name_core::live::Live;
 use name_core::name_index::Index;
 use name_core::name_query::{Alternatives, Hit, Query, Searcher};
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn usage() -> ! {
     eprintln!(
         "searchctl [options] <query>\n\n\

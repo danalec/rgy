@@ -12,3 +12,5 @@ path = "src/main.rs"
 [dependencies]
 discovery = { path = "../../crates/discovery" }
 name-core = { path = "../../crates/name-core" }
+# One allocator story (plan 4.4).
+mimalloc = { version = "0.1", default-features = false }

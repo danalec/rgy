@@ -5,6 +5,7 @@ members = [
     "crates/name-core",
     "crates/discovery-windows",
     "crates/discovery-linux",
+    "crates/discovery-macos",
     "crates/engine",
     "crates/proto",
     "crates/rgx-core",

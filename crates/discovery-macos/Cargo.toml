@@ -1,0 +1,14 @@
+[package]
+name = "discovery-macos"
+version = "0.1.0"
+edition = "2024"
+description = "macOS discovery backend: getattrlistbulk walk + FSEvents watch (from fsearch)"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+discovery = { path = "../discovery" }
+name-core = { path = "../name-core" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+rayon = "1.12"

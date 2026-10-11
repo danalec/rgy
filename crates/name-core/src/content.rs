@@ -28,8 +28,8 @@ use rayon::prelude::*;
 // verify). regex_syntax stays for plan()'s HIR; the regex crate remains
 // only as the fallback for patterns rgx's parser refuses (4.4 keeps it
 // for content `regex:` queries).
-use rgx_core::regex::ByteRegex;
 use regex_syntax::hir::{Class, Hir, HirKind};
+use rgx_core::regex::ByteRegex;
 
 /// The `regex` crate's `escape`, which this module no longer links:
 /// escape every regex metacharacter in a literal.
@@ -542,12 +542,8 @@ fn plain_identifier(name: &[u8]) -> bool {
 fn symbols(buf: &[u8], out: &mut Vec<u32>) {
     static RE: std::sync::OnceLock<ByteRegex> = std::sync::OnceLock::new();
     let re = RE.get_or_init(|| {
-        ByteRegex::new_multiline(
-            format!(r"(?-u:\b)(?:{DEFINES})(?:<[^>\n]*>)?[ \t*&]+(?:mut[ \t]+)?[A-Za-z_][A-Za-z0-9_]*").as_bytes(),
-            false,
-            false,
-        )
-        .expect("definition regex")
+        ByteRegex::new_multiline(format!(r"(?-u:\b)(?:{DEFINES})(?:<[^>\n]*>)?[ \t*&]+(?:mut[ \t]+)?[A-Za-z_][A-Za-z0-9_]*").as_bytes(), false, false)
+            .expect("definition regex")
     });
     let mut keys = Vec::new();
     let mut at = 0;
@@ -2638,12 +2634,7 @@ fn defined_at(hay: &[u8], p: usize, len: usize) -> bool {
         return false;
     }
     let re = KEYWORD.get_or_init(|| {
-        ByteRegex::new_multiline(
-            format!(r"(?-u:\b)(?:{DEFINES})(?:<[^>\n]*>)?[ \t*&]+(?:mut[ \t]+)?\z").as_bytes(),
-            false,
-            false,
-        )
-        .unwrap()
+        ByteRegex::new_multiline(format!(r"(?-u:\b)(?:{DEFINES})(?:<[^>\n]*>)?[ \t*&]+(?:mut[ \t]+)?\z").as_bytes(), false, false).unwrap()
     });
     let line = memchr::memrchr(b'\n', &hay[..p]).map_or(0, |i| i + 1);
     re.search(&hay[line..p], 0).is_some()
@@ -3270,7 +3261,6 @@ fn open_ahead(path: &[u8]) -> Option<std::fs::File> {
     Some(f)
 }
 
-
 #[cfg(test)]
 mod grep_pipeline_tests {
     use super::*;
@@ -3287,9 +3277,7 @@ mod grep_pipeline_tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("alpha.rs"), b"fn alpha() { let x = 1; }\n").unwrap();
         std::fs::write(dir.join("beta.txt"), b"nothing here\n").unwrap();
-        let src = PortableSource {
-            root: dir.to_string_lossy().into_owned().into_bytes(),
-        };
+        let src = PortableSource { root: dir.to_string_lossy().into_owned().into_bytes() };
         let live = Live::new(Index::build(src.enumerate().unwrap(), 0, 1, b"/"));
         (live, dir)
     }

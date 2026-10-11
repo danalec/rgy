@@ -2,7 +2,7 @@
 name = "searchd"
 version = "0.1.0"
 edition = "2024"
-description = "The merged search daemon: JSON-lines over stdio (pipe/UDS fronts later)"
+description = "The merged search daemon: JSON-lines over stdio/pipe/UDS, plus the rgx --serve front"
 license = "MIT OR Apache-2.0"
 
 [[bin]]
@@ -11,5 +11,11 @@ path = "src/main.rs"
 
 [dependencies]
 discovery = { path = "../../crates/discovery" }
+engine = { path = "../../crates/engine" }
 name-core = { path = "../../crates/name-core" }
 proto = { path = "../../crates/proto" }
+# rgx --serve front reads argv arrays with rgx's own JSON parser.
+rgx-core = { path = "../../crates/rgx-core" }
+# One allocator story (plan 4.4): mimalloc for the general heap —
+# MSVCRT's HeapAlloc serialises the parallel content readers on Windows.
+mimalloc = { version = "0.1", default-features = false }

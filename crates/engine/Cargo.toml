@@ -2,12 +2,14 @@
 name = "engine"
 version = "0.1.0"
 edition = "2024"
-description = "Orchestration: index lifecycle, sync, pools, keep-warm (skeleton)"
+description = "Orchestration: keep-warm, TV pack store glue"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
 discovery = { path = "../discovery" }
 name-core = { path = "../name-core" }
+# TV pack store (tv/ + tv_runtime/) as the daemon corpus store.
+rgx-core = { path = "../rgx-core", features = ["tv-runtime"] }
 
 [[example]]
 name = "name_bench"
