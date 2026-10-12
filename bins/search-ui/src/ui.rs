@@ -187,6 +187,11 @@ struct App {
     selected: usize,
     top: usize,
     page: usize,
+    /// What is on screen now, one rendered row per line, so a frame only
+    /// repaints what changed (see [`App::paint`]).
+    painted: Vec<String>,
+    /// The width `painted` was rendered at. A resize invalidates every row.
+    painted_width: usize,
     /// Per-keystroke search latency: cold `first` kept out of the window,
     /// which reports nearest-rank p50/p90 and the sparkline.
     meter: LatencyMeter,
@@ -216,6 +221,8 @@ impl App {
             selected: 0,
             top: 0,
             page: 1,
+            painted: Vec::new(),
+            painted_width: 0,
             meter: LatencyMeter::new(),
         };
         app.search();
@@ -237,15 +244,12 @@ impl App {
             self.results.clear();
             self.total = self.live.base.n.saturating_sub(1); // skip synthetic root
             let mut out = Vec::new();
-            let mut n = 0usize;
-            for i in 1..self.live.base.n {
-                if n >= MAX_RESULTS {
-                    break;
-                }
+            // Entry 0 is the synthetic root; the cap is on the range rather
+            // than a counter checked inside the loop.
+            for i in 1..self.live.base.n.min(MAX_RESULTS + 1) {
                 self.live.base.path(i, &mut out);
                 self.results
                     .push(String::from_utf8_lossy(&out).into_owned());
-                n += 1;
             }
             self.selected = 0;
             self.top = 0;
@@ -256,24 +260,16 @@ impl App {
         let home = std::env::var("USERPROFILE")
             .or_else(|_| std::env::var("HOME"))
             .unwrap_or_default();
+        // The merge is `Searcher`'s: keying it on `Hit::idx` here silently
+        // dropped live entries (every overlay entry shares the `u32::MAX`
+        // sentinel), and finding each hit by scanning the ones kept so far was
+        // quadratic -- with MAX_RESULTS that is hundreds of millions of
+        // comparisons on every keystroke.
         let mut hits: Vec<Hit> = Vec::new();
         if let Ok(alts) = Alternatives::parse(&self.input, &home) {
             let searcher = Searcher { live: &self.live };
-            for alt in &alts.alts {
-                let mut q = alt.clone();
-                q.limit = MAX_RESULTS;
-                for h in searcher.search(&q) {
-                    match hits.iter_mut().find(|e| e.idx == h.idx) {
-                        Some(e) if e.score < h.score => *e = h,
-                        Some(_) => {}
-                        None => hits.push(h),
-                    }
-                }
-            }
+            hits = searcher.search_alternatives(&alts.alts, MAX_RESULTS);
         }
-        // Score desc, then index asc — the same total order `searchctl` uses.
-        hits.sort_by(|a, b| b.score.cmp(&a.score).then(a.idx.cmp(&b.idx)));
-        hits.truncate(MAX_RESULTS);
 
         let mut out = Vec::new();
         self.results = hits
@@ -373,22 +369,28 @@ impl App {
         let height = size.1 as usize;
 
         if width < MIN_WIDTH || height < MIN_HEIGHT {
+            // Nothing on screen is what the next full frame expects, and the
+            // message is one line wide, so drop the buffer: the frame after
+            // this must repaint rather than trust rows it never painted.
+            self.painted.clear();
+            self.painted_width = 0;
             execute!(out, MoveTo(0, 0), Clear(ClearType::All))?;
             return self.write_line(
                 out,
                 0,
                 MIN_WIDTH,
-                format!("terminal {width}x{height} is too small — need {MIN_WIDTH}x{MIN_HEIGHT}")
+                &format!("terminal {width}x{height} is too small — need {MIN_WIDTH}x{MIN_HEIGHT}")
                     .with(palette::dim())
                     .to_string(),
             );
         }
 
         // Header, prompt, rule and footer leave four rows for the list.
-        let list_top = 3u16;
         let list_height = height.saturating_sub(4);
         self.page = list_height;
         self.clamp_selection();
+
+        let mut rows: Vec<String> = Vec::with_capacity(height);
 
         // FSearch layout: brand in bold white, two spaces, then a dim
         // subtitle that carries the volume and the entry count.
@@ -397,8 +399,11 @@ impl App {
             self.root.as_str().with(palette::dim()),
             thousands(self.indexed).with(palette::dim())
         );
-        let header = format!("{}  {}", "zen-rs".with(palette::ink()).bold(), subtitle);
-        self.write_line(out, 0, width, header)?;
+        rows.push(format!(
+            "{}  {}",
+            "zen-rs".with(palette::ink()).bold(),
+            subtitle
+        ));
 
         // The per-keystroke latency is the headline number. No label: the
         // video puts a green "8.1 ms" flush right of the prompt, with no word
@@ -409,35 +414,65 @@ impl App {
                 .to_string(),
             None => String::new(),
         };
-        self.write_line(out, 1, width, self.prompt_line(width, &latency))?;
-
-        self.write_line(
-            out,
-            2,
-            width,
-            "─".repeat(width).with(palette::dim()).to_string(),
-        )?;
+        rows.push(self.prompt_line(width, &latency));
+        rows.push("─".repeat(width).with(palette::dim()).to_string());
 
         let first = self.top.min(self.results.len());
         let last = (first + list_height).min(self.results.len());
 
         // FSearch flows the name flush left, the parent path dimmed after a
-        // two-space gap, with no column rule between them. A shrinking list
-        // would otherwise leave the previous frame's entries on screen below
-        // the last match, so every row of the list is repainted.
+        // two-space gap, with no column rule between them. Every row of the
+        // list is present even when empty: a shrinking list would otherwise
+        // leave the previous frame's entries on screen below the last match.
         for offset in 0..list_height {
             let row = first + offset;
-            let cell = if self.results.is_empty() && offset == 0 {
+            rows.push(if self.results.is_empty() && offset == 0 {
                 "  no matches".with(palette::dim()).to_string()
             } else if row < last {
                 self.result_cell(row, width)
             } else {
                 String::new()
-            };
-            self.write_line(out, list_top + offset as u16, width, cell)?;
+            });
         }
 
-        self.write_line(out, (height - 1) as u16, width, self.footer_line(width))?;
+        rows.push(self.footer_line(width));
+        self.paint(out, width, height, rows)
+    }
+
+    /// Paint `rows` over whatever is on screen, rewriting only what differs.
+    ///
+    /// The frame used to clear and redraw every row of the terminal, on every
+    /// keystroke. That is a full screen of output per key and, on a real
+    /// terminal, a visible flash between clearing a row and drawing it again.
+    /// Holding the previous frame means the usual edit touches one row -- the
+    /// prompt -- and everything else is left alone.
+    ///
+    /// A frame whose height or width differs from the last one has no rows in
+    /// common with it, so it is painted whole.
+    fn paint(
+        &mut self,
+        out: &mut impl Write,
+        width: usize,
+        height: usize,
+        rows: Vec<String>,
+    ) -> std::io::Result<()> {
+        let stale = self.painted.len() != height || self.painted_width != width;
+        // Truncate once, then compare and store the same string: truncating
+        // per row on both passes doubles the work of the whole frame.
+        let rendered: Vec<String> = rows.iter().map(|c| truncate_visible(c, width)).collect();
+        for (row, cell) in rendered.iter().enumerate() {
+            if stale || self.painted.get(row) != Some(cell) {
+                execute!(
+                    out,
+                    MoveTo(0, row as u16),
+                    SetBackgroundColor(palette::bg()),
+                    Clear(ClearType::CurrentLine),
+                    Print(cell),
+                )?;
+            }
+        }
+        self.painted = rendered;
+        self.painted_width = width;
         out.flush()
     }
 
@@ -569,7 +604,7 @@ impl App {
         out: &mut impl Write,
         row: u16,
         width: usize,
-        cell: String,
+        cell: &str,
     ) -> std::io::Result<()> {
         // Re-assert the background before every clear: `Clear` paints with the
         // currently active background, and a styled span may have reset it.
@@ -578,7 +613,7 @@ impl App {
             MoveTo(0, row),
             SetBackgroundColor(palette::bg()),
             Clear(ClearType::CurrentLine),
-            Print(truncate_visible(&cell, width)),
+            Print(truncate_visible(cell, width)),
         )
     }
 }
@@ -986,6 +1021,76 @@ mod tests {
         app.results.clone()
     }
 
+    /// Terminal size for the drawing tests: wide enough for a full result
+    /// row, tall enough that the list has rows to leave alone.
+    const FRAME: (u16, u16) = (100, 20);
+
+    /// A frame identical to the one before it writes nothing at all.
+    ///
+    /// This is what holding the previous frame buys, and it is not an
+    /// optimisation detail: the old draw cleared and redrew every row of the
+    /// terminal per keystroke, a screenful of output per key and a visible
+    /// flash between clearing a row and drawing it again. If this ever writes
+    /// bytes, the diff has stopped being a diff and the flash is back.
+    #[test]
+    fn a_frame_identical_to_the_last_writes_nothing() {
+        let mut app = app_with("");
+        let mut first = Vec::new();
+        app.draw(&mut first, FRAME).expect("draws");
+        assert!(!first.is_empty(), "the first frame has to paint the screen");
+
+        let mut second = Vec::new();
+        app.draw(&mut second, FRAME).expect("draws");
+        assert!(
+            second.is_empty(),
+            "an unchanged frame repainted; wrote {} bytes",
+            second.len()
+        );
+    }
+
+    /// Moving the caret changes one row -- the prompt -- and the frame must
+    /// say so by drawing one row. `MoveTo(0, row)` is `\x1b[{row + 1};1H`, so
+    /// row 1 is the prompt and row 0 the header above it.
+    #[test]
+    fn moving_the_caret_repaints_only_the_prompt() {
+        let mut app = app_with("hello");
+        let mut first = Vec::new();
+        app.draw(&mut first, FRAME).expect("draws");
+
+        app.caret = 0;
+        let mut second = Vec::new();
+        app.draw(&mut second, FRAME).expect("draws");
+
+        let painted = String::from_utf8_lossy(&second);
+        assert!(
+            painted.contains("\x1b[2;1H"),
+            "the prompt row is the one that changed; got {painted:?}"
+        );
+        assert!(
+            !painted.contains("\x1b[1;1H"),
+            "the header row is unchanged and must be left alone; got {painted:?}"
+        );
+    }
+
+    /// A resize shares no rows with the frame before it -- the columns of
+    /// every line are different -- so it is painted whole, including the rows
+    /// whose content did not change.
+    #[test]
+    fn a_resize_repaints_the_whole_frame() {
+        let mut app = app_with("");
+        let mut first = Vec::new();
+        app.draw(&mut first, FRAME).expect("draws");
+
+        let mut resized = Vec::new();
+        app.draw(&mut resized, (FRAME.0 - 1, FRAME.1))
+            .expect("draws");
+        let painted = String::from_utf8_lossy(&resized);
+        assert!(
+            painted.contains("\x1b[1;1H"),
+            "a resize must repaint rows the previous frame drew too; got {painted:?}"
+        );
+    }
+
     #[test]
     fn an_empty_query_lists_every_entry() {
         let app = app_with("");
@@ -1027,7 +1132,7 @@ mod tests {
     fn every_query_is_timed_and_recorded() {
         let mut app = app_new();
         // The initial empty scan is the cold `first`, not a window sample.
-        assert_eq!(app.meter.first().is_some(), true);
+        assert!(app.meter.first().is_some());
         assert_eq!(app.meter.window_len(), 0);
         app.insert('m');
         app.search();
@@ -1085,7 +1190,7 @@ mod tests {
         // p50 is a percentile of the window, so the 300 ms outlier is not
         // "the middle" and the cold sample is not in the window at all.
         assert_eq!(app.meter.p50(), Some(1_000));
-        assert_eq!(app.meter.first().is_some(), true);
+        assert!(app.meter.first().is_some());
     }
 
     #[test]
@@ -1322,6 +1427,30 @@ mod tests {
         parse_frame(&String::from_utf8(buf).expect("utf-8"))
     }
 
+    /// What a run of frames leaves on screen.
+    ///
+    /// [`frame`] returns what a frame *wrote*, which since the diff renderer
+    /// is only its difference from the last one. The question worth asking
+    /// about stale rows is what the user is left looking at, so a test that
+    /// cares accumulates the deltas instead of reading one of them.
+    #[derive(Default)]
+    struct Screen(Vec<(u16, String)>);
+
+    impl Screen {
+        fn apply(&mut self, delta: &[(u16, String)]) {
+            for (row, text) in delta {
+                match self.0.binary_search_by_key(row, |(r, _)| *r) {
+                    Ok(i) => self.0[i] = (*row, text.clone()),
+                    Err(i) => self.0.insert(i, (*row, text.clone())),
+                }
+            }
+        }
+
+        fn rows(&self) -> Vec<(u16, String)> {
+            self.0.clone()
+        }
+    }
+
     #[test]
     fn a_frame_paints_every_row_it_owns() {
         let mut app = app_with("maintenance");
@@ -1363,14 +1492,22 @@ mod tests {
     fn shrinking_the_result_list_erases_the_rows_it_freed() {
         // The failure this guards against: results shrink from many to one and
         // the old entries stay on screen below the new, shorter list.
+        //
+        // Asserted on the screen rather than on what the frame wrote: a frame
+        // now writes only its difference, so a row that was already blank and
+        // stays blank is not written again -- and does not need to be. What
+        // must never happen is a row still holding the *old* list.
         let mut app = app_with("maintenance");
-        assert_eq!(frame(&mut app, 60, 10).len(), 10);
+        let mut screen = Screen::default();
+        screen.apply(&frame(&mut app, 60, 10));
+        assert_eq!(screen.rows().len(), 10);
 
         app.input = String::new();
         app.caret = 0;
         app.search();
-        let rows = frame(&mut app, 60, 10);
+        screen.apply(&frame(&mut app, 60, 10));
 
+        let rows = screen.rows();
         assert_eq!(rows.len(), 10);
         // Every entry this index has, in the rows below the prompt.
         let listed = rows[3..9]

@@ -20,6 +20,12 @@ pub struct LatencyMeter {
     window: VecDeque<u128>,
 }
 
+impl Default for LatencyMeter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LatencyMeter {
     /// Empty meter: no `first`, empty window.
     pub fn new() -> Self {
@@ -122,8 +128,8 @@ impl LatencyMeter {
         }
         let mut sorted: Vec<u128> = self.window.iter().copied().collect();
         sorted.sort_unstable();
-        // ceil(n * num / den) without float: (n*num + den - 1) / den.
-        let ceil_pn = (n as u128 * num + den - 1) / den;
+        // ceil(n * num / den) without float.
+        let ceil_pn = (n as u128 * num).div_ceil(den);
         let idx = (ceil_pn as usize).saturating_sub(1).min(n - 1);
         Some(sorted[idx])
     }
