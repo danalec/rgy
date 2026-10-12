@@ -444,6 +444,13 @@ impl Index {
 
     /// Lay listings out as blocks in DFS order and compute everything derived.
     /// Listing id 0 is the root ("/").
+    ///
+    /// An empty `ls` builds the one-entry index that describes just the root:
+    /// an empty directory, or a root that could not be listed at all — which
+    /// is what pointing a CLI at a path that does not exist produces, since
+    /// the walk yields nothing rather than failing. Without this the DFS
+    /// starts from `by_id[0] == NONE` and indexes past the end of an empty
+    /// vector.
     pub fn build(mut ls: Vec<Listing>, event_id: u64, synced_at: u32, home: &[u8]) -> Index {
         ls.par_iter_mut().for_each(|l| {
             let names = &l.names;
@@ -451,11 +458,23 @@ impl Index {
                 names[a.name_off as usize..][..a.name_len as usize].cmp(&names[b.name_off as usize..][..b.name_len as usize])
             })
         });
+        // Listing 0 is the root: the DFS below starts from `by_id[0]`, so a
+        // stream with no listing claiming that id would index past the end.
+        // `scan` always stamps it, but `build` takes a bare `Vec` and is
+        // called from tests and live-update paths too, so it is made true here
+        // rather than assumed.
+        if ls.is_empty() {
+            // A scan of a root that listed nothing — a path that does not
+            // exist, a file where a directory was expected — is still a tree
+            // with a root in it, just one with no entries.
+            ls.push(Listing { id: 0, names: Vec::new(), ents: Vec::new() });
+        }
         let max_id = ls.iter().map(|l| l.id).max().unwrap_or(0) as usize;
         let mut by_id = vec![NONE; max_id + 1];
         for (i, l) in ls.iter().enumerate() {
             by_id[l.id as usize] = i as u32;
         }
+        debug_assert_ne!(by_id[0], NONE, "the DFS below starts from `by_id[0]`");
         let n_max = 1 + ls.iter().map(|l| l.ents.len()).sum::<usize>();
         let names_max: usize = ls.iter().map(|l| l.names.len()).sum();
 
