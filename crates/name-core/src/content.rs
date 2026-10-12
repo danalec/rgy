@@ -3268,11 +3268,24 @@ mod open_flags {
     pub const O_NONBLOCK: i32 = 0x4;
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     pub const O_NOFOLLOW: i32 = 0x100;
+    // FreeBSD's `sys/sys/fcntl.h`: O_NONBLOCK 0x0004, O_NOFOLLOW 0x0100 --
+    // the same two values Darwin uses, so this is the arm above by another
+    // name rather than a new pair. (Do not borrow Darwin's O_DIRECTORY,
+    // 0x100000: FreeBSD and Linux both use 0x20000.)
+    //
+    // Scoped to FreeBSD on purpose. OpenBSD, NetBSD and DragonFly are
+    // unverified, so they stay in the zero arm below rather than inherit a
+    // number that was read off one kernel.
+    #[cfg(target_os = "freebsd")]
+    pub const O_NONBLOCK: i32 = 0x4;
+    #[cfg(target_os = "freebsd")]
+    pub const O_NOFOLLOW: i32 = 0x100;
     // Not rgy targets: flags off; `is_file()` in open_sized is still the
-    // directory guard, but a FIFO could block open() here.
-    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "ios")))]
+    // directory guard, but a FIFO could block open() here. OpenBSD, NetBSD
+    // and DragonFly land here until their values are checked.
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "ios", target_os = "freebsd")))]
     pub const O_NONBLOCK: i32 = 0;
-    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "ios")))]
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "ios", target_os = "freebsd")))]
     pub const O_NOFOLLOW: i32 = 0;
 }
 
