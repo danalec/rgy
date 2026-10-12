@@ -8,26 +8,18 @@
 //! context tree over an order-N model, per-context symbol frequency tables,
 //! scaled escape estimation (SEE) for the fallback probability, and a
 //! carry-less range decoder with RAR's `0x8000` renormalisation floor.
-//! Written from the published algorithm description (Shkarin's PPMd /
-//! PPMdI) and from the contract the caller in [`crate::unpack3`] binds to —
-//! not a port of any implementation.
+//! Written from the published algorithm description (Shkarin's PPMd / PPMdI)
+//! and from the contract the caller in [`crate::unpack3`] binds to — not a
+//! port of any implementation.
 //!
-//! Algorithm semantics are cross-checked against the decompiled UnRAR 7.20
-//! (`kuna-unrar`): range-coder renormalisation order, threshold arithmetic,
-//! SEE/binary-counter update rounding, context-tree suffix links, the
-//! sub-allocator block size and restart policy, and the model-update
-//! frequency formulas (`sub_140038db4`, `sub_140042028`, `sub_140041eb4`,
-//! `sub_140041a20`).
-//!
-//! End-to-end is verified against real PPMd-bearing archives: `Rar.exe` 6.24
-//! can still emit RAR 4.x PPMd (`-ma4 -mct+`, the "text compression" module
-//! RAR 5.0 cannot carry), and genuine `UnRAR.exe` 7.20 extracts them. The
-//! winrar-oracle-rar4 cases `ppmd_text` (`archives/ppmd_text.rar`, 40 000 B
-//! of generated English, 2 822 B packed) and `ppmd_mixed`
-//! (`archives/ppmd_mixed.rar`, 98 304 B of mixed zeros/random/text) both
-//! decode byte-identical to the UnRAR goldens through this module. The
-//! synthetic tests still pin the model invariants the archives cannot
-//! isolate (allocator floors, rescale, restart).
+//! Correctness is established behaviourally: real PPMd-bearing archives are
+//! decoded byte-identically through this module. `Rar.exe` 6.24 can still
+//! emit RAR 4.x PPMd (`-ma4 -mct+`, the "text compression" module RAR 5.0
+//! cannot carry) and genuine `UnRAR.exe` 7.20 extracts them; the cases
+//! `ppmd_text` (40 000 B of generated English, 2 822 B packed) and
+//! `ppmd_mixed` (98 304 B of mixed zeros/random/text) match the UnRAR
+//! goldens exactly. The synthetic tests pin the model invariants the
+//! archives cannot isolate (allocator floors, rescale, restart).
 //!
 //! # Arena
 //!

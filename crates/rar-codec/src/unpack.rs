@@ -3,12 +3,12 @@
 //! RAR 5.0 decompression: Huffman-coded commands over an LZ77 window.
 //!
 //! Independent reimplementation. RARLAB's published specification documents
-//! the *container* and directs readers to UnRAR source code for the
-//! *algorithms*, so this module is written from the algorithm's shape — a
-//! canonical Huffman table over a literal/command alphabet, a circular
-//! dictionary for back-references, and a small distance cache — rather than
-//! from a published formula. The constants below are the alphabet sizes
-//! this format uses.
+//! the *container* only and publishes no formula for the *algorithms*, so
+//! this module is written from the algorithm's shape — a canonical Huffman
+//! table over a literal/command alphabet, a circular dictionary for
+//! back-references, and a small distance cache — rather than from a
+//! published formula. The constants below are the alphabet sizes this
+//! format uses.
 //!
 //! # Alphabet
 //!

@@ -5,17 +5,16 @@
 //! delta / E8 / E8E9 / RGB / audio VM filter programs.
 //!
 //! Independent reimplementation. The algorithm was rewritten from
-//! understanding of the decompression pipeline and cross-checked against
-//! the decompiled UnRAR 7.20 (`kuna-unrar` in `winrar-analysis`) plus this
-//! crate's `rar4-*` fixtures as the behavioral oracle. RARLAB publishes no
+//! understanding of the decompression pipeline and validated against this
+//! crate's `rar4-*` fixtures as the behavioural oracle. RARLAB publishes no
 //! compression specification — the RAR 4.11/4.20 technote documents only
 //! the container (block layout, CRC-32 poly 0xEDB88320) — and LOC PRONOM
 //! fmt/411 records the format's transparency as low. Real WinRAR-produced
-//! bytes now verify this module end to end as well: the winrar-oracle-rar4
-//! cases `rar4_normal`, `rar4_best` and `rar4_store` (built by `Rar.exe`
-//! 6.24 with `-ma4`, extracted by genuine `UnRAR.exe` 7.20) decode
-//! byte-identical, and the PPMd block path through [`crate::ppmd7`] is
-//! verified by `ppmd_text` / `ppmd_mixed` in the same oracle.
+//! bytes verify this module end to end as well: `rar4_normal`, `rar4_best`
+//! and `rar4_store` (built by `Rar.exe` 6.24 with `-ma4`, extracted by
+//! genuine `UnRAR.exe` 7.20) decode byte-identical, and the PPMd block path
+//! through [`crate::ppmd7`] is verified by `ppmd_text` / `ppmd_mixed` in the
+//! same corpus.
 //!
 //! # Shape
 //!

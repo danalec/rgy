@@ -9,9 +9,8 @@
 //! are learned from the upstream source, from RARLAB's published RAR 5.0
 //! archive format specification (`https://www.rarlab.com/technote.htm`), and
 //! — for the decompression algorithms the technote does not cover — from
-//! understanding of the algorithm cross-checked against the decompiled
-//! UnRAR 7.20. Then the code is written fresh: no file-level copies, no
-//! verbatim pastes.
+//! understanding of the algorithm itself. Then the code is written fresh: no
+//! file-level copies, no verbatim pastes.
 //!
 //! **Modules rewritten** (Apache-2.0, SPDX headers; per-module rows in
 //! `scripts/vendored-sources.tsv`): `error`, `vint`, `crc32`, `bitreader`,
@@ -21,14 +20,11 @@
 //! overflow list for long codes and one peek per symbol, and treats an
 //! all-zero length array as a legal empty table (RAR 5.0 sends unused
 //! sub-tables that way). `unpack3` and `ppmd7` are the decompression half
-//! RARLAB's spec does not cover: rewritten from algorithm understanding,
-//! cross-checked against the decompiled UnRAR 7.20 (distance cache starts
-//! all-ones, the EOF marker's next-member bit persists, PPMd var-H
-//! renormalisation order), and verified end-to-end against goldens
-//! extracted by the genuine UnRAR — RAR4 store/normal/best members and
-//! PPMd var-H members decode byte-identical (`benchmark/winrar-oracle.md`).
-//! No public algorithm specification exists for that half; LOC PRONOM
-//! fmt/411 records the format's transparency as low.
+//! RARLAB's spec does not cover: rewritten from algorithm understanding and
+//! verified end-to-end against goldens extracted by the genuine UnRAR —
+//! RAR4 store/normal/best members and PPMd var-H members decode
+//! byte-identical. No public algorithm specification exists for that half;
+//! LOC PRONOM fmt/411 records the format's transparency as low.
 //!
 //! **Verification**: `tests/winrar_oracle.rs` compares extraction against
 //! SHA-256 goldens produced by genuine `Rar.exe`/`UnRAR.exe` (gated on

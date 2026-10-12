@@ -2,9 +2,12 @@
 //!
 //! Gated on environment variables so the normal gate stays green:
 //!
-//!   RGX_WINRAR_ORACLE=<winrar-oracle dir>        forward decode conformance
-//!   RGX_WINRAR_ORACLE_RAR4=<winrar-oracle-rar4>  second oracle, RAR4 + PPMd
-//!   RGX_UNRAR=<path to UnRAR.exe>                reverse writer check
+//!   RGX_WINRAR_ORACLE=<goldens dir>          forward decode conformance:
+//!                                            the RAR 7.20 matrix, RAR5 only
+//!   RGX_WINRAR_ORACLE_RAR4=<goldens dir>     the same matrix rebuilt by
+//!                                            Rar.exe 6.24, plus RAR4 and
+//!                                            RAR4-PPMd cases
+//!   RGX_UNRAR=<path to UnRAR.exe>            reverse writer check
 //!
 //! Forward: for every (archive, member) row in an oracle's `golden.h`, the
 //! archive is hashed, opened with `rar_codec::Archive`, the member extracted,
@@ -17,11 +20,11 @@
 //! extracted by the genuine UnRAR.exe and the bytes compared, including the
 //! 0/1/2-byte edge shapes and a multi-member archive.
 //!
-//! Two oracles, complementary by construction. `winrar-oracle` is the RAR
-//! 7.20 matrix (RAR5 only — RAR 7.x has no `-ma4`, so its three RAR4 cases
-//! were skipped at build time). `winrar-oracle-rar4` is the same matrix
-//! rebuilt by `Rar.exe` 6.24 plus RAR4 and RAR4-PPMd cases, extracted with
-//! the same genuine UnRAR 7.20. See `benchmark/winrar-oracle.md`.
+//! Two corpora, complementary by construction. One is the RAR 7.20 matrix
+//! (RAR5 only — RAR 7.x has no `-ma4`, so its three RAR4 cases were skipped
+//! at build time). The other is the same matrix rebuilt by `Rar.exe` 6.24
+//! plus RAR4 and RAR4-PPMd cases, extracted with the same genuine
+//! UnRAR 7.20.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

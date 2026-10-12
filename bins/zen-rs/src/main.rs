@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! zen-rs — an NTFS file indexer built on the MFT and the USN journal.
+//! zen-rs - an NTFS file indexer built on the MFT and the USN journal.
 //!
-//! Grounding for the approach came from the decompiled Zen 1.4.1.1032
-//! binary, specifically its NTFS monitor state machine, which drives
-//! `FSCTL_READ_USN_JOURNAL` (0x900bb) with a 40-byte input and a 64 KiB output
-//! buffer and tails journal deltas via overlapped reads.
+//! The monitor drives `FSCTL_READ_USN_JOURNAL` (0x900bb) with a 40-byte
+//! input and a 64 KiB output buffer, and tails journal deltas via overlapped
+//! reads -- the shape the Win32 USN journal interface documents.
 
 // Old bin, new homes (IMPLEMENTATION_PLAN.md first-PR sequence #3: "old bins
 // compile against them unchanged" — behaviour unchanged, imports only).
