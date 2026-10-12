@@ -198,7 +198,7 @@ struct App {
 }
 
 /// What a key press did to the app.
-#[derive(PartialEq)]
+#[derive(PartialEq, Debug)]
 enum Action {
     None,
     Moved,
@@ -701,9 +701,9 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Action {
         _ => Action::None,
     };
 
-    if action == Action::Edited {
-        app.search();
-    }
+    // No search here: this applies one key and says what it did. Whether to
+    // re-run the search is the caller's to decide, because a burst of keys
+    // wants exactly one search at the end of it (see [`run`]).
     app.clamp_selection();
     action
 }
@@ -721,16 +721,52 @@ pub fn run(live: Live, root: String, indexed: usize) -> Result<(), String> {
         let size = terminal::size().map_err(|e| format!("cannot read the terminal size: {e}"))?;
         app.draw(&mut out, size)
             .map_err(|e| format!("cannot draw: {e}"))?;
-        let event = event::read().map_err(|e| format!("cannot read the keyboard: {e}"))?;
-        // Windows can report releases as well as presses; ignore anything that
-        // is not a key going down.
-        let Event::Key(key) = event else {
-            continue;
-        };
-        if key.kind != KeyEventKind::Press {
-            continue;
+
+        // Read one key, then every key already queued behind it, and search
+        // once for the lot. Without this a burst of typing is a burst of
+        // whole-index searches -- one per letter -- even though only the state
+        // after the last key is ever drawn. The terminal hands over keys far
+        // faster than a large index can be searched, so the queue is where
+        // that work piles up and then gets thrown away.
+        let mut edited = false;
+        let mut outcome = Action::None;
+        let mut block = true;
+        loop {
+            if !block
+                && !event::poll(std::time::Duration::ZERO)
+                    .map_err(|e| format!("cannot poll the keyboard: {e}"))?
+            {
+                break;
+            }
+            block = false;
+            match event::read().map_err(|e| format!("cannot read the keyboard: {e}"))? {
+                // Windows can report releases as well as presses; ignore
+                // anything that is not a key going down.
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    match handle_key(&mut app, key) {
+                        Action::Quit => {
+                            outcome = Action::Quit;
+                            break;
+                        }
+                        Action::Open => {
+                            outcome = Action::Open;
+                            break;
+                        }
+                        Action::Edited => edited = true,
+                        Action::None | Action::Moved => {}
+                    }
+                }
+                // A resize and anything else want the next frame, not more
+                // keys: what is on screen no longer matches the terminal.
+                _ => break,
+            }
         }
-        match handle_key(&mut app, key) {
+        if edited {
+            app.search();
+        }
+        app.clamp_selection();
+
+        match outcome {
             Action::Quit => break,
             Action::Open => {
                 chosen = app.selected_path();
@@ -1069,6 +1105,26 @@ mod tests {
         assert!(
             !painted.contains("\x1b[1;1H"),
             "the header row is unchanged and must be left alone; got {painted:?}"
+        );
+    }
+
+    /// Applying a key edits the query; recomputing the matches is the
+    /// caller's call. They have to be separate steps for a burst of typing to
+    /// cost one search instead of one per letter, which is what `run` does.
+    #[test]
+    fn applying_a_key_does_not_research() {
+        let mut app = app_new();
+        let listed = app.results.len();
+        assert!(listed > 1, "the fixture must start with something listed");
+
+        let key = KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE);
+        assert_eq!(handle_key(&mut app, key), Action::Edited);
+        assert_eq!(app.input, "m", "the key must be applied");
+        assert_eq!(
+            app.results.len(),
+            listed,
+            "the results must not move until the caller searches; otherwise \
+             every key in a burst pays for a whole search"
         );
     }
 
