@@ -247,7 +247,12 @@ Two rules follow:
   about this one.
 - **Absolute numbers as claims about other machines.** Every figure here is
   this machine on this corpus at these digests. The ratios are the portable
-  part; the milliseconds are not.
+  part; the milliseconds are not. **A second host is now on file** —
+  [`status-linux-ryzen7-255.md`](status-linux-ryzen7-255.md), same corpora,
+  same gate — and it shows the engine-alone edge is *not* portable: rgx
+  leads on the two single-byte shapes and loses the six multi-byte/class
+  shapes there, against a clean 9-of-9 lead here. Quote §1.1 with this
+  host's name or do not quote it.
 - **`benchmark/optimal-techniques.md`.** Hand-written, with no generator, and
   its −44.3% mean cites a corpus (93,234 files / 1.87 GB / 117 packs) that no
   digest pins — which is the defect §5 is about. **The harness it names does

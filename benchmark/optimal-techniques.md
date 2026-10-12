@@ -12,12 +12,21 @@ over memory-mapped I/O.
 > `scripts/tv-matrix.sh` — but the figure itself came from a corpus
 > (93,234 files / 1.87 GB / 117 packs) that no digest pins, so it is
 > **unreproduced** and is not adopted by [`status.md`](status.md) or the
-> README. What *is* filed: [`tv-transcript.md`](tv-transcript.md), a
-> count-gated A/B/C over the 20,028-file tree in which the pack engine is
-> **6.1×–6.6× over ripgrep** and 3.0×–3.5× over rgx's own filesystem path.
-> That supports the architecture; it does not settle the read-mode choice
-> inside it. To settle that, run `scripts/tv-matrix.sh` past the 64 MiB
-> threshold on a digest-named corpus and file the transcript.
+> README. A second host has now measured the same question on a
+> digest-named corpus (the 20,000-file generated tree, 26 packs, pattern
+> `fn main`, 7 paired order-rotated rounds): **the direction reproduces and
+> the magnitude does not.** `ParallelBuffered` beat mmap on every paired
+> round by 3% to 18% (mean ≈ **12%**), and `serial-buffered` was ~8× slower
+> than either. The −44.3% is therefore **contradicted in magnitude** and
+> stands only as a historical figure from an unpinned corpus. What *is*
+> filed: [`tv-transcript.md`](tv-transcript.md), a count-gated A/B/C over
+> the 20,028-file tree in which the pack engine is **6.1×–6.6× over
+> ripgrep** (Windows) and **1.55×–3.13×** (Linux), with exact count
+> parity. That supports the architecture; it does not settle the read-mode
+> choice inside it at the −44.3% figure. The read-mode choice is settled at
+> the level the second host can support: ParallelBuffered is the right
+> default, mmap is a one-shot-process comparison arm, and serial-buffered
+> is a different regime.
 
 ---
 
@@ -137,6 +146,42 @@ The performance of `ParallelBuffered` vs. `mmap` was evaluated across a 9-cell m
 | **Full Output** | `fn main` (11,567 lines) | **−45.2%** | **−41.9%** | **−34.3%** | Line formatting included; 0 overlap |
 
 **Overall Mean:** **−44.3% latency reduction** across all 9 cells.
+
+---
+
+## 5b. Second-host check (Linux, Ryzen 7 255) — direction yes, magnitude no
+
+The 9-cell matrix above is the *origin* of the −44.3%. A second host has
+since measured the same three read modes on a **digest-named** corpus (the
+20,000-file generated tree, 26 packs, 417.73 MB) with the paired rules this
+project uses: 7 rounds, order rotated per round, count gate first, pattern
+`fn main`, `-j10`, Linux CachyOS on an AMD Ryzen 7 255 (10 logical CPUs),
+default portable release build, `ripgrep 15.2.0` present but not an arm.
+
+| mode | 7 samples (ms) | min | per-round delta vs mmap |
+| :--- | :--- | ---: | :--- |
+| `--no-mmap` (ParallelBuffered) | 27, 27, 27, 28, 31, 33, 28 | **27** | — |
+| `--mmap` | 31, 31, 31, 32, 32, 39, 31 | 31 | mmap slower on **every** round |
+| `--serial-buffered` | 211, 213, 214, 224, 227, 254, 305 | 211 | ~8× slower than ParallelBuffered |
+
+ParallelBuffered is faster than mmap on every paired round, by **3% to 18%**
+(mean ≈ **12%**). Serial-buffered is a different regime (one pack at a time,
+no worker parallelism) and is not a contender for the default.
+
+**Reading.** The *direction* of the default flip is now observed on two
+hosts and two corpora: buffered beats mmap on a one-shot query. The
+*magnitude* is not portable. −44.3% was taken on an unpinned Windows corpus
+at three thread counts; this host gives ≈12% at `-j10`. Until a digest-named
+corpus reproduces the larger figure, the honest summary is:
+
+- **`ParallelBuffered` is the right default** (direction: two hosts, every
+  paired round).
+- **Do not quote −44.3%** as a property of the architecture. Quote the
+  second-host ≈12% if a number is needed, and name the host.
+- The physical mechanism of §3 (page faults, kernel teardown, sequential
+  line-rate reads) is unchanged and is what the direction is evidence for;
+  what varies by host is how much of the one-shot cost was ever in the
+  mapping.
 
 ---
 
