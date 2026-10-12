@@ -440,11 +440,27 @@ fn split_words(s: &str) -> Vec<String> {
 
 fn range(v: &str, p: fn(&str) -> Option<u64>) -> Result<(u64, u64), String> {
     let bad = || format!("bad range {v}");
-    if let Some(r) = v.strip_prefix(">=").or(v.strip_prefix('>')) {
+    // The returned bounds are inclusive and the filter rejects `x < lo ||
+    // x > hi`, so a *strict* bound has to move by one. `>` and `>=` used to
+    // fall through to the same arm and answer the same way, which made
+    // `size:>10000` match a file of exactly 10,000 bytes and `size:<1kb`
+    // match one of exactly 1kb.
+    //
+    // A range with `lo > hi` is empty: the filter's comparison rejects
+    // every value under it, which is what `>u64::MAX` and `<0` mean.
+    if let Some(r) = v.strip_prefix(">=") {
         return Ok((p(r).ok_or_else(bad)?, u64::MAX));
     }
-    if let Some(r) = v.strip_prefix("<=").or(v.strip_prefix('<')) {
+    if let Some(r) = v.strip_prefix('>') {
+        let x = p(r).ok_or_else(bad)?;
+        return Ok(x.checked_add(1).map_or((u64::MAX, 0), |lo| (lo, u64::MAX)));
+    }
+    if let Some(r) = v.strip_prefix("<=") {
         return Ok((0, p(r).ok_or_else(bad)?));
+    }
+    if let Some(r) = v.strip_prefix('<') {
+        let x = p(r).ok_or_else(bad)?;
+        return Ok(x.checked_sub(1).map_or((u64::MAX, 0), |hi| (0, hi)));
     }
     if let Some((a, b)) = v.split_once("..") {
         return Ok((p(a).ok_or_else(bad)?, p(b).ok_or_else(bad)?));
@@ -1389,6 +1405,34 @@ mod tests {
         assert!(hit("size:>0", "/a/b.txt", KIND_FILE, 5));
     }
 
+    /// `>` and `>=` are different questions and had been answering both as
+    /// `>=`. Found by an independent count: `size:>10000` matched a file of
+    /// exactly 10,000 bytes that `Get-ChildItem -Where Length -gt 10000`
+    /// correctly left out.
+    #[test]
+    fn a_strict_size_bound_excludes_the_boundary() {
+        // `>`: strictly more.
+        assert!(!hit("size:>10000", "/a/b.txt", KIND_FILE, 10_000));
+        assert!(hit("size:>10000", "/a/b.txt", KIND_FILE, 10_001));
+        // `>=`: more or equal.
+        assert!(hit("size:>=10000", "/a/b.txt", KIND_FILE, 10_000));
+        assert!(hit("size:>=10000", "/a/b.txt", KIND_FILE, 10_001));
+        // `<`: strictly less.
+        assert!(!hit("size:<10000", "/a/b.txt", KIND_FILE, 10_000));
+        assert!(hit("size:<10000", "/a/b.txt", KIND_FILE, 9_999));
+        // `<=`: less or equal.
+        assert!(hit("size:<=10000", "/a/b.txt", KIND_FILE, 10_000));
+        assert!(hit("size:<=10000", "/a/b.txt", KIND_FILE, 9_999));
+    }
+
+    /// The strict bounds have to stay strict at the ends of the range, where
+    /// moving by one would wrap: nothing is `>` the largest value or `<` 0.
+    #[test]
+    fn a_strict_size_bound_stays_strict_at_the_end_of_the_range() {
+        assert!(!hit("size:>18446744073709551615", "/a/b.txt", KIND_FILE, u64::MAX));
+        assert!(!hit("size:<0", "/a/b.txt", KIND_FILE, 0));
+    }
+
     #[test]
     fn bad_re_fails_closed_and_good_re_matches_the_path() {
         let a = q("re:(unclosed");
@@ -2148,6 +2192,33 @@ impl Searcher<'_> {
         let (idx, u) = (&self.live.base, self.live.base.u as f64);
         let counts = idx.class_counts();
         let est = (0..CLASSES).filter(|&c| t.mask & (1 << c) != 0).fold(u, |e, c| e * counts[c] as f64 / u);
+        // `ranked` is off by default, and the reason is a measurement rather
+        // than a judgement call. It is a bounded top-k meant to win on broad
+        // one-token searches; measured on `name_bench`'s 200k corpus against
+        // the `full` plan it replaces, it loses on both rows it is chosen
+        // for:
+        //
+        //     file   5,632 us (ranked)  vs    91 us (full)   62x slower
+        //     f1     4,547 us (ranked)  vs   137 us (full)   33x slower
+        //
+        // Same match counts and the same results. On real trees it does not
+        // even get that far: it bails out (`rejected-after: ranked`) and
+        // `full` runs anyway, so it costs a failed attempt every time.
+        //
+        // The design is sound for a shape the bench does not exercise -- a
+        // broad query whose top `limit` comes from one or two dominant names,
+        // where the floor jumps at once and prunes the rest. `rankable`
+        // selects on breadth (`RANKED_MIN`), which is the wrong signal: it
+        // fires exactly when many names score alike and pruning cannot pay.
+        //
+        // So the gate is opt-in, and the thresholds below document what the
+        // design intended. `RGY_FORCE_RANKED=1` turns it back on to study it.
+        // No `note_attempt` here: this is not a path reached and rejected, it
+        // is one deliberately not considered, and saying otherwise on every
+        // `--explain` would be noise.
+        if std::env::var_os("RGY_FORCE_RANKED").is_none() {
+            return None;
+        }
         if est >= RANKED_MIN {
             return Some((t, false));
         }
