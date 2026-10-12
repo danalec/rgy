@@ -44,7 +44,9 @@ struct Ctx {
     live: Live,
 }
 
-fn usage() -> ! {
+/// Print usage and leave. `code` is the exit status: 0 when the user asked
+/// for help, 2 for the rg convention's "bad invocation".
+fn usage(code: i32) -> ! {
     eprintln!(
         "searchd [--root <dir>] [--index <file>] [--reindex] [--max-age <dur>]\n         [--tv-dir <store>] [--listen stdio|uds:<path>|pipe:<name>] [--serve]\n\n\
          proto framing (default): one JSON request per line\n  \
@@ -54,7 +56,7 @@ fn usage() -> ! {
          --serve: rgx compat — a JSON argv-array per line, answers framed\n  \
            by {{\"rgx\":\"begin\"}}/{{\"rgx\":\"end\"}} with rg --json match lines."
     );
-    std::process::exit(2);
+    std::process::exit(code);
 }
 
 /// Parse `30m` / `2h` / `7d` / `90s` / `1w` into a duration. Bare numbers are
@@ -90,11 +92,11 @@ fn main() {
         match args[i].as_str() {
             "--root" => {
                 i += 1;
-                root = args.get(i).cloned().unwrap_or_else(|| usage());
+                root = args.get(i).cloned().unwrap_or_else(|| usage(2));
             }
             "--index" => {
                 i += 1;
-                index = Some(args.get(i).cloned().unwrap_or_else(|| usage()));
+                index = Some(args.get(i).cloned().unwrap_or_else(|| usage(2)));
             }
             "--reindex" => reindex = true,
             "--max-age" => {
@@ -102,21 +104,21 @@ fn main() {
                 max_age = Some(
                     args.get(i)
                         .and_then(|s| parse_age(s))
-                        .unwrap_or_else(|| usage()),
+                        .unwrap_or_else(|| usage(2)),
                 );
             }
             "--tv-dir" => {
                 i += 1;
                 tv_dir = Some(std::path::PathBuf::from(
-                    args.get(i).cloned().unwrap_or_else(|| usage()),
+                    args.get(i).cloned().unwrap_or_else(|| usage(2)),
                 ));
             }
             "--listen" => {
                 i += 1;
-                listen = args.get(i).cloned().unwrap_or_else(|| usage());
+                listen = args.get(i).cloned().unwrap_or_else(|| usage(2));
             }
             "--serve" => serve = true,
-            "-h" | "--help" => usage(),
+            "-h" | "--help" => usage(0),
             other => {
                 eprintln!("searchd: unknown argument {other}");
                 std::process::exit(2);
@@ -143,7 +145,7 @@ fn main() {
         }
         Some(("uds", path)) => serve_uds(path, &ctx, serve),
         Some(("pipe", name)) => serve_pipe(name, &ctx, serve),
-        _ => usage(),
+        _ => usage(2),
     }
 }
 

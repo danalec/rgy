@@ -34,7 +34,10 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 /// alive, slow enough that the lines stay readable.
 const REPORT_EVERY: Duration = Duration::from_millis(500);
 
-fn usage() -> ! {
+/// Print usage and leave. `code` is the exit status: 0 when the user asked
+/// for help, 2 for the rg convention's "bad invocation". `--help` used to
+/// exit 2 like a malformed command, which a script reads as an error.
+fn usage(code: i32) -> ! {
     eprintln!(
         "searchctl [options] <query>\n\n\
          options:\n  \
@@ -50,7 +53,7 @@ fn usage() -> ! {
          !x negate) + zen-rs filters (ext: dir: type: size: re:),\n\
          | alternates, * and ? glob the whole path."
     );
-    std::process::exit(2);
+    std::process::exit(code);
 }
 
 /// Parse `30m` / `2h` / `7d` / `90s` / `1w` into a duration. Bare numbers are
@@ -89,18 +92,18 @@ fn main() {
         match args[i].as_str() {
             "--root" => {
                 i += 1;
-                root = args.get(i).cloned().unwrap_or_else(|| usage());
+                root = args.get(i).cloned().unwrap_or_else(|| usage(2));
             }
             "--limit" => {
                 i += 1;
                 limit = args
                     .get(i)
                     .and_then(|s| s.parse().ok())
-                    .unwrap_or_else(|| usage());
+                    .unwrap_or_else(|| usage(2));
             }
             "--index" => {
                 i += 1;
-                index = Some(args.get(i).cloned().unwrap_or_else(|| usage()));
+                index = Some(args.get(i).cloned().unwrap_or_else(|| usage(2)));
             }
             "--reindex" => reindex = true,
             "--count" => count = true,
@@ -110,11 +113,11 @@ fn main() {
                 max_age = Some(
                     args.get(i)
                         .and_then(|s| parse_age(s))
-                        .unwrap_or_else(|| usage()),
+                        .unwrap_or_else(|| usage(2)),
                 );
             }
             "--json" => json = true,
-            "-h" | "--help" => usage(),
+            "-h" | "--help" => usage(0),
             a if a.starts_with('-') => {
                 eprintln!("searchctl: unknown option {a}");
                 std::process::exit(2);
@@ -129,7 +132,7 @@ fn main() {
         i += 1;
     }
     if query.is_empty() {
-        usage();
+        usage(2);
     }
 
     let opts = Opts {

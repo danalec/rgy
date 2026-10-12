@@ -232,6 +232,25 @@ fn unknown_option_exits_two() {
     assert!(err.contains("unknown option"), "got {err}");
 }
 
+/// Asking for help is not a failed invocation. It exited 2 alongside a
+/// malformed command, which the rg convention this CLI follows reads as
+/// "error" and a script acts on; `rg --help` exits 0.
+#[test]
+fn asking_for_help_is_not_an_error() {
+    for flag in ["-h", "--help"] {
+        let (code, _, err) = run(&searchctl(), &[flag]);
+        assert_eq!(code, 0, "{flag} must exit 0, not 2; stderr={err}");
+        assert!(
+            err.contains("searchctl"),
+            "{flag} printed no usage; stderr={err}"
+        );
+    }
+    // ...while an invocation that is actually missing its query is still a
+    // usage error, and must stay 2.
+    let (code, _, err) = run(&searchctl(), &[]);
+    assert_eq!(code, 2, "a missing query must exit 2; stderr={err}");
+}
+
 #[test]
 fn bad_limit_value_exits_two() {
     let dir = fixture_dir("badlimit");
