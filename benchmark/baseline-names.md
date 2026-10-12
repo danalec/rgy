@@ -4,6 +4,40 @@ Machine: Windows x64, `cargo run --release -p engine --example name_bench`
 (default corpus: 200,000 names / 1,000 dirs, 30 timed rounds after 3
 warmup rounds, counts proven equal before timing).
 
+## At the scale the plan targets: 5M
+
+`name_bench 5000000`, same machine and discipline. This is the row the plan
+calls "name search, median @ 5M = 0.5 ms", and it is the one number the 200k
+table cannot speak to.
+
+| query | hits | med µs | vs the 0.5 ms goal |
+|---|---|---|---|
+| `rep` | 716,000 | 540 | 1.1x |
+| `report` | 716,000 | 556 | 1.1x |
+| `^src` | 1,428,000 | 786 | 1.6x |
+| `mod` | 1,428,000 | 787 | 1.6x |
+| `f1` | 1,639,704 | 876 | 1.8x |
+| `file` | 2,856,000 | 1,249 | 2.5x |
+| `dat$` | 2,856,000 | 1,252 | 2.5x |
+| `'report_00000.pdf` (exact) | 1 | 1.0 | — |
+
+Walk: 5,002,000 entries in 0.90 s (5.5M entries/s). Index build: 1.7 s.
+
+**The goal is not met on these rows.** They are broad queries, though -- 14%
+to 57% of the corpus matches, so any implementation touches at least the
+matching names. The per-entry cost is already 0.11-0.25 ns of wall clock
+across the parallel scan, which is why the totals track match count rather
+than corpus size.
+
+What is left is not "less work per entry" but less work. The scan's one
+indirection is `dense[ent_name[i]]` -- a per-query table indexed by interned
+name id, gathered 5M times -- and it is structural: `dense` holds this
+query's scores, so it cannot live in the index. The levers are fewer matches
+to score (a bound that pays, which `ranked` was meant to be and measured
+against), or an index layout that removes the indirection. Both are changes,
+not tunings.
+
+
 **Gate:** a PR that regresses any row by more than 20% fails (plan §2).
 These numbers are the *current* baseline - the plan's targets (name search
 median = 0.5 ms @ 5M) are fsearch-grade end-state goals, not this table's
