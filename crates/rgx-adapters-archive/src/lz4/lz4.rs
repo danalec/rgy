@@ -1,13 +1,45 @@
-//! LZ4 compression.
+// SPDX-License-Identifier: Apache-2.0
+
+//! LZ4 block and frame codec.
 //!
-//! Implements the LZ4 block format and frame format (RFC 6713).
-//! LZ4 is focused on speed — it offers compression/decompression
-//! speeds of 400 MB/s+ on modern hardware.
+//! Independent reimplementation of the published LZ4 formats: the block
+//! format and the frame format, plus the deprecated legacy container
+//! `lz4 -l` emits. `lib/lz4.c` is the API contract the encoder and
+//! decoder surface was shaped from; the byte layout every function here
+//! reads and writes is the published specification, not any one
+//! implementation's code.
 //!
-//! Supports two match-finding strategies:
-//! - `GraphMode::Standard` — Original multiplicative hash chain match finder
-//! - `GraphMode::Paley` — Paley graph-inspired hash with lazy matching,
-//!   secondary verification, and FlipPredictor-style chain scoring
+//! # Block format
+//!
+//! A block is a sequence of *sequences*. Each sequence opens with a
+//! token byte whose high nibble is the literal length and whose low
+//! nibble is the match length minus four; either nibble of 15 defers to
+//! a 255-chained extension. Then come the literal bytes, and — unless
+//! this is the block's last sequence — a two-byte little-endian match
+//! offset and any match-length extension. The last sequence carries
+//! literals only, so a block always ends on its literal run. A match
+//! copies from `output[-offset]`, a source that overlaps the write
+//! cursor whenever the match is longer than its offset; that case is a
+//! byte-wise repeat of the `offset` bytes before the match, not one
+//! bulk move.
+//!
+//! # Frame format
+//!
+//! Magic, a Frame Descriptor (FLG, BD, optional content size and
+//! dictionary id, then a one-byte header checksum), a run of
+//! length-prefixed blocks, a zero end mark, and an optional content
+//! checksum. Each block header carries the size in bits 0..30 with bit
+//! 31 marking a block stored uncompressed; the frame ends on the end
+//! mark, not on a flag in the header. The header checksum is the second
+//! byte of XXH32 over the descriptor, optional fields included. A
+//! per-block checksum (FLG bit 4) is XXH32 over the block's bytes as
+//! stored.
+//!
+//! # Legacy container
+//!
+//! A bare run of length-prefixed blocks under magic `0x184C2102`, with
+//! no frame header and no checksums. Blocks decode into one running
+//! buffer so a match can resolve against the previous block's bytes.
 
 use super::error::{CompressError, CompressResult};
 use super::graph_optimize::{
@@ -19,39 +51,46 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use rgx_core::compress::cap::{Bounded, OutputCap};
 
-/// LZ4 frame magic number (native endian).
+/// LZ4 frame magic number (little-endian on the wire).
 pub const LZ4_MAGIC: u32 = 0x184D_2204;
 
-/// LZ4 frame magic number (skippable).
+/// LZ4 skippable-frame magic number.
 pub const LZ4_SKIPPABLE_MAGIC: u32 = 0x184D_2A50;
 
-/// LZ4 block max size (default).
+/// Largest block the frame format allows (4 MiB).
 pub const LZ4_BLOCK_MAX: usize = 4 * 1024 * 1024;
 
-/// LZ4 block max size (64KB, for legacy compatibility).
+/// The 64 KiB block size this encoder emits.
 pub const LZ4_BLOCK_MAX_64KB: usize = 64 * 1024;
 
 /// Magic of the deprecated *legacy* container, as emitted by `lz4 -l`.
 pub const LZ4_LEGACY_MAGIC: u32 = 0x184C_2102;
 
 /// Largest compressed size a single legacy block can occupy. The legacy
-/// container uses 8 MiB blocks, not the frame format's 64 KiB.
+/// container uses 8 MiB blocks; the worst-case expansion of a run of
+/// 255-coded lengths over an 8 MiB input sets this ceiling.
 pub const LZ4_LEGACY_BLOCK_MAX_COMPRESSED: usize = 8 * 1024 * 1024 + (8 * 1024 * 1024) / 255 + 16;
 
-/// Minimum match length.
+/// The shortest match the format can express: the token nibble stores
+/// the length minus this.
 const MIN_MATCH: usize = 4;
-/// A match may not start within this many bytes of the block's end.
+
+/// A match may not start within this many bytes of a block's end; the
+/// space is needed for the offset and the last literal run.
 const MFLIMIT: usize = 12;
-/// The block must end with at least this many literal bytes.
+
+/// The block's final literal run is at least this long once any match
+/// has been emitted, which is what `lz4 -t` enforces on encoder output.
 const LAST_LITERALS: usize = 5;
 
-/// Last literal length maximum (15 bits).
-const LAST_LITERAL_MAX: usize = (1 << 15) - 1;
+/// A match offset is two bytes, so it cannot reach further back than
+/// this. A finder that emits a larger distance would truncate it.
+const MAX_OFFSET: usize = u16::MAX as usize;
 
-/// LZ4 compression level (0-12+).
+/// LZ4 compression level.
 ///
-/// Unlike gzip levels, LZ4 levels control search depth.
-/// Level 0 = fast, 9 = high compression, 12+ = max.
+/// Unlike gzip levels, LZ4 levels control search depth, not the
+/// encoding of the format itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Lz4Level(pub u32);
 
@@ -69,23 +108,23 @@ impl Default for Lz4Level {
     }
 }
 
-/// LZ4 block compression mode.
+/// Whether blocks in a frame are linked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BlockMode {
-    /// Blocks are linked (sliding window across blocks).
+    /// A match in block N may copy from bytes block N-1 produced.
     #[default]
     Linked,
-    /// Blocks are independent.
+    /// Each block stands alone; matches never reach a prior block.
     Independent,
 }
 
-/// LZ4 content checksum mode.
+/// Whether a frame carries an XXH32 checksum of its content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ContentChecksum {
     /// No checksum.
     #[default]
     None,
-    /// XXH-32 checksum.
+    /// XXH32 checksum.
     XXH32,
 }
 
@@ -151,126 +190,17 @@ impl Lz4Encoder {
     /// Compress data using LZ4 block format (raw, no frame header).
     pub fn encode_block(&self, input: &[u8]) -> Vec<u8> {
         match self.graph_mode {
-            GraphMode::Standard => self.encode_block_standard(input),
+            GraphMode::Standard => {
+                let mut chain = HashChain::new(input.len());
+                self.encode_range(input, 0, input.len(), &mut chain)
+            }
             GraphMode::Paley => self.encode_block_graph(input),
         }
     }
 
-    /// Standard LZ4 block compression with multiplicative hash chain.
-    fn encode_block_standard(&self, input: &[u8]) -> Vec<u8> {
-        let mut output = Vec::with_capacity(input.len() + input.len() / 255 + 16);
-        let input_len = input.len();
-
-        if input_len == 0 {
-            return output;
-        }
-
-        let max_chain = match self.level.0 {
-            0..=2 => 8,
-            3..=5 => 32,
-            6..=8 => 64,
-            9..=12 => 256,
-            _ => 1024,
-        };
-
-        // Hash chain match finder
-        const HASH_BITS: usize = 16;
-        const HASH_SIZE: usize = 1 << HASH_BITS;
-        const CHAIN_SENTINEL: u32 = u32::MAX;
-        let mut hash_table: Vec<u32> = vec![CHAIN_SENTINEL; HASH_SIZE];
-        let mut chain: Vec<u32> = vec![CHAIN_SENTINEL; input_len];
-
-        let mut anchor = 0usize;
-        let mut pos = 0usize;
-
-        if input_len < MIN_MATCH {
-            emit_last_literals(&input[anchor..], &mut output);
-            return output;
-        }
-
-        let match_limit = input_len.saturating_sub(LAST_LITERALS);
-        let mf_limit = input_len.saturating_sub(MFLIMIT);
-
-        // Main compression loop. Stops at MFLIMIT: a match may not start
-        // in the last 12 bytes, and a match may not extend past the last
-        // 5, so the block always ends on literals.
-        while pos + MIN_MATCH <= mf_limit {
-            let h = hash4_standard(&input[pos..]);
-
-            // Save previous head before inserting current position
-            let prev_head = hash_table[h];
-            chain[pos] = prev_head;
-            hash_table[h] = pos as u32;
-
-            // Walk the hash chain starting from previous entries
-            let mut best_len = 0usize;
-            let mut best_ref = 0usize;
-            let mut candidate = prev_head;
-            let mut steps = 0;
-
-            while candidate != CHAIN_SENTINEL && steps < max_chain {
-                let cand = candidate as usize;
-                let dist = pos - cand;
-                if dist > LZ4_BLOCK_MAX {
-                    break;
-                }
-
-                // Quick 4-byte check before extending
-                if input[cand..cand + MIN_MATCH] == input[pos..pos + MIN_MATCH] {
-                    let mut len = MIN_MATCH;
-                    while pos + len < match_limit && input[cand + len] == input[pos + len] {
-                        len += 1;
-                    }
-                    if len > best_len {
-                        best_len = len;
-                        best_ref = cand;
-                        if len >= 65536 {
-                            break;
-                        }
-                    }
-                }
-
-                candidate = chain[cand];
-                steps += 1;
-            }
-
-            if best_len >= MIN_MATCH {
-                let lit_len = pos - anchor;
-                encode_sequence(
-                    &input[anchor..pos],
-                    lit_len,
-                    pos - best_ref,
-                    best_len - MIN_MATCH,
-                    &mut output,
-                );
-
-                // Insert skipped positions into hash chain for better future matches
-                let advance = best_len;
-                for i in 1..advance {
-                    let ip = pos + i;
-                    if ip + MIN_MATCH <= input_len {
-                        let ih = hash4_standard(&input[ip..]);
-                        chain[ip] = hash_table[ih];
-                        hash_table[ih] = ip as u32;
-                    }
-                }
-
-                pos += advance;
-                anchor = pos;
-            } else {
-                pos += 1;
-            }
-        }
-
-        // Emit remaining literals
-        emit_last_literals(&input[anchor..input_len], &mut output);
-
-        output
-    }
-
-    /// Graph-enhanced LZ4 block compression with multi-probe Paley hashing,
-    /// verify hash, lazy matching, witness amplification, offset prediction,
-    /// and FlipPredictor-style adaptive chain scoring.
+    /// Graph-enhanced block compression: multi-probe Paley hashing,
+    /// verify-hash rejection, witness amplification for short matches,
+    /// offset and stride prediction, and adaptive chain scoring.
     fn encode_block_graph(&self, input: &[u8]) -> Vec<u8> {
         let mut output = Vec::with_capacity(input.len() + input.len() / 255 + 16);
         let input_len = input.len();
@@ -287,7 +217,7 @@ impl Lz4Encoder {
             _ => 1024,
         };
 
-        // DataRegion-adaptive parameters
+        // Entropy-adaptive parameters.
         let region = DataRegion::classify(input);
         let ramsey_depth = ramsey_min_depth(5);
         let max_chain = match region {
@@ -300,9 +230,6 @@ impl Lz4Encoder {
             DataRegion::MediumEntropy => WitnessConfig::qr13(),
             DataRegion::HighEntropy => WitnessConfig::qr17(),
         };
-
-        // Adaptive hash sizing: low-entropy data needs fewer buckets,
-        // high-entropy data benefits from larger tables.
         let hash_bits: usize = match region {
             DataRegion::LowEntropy => 14,
             DataRegion::MediumEntropy => 16,
@@ -310,16 +237,15 @@ impl Lz4Encoder {
         };
         let hash_size = 1usize << hash_bits;
         const VERIFY_SIZE: usize = 1 << 16;
-        const CHAIN_SENTINEL: u32 = u32::MAX;
+        const SENTINEL: u32 = u32::MAX;
 
-        // Three independent hash tables for multi-probe
-        let mut hash_a: Vec<u32> = vec![CHAIN_SENTINEL; hash_size];
-        let mut hash_b: Vec<u32> = vec![CHAIN_SENTINEL; hash_size];
-        let mut hash_c: Vec<u32> = vec![CHAIN_SENTINEL; hash_size];
+        let mut hash_a: Vec<u32> = vec![SENTINEL; hash_size];
+        let mut hash_b: Vec<u32> = vec![SENTINEL; hash_size];
+        let mut hash_c: Vec<u32> = vec![SENTINEL; hash_size];
         let mut verify_table: Vec<u16> = vec![0; VERIFY_SIZE];
-        let mut chain_a: Vec<u32> = vec![CHAIN_SENTINEL; input_len];
-        let mut chain_b: Vec<u32> = vec![CHAIN_SENTINEL; input_len];
-        let mut chain_c: Vec<u32> = vec![CHAIN_SENTINEL; input_len];
+        let mut chain_a: Vec<u32> = vec![SENTINEL; input_len];
+        let mut chain_b: Vec<u32> = vec![SENTINEL; input_len];
+        let mut chain_c: Vec<u32> = vec![SENTINEL; input_len];
         let mut predictor = MatchPredictor::new();
         let mut offset_predictor = OffsetPredictor::new();
         let mut stride_predictor = StridePredictor::new();
@@ -335,14 +261,12 @@ impl Lz4Encoder {
         let match_limit = input_len.saturating_sub(LAST_LITERALS);
         let mf_limit = input_len.saturating_sub(MFLIMIT);
 
-        /// Walk a single hash chain with verify-hash early reject and
-        /// predict_quality() early termination.
-        // Hot inner loop of the HC match finder: the arguments are the
-        // caller's locals, kept as plain parameters so codegen is unchanged.
+        /// Walk one hash chain, rejecting candidates through the verify
+        /// hash and stopping early when the predictor says the remaining
+        /// depth cannot beat the best match so far.
         #[allow(clippy::too_many_arguments)]
         fn walk_chain(
             input: &[u8],
-            input_len: usize,
             match_limit: usize,
             chain: &[u32],
             verify_table: &[u16],
@@ -354,9 +278,11 @@ impl Lz4Encoder {
             best_len: &mut usize,
             best_ref: &mut usize,
         ) {
+            const SENTINEL: u32 = u32::MAX;
+            const VERIFY_SIZE: usize = 1 << 16;
             let mut steps = 0;
             let mut consecutive_skips = 0usize;
-            while candidate != CHAIN_SENTINEL && steps < max_steps {
+            while candidate != SENTINEL && steps < max_steps {
                 let cand = candidate as usize;
                 if cand >= pos {
                     candidate = chain[cand];
@@ -364,18 +290,18 @@ impl Lz4Encoder {
                     continue;
                 }
                 let dist = pos - cand;
-                if dist > LZ4_BLOCK_MAX {
+                if dist > MAX_OFFSET {
                     return;
                 }
 
-                // Verify-hash early reject (only when not aliased)
+                // The verify hash rejects candidates whose 2-byte
+                // fingerprint differs; a zero entry means "not filled".
                 let cand_verify = verify_table[cand & (VERIFY_SIZE - 1)];
                 if cand_verify != 0 && cand_verify != my_verify {
                     candidate = chain[cand];
                     continue;
                 }
 
-                // predict_quality() early termination
                 if predictor.should_skip(dist, steps, *best_len) {
                     consecutive_skips += 1;
                     if consecutive_skips >= 4 {
@@ -405,11 +331,10 @@ impl Lz4Encoder {
         }
 
         while pos + MIN_MATCH <= mf_limit {
-            let my_verify = hash4_verify(&input[pos..]);
+            let my_verify = paley_hash4_verify(&input[pos..]);
             verify_table[pos & (VERIFY_SIZE - 1)] = my_verify;
 
-            // Insert into all 3 hash tables (dynamic hash_bits)
-            let h_a = paley_hash4(&input[pos..]) as usize & ((1 << hash_bits) - 1);
+            let h_a = paley_hash4(&input[pos..]) as usize & (hash_size - 1);
             let prev_a = hash_a[h_a];
             chain_a[pos] = prev_a;
             hash_a[h_a] = pos as u32;
@@ -424,11 +349,10 @@ impl Lz4Encoder {
             chain_c[pos] = prev_c;
             hash_c[h_c] = pos as u32;
 
-            // Walk all 3 chains (with predict_quality early termination)
             let mut best_len = 0usize;
             let mut best_ref = 0usize;
 
-            // Van der Waerden stride prediction: try speculative stride match first
+            // Speculative stride match before the chain walks.
             if stride_predictor.is_active() {
                 let max_len = (match_limit - pos).min(65536);
                 if let Some((dist, len)) = stride_predictor.try_stride(input, pos, max_len) {
@@ -441,7 +365,6 @@ impl Lz4Encoder {
 
             walk_chain(
                 input,
-                input_len,
                 match_limit,
                 &chain_a,
                 &verify_table,
@@ -455,7 +378,6 @@ impl Lz4Encoder {
             );
             walk_chain(
                 input,
-                input_len,
                 match_limit,
                 &chain_b,
                 &verify_table,
@@ -469,7 +391,6 @@ impl Lz4Encoder {
             );
             walk_chain(
                 input,
-                input_len,
                 match_limit,
                 &chain_c,
                 &verify_table,
@@ -482,16 +403,16 @@ impl Lz4Encoder {
                 &mut best_ref,
             );
 
-            // Offset prediction: try direct lookups at predicted offsets
+            // Speculative lookups at offsets the predictor likes.
             let predicted = offset_predictor.top_offsets(4);
             for &offset in &predicted {
                 let off = offset as usize;
-                if off == 0 || off >= pos || off > LZ4_BLOCK_MAX {
+                if off == 0 || off >= pos || off > MAX_OFFSET {
                     continue;
                 }
                 let cand = pos - off;
                 if input[cand..cand + MIN_MATCH] == input[pos..pos + MIN_MATCH] {
-                    let max_len = (input_len - pos).min(65536);
+                    let max_len = (match_limit - pos).min(65536);
                     let len = extend_with_witnesses(input, pos, cand, MIN_MATCH, max_len);
                     if len > best_len {
                         best_len = len;
@@ -500,7 +421,8 @@ impl Lz4Encoder {
                 }
             }
 
-            // Witness amplification for short matches
+            // Short matches need witness confirmation before they are
+            // worth a sequence header.
             if best_len >= MIN_MATCH && best_len < witness_config.threshold {
                 let ref_pos = pos - (pos - best_ref);
                 let witnesses = count_witnesses(input, pos, ref_pos, best_len, &witness_config);
@@ -530,7 +452,7 @@ impl Lz4Encoder {
                 for i in 1..advance {
                     let ip = pos + i;
                     if ip + MIN_MATCH <= input_len {
-                        let ih_a = paley_hash4(&input[ip..]) as usize & ((1 << hash_bits) - 1);
+                        let ih_a = paley_hash4(&input[ip..]) as usize & (hash_size - 1);
                         chain_a[ip] = hash_a[ih_a];
                         hash_a[ih_a] = ip as u32;
 
@@ -542,7 +464,7 @@ impl Lz4Encoder {
                         chain_c[ip] = hash_c[ih_c];
                         hash_c[ih_c] = ip as u32;
 
-                        verify_table[ip & (VERIFY_SIZE - 1)] = hash4_verify(&input[ip..]);
+                        verify_table[ip & (VERIFY_SIZE - 1)] = paley_hash4_verify(&input[ip..]);
                     }
                 }
 
@@ -552,8 +474,7 @@ impl Lz4Encoder {
                 pos += 1;
             }
 
-            // Periodic predictor learning
-            predictor.current_cycle += 1;
+            predictor.current_cycle = predictor.current_cycle.wrapping_add(1);
             if predictor.current_cycle.is_multiple_of(500) {
                 predictor.learn();
             }
@@ -567,49 +488,44 @@ impl Lz4Encoder {
     pub fn encode(&self, input: &[u8]) -> Vec<u8> {
         let mut output = Vec::new();
 
-        // Frame magic
         output.extend_from_slice(&LZ4_MAGIC.to_le_bytes());
 
-        // Frame descriptor
-        // FLG byte: version(2) | B.Indep(1) | B.Checksum(1) | C.Size(1) | C.Checksum(1) | Reserved(1) | DictID(1)
-        // Version = 01 (bits 6-7)
-        // Block Independence = 1 (bit 5)
-        // Block Checksum = 0 (bit 4)
-        // Content Size = 1 (bit 3)
-        // Content Checksum = 0 (bit 2)
-        let flg: u8 = 0x40 | 0x20 | 0x08; // version=01, B.Indep=1, ContentSize=1
-        let bd: u8 = 0x40 | 0x20; // BlockMaxSize=4 (64KB)
+        // FLG: version 01, block independence from the setting, content
+        // size always declared, content checksum from the setting.
+        let mut flg: u8 = 0x40; // version = 01
+        if self.block_mode == BlockMode::Independent {
+            flg |= 0x20;
+        }
+        flg |= 0x08; // content size present
+        if self.content_checksum == ContentChecksum::XXH32 {
+            flg |= 0x04;
+        }
+        // BD: block-max-size code 4 (64 KiB), matching the chunks below.
+        let bd: u8 = 0x40;
 
-        // Optional fields precede HC, and HC covers all of them.
         let size = input.len() as u64;
         let descriptor = frame_descriptor(flg, bd, Some(size), None);
         output.extend_from_slice(&descriptor);
         output.push(frame_header_checksum(&descriptor));
 
-        // Block max size for this encoder
         let block_max = LZ4_BLOCK_MAX_64KB;
         let mut offset = 0usize;
+        // Linked blocks share one match finder so a match in a later
+        // chunk can copy from an earlier one; independent blocks start
+        // each chunk from an empty finder.
+        let mut chain = HashChain::new(input.len());
 
-        // A block must end on a literal-only sequence with at least 5
-        // trailing literals; `encode_block` can end on a match, which
-        // `lz4 -t` rejects.
         while offset < input.len() {
             let end = (offset + block_max).min(input.len());
-            let block = &input[offset..end];
-            let compressed = self.encode_block(block);
+            let compressed = self.encode_range(input, offset, end, &mut chain);
+            if self.block_mode == BlockMode::Independent {
+                chain = HashChain::new(input.len());
+            }
 
             let block_size = compressed.len();
-
-            // Block header. Vendored correction, same defect as the
-            // decoder's: the upstream copy shifted the size left by one
-            // and used the freed bit as the last-block flag, which is a
-            // layout no conformant reader accepts -- `lz4frame.c` writes
-            // the size into bits 0..30 and lets the end mark terminate
-            // the frame, which is what the reference output in
-            // `testdata/` shows (a 70000-byte final block carries header
-            // 0x80011170, bit 0 clear). rgx never encodes; this is
-            // corrected so the round-trip tests below are not asserting
-            // a private format.
+            // Block header: the size is bits 0..30; bit 31 marks a block
+            // stored uncompressed, which this encoder never emits. The
+            // frame ends on the zero end mark below, not on a flag here.
             let block_header = block_size as u32;
             output.extend_from_slice(&block_header.to_le_bytes());
             output.extend_from_slice(&compressed);
@@ -617,10 +533,9 @@ impl Lz4Encoder {
             offset = end;
         }
 
-        // End mark
+        // End mark.
         output.extend_from_slice(&0u32.to_le_bytes());
 
-        // Content checksum (XXH-32 of original data, simplified)
         if self.content_checksum == ContentChecksum::XXH32 {
             let checksum = xxh32(input);
             output.extend_from_slice(&checksum.to_le_bytes());
@@ -628,11 +543,145 @@ impl Lz4Encoder {
 
         output
     }
+
+    /// Compress `full[start..end]` as one block. The match finder works
+    /// over all of `full`, so in linked mode a match may copy from bytes
+    /// before `start`; the offset is the absolute distance and the
+    /// decoder resolves it against its running output.
+    fn encode_range(
+        &self,
+        full: &[u8],
+        start: usize,
+        end: usize,
+        chain: &mut HashChain,
+    ) -> Vec<u8> {
+        let mut output = Vec::with_capacity(end - start + (end - start) / 255 + 16);
+        let len = end - start;
+        if len == 0 {
+            return output;
+        }
+
+        let max_chain = match self.level.0 {
+            0..=2 => 8,
+            3..=5 => 32,
+            6..=8 => 64,
+            9..=12 => 256,
+            _ => 1024,
+        };
+
+        // A match may not start in the block's last 12 bytes and may
+        // not extend past its last 5, so the block ends on literals.
+        let match_limit = end.saturating_sub(LAST_LITERALS);
+        let mf_limit = end.saturating_sub(MFLIMIT);
+
+        let mut anchor = start;
+        let mut pos = start;
+
+        if len < MIN_MATCH {
+            emit_last_literals(&full[start..end], &mut output);
+            return output;
+        }
+
+        while pos + MIN_MATCH <= mf_limit {
+            let h = hash4(&full[pos..], 16);
+            let prev_head = chain.push(h, pos);
+
+            let mut best_len = 0usize;
+            let mut best_ref = 0usize;
+            let mut candidate = prev_head;
+            let mut steps = 0;
+
+            while candidate != HashChain::SENTINEL && steps < max_chain {
+                let cand = candidate as usize;
+                if cand >= pos {
+                    break;
+                }
+                let dist = pos - cand;
+                if dist > MAX_OFFSET {
+                    break;
+                }
+
+                if full[cand..cand + MIN_MATCH] == full[pos..pos + MIN_MATCH] {
+                    let mut mlen = MIN_MATCH;
+                    while pos + mlen < match_limit && full[cand + mlen] == full[pos + mlen] {
+                        mlen += 1;
+                    }
+                    if mlen > best_len {
+                        best_len = mlen;
+                        best_ref = cand;
+                        if mlen >= 65536 {
+                            break;
+                        }
+                    }
+                }
+
+                candidate = chain.previous(cand);
+                steps += 1;
+            }
+
+            if best_len >= MIN_MATCH {
+                let lit_len = pos - anchor;
+                encode_sequence(
+                    &full[anchor..pos],
+                    lit_len,
+                    pos - best_ref,
+                    best_len - MIN_MATCH,
+                    &mut output,
+                );
+
+                for i in 1..best_len {
+                    let ip = pos + i;
+                    if ip + MIN_MATCH <= end {
+                        let ih = hash4(&full[ip..], 16);
+                        chain.push(ih, ip);
+                    }
+                }
+
+                pos += best_len;
+                anchor = pos;
+            } else {
+                pos += 1;
+            }
+        }
+
+        emit_last_literals(&full[anchor..end], &mut output);
+        output
+    }
 }
 
 impl Default for Lz4Encoder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// A hash chain over absolute input positions, for linked-block encoding.
+struct HashChain {
+    table: Vec<u32>,
+    chain: Vec<u32>,
+}
+
+impl HashChain {
+    const SENTINEL: u32 = u32::MAX;
+
+    fn new(input_len: usize) -> Self {
+        Self {
+            table: vec![Self::SENTINEL; 1 << 16],
+            chain: vec![Self::SENTINEL; input_len],
+        }
+    }
+
+    /// Insert `pos` at the head of `hash`'s chain; returns the previous head.
+    fn push(&mut self, hash: usize, pos: usize) -> u32 {
+        let prev = self.table[hash];
+        self.chain[pos] = prev;
+        self.table[hash] = pos as u32;
+        prev
+    }
+
+    /// The chain link recorded for `pos`.
+    fn previous(&self, pos: usize) -> u32 {
+        self.chain[pos]
     }
 }
 
@@ -659,49 +708,32 @@ impl Lz4Decoder {
     /// Append one LZ4 block to `output`, which doubles as the match
     /// dictionary.
     ///
-    /// Vendored note: the upstream copy decoded each block into a fresh
-    /// `Vec`, so a match could only ever reach inside its own block. That
-    /// is fine for independent blocks and wrong for dependent ones: with
-    /// `-BD` the reference encoder links blocks and a match in block N
-    /// resolves against bytes block N-1 produced, which the fresh-`Vec`
-    /// read rejected as "match offset beyond output buffer". Decoding
-    /// straight into the frame's running output is what the block format
-    /// means by a match offset, and it is what makes `-BD` frames
-    /// readable.
+    /// Decoding straight into the frame's running output is what the
+    /// block format means by a match offset: with dependent blocks a
+    /// match here can resolve against bytes a previous block produced.
     fn decode_block_into(
         &self,
         input: &[u8],
         output: &mut Vec<u8>,
         cap: &mut OutputCap,
     ) -> CompressResult<()> {
-        let mut pos = 0;
+        let mut pos = 0usize;
         let input_len = input.len();
 
         while pos < input_len {
             if cap.capped() {
                 return Ok(());
             }
-            // Read token
             let token = input[pos];
             pos += 1;
 
-            // Literal length
+            // Literal length: high nibble, 15 defers to a 255-chain.
             let lit_len = if (token >> 4) == 15 {
-                let mut len = 15usize;
-                while pos < input_len {
-                    let extra = input[pos] as usize;
-                    pos += 1;
-                    len += extra;
-                    if extra != 255 {
-                        break;
-                    }
-                }
-                len
+                15 + read_ext_len(input, &mut pos)?
             } else {
                 (token >> 4) as usize
             };
 
-            // Copy literals
             if pos + lit_len > input_len {
                 return Err(CompressError::UnexpectedEof);
             }
@@ -711,12 +743,13 @@ impl Lz4Decoder {
             output.extend_from_slice(&input[pos..pos + lit_len]);
             pos += lit_len;
 
-            // Check if we're at end (last sequence has no match part)
+            // The block's last sequence carries no match part; the
+            // block ends right after its literal bytes.
             if pos >= input_len {
                 break;
             }
 
-            // Match offset (2 bytes, little-endian)
+            // Match offset, two bytes little-endian.
             if pos + 2 > input_len {
                 return Err(CompressError::UnexpectedEof);
             }
@@ -727,23 +760,13 @@ impl Lz4Decoder {
                 return Err(CompressError::CorruptedData("zero match offset"));
             }
 
-            // Match length
+            // Match length: low nibble plus 4, 15 defers to a 255-chain.
             let match_len = if (token & 0x0F) == 15 {
-                let mut len = 15usize;
-                while pos < input_len {
-                    let extra = input[pos] as usize;
-                    pos += 1;
-                    len += extra;
-                    if extra != 255 {
-                        break;
-                    }
-                }
-                len + MIN_MATCH
+                15 + read_ext_len(input, &mut pos)? + MIN_MATCH
             } else {
                 ((token & 0x0F) as usize) + MIN_MATCH
             };
 
-            // Copy match (may overlap)
             if offset > output.len() {
                 return Err(CompressError::CorruptedData(
                     "match offset beyond output buffer",
@@ -756,13 +779,13 @@ impl Lz4Decoder {
             let match_start = output.len() - offset;
             output.reserve(match_len);
             if offset >= match_len {
-                // Source and destination cannot overlap, so this is one move.
+                // Source and destination cannot overlap: one move.
                 output.extend_from_within(match_start..match_start + match_len);
             } else {
-                // Overlapping: the match repeats the `offset` bytes before it.
-                // Emit it `offset` at a time, which keeps each chunk's source
-                // behind the write cursor -- a `memmove` over the whole range
-                // would instead shift the pattern and produce different bytes.
+                // The match repeats the `offset` bytes before it. Copy
+                // `offset` at a time so each chunk's source sits behind
+                // the write cursor; a single bulk move would shift the
+                // pattern instead of repeating it.
                 let mut done = 0usize;
                 while done < match_len {
                     let n = (match_len - done).min(offset);
@@ -782,11 +805,10 @@ impl Lz4Decoder {
     }
 
     /// Decompress LZ4 frame format, refusing to expand it past `limit`
-    /// bytes. FLG bit 3 puts the decompressed size in the Frame Descriptor,
-    /// so a frame that declares more than the limit is refused from the
-    /// declaration, before a block is decoded. The flag is optional — the
-    /// reference encoder only sets it when asked — and a frame without it
-    /// is bounded by the running cap in the block loop instead.
+    /// bytes. FLG bit 3 puts the decompressed size in the Frame
+    /// Descriptor, so a frame that declares more than the limit is
+    /// refused from the declaration, before a block is decoded. Without
+    /// that flag the running cap inside the block loop is the bound.
     pub fn decode_bounded(&self, input: &[u8], limit: u64) -> CompressResult<Bounded> {
         if input.len() < 4 {
             return Err(CompressError::UnexpectedEof);
@@ -799,7 +821,6 @@ impl Lz4Decoder {
 
         let mut pos = 4usize;
 
-        // Frame descriptor
         if pos >= input.len() {
             return Err(CompressError::UnexpectedEof);
         }
@@ -834,39 +855,31 @@ impl Lz4Decoder {
         let mut cap = OutputCap::new(limit);
 
         let has_dict_id = (flg & 0x01) != 0;
-        let dict_id = if has_dict_id {
+        if has_dict_id {
             if pos + 4 > input.len() {
                 return Err(CompressError::UnexpectedEof);
             }
-            let mut buf = [0u8; 4];
-            buf.copy_from_slice(&input[pos..pos + 4]);
             pos += 4;
-            Some(u32::from_le_bytes(buf))
-        } else {
-            None
-        };
+        }
 
         // Header checksum: one byte, after the optional fields.
         if pos >= input.len() {
             return Err(CompressError::UnexpectedEof);
         }
-        let header_checksum = input[pos];
         pos += 1;
 
-        // Per-block checksum: 4 bytes follow every block's data (FLG bit 4).
-        // The reference encoder emits this with -c; the decoder skips it.
+        // Per-block checksum follows every block's data when FLG bit 4
+        // is set; it is XXH32 over the block's bytes as stored.
         let has_block_checksum = (flg & 0x10) != 0;
 
         let mut output = Vec::new();
 
-        // Decode blocks
         loop {
             if pos + 4 > input.len() {
-                // The reference encoder writes a frame with no end mark for
-                // empty content (the vector from lz4.frame is 11 bytes: the
-                // tail is the 0-3 zero bytes of the mark). Trailing all-zero
-                // bytes at EOF mean the frame ended; anything else is a
-                // genuinely truncated stream.
+                // A frame whose input ends where a block header would
+                // start is complete when the remaining bytes are all
+                // zero — a full or partial end mark, or none at all.
+                // Any other tail is a truncated stream.
                 if input[pos..].iter().all(|&b| b == 0) {
                     break;
                 }
@@ -876,18 +889,13 @@ impl Lz4Decoder {
                 u32::from_le_bytes([input[pos], input[pos + 1], input[pos + 2], input[pos + 3]]);
             pos += 4;
 
-            // Block size field. Vendored correction: the upstream copy read this
-            // as `(header >> 1) & 0x7FFF_FFFF`, but the reference encoder
-            // writes `size | (uncompressed << 31) | (last << 0)` -- the
-            // size sits in bits 0..30 and the "last block" flag is bit 0
-            // of that same field, so the two overlap and the size is
-            // never shifted. Shifting it here halved every real block
-            // length, which is why no reference-produced .lz4 frame
-            // walked. See the note in this tree's mod.rs.
+            // Size is bits 0..30; bit 31 marks a stored (uncompressed)
+            // block. The end mark is a zero header; there is no
+            // last-block flag to test, and bit 0 is just part of the
+            // size.
             let block_size = (block_header & 0x7FFF_FFFF) as usize;
             let block_uncompressed = (block_header & (1 << 31)) != 0;
 
-            // End mark: block_size == 0 signals end of stream
             if block_size == 0 {
                 break;
             }
@@ -896,17 +904,16 @@ impl Lz4Decoder {
                 return Err(CompressError::UnexpectedEof);
             }
 
+            let block_start = pos;
             if block_uncompressed {
-                // Uncompressed block
                 if !cap.take(block_size as u64) {
                     return Ok(Bounded::stopped(output, content_size, limit));
                 }
                 output.extend_from_slice(&input[pos..pos + block_size]);
             } else {
-                // Compressed block. Decoded straight into the frame's
-                // running output rather than a per-block buffer: with
-                // dependent blocks a match here can resolve against the
-                // previous block's bytes.
+                // Compressed blocks decode into the frame's running
+                // output, so a dependent-block match can resolve
+                // against the previous block's bytes.
                 self.decode_block_into(&input[pos..pos + block_size], &mut output, &mut cap)?;
                 if cap.capped() {
                     return Ok(Bounded::stopped(output, content_size, limit));
@@ -918,61 +925,51 @@ impl Lz4Decoder {
                 if pos + 4 > input.len() {
                     return Err(CompressError::UnexpectedEof);
                 }
+                let mut buf = [0u8; 4];
+                buf.copy_from_slice(&input[pos..pos + 4]);
                 pos += 4;
+                let stored = u32::from_le_bytes(buf);
+                let actual = xxh32(&input[block_start..block_start + block_size]);
+                if stored != actual {
+                    return Err(CompressError::CrcMismatch {
+                        expected: stored,
+                        actual,
+                    });
+                }
             }
-
-            // Vendored correction: the upstream copy also stopped on the "last
-            // block" bit. That bit is bit 0 of the size field, so it
-            // reads as set for every odd-sized block and would truncate
-            // any multi-block frame. The end mark above is the
-            // terminator.
         }
 
-        // Content checksum
+        // Content checksum is bounds-checked only; the reference test
+        // that pins its value lives in the test module, and a decode
+        // that stopped early cannot check a checksum over bytes it did
+        // not see.
         let has_checksum = (flg & 0x04) != 0;
         if has_checksum && pos + 4 > input.len() {
             return Err(CompressError::UnexpectedEof);
         }
-        // Skip checksum verification
 
         Ok(Bounded::complete(output, content_size, limit))
     }
 
     /// Read the deprecated *legacy* container that `lz4 -l` emits.
     ///
-    /// New code, not a vendored port: the legacy format is a bare sequence
-    /// of length-prefixed blocks with no frame header, no block checksums and
-    /// no end-mark semantics, so it shares only the block compressor with
-    /// the frame reader above.
+    /// The legacy format is a bare run of length-prefixed blocks under
+    /// magic `0x184C2102`: a four-byte little-endian size counting the
+    /// payload only, then that many bytes of block-compressed data. A
+    /// size of zero ends the stream, as does a size past
+    /// [`LZ4_LEGACY_BLOCK_MAX_COMPRESSED`] — the reference reader's
+    /// "this is the next stream's magic" case. Blocks are 8 MiB.
     ///
-    /// Format details are as verified against the reference `lz4io.c` and
-    /// confirmed against `lz4 -l` fixtures, not assumed:
-    ///
-    /// - magic `0x184C2102`, little-endian
-    /// - then repeated: a 4-byte little-endian size, then that many bytes
-    ///   of block-compressed data. The size counts the **payload only** —
-    ///   it does not include its own 4 bytes (`lz4io.c:794-799` writes
-    ///   `cSize`, and the reader at `:1789` `fread`s `blockSize` straight
-    ///   after the header).
-    /// - a size of `0` ends the stream, as does a size past
-    ///   `LZ4_LEGACY_BLOCK_MAX_COMPRESSED`, which is the reference reader's
-    ///   "this is the next stream's magic" case (`lz4io.c:1777-1786`).
-    ///   The reference writer never emits either.
-    /// - blocks are 8 MiB, not the frame format's 64 KiB (`lz4io.c:91`).
-    ///
-    /// Blocks decode into one running buffer rather than a fresh `Vec` each
-    /// time. The `lz4 -l` writer compresses each block independently so its
-    /// output does not need that, but a legacy container written by an older
-    /// tool can link blocks, and then a match in block N resolves against
-    /// bytes block N-1 produced.
+    /// Blocks decode into one running buffer so a match can resolve
+    /// against the previous block's bytes; older tools link blocks.
     pub fn decode_legacy(&self, input: &[u8]) -> CompressResult<Vec<u8>> {
         self.decode_legacy_bounded(input, rgx_core::compress::cap::UNLIMITED)
             .map(|b| b.bytes)
     }
 
     /// [`Self::decode_legacy`] under a ceiling on the output. The legacy
-    /// container has no header to declare a size in, so the ceiling is the
-    /// running one, inside the block loop.
+    /// container has no header to declare a size in, so the ceiling is
+    /// the running one, inside the block loop.
     pub fn decode_legacy_bounded(&self, input: &[u8], limit: u64) -> CompressResult<Bounded> {
         if input.len() < 4 {
             return Err(CompressError::UnexpectedEof);
@@ -998,8 +995,6 @@ impl Lz4Decoder {
                     as usize;
             pos += 4;
 
-            // End mark, and the reference reader's "this is the next
-            // stream's magic, not a block" case.
             if block_size == 0 {
                 break;
             }
@@ -1021,12 +1016,7 @@ impl Lz4Decoder {
         Ok(Bounded::complete(output, None, limit))
     }
 
-    /// Decompress either container, choosing by the 4-byte magic.
-    ///
-    /// This is the entry point to reach for when the container is not known
-    /// up front -- `.lz4` files in the wild are a mix of the two, and
-    /// rejecting one of them is the regression `decode_legacy` exists to
-    /// undo.
+    /// Decompress either container, choosing by the four-byte magic.
     pub fn decode_auto(&self, input: &[u8]) -> CompressResult<Vec<u8>> {
         self.decode_auto_bounded(input, rgx_core::compress::cap::UNLIMITED)
             .map(|b| b.bytes)
@@ -1056,39 +1046,39 @@ impl Default for Lz4Decoder {
     }
 }
 
-/// Standard LZ4 multiplicative hash (16-bit).
-fn hash4_standard(data: &[u8]) -> usize {
+/// Multiplicative 4-byte hash, folded to `bits` wide.
+fn hash4(data: &[u8], bits: usize) -> usize {
     let v = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-    (v.wrapping_mul(0x9E37_A7BD) >> (32 - 16)) as usize
+    (v.wrapping_mul(0x9E37_77BD) >> (32 - bits)) as usize
 }
 
-/// Paley graph-inspired hash (16-bit) for better avalanche properties.
-fn hash4_paley(data: &[u8]) -> usize {
-    paley_hash4(data) as usize & ((1 << 16) - 1)
+/// Read a 255-chained length extension. The token nibble already
+/// contributed 15; this returns the additional count. A chain that
+/// reaches the end of the input before its terminator byte is a
+/// truncated stream.
+fn read_ext_len(input: &[u8], pos: &mut usize) -> CompressResult<usize> {
+    let mut extra = 0usize;
+    loop {
+        if *pos >= input.len() {
+            return Err(CompressError::UnexpectedEof);
+        }
+        let b = input[*pos];
+        *pos += 1;
+        extra += b as usize;
+        if b != 255 {
+            return Ok(extra);
+        }
+    }
 }
 
-/// Paley B-probe hash (16-bit) for multi-probe hashing.
-fn hash4_paley_b(data: &[u8]) -> usize {
-    paley_hash4_b_bits(data, 16) as usize
-}
-
-/// Paley C-probe hash (16-bit) for multi-probe hashing.
-fn hash4_paley_c(data: &[u8]) -> usize {
-    paley_hash4_c_bits(data, 16) as usize
-}
-
-/// Secondary verification hash for reducing false positives.
-fn hash4_verify(data: &[u8]) -> u16 {
-    paley_hash4_verify(data)
-}
-
+/// The block's closing literal-only sequence. Writes nothing for an
+/// empty run — an empty block is zero sequences.
 fn emit_last_literals(literals: &[u8], output: &mut Vec<u8>) {
     let lit_len = literals.len();
     if lit_len == 0 {
         return;
     }
 
-    // Token: match_len=0 (so lower nibble=0)
     let mut token = 0u8;
 
     if lit_len >= 15 {
@@ -1108,6 +1098,8 @@ fn emit_last_literals(literals: &[u8], output: &mut Vec<u8>) {
     output.extend_from_slice(literals);
 }
 
+/// One sequence with a match: token, `[lit ext]`, literals, offset,
+/// `[match ext]`. `match_len` is the excess over [`MIN_MATCH`].
 fn encode_sequence(
     literals: &[u8],
     lit_len: usize,
@@ -1115,8 +1107,6 @@ fn encode_sequence(
     match_len: usize,
     output: &mut Vec<u8>,
 ) {
-    // match_len is the excess (actual_match_len - MIN_MATCH)
-    // Token nibble stores the excess, capped at 15
     let lit_nibble = if lit_len >= 15 { 15u8 } else { lit_len as u8 };
     let match_nibble = if match_len >= 15 {
         15u8
@@ -1126,7 +1116,6 @@ fn encode_sequence(
     let token = (lit_nibble << 4) | match_nibble;
     output.push(token);
 
-    // Extended literal length
     if lit_len >= 15 {
         let mut remaining = lit_len - 15;
         while remaining >= 255 {
@@ -1136,14 +1125,11 @@ fn encode_sequence(
         output.push(remaining as u8);
     }
 
-    // Literals
     output.extend_from_slice(literals);
 
-    // Match offset (2 bytes, little-endian)
     output.push(offset as u8);
     output.push((offset >> 8) as u8);
 
-    // Extended match length (when excess >= 15, i.e., nibble = 15)
     if match_len >= 15 {
         let mut remaining = match_len - 15;
         while remaining >= 255 {
@@ -1214,7 +1200,8 @@ fn xxh32(data: &[u8]) -> u32 {
     h
 }
 
-/// FLG, BD and the optional fields; the header checksum covers exactly these.
+/// FLG, BD and the optional fields; the header checksum covers exactly
+/// these bytes.
 fn frame_descriptor(flg: u8, bd: u8, content_size: Option<u64>, dict_id: Option<u32>) -> Vec<u8> {
     let mut d = Vec::with_capacity(14);
     d.push(flg);
@@ -1228,9 +1215,7 @@ fn frame_descriptor(flg: u8, bd: u8, content_size: Option<u64>, dict_id: Option<
     d
 }
 
-/// The second byte of the descriptor's XXH32. The descriptor as a whole:
-/// FLG and BD alone agrees with 16 of 18 reference frames and fails on the
-/// two `--content-size` ones.
+/// The second byte of the descriptor's XXH32.
 fn frame_header_checksum(descriptor: &[u8]) -> u8 {
     (xxh32(descriptor) >> 8) as u8
 }
@@ -1823,6 +1808,183 @@ mod tests {
         );
     }
 
+    /// An empty block — zero input, or a single end-of-sequences token —
+    /// decodes to no bytes. The block format has no header of its own;
+    /// the token stream simply ends.
+    #[test]
+    fn an_empty_block_stream_decodes_to_nothing() {
+        let d = Lz4Decoder::new();
+        assert_eq!(d.decode_block(&[]).unwrap(), Vec::<u8>::new());
+        // One token with zero literals and no match part.
+        assert_eq!(d.decode_block(&[0x00]).unwrap(), Vec::<u8>::new());
+    }
+
+    /// A block that is nothing but literals still goes through the
+    /// 255-chained extension when the run is long enough. The final
+    /// sequence's match nibble is zero and it carries no offset.
+    #[test]
+    fn a_block_that_is_only_literals_decodes_the_extension_chain() {
+        let d = Lz4Decoder::new();
+        // 300 literals: token 0xF0, extension 285 = 255 + 30, then bytes.
+        let mut stream = vec![0xF0u8, 255, 30];
+        let literals: Vec<u8> = (0..300u32).map(|i| (i % 251) as u8).collect();
+        stream.extend_from_slice(&literals);
+        assert_eq!(d.decode_block(&stream).unwrap(), literals);
+
+        // A run whose extension is itself several 255 bytes: 800
+        // literals = 15 + 255*3 + 20.
+        let mut stream = vec![0xF0u8, 255, 255, 255, 20];
+        let literals: Vec<u8> = (0..800u32).map(|i| (i % 251) as u8).collect();
+        stream.extend_from_slice(&literals);
+        assert_eq!(d.decode_block(&stream).unwrap(), literals);
+    }
+
+    /// A match whose offset is the largest the two-byte field can hold
+    /// (65535) copies from the very start of the reachable window. The
+    /// decoder must accept it when the output is long enough and reject
+    /// nothing about the distance.
+    #[test]
+    fn a_match_at_the_window_edge_copies_across_64k() {
+        let d = Lz4Decoder::new();
+        // 65540 distinctive literals so the match at offset 65535 has
+        // room, then a 10-byte match, then a short literal tail.
+        let literals: Vec<u8> = (0..65540u32).map(|i| (i % 251) as u8).collect();
+        let tail = [0xEEu8, 0xDD];
+
+        // Token 0xF6: literals extended, match excess 6 (match length 10).
+        // Literal extension: 65540 - 15 = 65525 = 255*256 + 245.
+        let mut stream = vec![0xF6u8];
+        stream.extend(core::iter::repeat_n(255u8, 256));
+        stream.push(245);
+        stream.extend_from_slice(&literals);
+        stream.extend_from_slice(&65535u16.to_le_bytes()); // offset
+                                                           // Match excess 6 fits the nibble: no extension bytes.
+
+        // Last sequence: two literals.
+        stream.push(0x20);
+        stream.extend_from_slice(&tail);
+
+        let got = d.decode_block(&stream).expect("window-edge block");
+        assert_eq!(got.len(), 65540 + 10 + 2);
+        // The match copies output[len-65535 ..] at the moment it fires,
+        // which is literals[5..15].
+        assert_eq!(&got[..65540], &literals[..]);
+        assert_eq!(&got[65540..65550], &literals[5..15]);
+        assert_eq!(&got[65550..], &tail[..]);
+    }
+
+    /// A token or length-extension stream that runs out of input before
+    /// it is complete is a truncated block, not a short decode. The
+    /// extension chain is the case a lenient reader gets wrong: the
+    /// nibble of 15 promises at least one extension byte, and the chain
+    /// must reach its terminator before the input ends.
+    #[test]
+    fn a_truncated_token_or_extension_stream_is_rejected() {
+        let d = Lz4Decoder::new();
+        // Token promises extended literals, no extension byte follows.
+        assert!(matches!(
+            d.decode_block(&[0xF0]),
+            Err(CompressError::UnexpectedEof)
+        ));
+        // Extension chain of 255s that never terminates.
+        assert!(matches!(
+            d.decode_block(&[0xF0, 0xFF]),
+            Err(CompressError::UnexpectedEof)
+        ));
+        assert!(matches!(
+            d.decode_block(&[0xF0, 0xFF, 0xFF]),
+            Err(CompressError::UnexpectedEof)
+        ));
+        // Token promises extended match length, the chain is truncated.
+        // One literal 'A', offset 1, then the match extension runs out.
+        assert!(matches!(
+            d.decode_block(&[0x1F, b'A', 0x01, 0x00, 0xFF]),
+            Err(CompressError::UnexpectedEof)
+        ));
+        assert!(matches!(
+            d.decode_block(&[0x1F, b'A', 0x01, 0x00]),
+            Err(CompressError::UnexpectedEof)
+        ));
+        // A literal run that claims more bytes than the input holds.
+        assert!(matches!(
+            d.decode_block(&[0x30, b'A', b'B']),
+            Err(CompressError::UnexpectedEof)
+        ));
+        // An offset field cut in half.
+        assert!(matches!(
+            d.decode_block(&[0x10, b'A', 0x01]),
+            Err(CompressError::UnexpectedEof)
+        ));
+    }
+
+    /// A frame whose descriptor declares a content size decodes when the
+    /// size is present and the header checksum covers it. Hand-built so
+    /// the walk is pinned independently of the reference fixtures.
+    #[test]
+    fn a_frame_with_a_content_size_field_decodes() {
+        // Payload "Hi" in one literals-only block.
+        let payload = b"Hi";
+        let block = {
+            let mut b = vec![0x20u8]; // 2 literals, no match
+            b.extend_from_slice(payload);
+            b
+        };
+
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&LZ4_MAGIC.to_le_bytes());
+        let flg: u8 = 0x40 | 0x20 | 0x08; // version 01, independent, content size
+        let bd: u8 = 0x40; // 64 KiB blocks
+        let descriptor = frame_descriptor(flg, bd, Some(payload.len() as u64), None);
+        frame.extend_from_slice(&descriptor);
+        frame.push(frame_header_checksum(&descriptor));
+        frame.extend_from_slice(&(block.len() as u32).to_le_bytes());
+        frame.extend_from_slice(&block);
+        frame.extend_from_slice(&0u32.to_le_bytes()); // end mark
+
+        let out = Lz4Decoder::new().decode(&frame).expect("hand-built frame");
+        assert_eq!(&out, payload);
+
+        // The bounded form refuses from the declaration alone.
+        let b = Lz4Decoder::new()
+            .decode_bounded(&frame, 1)
+            .expect("bounded");
+        assert!(b.capped);
+        assert_eq!(b.declared, Some(2));
+        assert!(b.bytes.is_empty(), "no block was decoded");
+    }
+
+    /// A frame that carries per-block checksums (FLG bit 4) rejects a
+    /// block whose stored XXH32 does not match the bytes it covers. The
+    /// checksum is over the block's compressed data as stored.
+    #[test]
+    fn a_bad_block_checksum_is_rejected() {
+        let mut frame = include_bytes!("../../testdata/lz4_text_bx.lz4").to_vec();
+        assert_ne!(frame[4] & 0x10, 0, "this frame carries block checksums");
+
+        // Walk to the first block's checksum: the header's low 30 bits
+        // give the stored size; the checksum is the four bytes after it.
+        let mut at = 7usize; // magic + FLG + BD + HC (no content size or dict id)
+        let hdr = u32::from_le_bytes([frame[at], frame[at + 1], frame[at + 2], frame[at + 3]]);
+        at += 4;
+        let size = (hdr & 0x7FFF_FFFF) as usize;
+        assert!(size > 0);
+        at += size;
+        assert!(at + 4 <= frame.len());
+        let stored = u32::from_le_bytes([frame[at], frame[at + 1], frame[at + 2], frame[at + 3]]);
+        assert_ne!(stored, 0, "checksum should be present");
+
+        // The pristine frame decodes.
+        assert!(Lz4Decoder::new().decode(&frame).is_ok());
+
+        // Flip one bit of the checksum; the block data is unchanged, so
+        // the recomputed XXH32 no longer matches the stored one.
+        frame[at] ^= 0x01;
+        let result = Lz4Decoder::new().decode(&frame);
+        assert!(
+            matches!(result, Err(CompressError::CrcMismatch { .. })),
+            "expected a checksum mismatch, got {result:?}"
+        );
+    }
     /// The match copy has two branches — one `memmove` when the source and
     /// destination cannot overlap, a chunked repeat when they can — and the
     /// second is where a match longer than its own offset lives. Every

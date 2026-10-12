@@ -1,11 +1,14 @@
-//! BZIP2 compression — format-compatible with libbz2 streams.
+// SPDX-License-Identifier: Apache-2.0
+
+//! BZIP2 compression codec, stream-compatible with libbz2 (bzip2 1.0.8).
 //!
-//! Implements the real bzip2 container: RLE1 stage, Burrows-Wheeler
-//! Transform, move-to-front encoding with RUNA/RUNB runs, and canonical
-//! Huffman coding over 2-6 trees with 50-symbol group selectors.
+//! Independent reimplementation of the published bzip2 format: RLE1
+//! run-length preprocessing, Burrows-Wheeler transform, move-to-front
+//! coding with RUNA/RUNB bijective base-2 run digits, and canonical
+//! Huffman coding over 2–6 trees with 50-symbol group selectors.
 //!
-//! Bit packing is MSB-first within bytes, continuous across block
-//! boundaries, exactly as produced by `bzip2` / libbz2.
+//! Bit packing is MSB-first within bytes and continuous across block
+//! boundaries, matching `bzip2` / libbz2 output byte-for-byte.
 
 use alloc::vec::Vec;
 
@@ -13,10 +16,12 @@ use super::bwt::Bwt;
 use super::error::{CompressError, CompressResult};
 use super::huffman::{build_canonical_codes, package_merge_lengths, MAX_BZIP2_CODE_LEN};
 
-/// BZIP2 magic header.
+// ── Format constants ───────────────────────────────────────────────────
+
+/// Stream magic: `BZh`.
 const BZIP2_MAGIC: [u8; 3] = *b"BZh";
 
-/// Maximum block size in 100KB units (1-9).
+/// Maximum block size in 100 KB units (1–9).
 const MAX_BLOCK_SIZE: u8 = 9;
 
 /// Maximum Huffman code length in bzip2.
@@ -25,23 +30,28 @@ const MAX_CODE_LEN: u8 = MAX_BZIP2_CODE_LEN as u8;
 /// RUNA symbol (adds current `es` to the run length).
 const RUNA: u16 = 0;
 
-/// RUNB symbol (skips).
+/// RUNB symbol (doubles `es` then adds).
 const RUNB: u16 = 1;
 
-/// End-of-block symbol. All 256 byte values are always marked in use by the
-/// encoder, so `nInUse = 256` and `EOB = nInUse + 1`.
+/// End-of-block symbol.  The encoder marks all 256 byte values in use,
+/// so `EOB = 257`.
 const EOB: u16 = 257;
 
-/// Total Huffman alphabet size: RUNA, RUNB, 256 byte values, EOB.
+/// Total Huffman alphabet: RUNA, RUNB, 256 bytes, EOB.
 const ALPHA_SIZE: usize = 258;
 
-/// Block magic: digits of pi.
+/// Block header magic: digits of pi (0x3141_5926_5359).
 const BLOCK_MAGIC: u64 = 0x3141_5926_5359;
 
-/// End-of-stream magic: sqrt(pi).
+/// End-of-stream magic: sqrt(pi) (0x1772_4538_5090).
 const EOS_MAGIC: u64 = 0x1772_4538_5090;
 
-/// CRC-32/BZIP2 (poly 0x04C11DB7, MSB-first, init/xorout 0xFFFFFFFF).
+// ── CRC-32/BZIP2 ───────────────────────────────────────────────────────
+
+/// Build the CRC lookup table at compile time.
+///
+/// Polynomial 0x04C11DB7, MSB-first, init/xorout 0xFFFFFFFF — the
+/// CRC-32/BZIP2 variant (not the ISO-HDLC one used by zlib/gzip).
 const fn make_crc_table() -> [u32; 256] {
     let mut table = [0u32; 256];
     let mut i = 0;
@@ -62,10 +72,9 @@ const fn make_crc_table() -> [u32; 256] {
     table
 }
 
-/// CRC lookup table.
 const CRC_TABLE: [u32; 256] = make_crc_table();
 
-/// Compute the bzip2 CRC-32 of a block (original, uncompressed bytes).
+/// Compute CRC-32/BZIP2 over raw (uncompressed) bytes.
 fn bz2_crc32(data: &[u8]) -> u32 {
     let mut crc = !0u32;
     for &b in data {
@@ -74,7 +83,9 @@ fn bz2_crc32(data: &[u8]) -> u32 {
     !crc
 }
 
-/// MSB-first bit writer: the first bit written lands in bit 7 of the byte.
+// ── MSB-first bit I/O ─────────────────────────────────────────────────
+
+/// MSB-first bit writer: the first bit written lands in bit 7.
 #[derive(Debug, Default)]
 struct MsbWriter {
     out: Vec<u8>,
@@ -114,7 +125,7 @@ impl MsbWriter {
     }
 }
 
-/// MSB-first bit reader: the bit at bit 7 of the current byte is next.
+/// MSB-first bit reader.
 struct MsbReader<'a> {
     data: &'a [u8],
     bit: usize,
@@ -135,7 +146,7 @@ impl<'a> MsbReader<'a> {
         Ok(b as u32)
     }
 
-    /// Read `n` bits (n <= 57), MSB first.
+    /// Read `n` bits (n ≤ 57), MSB first.
     fn read_bits(&mut self, n: u8) -> CompressResult<u64> {
         let mut value = 0u64;
         for _ in 0..n {
@@ -145,11 +156,11 @@ impl<'a> MsbReader<'a> {
     }
 }
 
-/// Canonical Huffman decoding table for one bzip2 group tree.
-///
+// ── Canonical Huffman decoder (puff.c walk) ───────────────────────────
+
 /// Decodes MSB-first using the classic puff.c walk: `counts` holds the
-/// number of codes per length, `symbols` lists symbols sorted by (length,
-/// symbol).
+/// number of codes per length; `symbols` lists symbols sorted by
+/// (length, symbol).
 struct BzHuffman {
     counts: [u16; (MAX_CODE_LEN + 1) as usize],
     symbols: Vec<u16>,
@@ -190,8 +201,10 @@ impl BzHuffman {
     }
 }
 
-/// Symbol stream for one block: advances through 50-symbol groups and
-/// switches Huffman trees per the selector list.
+// ── Symbol stream (50-symbol groups) ──────────────────────────────────
+
+/// Advances through 50-symbol groups and switches Huffman trees per the
+/// selector list.
 struct SymStream<'r, 'd> {
     reader: &'r mut MsbReader<'d>,
     trees: &'r [BzHuffman],
@@ -215,8 +228,10 @@ impl<'r, 'd> SymStream<'r, 'd> {
     }
 }
 
-/// RLE1 stage: a run of 4 identical bytes is followed by a count byte with
-/// the number of additional repeats (0-255 per group).
+// ── RLE1 ───────────────────────────────────────────────────────────────
+
+/// RLE1: a run of 4 identical bytes is followed by a count byte (0–251)
+/// giving the number of additional repeats.
 fn rle1_encode(data: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(data.len());
     let mut i = 0;
@@ -234,15 +249,12 @@ fn rle1_encode(data: &[u8]) -> Vec<u8> {
             out.extend(core::iter::repeat_n(b, 4));
             let mut rem = run - 4;
             loop {
-                // Format limit: count byte is 0..=251 (max group 4+251).
                 let n = rem.min(251);
                 out.push(n as u8);
                 rem -= n;
                 if rem == 0 {
                     break;
                 }
-                // More repeats: start another group, which always ends with
-                // a count byte so the decoder's 4-run rule stays satisfied.
                 out.extend(core::iter::repeat_n(b, 4));
                 rem -= 4;
             }
@@ -280,11 +292,12 @@ fn rle1_decode(data: &[u8]) -> CompressResult<Vec<u8>> {
     Ok(out)
 }
 
-/// Huffman code lengths without a length limit.
+// ── Huffman length construction ────────────────────────────────────────
+
+/// Build Huffman code lengths without a length limit.
 ///
-/// Combines nodes with a binary heap; each merge raises the depth of every
-/// leaf in the merged subtree by one, so leaf lengths emerge without an
-/// explicit tree walk.
+/// Each merge raises the depth of every leaf in the merged subtree by one,
+/// so leaf depths emerge without an explicit tree walk.
 fn huffman_lengths_unlimited(weights: &[u64]) -> Vec<u8> {
     let n = weights.len();
     let mut lens = vec![0u8; n];
@@ -328,11 +341,11 @@ fn huffman_lengths_unlimited(weights: &[u64]) -> Vec<u8> {
     lens
 }
 
-/// Length-limited Huffman code lengths, using the same iterative deepening
-/// strategy as libbz2's `BZ2_hbMakeCodeLengths`: build an optimal tree,
-/// and if any length exceeds the limit, bump the weights of the deepest
-/// symbols and rebuild. The result always comes from a real Huffman tree,
-/// so the Kraft sum is exactly 1.
+/// Length-limited Huffman code lengths, matching libbz2's iterative
+/// deepening (`BZ2_hbMakeCodeLengths`): build an optimal tree, and if
+/// any length exceeds the limit, bump the weights of the deepest symbols
+/// and rebuild.  The result always comes from a real Huffman tree, so the
+/// Kraft sum is exactly 1.
 fn limited_huffman_lengths(freqs: &[u64], max_len: u8) -> Vec<u8> {
     let mut weights: Vec<u64> = freqs.to_vec();
     for _iteration in 0..64 {
@@ -351,14 +364,13 @@ fn limited_huffman_lengths(freqs: &[u64], max_len: u8) -> Vec<u8> {
     package_merge_lengths(freqs, max_len)
 }
 
+// ── MTF with RUNA/RUNB ────────────────────────────────────────────────
+
 /// MTF encode with RUNA/RUNB runs (bijective base-2), matching libbz2.
 ///
-/// The full 256-symbol list is always used (`nInUse = 256`), so the literal
-/// symbol for a byte at MTF index `j >= 1` is `j + 1`.
-///
-/// Run values use bijective base-2: `N = sum(d_i * 2^i)` with digits
-/// `d_i in {1, 2}` (RUNA = 1, RUNB = 2). Digits are `d_i = 1 + bit_i(M)`
-/// where `k = floor(log2(N+1))` and `M = N - (2^k - 1)`.
+/// The full 256-symbol list is always used, so a literal at MTF index
+/// `j ≥ 1` is symbol `j + 1`.  Run values use bijective base-2:
+/// `N = Σ(dᵢ · 2ⁱ)` with digits `dᵢ ∈ {1, 2}` (RUNA = 1, RUNB = 2).
 fn mtf_encode_runs(data: &[u8], mtfv: &mut Vec<u16>, freqs: &mut [u64; ALPHA_SIZE]) {
     let mut list: Vec<u8> = (0..=255u8).collect();
     let mut zpend = 0u64;
@@ -388,34 +400,34 @@ fn flush_zpend(zpend: u64, mtfv: &mut Vec<u16>, freqs: &mut [u64; ALPHA_SIZE]) {
     let base = (1u64 << k) - 1;
     let m = zpend - base;
     for i in 0..k {
-        // bit set -> digit 2 (RUNB), bit clear -> digit 1 (RUNA)
         let sym = if (m >> i) & 1 == 1 { RUNB } else { RUNA };
         mtfv.push(sym);
         freqs[sym as usize] += 1;
     }
 }
 
+// ── Encoder ────────────────────────────────────────────────────────────
+
 /// BZIP2 encoder producing libbz2-compatible streams.
 #[derive(Debug)]
 pub struct Bzip2Encoder {
-    /// Block size in 100KB units (1-9).
     block_size: u8,
 }
 
 impl Bzip2Encoder {
-    /// Create a new BZIP2 encoder with default block size (9).
+    /// Create an encoder with default block size (9).
     pub fn new() -> Self {
         Self::with_block_size(MAX_BLOCK_SIZE)
     }
 
-    /// Create a BZIP2 encoder with a specific block size (1-9).
+    /// Create an encoder with a specific block size (1–9).
     pub fn with_block_size(block_size: u8) -> Self {
         Self {
             block_size: block_size.clamp(1, MAX_BLOCK_SIZE),
         }
     }
 
-    /// Compress data using BZIP2.
+    /// Compress `data` to a BZIP2 stream.
     pub fn encode(&mut self, data: &[u8]) -> Vec<u8> {
         let mut w = MsbWriter::new();
         w.write_bits(BZIP2_MAGIC[0] as u64, 8);
@@ -438,13 +450,12 @@ impl Bzip2Encoder {
         w.finish()
     }
 
-    /// Encode a single block (chunk is a slice of the original input).
+    /// Encode one block.  The chunk is a slice of the original input.
     fn encode_block(&mut self, chunk: &[u8], block_crc: u32, bwt: &mut Bwt, w: &mut MsbWriter) {
-        // RLE1 -> BWT -> MTF with runs.
         let rle = rle1_encode(chunk);
         let (bwt_data, bwt_idx) = bwt.transform(&rle);
         let mut mtfv: Vec<u16> = Vec::new();
-        let mut freqs = [1u64; ALPHA_SIZE]; // min freq 1: format forbids zero lengths
+        let mut freqs = [1u64; ALPHA_SIZE]; // min freq 1: the format forbids zero lengths
         mtf_encode_runs(&bwt_data, &mut mtfv, &mut freqs);
         freqs[EOB as usize] += 1;
         mtfv.push(EOB);
@@ -458,8 +469,7 @@ impl Bzip2Encoder {
         w.write_bits(0, 1); // not randomized
         w.write_bits(bwt_idx as u64, 24);
 
-        // In-use byte map: 16 single bits (one per group), then 16 bits for
-        // each set group.
+        // In-use map: 16 group bits, then 16 bits per set group.
         for _ in 0..16 {
             w.write_bits(1, 1);
         }
@@ -467,9 +477,8 @@ impl Bzip2Encoder {
             w.write_bits(0xFFFF, 16);
         }
 
-        // Huffman groups: 2 identical trees, all selectors point to tree 0.
-        // Selector encoding is a unary bit run: j one-bits then a zero-bit;
-        // tree 0 is MTF value 0, i.e. a single 0 bit.
+        // Huffman groups: 2 identical trees, all selectors → tree 0.
+        // Selector encoding is a unary bit run: j one-bits then a zero-bit.
         w.write_bits(2, 3);
         let n_selectors = mtfv.len().div_ceil(50);
         w.write_bits(n_selectors as u64, 15);
@@ -479,7 +488,7 @@ impl Bzip2Encoder {
         for _ in 0..2 {
             let mut curr = lengths[0];
             w.write_bits(curr as u64, 5);
-            w.write_bits(0, 1); // terminator for symbol 0
+            w.write_bits(0, 1);
             for &target in &lengths[1..ALPHA_SIZE] {
                 while curr != target {
                     if target > curr {
@@ -490,7 +499,7 @@ impl Bzip2Encoder {
                         curr -= 1;
                     }
                 }
-                w.write_bits(0, 1); // terminator for symbol i
+                w.write_bits(0, 1);
             }
         }
 
@@ -513,17 +522,19 @@ impl Default for Bzip2Encoder {
     }
 }
 
+// ── Decoder ────────────────────────────────────────────────────────────
+
 /// BZIP2 decoder for libbz2-compatible streams.
 #[derive(Debug, Default)]
 pub struct Bzip2Decoder;
 
 impl Bzip2Decoder {
-    /// Create a new BZIP2 decoder.
+    /// Create a new decoder.
     pub fn new() -> Self {
         Self
     }
 
-    /// Decompress BZIP2 data.
+    /// Decompress a BZIP2 stream.
     pub fn decode(&mut self, data: &[u8]) -> CompressResult<Vec<u8>> {
         if data.len() < 4 || data[0..3] != BZIP2_MAGIC {
             return Err(CompressError::InvalidFormat("invalid BZIP2 magic"));
@@ -539,7 +550,7 @@ impl Bzip2Decoder {
         let mut combined_crc = 0u32;
         let mut bwt = Bwt::new();
 
-        // A failed read is truncated padding after the last block: tolerate.
+        // Tolerate trailing padding after the last block.
         while let Ok(magic) = reader.read_bits(48) {
             if magic == EOS_MAGIC {
                 if let Ok(stored) = reader.read_bits(32) {
@@ -561,8 +572,7 @@ impl Bzip2Decoder {
             }
             let orig_ptr = reader.read_bits(24)? as usize;
 
-            // In-use byte map: 16 single bits (one per group of 16 bytes),
-            // then 16 bits for each set group.
+            // In-use map.
             let mut inuse16 = 0u16;
             for g in 0..16 {
                 if reader.read_bit()? != 0 {
@@ -600,7 +610,6 @@ impl Bzip2Decoder {
             {
                 let mut pos: Vec<u8> = (0..num_trees as u8).collect();
                 for sel in selectors.iter_mut() {
-                    // Unary bit run: count 1-bits, terminated by a 0-bit.
                     let mut j = 0usize;
                     while reader.read_bit()? != 0 {
                         j += 1;
@@ -629,7 +638,6 @@ impl Bzip2Decoder {
                         if reader.read_bit()? == 0 {
                             break;
                         }
-                        // Second bit: 0 = increment, 1 = decrement.
                         if reader.read_bit()? == 0 {
                             curr += 1;
                         } else {
@@ -641,7 +649,7 @@ impl Bzip2Decoder {
                 trees.push(BzHuffman::from_lengths(&lengths));
             }
 
-            // Payload: Huffman -> MTF with runs.
+            // Payload: Huffman → MTF with runs.
             let mut mtf = seq_to_unseq;
             let mut buf = Vec::with_capacity(block_cap.min(1 << 20));
             {
@@ -658,7 +666,7 @@ impl Bzip2Decoder {
                         break;
                     }
                     if sym <= RUNB {
-                        // Front-byte run: RUNA adds es, RUNB adds 2*es,
+                        // Front-byte run: RUNA adds es, RUNB adds 2·es;
                         // es doubles per symbol (bijective base-2).
                         let mut es = 1u64;
                         let mut n = 0u64;
@@ -690,7 +698,7 @@ impl Bzip2Decoder {
                 }
             }
 
-            // Inverse BWT then inverse RLE1, verify block CRC.
+            // Inverse BWT, then inverse RLE1, then verify block CRC.
             if orig_ptr >= buf.len() && !buf.is_empty() {
                 return Err(CompressError::CorruptedData("bad BWT index"));
             }
@@ -707,7 +715,7 @@ impl Bzip2Decoder {
     }
 }
 
-/// Decode one MTF literal symbol (symbol >= 2 -> MTF index symbol - 1).
+/// Decode one MTF literal symbol (symbol ≥ 2 → MTF index symbol − 1).
 fn mtf_literal(sym: u16, mtf: &mut [u8], buf: &mut Vec<u8>) -> CompressResult<()> {
     let idx = sym as usize - 1;
     if idx == 0 || idx >= mtf.len() {
@@ -719,6 +727,8 @@ fn mtf_literal(sym: u16, mtf: &mut [u8], buf: &mut Vec<u8>) -> CompressResult<()
     buf.push(b);
     Ok(())
 }
+
+// ── Tests ──────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -769,7 +779,6 @@ mod tests {
 
     #[test]
     fn test_bzip2_multiblock() {
-        // 250 KB forces three 100 KB blocks with block size 1.
         let mut encoder = Bzip2Encoder::with_block_size(1);
         let mut decoder = Bzip2Decoder::new();
         let mut data = Vec::new();
@@ -785,7 +794,6 @@ mod tests {
 
     #[test]
     fn test_bzip2_highly_repetitive() {
-        // Worst case for naive rotation-based BWT.
         let mut encoder = Bzip2Encoder::new();
         let mut decoder = Bzip2Decoder::new();
         let mut data = Vec::new();
@@ -830,7 +838,6 @@ mod tests {
 
     #[test]
     fn test_huffman_pipeline_synthetic() {
-        // 258 symbols: a few hot, many cold — mirrors the "mixed" profile.
         let mut freqs = [1u64; ALPHA_SIZE];
         let mut rng = 0x12345678u64;
         for _ in 0..2000 {
@@ -848,7 +855,6 @@ mod tests {
         assert!((kraft - 1.0).abs() < 1e-9, "kraft must be 1, got {kraft}");
 
         let codes = build_canonical_codes(&lengths, MAX_CODE_LEN as usize);
-        // Encode a symbol stream and decode it back with the puff-style walk.
         let mut syms = Vec::new();
         for i in 0..500 {
             rng = rng
@@ -873,9 +879,6 @@ mod tests {
 
     #[test]
     fn test_huffman_limited_extreme_skew() {
-        // One symbol dominates 1M:1 — forces the length-limit loop to bump
-        // weights repeatedly. Result must still be a complete code with
-        // max_len <= 20 (Kraft sum exactly 1), like BZ2_hbMakeCodeLengths.
         let mut freqs = [1u64; ALPHA_SIZE];
         freqs[7] = 1_000_000;
         freqs[200] = 500_000;
@@ -887,14 +890,12 @@ mod tests {
             .map(|&l| if l > 0 { 2f64.powi(-(l as i32)) } else { 0.0 })
             .sum();
         assert!((kraft - 1.0).abs() < 1e-9, "kraft must be 1, got {kraft}");
-        // Dominant symbols get the shortest codes.
         assert!(lengths[7] <= lengths[100]);
         assert!(lengths[200] <= lengths[100]);
     }
 
     #[test]
     fn test_bzip2_vector_match() {
-        // bzip2 stream produced by CPython bz2 (matches + literals).
         let compressed = include_bytes!("../../testdata/bzip2_match.bin");
         let expected = include_bytes!("../../testdata/bzip2_match.expected");
         let mut decoder = Bzip2Decoder::new();

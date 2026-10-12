@@ -1,4 +1,10 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Zstandard, decoding only — RFC 8878.
+//!
+//! Independent reimplementation of the published RFC, written from the
+//! format description rather than translated from libzstd or any other
+//! implementation's source.
 //!
 //! Frames (§3.1.1) including skippable and concatenated frames, all four
 //! block types (§3.1.1.2), all four literals block types (§3.1.1.3.1),

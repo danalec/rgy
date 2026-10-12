@@ -1,4 +1,4 @@
-//! Clean-room reimplementation of memmap2-rs error type.
+//! Independent reimplementation of memmap2-rs error type.
 
 use std::io;
 

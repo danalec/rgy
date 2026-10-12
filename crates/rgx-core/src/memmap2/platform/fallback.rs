@@ -1,4 +1,4 @@
-//! Clean-room reimplementation of memmap2-rs fallback path.
+//! Independent reimplementation of memmap2-rs fallback path.
 
 use std::fs::File;
 use std::io::{self, Read};

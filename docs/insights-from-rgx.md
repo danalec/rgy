@@ -2,9 +2,10 @@
 
 rgx (`../rgx`) has already paid for the lessons below — measured on its own
 corpora, documented in its `AGENTS.md` / `ROADMAP.md` / `src/mmap.rs`. rgy
-inherits them so the same bill is not paid twice. (Its `rar-codec` is under
-active development there: this workspace's copy is verbatim and should be
-re-synced from `../rgx/crates/rar-codec` when that settles.)
+inherits them so the same bill is not paid twice. (Its `rar-codec` rewrite
+settled: this workspace's copies of the `rgx-*` crates are verbatim with the
+cleanroom codec rewrites, and `benchmark/winrar-oracle.md` records what the
+WinRAR oracle verified.)
 
 ## Memory mapping
 

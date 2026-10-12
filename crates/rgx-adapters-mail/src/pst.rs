@@ -3,7 +3,7 @@
 //! bodies).
 //!
 //! The reader is hand-rolled per [MS-PST] and cross-checked against
-//! Microsoft's `outlook-pst-rs` clean-room implementation. Parsing strategy
+//! Microsoft's `outlook-pst-rs` independent implementation. Parsing strategy
 //! mirrors the upstream `io::binary::pst` module so both stay in lockstep:
 //! Unicode (v23) and ANSI (v14/15) databases, NBT/BBT page trees, data
 //! trees (XBLOCK/XXBLOCK), subnode trees, heaps-on-node, BTH indices,

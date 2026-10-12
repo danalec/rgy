@@ -1,23 +1,33 @@
-//! CRC-32 checksum implementation.
+// SPDX-License-Identifier: Apache-2.0
+
+//! CRC-32 (IEEE 802.3) over byte slices.
 //!
-//! Implements the CRC-32 algorithm (IEEE 802.3 polynomial) used in ZIP, gzip, PNG, etc.
+//! Independent implementation from the published CRC definition: the
+//! reflected polynomial 0xEDB88320, an initial register of all ones,
+//! and a final complement. The lookup table is generated at compile
+//! time from the polynomial itself — it is the definition, not a copied
+//! table. Per-member checksums in the 7z container are small buffers,
+//! so the byte-at-a-time fold is the whole story here.
 
-/// CRC-32 lookup table (IEEE 802.3 polynomial: 0xEDB88320).
-const CRC32_TABLE: [u32; 256] = generate_crc32_table();
+/// The reflected IEEE 802.3 polynomial.
+const POLY: u32 = 0xEDB8_8320;
 
-const fn generate_crc32_table() -> [u32; 256] {
+/// `TABLE[i]` is the CRC of the single byte `i`.
+const TABLE: [u32; 256] = build_table();
+
+const fn build_table() -> [u32; 256] {
     let mut table = [0u32; 256];
     let mut i = 0;
     while i < 256 {
         let mut crc = i as u32;
-        let mut j = 0;
-        while j < 8 {
-            if crc & 1 != 0 {
-                crc = (crc >> 1) ^ 0xEDB88320;
+        let mut bit = 0;
+        while bit < 8 {
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ POLY
             } else {
-                crc >>= 1;
-            }
-            j += 1;
+                crc >> 1
+            };
+            bit += 1;
         }
         table[i] = crc;
         i += 1;
@@ -25,56 +35,53 @@ const fn generate_crc32_table() -> [u32; 256] {
     table
 }
 
-/// Calculate CRC-32 checksum of data.
-///
-/// The worked example lives in [`tests::test_crc32_known`]; this module is
-/// crate-private, so a doc-test cannot reach `crc32` at all.
+/// CRC-32 checksum of `data`.
 #[allow(missing_docs)]
 pub fn crc32(data: &[u8]) -> u32 {
-    crc32_update(0xFFFFFFFF, data) ^ 0xFFFFFFFF
+    crc32_update(0xFFFF_FFFF, data) ^ 0xFFFF_FFFF
 }
 
-/// Update CRC-32 with additional data.
-///
-/// Use this for streaming CRC calculation.
+/// Fold `data` into a running CRC register. `crc32` is
+/// `crc32_update(0xFFFF_FFFF, data) ^ 0xFFFF_FFFF`; keep the same
+/// convention when chaining calls.
 pub fn crc32_update(mut crc: u32, data: &[u8]) -> u32 {
     for &byte in data {
-        let index = ((crc ^ byte as u32) & 0xFF) as usize;
-        crc = (crc >> 8) ^ CRC32_TABLE[index];
+        let index = ((crc ^ u32::from(byte)) & 0xFF) as usize;
+        crc = (crc >> 8) ^ TABLE[index];
     }
     crc
 }
 
-/// CRC-32 calculator for streaming operations.
+/// Streaming form: feed chunks, then take the finished checksum.
 #[derive(Debug, Clone, Default)]
 pub struct Crc32Calculator {
     crc: u32,
 }
 
 impl Crc32Calculator {
-    /// Create a new CRC-32 calculator.
+    /// A calculator at the start of a stream.
     pub fn new() -> Self {
-        Self { crc: 0xFFFFFFFF }
+        Self { crc: 0xFFFF_FFFF }
     }
 
-    /// Update with additional data.
+    /// Absorb the next chunk.
     pub fn update(&mut self, data: &[u8]) {
         self.crc = crc32_update(self.crc, data);
     }
 
-    /// Get the final CRC-32 value.
+    /// The checksum of everything absorbed so far.
     pub fn finish(self) -> u32 {
-        self.crc ^ 0xFFFFFFFF
+        self.crc ^ 0xFFFF_FFFF
     }
 
-    /// Reset the calculator.
+    /// Back to the start of a stream.
     pub fn reset(&mut self) {
-        self.crc = 0xFFFFFFFF;
+        self.crc = 0xFFFF_FFFF;
     }
 
-    /// Get current CRC value without finalizing.
+    /// The checksum so far, without consuming the calculator.
     pub fn current(&self) -> u32 {
-        self.crc ^ 0xFFFFFFFF
+        self.crc ^ 0xFFFF_FFFF
     }
 }
 
@@ -89,7 +96,7 @@ mod tests {
 
     #[test]
     fn test_crc32_known() {
-        // Test vector from PNG spec
+        // The standard check value: CRC-32 of "123456789".
         assert_eq!(crc32(b"123456789"), 0xCBF43926);
     }
 
@@ -106,11 +113,11 @@ mod tests {
     fn test_crc32_update_consistency() {
         let full = crc32(b"Hello, World!");
 
-        let mut partial = 0xFFFFFFFF;
+        let mut partial = 0xFFFF_FFFF;
         partial = crc32_update(partial, b"Hello, ");
         partial = crc32_update(partial, b"World!");
 
-        assert_eq!(partial ^ 0xFFFFFFFF, full);
+        assert_eq!(partial ^ 0xFFFF_FFFF, full);
     }
 
     #[test]

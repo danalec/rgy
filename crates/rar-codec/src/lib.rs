@@ -1,11 +1,46 @@
 //! rar-codec: pure-Rust RAR container codec.
 //!
-//! Vendored from libarchive (`archive_read_support_format_rar5.c`,
-//! `archive_read_support_format_rar.c`, BSD-2-Clause) and RARLAB's published
-//! RAR technote (`https://www.rarlab.com/technote.htm`). Per-file provenance
-//! is in `scripts/vendored-sources.tsv`; this header is the one place the
-//! tree declares where it came from. Zero dependencies, `#![no_std]` +
-//! `alloc`, `#![forbid(unsafe_code)]`.
+//! # Provenance
+//!
+//! This crate was originally a `rustfmt`-ed port of libarchive's RAR support
+//! (`archive_read_support_format_rar{5,}.c`, BSD-2-Clause), and every module
+//! has since been rewritten as an independent reimplementation in this
+//! repository's sense (`AGENTS.md` §11): the API contract and the algorithm
+//! are learned from the upstream source, from RARLAB's published RAR 5.0
+//! archive format specification (`https://www.rarlab.com/technote.htm`), and
+//! — for the decompression algorithms the technote does not cover — from
+//! understanding of the algorithm cross-checked against the decompiled
+//! UnRAR 7.20. Then the code is written fresh: no file-level copies, no
+//! verbatim pastes.
+//!
+//! **Modules rewritten** (Apache-2.0, SPDX headers; per-module rows in
+//! `scripts/vendored-sources.tsv`): `error`, `vint`, `crc32`, `bitreader`,
+//! `huffman`, `read`, `write`, `unpack`, `unpack3`, `ppmd7`. `crc32` keeps
+//! the byte-at-a-time definition in-file as the oracle its slice-by-8 fold
+//! is tested against. `huffman` caps its primary table at 12 bits with an
+//! overflow list for long codes and one peek per symbol, and treats an
+//! all-zero length array as a legal empty table (RAR 5.0 sends unused
+//! sub-tables that way). `unpack3` and `ppmd7` are the decompression half
+//! RARLAB's spec does not cover: rewritten from algorithm understanding,
+//! cross-checked against the decompiled UnRAR 7.20 (distance cache starts
+//! all-ones, the EOF marker's next-member bit persists, PPMd var-H
+//! renormalisation order), and verified end-to-end against goldens
+//! extracted by the genuine UnRAR — RAR4 store/normal/best members and
+//! PPMd var-H members decode byte-identical (`benchmark/winrar-oracle.md`).
+//! No public algorithm specification exists for that half; LOC PRONOM
+//! fmt/411 records the format's transparency as low.
+//!
+//! **Verification**: `tests/winrar_oracle.rs` compares extraction against
+//! SHA-256 goldens produced by genuine `Rar.exe`/`UnRAR.exe` (gated on
+//! `RGX_WINRAR_ORACLE` / `RGX_WINRAR_ORACLE_RAR4` / `RGX_UNRAR`; the two
+//! matrices cover RAR5 and RAR4 methods, PPMd, solid groups, path
+//! encodings, encryption refusal and edge-case sizes) plus a reverse check
+//! that genuine UnRAR reads what [`ArchiveBuilder`] writes. The integration
+//! tests in `tests/` are the behavioral oracle retained from the port and
+//! are deliberately not rewritten; those files keep their BSD-2-Clause
+//! obligation.
+//!
+//! Zero dependencies, `#![no_std]` + `alloc`, `#![forbid(unsafe_code)]`.
 //!
 //! ## Decode
 //!
@@ -55,9 +90,10 @@ mod ppmd7;
 mod read;
 mod unpack;
 mod unpack3;
-mod vint;
+pub mod vint;
 mod write;
 
+pub use crc32::{crc32, update};
 pub use error::{Error, Result};
 pub use read::{Archive, Entry, EntryKind, Format, METHOD_STORE};
 pub use write::ArchiveBuilder;

@@ -1,6 +1,13 @@
-//! ZLIB compression format (RFC 1950).
+// SPDX-License-Identifier: Apache-2.0
+
+//! The zlib wrapper format (RFC 1950): a two-byte header, a DEFLATE
+//! body, and a four-byte Adler-32 trailer.
 //!
-//! Wrapper around DEFLATE with ZLIB header/trailer (ADLER32 checksum).
+//! Independent reimplementation of the published framing, written from
+//! the RFC rather than from any implementation's source: the CMF/FLG
+//! header check (CM must be 8, the two bytes as a 16-bit value must be a
+//! multiple of 31), the FDICT refusal, and the Adler-32 checksum the
+//! trailer carries. The body is decoded by [`super::deflate`].
 
 use alloc::format;
 use alloc::string::String;
@@ -11,24 +18,31 @@ use super::cap::Bounded;
 use super::deflate::{CompressionLevel, DeflateDecoder, DeflateEncoder};
 use super::error::CompressError;
 
+/// Adler-32 of `data`, as RFC 1950 defines it: two running sums, `a`
+/// over the bytes and `b` over `a`, both modulo 65521, with `a` seeded
+/// to 1 so an empty input hashes to 1.
 fn adler32(data: &[u8]) -> u32 {
-    // 5552 bytes is the largest chunk over which `a` and `b` cannot overflow
-    // u32, so the `% 65521` modulus only needs to run at the end of each
-    // chunk (and once over the tail) — not inside the per-byte loop.
+    // 5552 is the largest run over which `b` cannot overflow u32 given
+    // `a, b < 65521` on entry (255·n(n+1)/2 + (n+1)·65520 ≤ 2^32-1), so
+    // the modulus only needs to run per chunk and over the tail — not
+    // inside the per-byte loop.
+    const CHUNK: usize = 5552;
     let mut a = 1u32;
     let mut b = 0u32;
 
-    let (chunks, remainder) = data.as_chunks::<5552>();
-    for chunk in chunks {
-        for byte in chunk {
-            a = a.wrapping_add(*byte as u32);
+    let mut rest = data;
+    while rest.len() >= CHUNK {
+        let (chunk, tail) = rest.split_at(CHUNK);
+        rest = tail;
+        for &byte in chunk {
+            a = a.wrapping_add(byte as u32);
             b = b.wrapping_add(a);
         }
         a %= 65521;
         b %= 65521;
     }
-    for byte in remainder {
-        a = a.wrapping_add(*byte as u32);
+    for &byte in rest {
+        a = a.wrapping_add(byte as u32);
         b = b.wrapping_add(a);
     }
     a %= 65521;
@@ -62,6 +76,48 @@ pub type ZlibResult<T> = Result<T, ZlibError>;
 #[cfg(feature = "std")]
 impl std::error::Error for ZlibError {}
 
+/// What the RFC 1950 header says. The decompressed size is not in there,
+/// which is why the bounded decode has only a running ceiling to work
+/// with.
+#[derive(Debug, Clone, Copy)]
+struct ZlibHeader {
+    /// The FLEVEL field (bits 6-7 of FLG): a hint, not a constraint.
+    #[allow(dead_code)]
+    flevel: u8,
+}
+
+/// Parse and check CMF/FLG. Returns the header and the offset the
+/// DEFLATE body starts at.
+fn parse_header(data: &[u8]) -> ZlibResult<(ZlibHeader, usize)> {
+    if data.len() < 2 {
+        return Err(ZlibError {
+            message: "Data too short for ZLIB".into(),
+        });
+    }
+    let cmf = data[0];
+    let flg = data[1];
+
+    if cmf & 0x0F != 8 {
+        return Err(ZlibError {
+            message: format!("Unsupported compression method: {}", cmf & 0x0F),
+        });
+    }
+    // FDICT set means a 4-byte dictionary id follows and the body is
+    // compressed against a dictionary this decoder does not have.
+    if flg & 0x20 != 0 {
+        return Err(ZlibError {
+            message: "ZLIB stream uses a preset dictionary".into(),
+        });
+    }
+    if (u16::from(cmf) * 256 + u16::from(flg)) % 31 != 0 {
+        return Err(ZlibError {
+            message: "Invalid ZLIB header checksum".into(),
+        });
+    }
+
+    Ok((ZlibHeader { flevel: flg >> 6 }, 2))
+}
+
 pub struct ZlibEncoder {
     level: CompressionLevel,
 }
@@ -75,6 +131,10 @@ impl ZlibEncoder {
         Self { level }
     }
 
+    /// CMF/FLG as the RFC composes them: CM = 8 (deflate), CINFO = 7
+    /// (32 KiB window), FLEVEL from the compression level, and FCHECK
+    /// chosen so the two bytes read as a 16-bit value are a multiple of
+    /// 31.
     pub fn encode(&self, data: &[u8]) -> Vec<u8> {
         let mut output = Vec::new();
 
@@ -137,29 +197,15 @@ impl ZlibDecoder {
             });
         }
 
-        let cmf = data[0];
-        let flg = data[1];
-
-        if cmf & 0x0F != 8 {
-            return Err(ZlibError {
-                message: format!("Unsupported compression method: {}", cmf & 0x0F),
-            });
-        }
-
-        if !(cmf as u16 * 256 + flg as u16).is_multiple_of(31) {
-            return Err(ZlibError {
-                message: "Invalid ZLIB header checksum".into(),
-            });
-        }
-
-        let deflate_data = &data[2..];
+        let (_, body_at) = parse_header(data)?;
+        let deflate_data = &data[body_at..];
 
         let mut decoder = DeflateDecoder::new();
         let (decompressed, consumed_deflate) = decoder
             .decode_bounded_with_consumed(deflate_data, limit)
             .map_err(ZlibError::from)?;
 
-        let total_consumed = 2 + consumed_deflate + 4;
+        let total_consumed = body_at + consumed_deflate + 4;
         if total_consumed > data.len() {
             return Err(ZlibError {
                 message: "Unexpected EOF in ZLIB stream".into(),
@@ -170,7 +216,7 @@ impl ZlibDecoder {
             return Ok((decompressed, total_consumed));
         }
 
-        let trailer_offset = 2 + consumed_deflate;
+        let trailer_offset = body_at + consumed_deflate;
         let expected_adler = u32::from_be_bytes([
             data[trailer_offset],
             data[trailer_offset + 1],
@@ -191,6 +237,8 @@ impl ZlibDecoder {
         Ok((decompressed, total_consumed))
     }
 
+    /// Decode a buffer that holds exactly one zlib stream: header, body,
+    /// and the trailer as its last four bytes.
     pub fn decode_bounded(&self, data: &[u8], limit: u64) -> ZlibResult<Bounded> {
         if data.len() < 6 {
             return Err(ZlibError {
@@ -198,22 +246,8 @@ impl ZlibDecoder {
             });
         }
 
-        let cmf = data[0];
-        let flg = data[1];
-
-        if cmf & 0x0F != 8 {
-            return Err(ZlibError {
-                message: format!("Unsupported compression method: {}", cmf & 0x0F),
-            });
-        }
-
-        if !(cmf as u16 * 256 + flg as u16).is_multiple_of(31) {
-            return Err(ZlibError {
-                message: "Invalid ZLIB header checksum".into(),
-            });
-        }
-
-        let deflate_data = &data[2..data.len() - 4];
+        let (_, body_at) = parse_header(data)?;
+        let deflate_data = &data[body_at..data.len() - 4];
 
         let mut decoder = DeflateDecoder::new();
         let decompressed = decoder
@@ -342,5 +376,50 @@ mod tests {
             .expect("exact");
         assert!(!whole.capped);
         assert_eq!(whole.bytes, expected);
+    }
+
+    /// FDICT set means the body is compressed against a dictionary the
+    /// stream only names by id. Decoding it against nothing would produce
+    /// bytes and then blame the Adler-32; the header refuses it instead.
+    #[test]
+    fn a_preset_dictionary_is_refused() {
+        // CMF=0x78, FLG with FDICT set (bit 5) and a valid FCHECK so the
+        // two bytes still pass the RFC's multiple-of-31 check.
+        let cmf = 0x78u8;
+        let fdict = 0x20u8;
+        let base = u16::from(cmf) * 256 + u16::from(fdict);
+        let fcheck = (31 - (base % 31)) % 31;
+        let flg = fdict | fcheck as u8;
+        assert_eq!((u16::from(cmf) * 256 + u16::from(flg)) % 31, 0);
+        assert_ne!(flg & 0x20, 0, "FDICT must be set for this test");
+
+        let mut stream = alloc::vec![cmf, flg];
+        stream.extend_from_slice(&[0x01, 0x02, 0x03, 0x04]); // DICTID
+        stream.extend_from_slice(&[0x03, 0x00]); // a tiny deflate tail
+        stream.extend_from_slice(&0u32.to_be_bytes());
+        let err = ZlibDecoder::new().decode(&stream).unwrap_err();
+        assert!(
+            err.message.contains("dictionary"),
+            "unexpected error: {}",
+            err.message
+        );
+    }
+
+    /// A corrupt zlib stream is untrusted input: wrong method, wrong
+    /// check, truncated body, or garbage after a valid header — none may
+    /// panic.
+    #[test]
+    fn never_panics_on_arbitrary_bytes() {
+        let corpus: alloc::vec::Vec<(&str, alloc::vec::Vec<u8>)> = alloc::vec![
+            ("empty", alloc::vec![]),
+            ("one", alloc::vec![0x78]),
+            ("good_head", alloc::vec![0x78, 0x9C]),
+            ("short", alloc::vec![0x78, 0x9C, 0x01]),
+        ];
+        crate::fuzzkit::assert_never_panics(corpus, 2000, "zlib", |data| {
+            let _ = ZlibDecoder::new().decode(data);
+            let _ = ZlibDecoder::new().decode_bounded(data, 64);
+            let _ = ZlibDecoder::new().decode_bounded_with_consumed(data, 64);
+        });
     }
 }

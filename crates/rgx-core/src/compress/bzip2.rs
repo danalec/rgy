@@ -1,11 +1,19 @@
-//! BZIP2 compression — format-compatible with libbz2 streams.
+// SPDX-License-Identifier: Apache-2.0
+
+//! The bzip2 stream format: RLE, Burrows-Wheeler, move-to-front with
+//! RUNA/RUNB runs, and canonical Huffman coding over 2-6 trees selected
+//! in 50-symbol groups.
 //!
-//! Implements the real bzip2 container: RLE1 stage, Burrows-Wheeler
-//! Transform, move-to-front encoding with RUNA/RUNB runs, and canonical
-//! Huffman coding over 2-6 trees with 50-symbol group selectors.
+//! Independent reimplementation of the published algorithm and bitstream
+//! (the format `bzip2`/libbz2 produces), written from the format's
+//! description rather than from any implementation's source. Bit packing
+//! is MSB-first within bytes and continuous across block boundaries. The
+//! BWT itself is [`super::bwt`]; the length-limited code lengths fall
+//! back to [`super::huffman::package_merge_lengths`].
 //!
-//! Bit packing is MSB-first within bytes, continuous across block
-//! boundaries, exactly as produced by `bzip2` / libbz2.
+//! A stream declares its *block* size (100 kB units) and nothing about
+//! its total, so a bounded decode can only refuse late — a block that
+//! does not fit is dropped whole rather than appended in part.
 
 use super::bwt::Bwt;
 use super::cap::Bounded;
@@ -41,6 +49,9 @@ const BLOCK_MAGIC: u64 = 0x3141_5926_5359;
 
 /// End-of-stream magic: sqrt(pi).
 const EOS_MAGIC: u64 = 0x1772_4538_5090;
+
+/// How many payload symbols one selector group covers.
+const GROUP_LEN: usize = 50;
 
 /// CRC-32/BZIP2 (poly 0x04C11DB7, MSB-first, init/xorout 0xFFFFFFFF).
 const fn make_crc_table() -> [u32; 256] {
@@ -79,8 +90,10 @@ fn bz2_crc32(data: &[u8]) -> u32 {
 #[derive(Debug, Default)]
 struct MsbWriter {
     out: Vec<u8>,
-    cur: u8,
-    nbits: u8,
+    /// Bits staged for the current byte, left-aligned in the low `used` bits.
+    staged: u8,
+    /// How many bits `staged` holds (0..8).
+    used: u8,
 }
 
 impl MsbWriter {
@@ -89,12 +102,12 @@ impl MsbWriter {
     }
 
     fn write_bit(&mut self, bit: u8) {
-        self.cur = (self.cur << 1) | (bit & 1);
-        self.nbits += 1;
-        if self.nbits == 8 {
-            self.out.push(self.cur);
-            self.cur = 0;
-            self.nbits = 0;
+        self.staged = (self.staged << 1) | (bit & 1);
+        self.used += 1;
+        if self.used == 8 {
+            self.out.push(self.staged);
+            self.staged = 0;
+            self.used = 0;
         }
     }
 
@@ -107,9 +120,9 @@ impl MsbWriter {
 
     /// Flush with zero padding and return the output.
     fn finish(mut self) -> Vec<u8> {
-        if self.nbits > 0 {
-            self.cur <<= 8 - self.nbits;
-            self.out.push(self.cur);
+        if self.used > 0 {
+            self.staged <<= 8 - self.used;
+            self.out.push(self.staged);
         }
         self.out
     }
@@ -118,22 +131,33 @@ impl MsbWriter {
 /// MSB-first bit reader: the bit at bit 7 of the current byte is next.
 struct MsbReader<'a> {
     data: &'a [u8],
-    bit: usize,
+    /// Byte the next bit comes from.
+    byte_pos: usize,
+    /// How many bits of that byte are already spent (0..8).
+    spent: u8,
 }
 
 impl<'a> MsbReader<'a> {
     fn new(data: &'a [u8]) -> Self {
-        Self { data, bit: 0 }
+        Self {
+            data,
+            byte_pos: 0,
+            spent: 0,
+        }
     }
 
     fn read_bit(&mut self) -> CompressResult<u32> {
-        if self.bit >= self.data.len() * 8 {
-            return Err(CompressError::UnexpectedEof);
+        let byte = *self
+            .data
+            .get(self.byte_pos)
+            .ok_or(CompressError::UnexpectedEof)?;
+        let bit = (byte >> (7 - self.spent)) & 1;
+        self.spent += 1;
+        if self.spent == 8 {
+            self.byte_pos += 1;
+            self.spent = 0;
         }
-        let byte = self.data[self.bit / 8];
-        let b = (byte >> (7 - (self.bit % 8))) & 1;
-        self.bit += 1;
-        Ok(b as u32)
+        Ok(bit as u32)
     }
 
     /// Read `n` bits (n <= 57), MSB first.
@@ -148,44 +172,62 @@ impl<'a> MsbReader<'a> {
 
 /// Canonical Huffman decoding table for one bzip2 group tree.
 ///
-/// Decodes MSB-first using the classic puff.c walk: `counts` holds the
-/// number of codes per length, `symbols` lists symbols sorted by (length,
-/// symbol).
+/// Built from the code lengths the stream carries: for every length, the
+/// smallest code of that length and the symbols that own codes of that
+/// length in code order. Decoding accumulates bits MSB-first and stops at
+/// the first length whose code range covers what has been read.
 struct BzHuffman {
-    counts: [u16; (MAX_CODE_LEN + 1) as usize],
-    symbols: Vec<u16>,
+    /// `first[len]` is the smallest `len`-bit code, or 0 when no code of
+    /// that length exists.
+    first: [u32; (MAX_CODE_LEN + 1) as usize],
+    /// `by_len[len]` lists the symbols whose codes are `len` bits, in
+    /// ascending code order.
+    by_len: [Vec<u16>; (MAX_CODE_LEN + 1) as usize],
 }
 
 impl BzHuffman {
     fn from_lengths(lengths: &[u8]) -> Self {
-        let mut counts = [0u16; (MAX_CODE_LEN + 1) as usize];
-        for &l in lengths {
-            counts[l as usize] += 1;
-        }
-        let mut symbols = Vec::with_capacity(lengths.len());
-        for len in 1..=(MAX_CODE_LEN as usize) {
-            for (sym, &l) in lengths.iter().enumerate() {
-                if l as usize == len {
-                    symbols.push(sym as u16);
+        // Canonical order: sort symbols by (length, symbol) and hand out
+        // codes length by length, each starting where the previous left
+        // off shifted up one.
+        let mut order: Vec<(u8, u16)> = lengths
+            .iter()
+            .enumerate()
+            .filter(|(_, &l)| l > 0)
+            .map(|(s, &l)| (l, s as u16))
+            .collect();
+        order.sort_unstable();
+
+        let mut first = [0u32; (MAX_CODE_LEN + 1) as usize];
+        let mut by_len: [Vec<u16>; (MAX_CODE_LEN + 1) as usize] = Default::default();
+        let mut code = 0u32;
+        let mut prev_len = 0u8;
+        for &(len, sym) in &order {
+            if len != prev_len {
+                if prev_len > 0 {
+                    code <<= len - prev_len;
                 }
+                first[len as usize] = code;
+                prev_len = len;
             }
+            by_len[len as usize].push(sym);
+            code += 1;
         }
-        Self { counts, symbols }
+        Self { first, by_len }
     }
 
     fn decode_symbol(&self, reader: &mut MsbReader) -> CompressResult<u16> {
-        let mut code: i32 = 0;
-        let mut first: i32 = 0;
-        let mut index: usize = 0;
+        let mut code = 0u32;
         for len in 1..=(MAX_CODE_LEN as usize) {
-            code |= reader.read_bit()? as i32;
-            let count = self.counts[len] as i32;
-            if code - first < count {
-                return Ok(self.symbols[index + (code - first) as usize]);
+            code = (code << 1) | reader.read_bit()?;
+            let list = &self.by_len[len];
+            if list.is_empty() {
+                continue;
             }
-            index += count as usize;
-            first = (first + count) << 1;
-            code <<= 1;
+            let offset = code.wrapping_sub(self.first[len]);
+            if offset < list.len() as u32 {
+                return Ok(list[offset as usize]);
+            }
         }
         Err(CompressError::CorruptedData("invalid bzip2 huffman code"))
     }
@@ -208,7 +250,7 @@ impl<'r, 'd> SymStream<'r, 'd> {
             if self.sel_idx >= self.selectors.len() {
                 return Err(CompressError::CorruptedData("selector list exhausted"));
             }
-            self.group_rem = 50;
+            self.group_rem = GROUP_LEN;
         }
         self.group_rem -= 1;
         let tree = &self.trees[self.selectors[self.sel_idx] as usize];
@@ -216,43 +258,50 @@ impl<'r, 'd> SymStream<'r, 'd> {
     }
 }
 
+/// One run of identical bytes at the head of `data`, at least one byte
+/// long.
+fn take_run(data: &[u8]) -> (u8, usize) {
+    let b = data[0];
+    let mut n = 1;
+    while n < data.len() && data[n] == b {
+        n += 1;
+    }
+    (b, n)
+}
+
 /// RLE1 stage: a run of 4 identical bytes is followed by a count byte with
 /// the number of additional repeats (0-255 per group).
 fn rle1_encode(data: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(data.len());
-    let mut i = 0;
-    while i < data.len() {
-        let b = data[i];
-        let mut run = 1usize;
-        i += 1;
-        while i < data.len() && data[i] == b {
-            run += 1;
-            i += 1;
-        }
+    let mut rest = data;
+    while !rest.is_empty() {
+        let (b, run) = take_run(rest);
+        rest = &rest[run..];
         if run < 4 {
             out.extend(core::iter::repeat_n(b, run));
-        } else {
-            out.extend(core::iter::repeat_n(b, 4));
-            let mut rem = run - 4;
-            loop {
-                // Format limit: count byte is 0..=251 (max group 4+251).
-                let n = rem.min(251);
-                out.push(n as u8);
-                rem -= n;
-                if rem == 0 {
-                    break;
-                }
-                // More repeats: start another group, which always ends with
-                // a count byte so the decoder's 4-run rule stays satisfied.
-                out.extend(core::iter::repeat_n(b, 4));
-                rem -= 4;
+            continue;
+        }
+        out.extend(core::iter::repeat_n(b, 4));
+        let mut rem = run - 4;
+        loop {
+            // Format limit: count byte is 0..=251 (max group 4+251).
+            let n = rem.min(251);
+            out.push(n as u8);
+            rem -= n;
+            if rem == 0 {
+                break;
             }
+            // More repeats: start another group, which always ends with
+            // a count byte so the decoder's 4-run rule stays satisfied.
+            out.extend(core::iter::repeat_n(b, 4));
+            rem -= 4;
         }
     }
     out
 }
 
-/// Invert the RLE1 stage.
+/// Invert the RLE1 stage: four of a byte in a row is the signal that the
+/// next byte counts further repeats.
 fn rle1_decode(data: &[u8]) -> CompressResult<Vec<u8>> {
     let mut out = Vec::with_capacity(data.len());
     let mut run = 0usize;
@@ -269,10 +318,7 @@ fn rle1_decode(data: &[u8]) -> CompressResult<Vec<u8>> {
         }
         out.push(b);
         if run == 4 {
-            if i >= data.len() {
-                return Err(CompressError::UnexpectedEof);
-            }
-            let n = data[i] as usize;
+            let n = *data.get(i).ok_or(CompressError::UnexpectedEof)? as usize;
             i += 1;
             out.extend(core::iter::repeat_n(b, n));
             run = 0;
@@ -329,11 +375,10 @@ fn huffman_lengths_unlimited(weights: &[u64]) -> Vec<u8> {
     lens
 }
 
-/// Length-limited Huffman code lengths, using the same iterative deepening
-/// strategy as libbz2's `BZ2_hbMakeCodeLengths`: build an optimal tree,
-/// and if any length exceeds the limit, bump the weights of the deepest
-/// symbols and rebuild. The result always comes from a real Huffman tree,
-/// so the Kraft sum is exactly 1.
+/// Length-limited Huffman code lengths: build an optimal tree, and if any
+/// length exceeds the limit, bump the weights of the deepest symbols and
+/// rebuild. The result always comes from a real Huffman tree, so the Kraft
+/// sum is exactly 1.
 fn limited_huffman_lengths(freqs: &[u64], max_len: u8) -> Vec<u8> {
     let mut weights: Vec<u64> = freqs.to_vec();
     for _iteration in 0..64 {
@@ -472,7 +517,7 @@ impl Bzip2Encoder {
         // Selector encoding is a unary bit run: j one-bits then a zero-bit;
         // tree 0 is MTF value 0, i.e. a single 0 bit.
         w.write_bits(2, 3);
-        let n_selectors = mtfv.len().div_ceil(50);
+        let n_selectors = mtfv.len().div_ceil(GROUP_LEN);
         w.write_bits(n_selectors as u64, 15);
         for _ in 0..n_selectors {
             w.write_bits(0, 1);
@@ -496,10 +541,10 @@ impl Bzip2Encoder {
         }
 
         // Payload.
-        let mut group_rem = 50usize;
+        let mut group_rem = GROUP_LEN;
         for &sym in &mtfv {
             if group_rem == 0 {
-                group_rem = 50;
+                group_rem = GROUP_LEN;
             }
             group_rem -= 1;
             let code = codes[sym as usize];
@@ -566,142 +611,7 @@ impl Bzip2Decoder {
                 return Err(CompressError::InvalidFormat("invalid block magic"));
             }
 
-            let block_crc = reader.read_bits(32)? as u32;
-            if reader.read_bits(1)? != 0 {
-                return Err(CompressError::InvalidFormat(
-                    "randomized blocks are not supported",
-                ));
-            }
-            let orig_ptr = reader.read_bits(24)? as usize;
-
-            // In-use byte map: 16 single bits (one per group of 16 bytes),
-            // then 16 bits for each set group.
-            let mut inuse16 = 0u16;
-            for g in 0..16 {
-                if reader.read_bit()? != 0 {
-                    inuse16 |= 1 << g;
-                }
-            }
-            let mut seq_to_unseq: Vec<u8> = Vec::new();
-            for g in 0..16 {
-                if inuse16 & (1 << g) != 0 {
-                    for j in 0..16 {
-                        if reader.read_bit()? != 0 {
-                            seq_to_unseq.push((g * 16 + j) as u8);
-                        }
-                    }
-                }
-            }
-            let n_in_use = seq_to_unseq.len();
-            if n_in_use == 0 {
-                return Err(CompressError::CorruptedData("empty in-use map"));
-            }
-            let alpha_size = n_in_use + 2;
-            let eob = alpha_size - 1;
-
-            // Huffman groups.
-            let num_trees = reader.read_bits(3)? as usize;
-            if !(2..=6).contains(&num_trees) {
-                return Err(CompressError::InvalidFormat("invalid number of trees"));
-            }
-            let num_selectors = reader.read_bits(15)? as usize;
-            if num_selectors == 0 || num_selectors > 2 + block_cap / 50 {
-                return Err(CompressError::InvalidFormat("invalid selector count"));
-            }
-
-            let mut selectors = vec![0u8; num_selectors];
-            {
-                let mut pos: Vec<u8> = (0..num_trees as u8).collect();
-                for sel in selectors.iter_mut() {
-                    // Unary bit run: count 1-bits, terminated by a 0-bit.
-                    let mut j = 0usize;
-                    while reader.read_bit()? != 0 {
-                        j += 1;
-                        if j >= num_trees {
-                            return Err(CompressError::CorruptedData("bad selector"));
-                        }
-                    }
-                    let tmp = pos[j];
-                    for k in (1..=j).rev() {
-                        pos[k] = pos[k - 1];
-                    }
-                    pos[0] = tmp;
-                    *sel = tmp;
-                }
-            }
-
-            let mut trees = Vec::with_capacity(num_trees);
-            for _ in 0..num_trees {
-                let mut curr = reader.read_bits(5)? as i32;
-                let mut lengths = vec![0u8; alpha_size];
-                for len in lengths.iter_mut() {
-                    loop {
-                        if curr < 1 || curr > MAX_CODE_LEN as i32 {
-                            return Err(CompressError::CorruptedData("bad code length"));
-                        }
-                        if reader.read_bit()? == 0 {
-                            break;
-                        }
-                        // Second bit: 0 = increment, 1 = decrement.
-                        if reader.read_bit()? == 0 {
-                            curr += 1;
-                        } else {
-                            curr -= 1;
-                        }
-                    }
-                    *len = curr as u8;
-                }
-                trees.push(BzHuffman::from_lengths(&lengths));
-            }
-
-            // Payload: Huffman -> MTF with runs.
-            let mut mtf = seq_to_unseq;
-            let mut buf = Vec::with_capacity(block_cap.min(1 << 20));
-            {
-                let mut stream = SymStream {
-                    reader: &mut reader,
-                    trees: &trees,
-                    selectors: &selectors,
-                    group_rem: 50,
-                    sel_idx: 0,
-                };
-                loop {
-                    let sym = stream.next()?;
-                    if sym as usize == eob {
-                        break;
-                    }
-                    if sym <= RUNB {
-                        // Front-byte run: RUNA adds es, RUNB adds 2*es,
-                        // es doubles per symbol (bijective base-2).
-                        let mut es = 1u64;
-                        let mut n = 0u64;
-                        let mut s = sym;
-                        while s <= RUNB {
-                            if s == RUNA {
-                                n += es;
-                            } else {
-                                n += 2 * es;
-                            }
-                            es <<= 1;
-                            if n >= 1 << 25 {
-                                return Err(CompressError::CorruptedData("run too long"));
-                            }
-                            s = stream.next()?;
-                        }
-                        let b = mtf[0];
-                        buf.extend(core::iter::repeat_n(b, n as usize));
-                        if s as usize == eob {
-                            break;
-                        }
-                        mtf_literal(s, &mut mtf, &mut buf)?;
-                    } else {
-                        mtf_literal(sym, &mut mtf, &mut buf)?;
-                    }
-                    if buf.len() > block_cap {
-                        return Err(CompressError::CorruptedData("block too large"));
-                    }
-                }
-            }
+            let (block_crc, orig_ptr, buf) = read_block_payload(&mut reader, block_cap)?;
 
             // Inverse BWT then inverse RLE1, verify block CRC.
             if orig_ptr >= buf.len() && !buf.is_empty() {
@@ -723,6 +633,153 @@ impl Bzip2Decoder {
     }
 }
 
+/// Read everything one block carries between its magic and the inverse
+/// transform: CRC, the BWT index, the in-use map (as the MTF seed), the
+/// Huffman groups, and the run-expanded symbol payload.
+fn read_block_payload(
+    reader: &mut MsbReader,
+    block_cap: usize,
+) -> CompressResult<(u32, usize, Vec<u8>)> {
+    let block_crc = reader.read_bits(32)? as u32;
+    if reader.read_bits(1)? != 0 {
+        return Err(CompressError::InvalidFormat(
+            "randomized blocks are not supported",
+        ));
+    }
+    let orig_ptr = reader.read_bits(24)? as usize;
+
+    // In-use byte map: 16 single bits (one per group of 16 bytes),
+    // then 16 bits for each set group.
+    let mut inuse16 = 0u16;
+    for g in 0..16 {
+        if reader.read_bit()? != 0 {
+            inuse16 |= 1 << g;
+        }
+    }
+    let mut seq_to_unseq: Vec<u8> = Vec::new();
+    for g in 0..16 {
+        if inuse16 & (1 << g) != 0 {
+            for j in 0..16 {
+                if reader.read_bit()? != 0 {
+                    seq_to_unseq.push((g * 16 + j) as u8);
+                }
+            }
+        }
+    }
+    let n_in_use = seq_to_unseq.len();
+    if n_in_use == 0 {
+        return Err(CompressError::CorruptedData("empty in-use map"));
+    }
+    let alpha_size = n_in_use + 2;
+    let eob = alpha_size - 1;
+
+    // Huffman groups.
+    let num_trees = reader.read_bits(3)? as usize;
+    if !(2..=6).contains(&num_trees) {
+        return Err(CompressError::InvalidFormat("invalid number of trees"));
+    }
+    let num_selectors = reader.read_bits(15)? as usize;
+    if num_selectors == 0 || num_selectors > 2 + block_cap / GROUP_LEN {
+        return Err(CompressError::InvalidFormat("invalid selector count"));
+    }
+
+    let mut selectors = vec![0u8; num_selectors];
+    {
+        let mut pos: Vec<u8> = (0..num_trees as u8).collect();
+        for sel in selectors.iter_mut() {
+            // Unary bit run: count 1-bits, terminated by a 0-bit.
+            let mut j = 0usize;
+            while reader.read_bit()? != 0 {
+                j += 1;
+                if j >= num_trees {
+                    return Err(CompressError::CorruptedData("bad selector"));
+                }
+            }
+            let tmp = pos[j];
+            for k in (1..=j).rev() {
+                pos[k] = pos[k - 1];
+            }
+            pos[0] = tmp;
+            *sel = tmp;
+        }
+    }
+
+    let mut trees = Vec::with_capacity(num_trees);
+    for _ in 0..num_trees {
+        let mut curr = reader.read_bits(5)? as i32;
+        let mut lengths = vec![0u8; alpha_size];
+        for len in lengths.iter_mut() {
+            loop {
+                if curr < 1 || curr > MAX_CODE_LEN as i32 {
+                    return Err(CompressError::CorruptedData("bad code length"));
+                }
+                if reader.read_bit()? == 0 {
+                    break;
+                }
+                // Second bit: 0 = increment, 1 = decrement.
+                if reader.read_bit()? == 0 {
+                    curr += 1;
+                } else {
+                    curr -= 1;
+                }
+            }
+            *len = curr as u8;
+        }
+        trees.push(BzHuffman::from_lengths(&lengths));
+    }
+
+    // Payload: Huffman -> MTF with runs.
+    let mut mtf = seq_to_unseq;
+    let mut buf = Vec::with_capacity(block_cap.min(1 << 20));
+    {
+        let mut stream = SymStream {
+            reader,
+            trees: &trees,
+            selectors: &selectors,
+            group_rem: GROUP_LEN,
+            sel_idx: 0,
+        };
+        loop {
+            let sym = stream.next()?;
+            if sym as usize == eob {
+                break;
+            }
+            if sym <= RUNB {
+                // Front-byte run: RUNA adds es, RUNB adds 2*es,
+                // es doubles per symbol (bijective base-2).
+                let mut es = 1u64;
+                let mut n = 0u64;
+                let mut s = sym;
+                while s <= RUNB {
+                    if s == RUNA {
+                        n += es;
+                    } else {
+                        n += 2 * es;
+                    }
+                    es <<= 1;
+                    if n >= 1 << 25 {
+                        return Err(CompressError::CorruptedData("run too long"));
+                    }
+                    s = stream.next()?;
+                }
+                let b = mtf[0];
+                buf.extend(core::iter::repeat_n(b, n as usize));
+                if s as usize == eob {
+                    break;
+                }
+                mtf_literal(s, &mut mtf, &mut buf)?;
+            } else {
+                mtf_literal(sym, &mut mtf, &mut buf)?;
+            }
+            if buf.len() > block_cap {
+                return Err(CompressError::CorruptedData("block too large"));
+            }
+        }
+    }
+
+    Ok((block_crc, orig_ptr, buf))
+}
+
 /// Decode one MTF literal symbol (symbol >= 2 -> MTF index symbol - 1).
 fn mtf_literal(sym: u16, mtf: &mut [u8], buf: &mut Vec<u8>) -> CompressResult<()> {
     let idx = sym as usize - 1;
@@ -735,7 +792,6 @@ fn mtf_literal(sym: u16, mtf: &mut [u8], buf: &mut Vec<u8>) -> CompressResult<()
     buf.push(b);
     Ok(())
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -973,5 +1029,34 @@ mod tests {
             "{} bytes",
             b.bytes.len()
         );
+    }
+}
+
+/// A stream is untrusted input: bad magic, a randomized block, a
+/// selector run past the tree count, a run length that will not fit the
+/// block — every one must answer with an error, never a panic.
+#[cfg(test)]
+mod fuzz {
+    use super::*;
+
+    #[test]
+    fn never_panics_on_arbitrary_bytes() {
+        let corpus: alloc::vec::Vec<(&str, alloc::vec::Vec<u8>)> = alloc::vec![
+            ("empty", alloc::vec![]),
+            ("magic", b"BZh9".to_vec()),
+            ("eos", {
+                let mut v = b"BZh9".to_vec();
+                v.extend_from_slice(&EOS_MAGIC.to_be_bytes()[2..]);
+                v.extend_from_slice(&[0u8; 4]);
+                v
+            }),
+        ];
+        crate::fuzzkit::assert_never_panics(corpus, 2000, "bzip2", |data| {
+            let mut decoder = Bzip2Decoder::new();
+            let _ = decoder.decode(data);
+            let mut decoder = Bzip2Decoder::new();
+            let _ = decoder.decode_bounded(data, 4096);
+            let _ = rle1_decode(data);
+        });
     }
 }

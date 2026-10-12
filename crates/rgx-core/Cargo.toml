@@ -3,8 +3,9 @@ name = "rgx-core"
 version = "0.1.0"
 edition = "2021"
 description = "Core adapter trait and extraction pipeline for rgx"
-# The Tesla Valve pack store (src/tv/, src/tv_runtime/, bin/rgx-tv.rs) is
-# Apache-2.0 only; the rest is MIT OR Apache-2.0. See COPYING.
+# The `tv/`, `tv_runtime/` and `src/bin/rgx-tv.rs` portion is Apache-2.0 only
+# (per-file SPDX headers); everything else in this crate is MIT OR Apache-2.0.
+# See the repository's COPYING.
 license = "MIT OR Apache-2.0"
 
 [features]

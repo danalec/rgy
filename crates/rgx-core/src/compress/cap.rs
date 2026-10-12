@@ -1,5 +1,8 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The ceiling on how many bytes one decode may emit.
 //!
+//! rgx's own bomb guard, not derived from any third-party implementation.
 //! Every bounded decode here counts bytes as they are emitted. Decoding first
 //! and measuring afterwards costs exactly what a compression bomb was built to
 //! cost.

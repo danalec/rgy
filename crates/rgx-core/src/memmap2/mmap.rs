@@ -1,4 +1,4 @@
-//! Clean-room reimplementation of memmap2-rs read-only Mmap handle.
+//! Independent reimplementation of memmap2-rs read-only Mmap handle.
 
 use std::fmt;
 use std::io;

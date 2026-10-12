@@ -1,4 +1,4 @@
-//! Clean-room reimplementation of memmap2-rs platform dispatch.
+//! Independent reimplementation of memmap2-rs platform dispatch.
 
 use std::fs::File;
 use std::io;

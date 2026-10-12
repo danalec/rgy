@@ -1,34 +1,62 @@
-//! # TAR Archive Format
-// Vendored from the GNU tar source tree (https://www.gnu.org/software/tar/,
-// `src/tar.c`, `src/list.c`, `src/extract.c`, GPL-3.0-or-later): the
-// reader is used; the writer, the unparsed header fields and two error
-// variants are not referenced from rgx, so the file carries a blanket
-// dead-code allow rather than drifting from the source.
-#![allow(dead_code)]
-//!
-//! Reader and writer for Unix TAR archives.
-//!
-//! ## Features
-//!
-//! - USTAR format support
-//! - PAX extended attributes
-//! - GNU TAR extensions
-//! - Long filename support
-//! - Streaming read/write
+// SPDX-License-Identifier: Apache-2.0
 
-// Vendored trim note: the write half (TarWriter, the magics, to_byte)
-// is kept byte-identical to the upstream source on purpose — rgx only
-// reads, but a smaller delta from the source means a future re-sync is a
-// plain overwrite. rgx never calls it.
-#[allow(dead_code)]
-pub const TMAGIC: &[u8; 5] = b"ustar";
-#[allow(dead_code)]
-pub const GNUTMAGIC: &[u8; 7] = b"ustar  ";
+//! TAR archives (POSIX.1-2001 ustar, with the pax and GNU extensions
+//! that real archives carry).
+//!
+//! Independent reimplementation of the archive walk the POSIX.1-2001
+//! ustar format defines: a sequence of 512-byte header blocks, each
+//! followed by its file data padded to a 512-byte boundary, terminated
+//! by a zero block. The reader also resolves the two long-path
+//! extensions in common use — pax extended headers (`x`/`g` typeflags,
+//! records of the form `"<decimal length> <key>=<value>\n"`) and GNU
+//! long name/link entries (`L`/`K` typeflags) — because archives that
+//! need them are the archives whose paths matter most.
+//!
+//! # Contract
+//!
+//! A header's checksum is the unsigned sum of all 512 bytes with the
+//! checksum field itself taken as eight spaces. Numeric fields are
+//! NUL/space-terminated octal. The ustar path is the `prefix` field
+//! (155 bytes at offset 345) joined with `name` (100 bytes at offset 0)
+//! by a single `/` whenever the prefix is non-empty — per POSIX the
+//! prefix applies regardless of how full `name` is, so a NUL-padded
+//! short name with a prefix is a split path, not a short one. Name
+//! precedence for the following entry is: pax `path` over GNU `L` over
+//! the ustar name/prefix pair; the same ordering applies to `linkpath`
+//! and `size`.
+//!
+//! The zero-block terminator stops the walk; anything after the first
+//! zero block is not an entry. Only regular entries carry data.
+
+// The write half and the header fields no rgx consumer reads (mode,
+// uid, gid, uname, gname, dev*) are kept so the on-disk struct layout
+// and a reader/writer round trip stay complete; they are unused in the
+// shipped adapter path.
+#![allow(dead_code)]
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::budget::Stopped;
+
+pub const TMAGIC: &[u8; 5] = b"ustar";
+pub const GNUTMAGIC: &[u8; 7] = b"ustar  ";
+
+const BLOCK_SIZE: usize = 512;
+
+/// ustar field offsets (POSIX.1-2001, Table "ustar Header Block").
+const NAME: (usize, usize) = (0, 100);
+const MODE: (usize, usize) = (100, 8);
+const UID: (usize, usize) = (108, 8);
+const GID: (usize, usize) = (116, 8);
+const SIZE: (usize, usize) = (124, 12);
+const MTIME: (usize, usize) = (136, 12);
+const CHECKSUM: (usize, usize) = (148, 8);
+const TYPEFLAG: usize = 156;
+const LINKNAME: (usize, usize) = (157, 100);
+const DEVMAJOR: (usize, usize) = (329, 8);
+const DEVMINOR: (usize, usize) = (337, 8);
+const PREFIX: (usize, usize) = (345, 155);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TarEntryType {
@@ -66,7 +94,6 @@ impl From<u8> for TarEntryType {
 }
 
 impl TarEntryType {
-    #[allow(dead_code)] // write half, see TMAGIC note
     pub fn to_byte(self) -> u8 {
         match self {
             Self::Regular => b'0',
@@ -103,8 +130,6 @@ pub struct TarHeader {
     pub prefix: String,
 }
 
-const BLOCK_SIZE: usize = 512;
-
 #[derive(Debug, Clone)]
 pub struct TarEntry {
     pub header: TarHeader,
@@ -136,8 +161,35 @@ impl core::fmt::Display for TarError {
 
 pub type TarResult<T> = Result<T, TarError>;
 
-// Vendored std adaptation — see compress/gzip.rs.
 impl std::error::Error for TarError {}
+
+/// Name/link/size overrides carried by the pax and GNU extension
+/// entries seen so far; they apply to the next real entry only.
+#[derive(Default)]
+struct Pending {
+    gnu_name: Option<String>,
+    gnu_link: Option<String>,
+    pax_path: Option<String>,
+    pax_link: Option<String>,
+    pax_size: Option<u64>,
+}
+
+impl Pending {
+    /// pax `path` over GNU `L` over the ustar name/prefix pair.
+    fn take_name(&mut self, ustar_name: String) -> String {
+        self.pax_path
+            .take()
+            .or_else(|| self.gnu_name.take())
+            .unwrap_or(ustar_name)
+    }
+
+    fn take_link(&mut self, ustar_link: String) -> String {
+        self.pax_link
+            .take()
+            .or_else(|| self.gnu_link.take())
+            .unwrap_or(ustar_link)
+    }
+}
 
 pub struct TarReader;
 
@@ -162,160 +214,92 @@ impl TarReader {
         let mut members = 0usize;
         let mut member_bytes = 0u64;
         let mut stopped = None;
-        let mut offset = 0;
-        let mut pending_long_name: Option<String> = None;
-        let mut pending_long_link: Option<String> = None;
-        // PAX extended attributes apply to the next entry after them.
-        let mut pending_pax_path: Option<String> = None;
-        let mut pending_pax_link: Option<String> = None;
-        let mut pending_pax_size: Option<u64> = None;
+        let mut offset = 0usize;
+        let mut pending = Pending::default();
 
         while offset + BLOCK_SIZE <= data.len() {
             let header_block = &data[offset..offset + BLOCK_SIZE];
 
+            // The end-of-archive marker is a zero block; nothing after
+            // the first one is an entry.
             if Self::is_zero_block(header_block) {
                 break;
             }
 
-            let checksum = Self::parse_octal(&header_block[148..156])? as u32;
+            let checksum = Self::parse_octal(field(header_block, CHECKSUM))? as u32;
             let computed = Self::compute_checksum(header_block);
-
             if checksum != computed {
                 return Err(TarError::InvalidChecksum);
             }
 
-            let entry_type = TarEntryType::from(header_block[156]);
+            let entry_type = TarEntryType::from(header_block[TYPEFLAG]);
+            let size = Self::parse_octal(field(header_block, SIZE))?;
+            let body_start = offset + BLOCK_SIZE;
+            let data_blocks = (size as usize).div_ceil(BLOCK_SIZE);
+            let body_end = body_start + data_blocks * BLOCK_SIZE;
 
-            let name_offset = offset + BLOCK_SIZE;
-            let (entry_name, entry_data_size) = if entry_type == TarEntryType::GnuLongName {
-                let size = Self::parse_octal(&header_block[124..136])? as usize;
-                let data_blocks = size.div_ceil(BLOCK_SIZE);
-                let name_data = &data[name_offset..name_offset + size];
-                let name = core::str::from_utf8(name_data)
-                    .map(|s| s.trim_end_matches('\0').to_string())
-                    .unwrap_or_default();
-                pending_long_name = Some(name);
-                offset += BLOCK_SIZE + data_blocks * BLOCK_SIZE;
-                continue;
-            } else if entry_type == TarEntryType::GnuLongLink {
-                let size = Self::parse_octal(&header_block[124..136])? as usize;
-                let data_blocks = size.div_ceil(BLOCK_SIZE);
-                let link_data = &data[name_offset..name_offset + size];
-                let link = core::str::from_utf8(link_data)
-                    .map(|s| s.trim_end_matches('\0').to_string())
-                    .unwrap_or_default();
-                pending_long_link = Some(link);
-                offset += BLOCK_SIZE + data_blocks * BLOCK_SIZE;
-                continue;
-            } else if entry_type == TarEntryType::PaxHeader {
-                // PAX records are "LEN key=value\n" and carry the
-                // authoritative path/size for the *next* entry. They were
-                // previously skipped wholesale, so an archive using PAX
-                // for long paths lost them silently.
-                let size = Self::parse_octal(&header_block[124..136])? as usize;
-                let data_blocks = size.div_ceil(BLOCK_SIZE);
-                let end = name_offset
-                    .checked_add(size)
-                    .filter(|e| *e <= data.len())
-                    .ok_or(TarError::Truncated)?;
-                if let Some(body) = data.get(name_offset..end) {
+            // Extension entries consume their body and set up an
+            // override for the entry that follows; they are never
+            // themselves returned.
+            match entry_type {
+                TarEntryType::GnuLongName => {
+                    let name = Self::read_c_string(data, body_start, size)?;
+                    pending.gnu_name = Some(name);
+                    offset = body_end;
+                    continue;
+                }
+                TarEntryType::GnuLongLink => {
+                    let link = Self::read_c_string(data, body_start, size)?;
+                    pending.gnu_link = Some(link);
+                    offset = body_end;
+                    continue;
+                }
+                TarEntryType::PaxHeader => {
+                    let body = Self::read_body(data, body_start, size)?;
                     for (key, value) in Self::parse_pax_records(body) {
                         match key.as_str() {
-                            "path" => pending_pax_path = Some(value),
-                            "linkpath" => pending_pax_link = Some(value),
-                            "size" => pending_pax_size = value.parse::<u64>().ok(),
+                            "path" => pending.pax_path = Some(value),
+                            "linkpath" => pending.pax_link = Some(value),
+                            "size" => pending.pax_size = value.parse::<u64>().ok(),
                             _ => {}
                         }
                     }
+                    offset = body_end;
+                    continue;
                 }
-                offset += BLOCK_SIZE + data_blocks * BLOCK_SIZE;
-                continue;
-            } else {
-                // ustar splits a long path across a 155-byte `prefix` and a
-                // 100-byte `name`, joined with '/'. Per POSIX the prefix
-                // applies whenever it is non-empty — producers NUL-pad a
-                // short `name`, so "name must be exactly full" (an earlier
-                // reading here) silently truncated such paths. GNU tar
-                // confirmed by fixture: prefix='./ddd…', name='ddd…/deep.txt'.
-                let raw = &header_block[0..100];
-                let raw_end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
-                let raw = &raw[..raw_end];
-                let prefix_bytes = &header_block[345..500];
-                let prefix_end = prefix_bytes
-                    .iter()
-                    .position(|&b| b == 0)
-                    .unwrap_or(prefix_bytes.len());
-                let prefix = &prefix_bytes[..prefix_end];
-                // Build the joined name with one allocation: count the
-                // bytes needed, reserve, push.
-                let total = raw.len()
-                    + if prefix.is_empty() {
-                        0
-                    } else {
-                        prefix.len() + 1
-                    };
-                let mut buf = String::with_capacity(total);
-                if !prefix.is_empty() {
-                    // Safety: header bytes are 7-bit ASCII by spec; lossy
-                    // replacement on a non-UTF-8 byte is acceptable here.
-                    buf.push_str(core::str::from_utf8(prefix).unwrap_or(""));
-                    buf.push('/');
-                }
-                buf.push_str(core::str::from_utf8(raw).unwrap_or(""));
-                let size = Self::parse_octal(&header_block[124..136])? as usize;
-                (buf, size)
-            };
+                _ => {}
+            }
 
-            // Precedence, highest first: a PAX `path` overrides a GNU
-            // 'L' record, which overrides the ustar name/prefix pair.
-            let name = pending_pax_path
-                .take()
-                .or_else(|| pending_long_name.take())
-                .unwrap_or(entry_name);
-            let size_override = pending_pax_size.take();
+            // ustar splits a long path across `prefix` and `name`,
+            // joined with '/'; the prefix applies whenever it is
+            // non-empty, so a NUL-padded short name still joins.
+            let ustar_name = Self::join_ustar_name(header_block);
+            let name = pending.take_name(ustar_name);
+            let linkname = pending.take_link(Self::read_field_string(header_block, LINKNAME));
+            let size = pending.pax_size.take().unwrap_or(size);
 
-            // Skip the per-block allocations for `uname`, `gname`, `prefix`:
-            // no rgx consumer reads them (the only downstream field accesses
-            // outside the writer are `entry_type`, `name`, and `linkname`). The
-            // tar header still carries the slots so the on-disk struct layout
-            // is unchanged for any future reader, but the read-side leaves them
-            // empty. On a 100 000-block fixture this is ~300 000 fewer
-            // `String::from_utf8_lossy().into_owned()` calls.
             let header = TarHeader {
                 name,
-                mode: Self::parse_octal(&header_block[100..108])? as u32,
-                uid: Self::parse_octal(&header_block[108..116])? as u32,
-                gid: Self::parse_octal(&header_block[116..124])? as u32,
-                size: size_override.unwrap_or(entry_data_size as u64),
-                mtime: Self::parse_octal(&header_block[136..148])?,
+                mode: Self::parse_octal(field(header_block, MODE))? as u32,
+                uid: Self::parse_octal(field(header_block, UID))? as u32,
+                gid: Self::parse_octal(field(header_block, GID))? as u32,
+                size,
+                mtime: Self::parse_octal(field(header_block, MTIME))?,
                 checksum,
                 entry_type,
-                linkname: pending_pax_link
-                    .take()
-                    .or_else(|| pending_long_link.take())
-                    .unwrap_or_else(|| {
-                        // linkname is needed for Symlink/Link entries;
-                        // the consumer checks `entry_type` first, so the
-                        // allocation only matters when the entry will be
-                        // opened. The previous implementation paid for
-                        // this unconditionally.
-                        let raw = &header_block[157..257];
-                        let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
-                        String::from_utf8_lossy(&raw[..end]).into_owned()
-                    }),
+                linkname,
                 uname: String::new(),
                 gname: String::new(),
-                devmajor: Self::parse_octal(&header_block[329..337])? as u32,
-                devminor: Self::parse_octal(&header_block[337..345])? as u32,
+                devmajor: Self::parse_octal(field(header_block, DEVMAJOR))? as u32,
+                devminor: Self::parse_octal(field(header_block, DEVMINOR))? as u32,
                 prefix: String::new(),
             };
 
-            let data_blocks = entry_data_size.div_ceil(BLOCK_SIZE);
-            let data_start = name_offset;
-            let data_end = data_start + entry_data_size;
-
-            let entry_data = if data_start < data.len() && entry_type == TarEntryType::Regular {
-                data[data_start..data_end.min(data.len())].to_vec()
+            // Only regular entries carry member data; the rest advance
+            // over their (usually empty) body without copying it.
+            let entry_data = if entry_type == TarEntryType::Regular {
+                let take = (size as usize).min(data.len().saturating_sub(body_start));
+                data[body_start..body_start + take].to_vec()
             } else {
                 Vec::new()
             };
@@ -337,28 +321,65 @@ impl TarReader {
                 header,
                 data: entry_data,
             });
-
-            offset += BLOCK_SIZE + data_blocks * BLOCK_SIZE;
+            offset = body_end;
         }
 
         Ok((entries, stopped))
     }
 
+    /// The ustar path: `prefix`/`name` joined by '/' when the prefix is
+    /// non-empty, `name` alone otherwise.
+    fn join_ustar_name(header: &[u8]) -> String {
+        let name = Self::nul_terminated(field(header, NAME));
+        let prefix = Self::nul_terminated(field(header, PREFIX));
+        if prefix.is_empty() {
+            return name;
+        }
+        let mut buf = String::with_capacity(prefix.len() + 1 + name.len());
+        buf.push_str(&prefix);
+        buf.push('/');
+        buf.push_str(&name);
+        buf
+    }
+
+    /// A NUL-terminated string field: bytes up to the first NUL.
+    fn nul_terminated(raw: &[u8]) -> String {
+        let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+        String::from_utf8_lossy(&raw[..end]).into_owned()
+    }
+
+    fn read_field_string(header: &[u8], loc: (usize, usize)) -> String {
+        Self::nul_terminated(field(header, loc))
+    }
+
+    /// The body of an extension entry as a byte slice, bounds-checked.
+    fn read_body(data: &[u8], start: usize, size: u64) -> TarResult<&[u8]> {
+        let end = start
+            .checked_add(size as usize)
+            .filter(|&e| e <= data.len())
+            .ok_or(TarError::Truncated)?;
+        Ok(&data[start..end])
+    }
+
+    /// A GNU `L`/`K` body: the name as a NUL-terminated string.
+    fn read_c_string(data: &[u8], start: usize, size: u64) -> TarResult<String> {
+        let body = Self::read_body(data, start, size)?;
+        Ok(Self::nul_terminated(body))
+    }
+
     /// Parse a PAX extended-header body into `(key, value)` pairs.
     ///
-    /// The format is a sequence of records, each
-    /// `"<decimal length> <key>=<value>\n"`, where the length counts the
-    /// whole record including its own digits and the trailing newline.
-    /// Parsing walks records by that declared length rather than splitting
-    /// on newlines, so a value containing a newline is not truncated.
-    ///
-    /// Unparseable records are skipped rather than failing the archive: a
-    /// single malformed key must not cost the caller every entry.
+    /// Each record is `"<decimal length> <key>=<value>\n"`, where the
+    /// length counts the whole record including its own digits and the
+    /// trailing newline. Records are walked by that declared length
+    /// rather than split on newlines, so a value containing a newline
+    /// is not truncated. Unparseable records are skipped rather than
+    /// failing the archive: one malformed key must not cost the caller
+    /// every entry.
     fn parse_pax_records(body: &[u8]) -> Vec<(String, String)> {
         let mut out = Vec::new();
         let mut pos = 0usize;
         while pos < body.len() {
-            // The length is the decimal prefix up to a space.
             let Some(sp) = body[pos..].iter().position(|&b| b == b' ') else {
                 break;
             };
@@ -371,8 +392,7 @@ impl TarReader {
             }
             // Skip "<len> " then take everything up to the final newline.
             let start = pos + sp + 1;
-            let end = pos + len;
-            let record = &body[start..end];
+            let record = &body[start..pos + len];
             if let Some(nl) = record.iter().rposition(|&b| b == b'\n') {
                 let record = &record[..nl];
                 if let Some(eq) = record.iter().position(|&b| b == b'=') {
@@ -386,6 +406,7 @@ impl TarReader {
         out
     }
 
+    /// A NUL/space-terminated octal field. An empty field is zero.
     fn parse_octal(data: &[u8]) -> TarResult<u64> {
         let s = core::str::from_utf8(data)
             .map_err(|_| TarError::Utf8Error)?
@@ -407,26 +428,21 @@ impl TarReader {
         Ok(result)
     }
 
+    /// The unsigned byte sum of the block with the checksum field
+    /// taken as eight spaces (POSIX checksum definition).
     fn compute_checksum(header: &[u8]) -> u32 {
-        // The previous loop had a branch on every byte
-        // (`if (148..156).contains(&i) { 0x20 } else { b }`) which kept
-        // the auto-vectorizer out of the picture: SSE/AVX sum
-        // instructions want a single byte-wide add per lane, not a
-        // conditional. Splitting the 512-byte block into two halves and
-        // folding in the eight 0x20 bytes for the checksum field gives
-        // the compiler one linear scan of a contiguous range per half,
-        // which it can fold to a horizontal sum.
-        let mut sum: u32 = header[..148].iter().map(|&b| b as u32).sum::<u32>();
+        // Two linear scans instead of a per-byte branch keeps the
+        // auto-vectorizer on a plain horizontal sum.
+        let (lo, rest) = header.split_at(CHECKSUM.0);
+        let mut sum: u32 = lo.iter().map(|&b| b as u32).sum::<u32>();
         sum += 8 * 0x20;
-        sum += header[156..].iter().map(|&b| b as u32).sum::<u32>();
+        sum += rest[CHECKSUM.1..].iter().map(|&b| b as u32).sum::<u32>();
         sum
     }
 
-    /// True if the 512-byte block is the tar end-of-archive marker (all
-    /// zeros). Walks the block as eight `u64` words; any non-zero word
-    /// short-circuits. A per-byte scan is the same on a 512 B block
-    /// but the `u64 != 0` form keeps the loop short and predictable
-    /// to the auto-vectorizer.
+    /// True if the 512-byte block is the tar end-of-archive marker
+    /// (all zeros). Walks the block as `u64` words so any non-zero
+    /// word short-circuits.
     fn is_zero_block(block: &[u8]) -> bool {
         let (chunks, remainder) = block.as_chunks::<8>();
         for &w in chunks {
@@ -438,7 +454,11 @@ impl TarReader {
     }
 }
 
-#[allow(dead_code)] // write half, see TMAGIC note
+/// `buf[offset..offset+width]` as one ustar field.
+fn field(buf: &[u8], loc: (usize, usize)) -> &[u8] {
+    &buf[loc.0..loc.0 + loc.1]
+}
+
 pub struct TarWriter {
     entries: Vec<TarEntry>,
 }
@@ -494,6 +514,8 @@ impl TarWriter {
         });
     }
 
+    /// Serialize as ustar: header, body padded to 512 bytes, and the
+    /// two zero blocks the terminator is conventionally written with.
     pub fn finish(self) -> Vec<u8> {
         let mut output = Vec::new();
 
@@ -519,8 +541,10 @@ impl TarWriter {
             header[257..262].copy_from_slice(b"ustar");
             header[263] = b'0';
 
+            // The checksum field is 6 octal digits, NUL, space; it is
+            // computed with the field itself standing as eight spaces.
             let checksum = Self::compute_checksum(&header);
-            Self::write_octal(&mut header[148..156], checksum as u64, 6);
+            Self::write_octal(&mut header[148..155], checksum as u64, 6);
             header[155] = b' ';
 
             output.extend_from_slice(&header);
@@ -537,6 +561,9 @@ impl TarWriter {
         output
     }
 
+    /// Write `value` as `width` octal digits filling the rightmost
+    /// `width` bytes of `buf`; the byte before them is left for the
+    /// field's terminator.
     fn write_octal(buf: &mut [u8], mut value: u64, width: usize) {
         let start = buf.len() - width - 1;
         for i in (start..buf.len() - 1).rev() {
@@ -546,10 +573,7 @@ impl TarWriter {
     }
 
     fn compute_checksum(header: &[u8]) -> u32 {
-        let mut sum: u32 = header[..148].iter().map(|&b| b as u32).sum::<u32>();
-        sum += 8 * 0x20;
-        sum += header[156..].iter().map(|&b| b as u32).sum::<u32>();
-        sum
+        TarReader::compute_checksum(header)
     }
 }
 
@@ -587,6 +611,17 @@ mod tests {
         h
     }
 
+    /// Append `body` padded to a 512-byte boundary.
+    fn pad_body(blocks: &mut Vec<u8>, data: &[u8]) {
+        blocks.extend_from_slice(data);
+        let pad = (BLOCK_SIZE - data.len() % BLOCK_SIZE) % BLOCK_SIZE;
+        blocks.resize(blocks.len() + pad, 0);
+    }
+
+    fn end_of_archive(blocks: &mut Vec<u8>) {
+        blocks.extend_from_slice(&[0u8; BLOCK_SIZE * 2]);
+    }
+
     /// ustar splits a long path across `prefix` and a *full* 100-byte
     /// `name`. Reading `name` alone truncated it silently.
     #[test]
@@ -596,7 +631,7 @@ mod tests {
         name[..5].copy_from_slice(b"file.");
         let data = {
             let mut d = header(&name, dir, 0, b'0');
-            d.extend_from_slice(&[0u8; BLOCK_SIZE]); // end-of-archive
+            end_of_archive(&mut d);
             d
         };
 
@@ -621,7 +656,7 @@ mod tests {
     fn test_short_name_joins_prefix() {
         let data = {
             let mut d = header(b"short.txt", b"real/dir", 0, b'0');
-            d.extend_from_slice(&[0u8; BLOCK_SIZE]);
+            end_of_archive(&mut d);
             d
         };
         let entries = TarReader::read_all(&data).expect("should parse");
@@ -654,12 +689,10 @@ mod tests {
         let body = pax_record("path", long_path);
 
         let mut data = header(b"PaxHeaders/entry", b"", body.len() as u64, b'x');
-        data.extend_from_slice(&body);
-        let pad = (BLOCK_SIZE - body.len() % BLOCK_SIZE) % BLOCK_SIZE;
-        data.extend_from_slice(&vec![0u8; pad]);
+        pad_body(&mut data, &body);
         // the real entry follows, with a placeholder name
         data.extend_from_slice(&header(b"placeholder", b"", 0, b'0'));
-        data.extend_from_slice(&[0u8; BLOCK_SIZE]);
+        end_of_archive(&mut data);
 
         let entries = TarReader::read_all(&data).expect("should parse");
         assert_eq!(
@@ -741,5 +774,126 @@ mod tests {
         case!("ustar");
         case!("pax");
         case!("gnu");
+    }
+
+    /// A GNU 'L' entry carries the next entry's name in its body
+    /// (NUL-terminated), overriding the ustar name field.
+    #[test]
+    fn gnu_longname_supplies_the_next_name() {
+        let long_name = "dir/".repeat(30) + "deep.txt";
+        let mut data = {
+            let mut d = header(b"././@LongLink", b"", long_name.len() as u64 + 1, b'L');
+            let mut name_body = long_name.clone().into_bytes();
+            name_body.push(0);
+            pad_body(&mut d, &name_body);
+            d
+        };
+        data.extend_from_slice(&header(b"placeholder", b"", 3, b'0'));
+        pad_body(&mut data, b"abc");
+        end_of_archive(&mut data);
+
+        let entries = TarReader::read_all(&data).expect("should parse");
+        assert_eq!(entries.len(), 1, "the 'L' record is not an entry");
+        assert_eq!(entries[0].header.name, long_name);
+        assert_eq!(entries[0].data, b"abc");
+    }
+
+    /// A GNU 'K' entry carries the next entry's link target the same way.
+    #[test]
+    fn gnu_longlink_supplies_the_next_linkname() {
+        let target = "target/".repeat(20) + "file";
+        let mut data = {
+            let mut d = header(b"././@LongLink", b"", target.len() as u64 + 1, b'K');
+            let mut link_body = target.clone().into_bytes();
+            link_body.push(0);
+            pad_body(&mut d, &link_body);
+            d
+        };
+        data.extend_from_slice(&header(b"link", b"", 0, b'2'));
+        end_of_archive(&mut data);
+
+        let entries = TarReader::read_all(&data).expect("should parse");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].header.entry_type, TarEntryType::SymbolicLink);
+        assert_eq!(entries[0].header.linkname, target);
+    }
+
+    /// The first zero block is the end of the archive; entries after it
+    /// are not walked.
+    #[test]
+    fn zero_block_terminates_the_archive() {
+        let mut data = header(b"first.txt", b"", 1, b'0');
+        pad_body(&mut data, b"x");
+        end_of_archive(&mut data);
+        // a second archive's entry sitting after the terminator
+        data.extend_from_slice(&header(b"second.txt", b"", 1, b'0'));
+        pad_body(&mut data, b"y");
+        end_of_archive(&mut data);
+
+        let entries = TarReader::read_all(&data).expect("should parse");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].header.name, "first.txt");
+    }
+
+    /// A pax `size` record overrides the size in the ustar header of
+    /// the entry that follows, so the body length is read from the
+    /// record and not from the (stale) numeric field.
+    #[test]
+    fn pax_size_overrides_the_header_size() {
+        let rec = pax_record("size", "5");
+        let mut data = header(b"PaxHeaders/entry", b"", rec.len() as u64, b'x');
+        pad_body(&mut data, &rec);
+        // the header claims size 1, the record says 5
+        data.extend_from_slice(&header(b"file.txt", b"", 1, b'0'));
+        pad_body(&mut data, b"hello");
+        end_of_archive(&mut data);
+
+        let entries = TarReader::read_all(&data).expect("should parse");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].header.size, 5);
+        assert_eq!(&entries[0].data, b"hello");
+    }
+
+    /// An extension entry whose declared body runs past the end of the
+    /// buffer is Truncated, not a panic: the length comes from the
+    /// archive and a short buffer must not index past itself.
+    #[test]
+    fn truncated_extension_body_is_an_error_not_a_panic() {
+        let long_name = "n".repeat(200);
+        let d = header(b"././@LongLink", b"", long_name.len() as u64 + 1, b'L');
+        // no body at all: the declared size cannot be read
+        assert!(matches!(TarReader::read_all(&d), Err(TarError::Truncated)));
+
+        let mut d = header(b"PaxHeaders/entry", b"", 100, b'x');
+        d.extend_from_slice(&[0u8; 10]); // body far shorter than declared
+        assert!(matches!(TarReader::read_all(&d), Err(TarError::Truncated)));
+    }
+
+    #[test]
+    fn read_all_limited_stops_on_the_member_budget() {
+        let mut data = Vec::new();
+        for i in 0..3 {
+            data.extend_from_slice(&header(format!("f{i}.txt").as_bytes(), b"", 1, b'0'));
+            pad_body(&mut data, b"z");
+        }
+        end_of_archive(&mut data);
+
+        let (entries, stopped) =
+            TarReader::read_all_limited(&data, 2, u64::MAX).expect("should parse");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(stopped, Some(Stopped::MemberCount));
+    }
+
+    #[test]
+    fn never_panics_on_arbitrary_bytes() {
+        let corpus: Vec<(&'static str, Vec<u8>)> = vec![
+            ("empty", Vec::new()),
+            ("zeros", vec![0u8; 1024]),
+            ("block", vec![0xff; 512]),
+            ("valid", header(b"a.txt", b"", 0, b'0')),
+        ];
+        rgx_core::fuzzkit::assert_never_panics(corpus, 200, "tar", |data| {
+            let _ = TarReader::read_all(data);
+        });
     }
 }

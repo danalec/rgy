@@ -1,19 +1,17 @@
-//! # 7z Container Reader
+// SPDX-License-Identifier: Apache-2.0
+
+//! 7z archive container reader.
 //!
-//! Pure-Rust reader for the 7-Zip archive format (`.7z`), supporting the
-//! classic coder chain: Copy, LZMA1, LZMA2, Deflate, BZip2 and Delta.
-//! Both raw and LZMA-compressed (encoded) headers are handled, with CRC
-//! verification of the signature header, next header, pack streams and
-//! unpacked payloads.
-//!
-//! Encrypted (AES-256), PPMd and BCJ-filtered archives are reported as
-//! [`CompressError::Unsupported`] rather than silently mis-decoded.
-//!
-//! Reference semantics mirror the 7z format specification and the
-//! `sevenz-rust2` crate (bind-pair wiring, empty-stream/directory mapping,
-//! sub-stream splitting).
+//! Independent reimplementation of the 7z format (7zFormat.txt from the
+//! 7-Zip SDK): signature header with CRC, raw and encoded (compressed)
+//! headers, bind-pair coder chains (Copy, LZMA1, LZMA2, Deflate, BZip2,
+//! Delta, x86 BCJ), UTF-16LE file table, sub-streams, and per-entry CRC
+//! verification.  Encrypted (AES-256), PPMd, and non-x86 BCJ filters
+//! report [`CompressError::Unsupported`] rather than silently
+//! mis-decoding.
 
 use alloc::string::String;
+use alloc::vec;
 use alloc::vec::Vec;
 
 use super::bzip2::Bzip2Decoder;
@@ -22,7 +20,7 @@ use super::deflate::DeflateDecoder;
 use super::error::{CompressError, CompressResult};
 use super::lzma::{LzmaDecoder, LzmaProps};
 
-// ---- Format constants -------------------------------------------------
+// ── Format constants ────────────────────────────────────────────────────
 
 const K_END: u8 = 0x00;
 const K_HEADER: u8 = 0x01;
@@ -62,7 +60,7 @@ const ID_DEFLATE: [u8; 3] = [0x04, 0x01, 0x08];
 const ID_BZIP2: [u8; 3] = [0x04, 0x02, 0x02];
 const ID_BCJ_X86: [u8; 4] = [0x03, 0x03, 0x01, 0x03];
 
-// ---- Public data types ------------------------------------------------
+// ── Public data types ───────────────────────────────────────────────────
 
 /// One file (or directory) entry of a [`SevenzArchive`].
 #[derive(Debug, Clone)]
@@ -79,7 +77,8 @@ pub struct SevenzFile {
     stream: Option<(usize, usize)>,
 }
 
-/// A parsed 7z archive. Borrows the original buffer for payload extraction.
+/// A parsed 7z archive.  Borrows the original buffer for payload
+/// extraction.
 #[derive(Debug)]
 pub struct SevenzArchive<'a> {
     data: &'a [u8],
@@ -113,7 +112,7 @@ struct SevenzCoder {
     props: Vec<u8>,
 }
 
-// ---- Reader helpers ---------------------------------------------------
+// ── Reader helpers ──────────────────────────────────────────────────────
 
 struct Reader<'a> {
     buf: &'a [u8],
@@ -168,7 +167,8 @@ impl<'a> Reader<'a> {
         self.take(n).map(|_| ())
     }
 
-    /// 7z variable-length integer (little-endian bit-mask prefix scheme).
+    /// 7z variable-length integer: leading mask bits select how many
+    /// extra bytes carry the low-order value.
     fn varint(&mut self) -> CompressResult<u64> {
         let first = self.u8()? as u64;
         let mut mask = 0x80u64;
@@ -185,8 +185,7 @@ impl<'a> Reader<'a> {
     }
 
     /// Bounded count: every counted element consumes at least one header
-    /// byte, so no legitimate count can exceed the remaining input. This
-    /// closes the "tiny header declares a huge count" OOM vector.
+    /// byte, so no legitimate count can exceed the remaining input.
     fn bounded(&mut self, field: &'static str) -> CompressResult<usize> {
         let v = self.varint()?;
         if v > self.remaining() as u64 {
@@ -215,7 +214,7 @@ fn read_bits(r: &mut Reader, size: usize) -> CompressResult<Vec<bool>> {
 /// Either "all defined" (non-zero marker byte) or an explicit bit map.
 fn read_all_or_bits(r: &mut Reader, size: usize) -> CompressResult<Vec<bool>> {
     if r.u8()? != 0 {
-        Ok(alloc::vec![true; size])
+        Ok(vec![true; size])
     } else {
         read_bits(r, size)
     }
@@ -231,9 +230,8 @@ fn read_crc_section(r: &mut Reader, size: usize) -> CompressResult<Vec<Option<u3
     Ok(out)
 }
 
-// ---- Parsing ----------------------------------------------------------
+// ── Parsing ─────────────────────────────────────────────────────────────
 
-/// Raw streams-info triple, before file mapping is known.
 struct StreamsInfo {
     pack_pos: u64,
     pack_sizes: Vec<u64>,
@@ -279,9 +277,9 @@ impl<'a> SevenzArchive<'a> {
         let main: StreamsInfo;
         let files: Vec<SevenzFile>;
         if nid == K_ENCODED_HEADER {
-            // The real header is stored as the single folder described by
-            // the streams-info that follows; its pack data sits at
-            // `pack_pos` relative to the end of the signature header.
+            // The real header is the single folder described by the
+            // streams-info that follows; its pack data sits at `pack_pos`
+            // relative to the end of the signature header.
             let enc = Self::read_streams_info(&mut r)?;
             if enc.folders.len() != 1 || enc.pack_sizes.is_empty() {
                 return Err(CompressError::InvalidFormat(
@@ -342,7 +340,7 @@ impl<'a> SevenzArchive<'a> {
         &self.files
     }
 
-    /// Unpack one entry by index. Directories and empty files yield an
+    /// Unpack one entry by index.  Directories and empty files yield an
     /// empty buffer.
     pub fn extract(&self, index: usize) -> CompressResult<Vec<u8>> {
         let file = self
@@ -398,14 +396,13 @@ impl<'a> SevenzArchive<'a> {
         self.files.iter().position(|f| f.name == name)
     }
 
-    // ---- Header parsing ----
+    // ── Header parsing ──────────────────────────────────────────────
 
-    /// Parse a top-level header (after the kHeader byte): optional archive
-    /// properties, optional main streams info, optional files info, kEnd.
+    /// Parse a top-level header: optional archive properties, optional
+    /// main streams info, optional files info, kEnd.
     fn read_header(r: &mut Reader) -> CompressResult<(StreamsInfo, Vec<SevenzFile>)> {
         let mut nid = r.u8()?;
         if nid == K_ARCHIVE_PROPERTIES {
-            // Property list: (id, size, payload)* until kEnd.
             let mut pid = r.u8()?;
             while pid != K_END {
                 let size = r.bounded("archive property size")?;
@@ -444,7 +441,6 @@ impl<'a> SevenzArchive<'a> {
     fn read_streams_info(r: &mut Reader) -> CompressResult<StreamsInfo> {
         let mut pack_pos = 0u64;
         let mut pack_sizes: Vec<u64> = Vec::new();
-        let mut pack_crcs: Vec<Option<u32>> = Vec::new();
         let mut folders: Vec<SevenzFolder> = Vec::new();
         let mut folder_crcs: Vec<Option<u32>> = Vec::new();
         let mut num_unpack_stream: Option<Vec<u64>> = None;
@@ -463,7 +459,7 @@ impl<'a> SevenzArchive<'a> {
                 sub = r.u8()?;
             }
             if sub == K_CRC {
-                pack_crcs = read_crc_section(r, num_packs)?;
+                let _pack_crcs = read_crc_section(r, num_packs)?;
                 sub = r.u8()?;
             }
             if sub != K_END {
@@ -518,9 +514,7 @@ impl<'a> SevenzArchive<'a> {
                 sub = r.u8()?;
             }
             if sub == K_SIZE {
-                // Sizes of all but the last sub-stream of each multi-stream
-                // folder, in folder order.
-                for (fi, _folder) in folders.iter().enumerate() {
+                for (fi, _) in folders.iter().enumerate() {
                     let n = num_unpack_stream
                         .as_ref()
                         .and_then(|v| v.get(fi))
@@ -559,8 +553,6 @@ impl<'a> SevenzArchive<'a> {
         let mut sub_size_iter = sub_sizes.iter().copied();
         let mut sub_crc_iter = sub_crcs.map(|v| v.into_iter());
         for (i, folder) in folders.iter_mut().enumerate() {
-            // The folder output is the output stream not consumed by a bond.
-            // Compute it before deriving sub-stream sizes from it.
             folder.unpack_size = folder.main_unpack_size();
             let n = num_unpack_stream.as_ref().map(|v| v[i]).unwrap_or(1).max(1);
             if n == 1 {
@@ -569,7 +561,7 @@ impl<'a> SevenzArchive<'a> {
                     .copied()
                     .flatten()
                     .or_else(|| sub_crc_iter.as_mut().and_then(|it| it.next()).flatten());
-                folder.substreams = alloc::vec![(folder.unpack_size, crc)];
+                folder.substreams = vec![(folder.unpack_size, crc)];
             } else {
                 let mut sizes = Vec::with_capacity(n as usize);
                 let mut sum = 0u64;
@@ -745,6 +737,9 @@ impl<'a> SevenzArchive<'a> {
                     if external != 0 {
                         return Err(CompressError::Unsupported("external file names"));
                     }
+                    // `size` counts the external byte plus the UTF-16LE
+                    // blob; the blob itself is `size - 1` bytes and must
+                    // contain an even number of code units.
                     if size == 0 || (size - 1) & 1 != 0 {
                         return Err(CompressError::InvalidFormat("invalid names size"));
                     }
@@ -758,8 +753,7 @@ impl<'a> SevenzArchive<'a> {
                     if external != 0 {
                         return Err(CompressError::Unsupported("external times"));
                     }
-                    for (i, d) in defined.iter().enumerate() {
-                        let _ = i;
+                    for d in &defined {
                         if *d {
                             r.skip(8)?;
                         }
@@ -832,7 +826,6 @@ impl<'a> SevenzArchive<'a> {
                 let (sz, c) = streams.folders[loc.0].substreams[loc.1];
                 (false, sz, c)
             } else {
-                // Entries not flagged as empty files are directories.
                 let is_file = is_empty_file
                     .as_ref()
                     .map(|v| v[empty_counter])
@@ -854,10 +847,9 @@ impl<'a> SevenzArchive<'a> {
         Ok(files)
     }
 
-    // ---- Decoding ----
+    // ── Decoding ────────────────────────────────────────────────────
 
-    /// Decode one folder to its full output buffer, given the contiguous
-    /// pack area (`pack_area`) and the folder's expected output size.
+    /// Decode one folder to its full output buffer.
     fn decode_folder_bytes(
         folder: &SevenzFolder,
         pack_sizes: &[u64],
@@ -878,7 +870,7 @@ impl<'a> SevenzArchive<'a> {
             acc += c.num_in;
         }
 
-        // First coder to apply: the one whose input is the first packed stream.
+        // First coder: the one owning the first packed stream.
         let first_in = folder.packed_streams[0];
         let mut coder_idx = folder
             .coders
@@ -887,8 +879,6 @@ impl<'a> SevenzArchive<'a> {
             .position(|(i, c)| first_in >= in_base[i] && first_in < in_base[i] + c.num_in)
             .ok_or(CompressError::InvalidFormat("packed stream owner missing"))?;
 
-        // Multi-pack-stream folders are only reachable through complex
-        // coders, which we reject below.
         if folder.packed_streams.len() != 1 {
             return Err(CompressError::Unsupported("multi-pack-stream folders"));
         }
@@ -898,8 +888,7 @@ impl<'a> SevenzArchive<'a> {
         }
         let mut data = pack_area[..pack_len].to_vec();
 
-        // Global output-stream base per coder: a bond's `out_index` refers
-        // to this numbering.
+        // Global output-stream base per coder.
         let mut out_base = Vec::with_capacity(folder.coders.len());
         let mut acc = 0u64;
         for c in &folder.coders {
@@ -1037,7 +1026,8 @@ impl SevenzFolder {
     }
 }
 
-/// Decode a UTF-16LE null-separated name blob into exactly `num_files` names.
+/// Decode a UTF-16LE null-separated name blob into exactly `num_files`
+/// names.
 fn parse_names(blob: &[u8], num_files: usize) -> CompressResult<Vec<String>> {
     let mut names = Vec::with_capacity(num_files);
     let mut units: Vec<u16> = Vec::new();
@@ -1075,11 +1065,8 @@ const fn test_86_ms_byte(b: u8) -> bool {
     b == 0x00 || b == 0xFF
 }
 
-/// x86 branch-call-jump filter (BCJ x86), decode direction.
-///
-/// Ports the public-domain `x86_code` routine from xz's liblzma
-/// (`liblzma/filter/branch/x86.c`, identical in 7-Zip's `Bra86.c`),
-/// as a single-shot whole-buffer transform starting at `start_pos`.
+/// x86 BCJ filter, decode direction: convert E8/E9 relative call/jump
+/// targets back to absolute addresses.
 fn bcj_x86_decode(buf: &mut [u8], start_pos: u32) {
     const MASK_TO_ALLOWED_STATUS: [bool; 8] = [true, true, true, false, true, false, false, false];
     const MASK_TO_BIT_NUMBER: [u8; 8] = [0, 1, 2, 2, 3, 3, 3, 3];
@@ -1089,8 +1076,6 @@ fn bcj_x86_decode(buf: &mut [u8], start_pos: u32) {
         return;
     }
     let end = len - 5;
-    // pos is the virtual instruction pointer, pre-advanced by 5 like the
-    // streaming filter (start_pos + 5).
     let mut pos: u32 = start_pos.wrapping_add(5);
     let mut prev_mask: u32 = 0;
     let mut prev_pos: isize = -1;
@@ -1150,8 +1135,8 @@ fn bcj_x86_decode(buf: &mut [u8], start_pos: u32) {
     let _ = pos;
 }
 
-/// Truncate/validate a naturally-terminated decode against the declared
-/// unpacked size.
+/// Truncate or reject a naturally-terminated decode against the
+/// declared unpacked size.
 fn fit_size(mut out: Vec<u8>, out_size: u64) -> CompressResult<Vec<u8>> {
     if (out.len() as u64) < out_size {
         return Err(CompressError::UnexpectedEof);
@@ -1261,5 +1246,222 @@ mod tests {
         assert!(SevenzArchive::parse(b"not a 7z archive at all............").is_err());
         // Truncated signature header.
         assert!(SevenzArchive::parse(b"7z\xBC\xAF\x27\x1C").is_err());
+    }
+
+    // ── New tests for shapes the old suite missed ────────────────────
+
+    #[test]
+    fn test_7z_bad_start_header_crc() {
+        let mut data = include_bytes!("../../testdata/copy.7z").to_vec();
+        // Flip a byte in the start-header CRC (offset 8..12).
+        data[8] ^= 0xFF;
+        assert!(matches!(
+            SevenzArchive::parse(&data),
+            Err(CompressError::CorruptedData(_))
+        ));
+    }
+
+    #[test]
+    fn test_7z_bad_next_header_crc() {
+        let mut data = include_bytes!("../../testdata/copy.7z").to_vec();
+        // Flip a byte in the next-header CRC (offset 28..32).
+        data[28] ^= 0xFF;
+        assert!(matches!(
+            SevenzArchive::parse(&data),
+            Err(CompressError::CorruptedData(_))
+        ));
+    }
+
+    #[test]
+    fn test_7z_truncated_signature_header() {
+        // Valid signature but only 20 of the 32 header bytes.
+        let short = b"7z\xBC\xAF\x27\x1C\x00\x04\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+        assert!(SevenzArchive::parse(short).is_err());
+    }
+
+    #[test]
+    fn test_7z_unsupported_aes_coder() {
+        // Build a minimal 7z with a single folder whose coder ID starts
+        // with 0x06 (AES-256 encrypted).  Parsing succeeds (the coder
+        // is described); extraction rejects it.
+        let header = build_minimal_header_with_coder(&[0x06]);
+        let archive = wrap_in_signature(&header);
+        let arc = SevenzArchive::parse(&archive).expect("parse");
+        let result = arc.extract(0);
+        assert!(
+            matches!(result, Err(CompressError::Unsupported(_))),
+            "expected Unsupported for AES coder, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_7z_unsupported_ppmd_coder() {
+        let header = build_minimal_header_with_coder(&ID_PPMD);
+        let archive = wrap_in_signature(&header);
+        let arc = SevenzArchive::parse(&archive).expect("parse");
+        let result = arc.extract(0);
+        assert!(
+            matches!(result, Err(CompressError::Unsupported(_))),
+            "expected Unsupported for PPMd coder, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_7z_substream_count_mismatch() {
+        // One folder with one sub-stream, but two streamed files.
+        let header = build_header_substream_mismatch();
+        let archive = wrap_in_signature(&header);
+        let result = SevenzArchive::parse(&archive);
+        assert!(
+            matches!(result, Err(CompressError::InvalidFormat(_))),
+            "expected InvalidFormat for substream mismatch, got {result:?}"
+        );
+    }
+
+    // ── Helpers to build minimal synthetic 7z headers ────────────────
+
+    /// Encode a 7z varint.
+    fn varint(mut v: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut mask = 0x80u8;
+        let mut buf = [0u8; 9];
+        let mut n = 0;
+        loop {
+            if v < mask as u64 {
+                buf[0] |= (v as u8) & (mask - 1);
+                break;
+            }
+            buf[0] |= mask;
+            n += 1;
+            buf[n] = (v & 0xFF) as u8;
+            v >>= 8;
+            mask >>= 1;
+            if mask == 0 {
+                break;
+            }
+        }
+        out.extend_from_slice(&buf[..=n]);
+        out
+    }
+
+    /// Build a raw kHeader containing a single folder with one coder of
+    /// the given method ID, one packed stream, and one file entry.
+    fn build_minimal_header_with_coder(coder_id: &[u8]) -> Vec<u8> {
+        let mut h = Vec::new();
+        h.push(K_HEADER); // kHeader
+
+        // kMainStreamsInfo
+        h.push(K_MAIN_STREAMS_INFO);
+
+        // kPackInfo: pack_pos=0, 1 pack of size 1
+        h.push(K_PACK_INFO);
+        h.extend(varint(0)); // pack_pos
+        h.extend(varint(1)); // num_pack_streams
+        h.push(K_SIZE);
+        h.extend(varint(1)); // pack size
+        h.push(K_END); // end pack info
+
+        // kUnpackInfo
+        h.push(K_UNPACK_INFO);
+        h.push(K_FOLDER);
+        h.extend(varint(1)); // num_folders
+        h.push(0); // external = 0
+
+        // Folder: 1 coder
+        h.extend(varint(1)); // num_coders
+        let bits = (coder_id.len() as u8) & 0x0F | 0x20; // id_size + has_attrs
+        h.push(bits);
+        h.extend_from_slice(coder_id);
+        h.extend(varint(1)); // properties size = 1
+        h.push(0); // dummy properties byte
+
+        // kCodersUnpackSize: 1 output stream, unpack size = 1
+        h.push(K_CODERS_UNPACK_SIZE);
+        h.extend(varint(1));
+        h.push(K_END); // end unpack info
+
+        h.push(K_END); // end streams info
+
+        // kFilesInfo: 1 file named "x"
+        h.push(K_FILES_INFO);
+        h.extend(varint(1)); // num_files
+        h.push(K_NAME);
+        let name_blob: Vec<u8> = b"x\0".iter().flat_map(|&b| [b, 0]).collect();
+        // size = 1 (external byte) + name_blob.len()
+        h.extend(varint(1 + name_blob.len() as u64));
+        h.push(0); // external = 0
+        h.extend_from_slice(&name_blob);
+        h.push(K_END); // end files info
+
+        h.push(K_END); // end header
+        h
+    }
+
+    /// Build a raw kHeader with 1 folder (1 sub-stream) but 2 streamed
+    /// files to trigger the sub-stream count mismatch.
+    fn build_header_substream_mismatch() -> Vec<u8> {
+        let mut h = Vec::new();
+        h.push(K_HEADER);
+
+        h.push(K_MAIN_STREAMS_INFO);
+        h.push(K_PACK_INFO);
+        h.extend(varint(0));
+        h.extend(varint(1));
+        h.push(K_SIZE);
+        h.extend(varint(4)); // 4 bytes of pack data
+        h.push(K_END);
+
+        h.push(K_UNPACK_INFO);
+        h.push(K_FOLDER);
+        h.extend(varint(1));
+        h.push(0);
+        // 1 copy coder, no properties
+        h.extend(varint(1));
+        h.push(0x00); // simple copy: id_size=0, no attrs
+        h.push(K_CODERS_UNPACK_SIZE);
+        h.extend(varint(4));
+        h.push(K_END);
+
+        h.push(K_END); // end streams
+
+        // 2 files, both streamed (no kEmptyStream)
+        h.push(K_FILES_INFO);
+        h.extend(varint(2));
+        h.push(K_NAME);
+        let names: Vec<u8> = b"a\0b\0".iter().flat_map(|&b| [b, 0]).collect();
+        h.extend(varint(1 + names.len() as u64));
+        h.push(0);
+        h.extend_from_slice(&names);
+        h.push(K_END);
+
+        h.push(K_END);
+        h
+    }
+
+    /// Wrap raw header bytes in a valid 32-byte signature header +
+    /// 4 bytes of pack data (so the pack area is present).
+    fn wrap_in_signature(header: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&SIGNATURE);
+        out.extend_from_slice(&[0x00, 0x04]); // version
+        out.extend_from_slice(&[0u8; 4]); // start header CRC — filled below
+        let next_header_offset = 4u64; // 4 bytes of pack data before header
+        let next_header_size = header.len() as u64;
+        out.extend_from_slice(&next_header_offset.to_le_bytes());
+        out.extend_from_slice(&next_header_size.to_le_bytes());
+        out.extend_from_slice(&[0u8; 4]); // next header CRC — filled below
+
+        // Pack data (4 zero bytes)
+        out.extend_from_slice(&[0u8; 4]);
+        // Header
+        out.extend_from_slice(header);
+
+        // Fill the next-header CRC first: the start-header CRC covers
+        // bytes 12..32 which includes it.
+        let header_crc = crc32(&out[36..36 + header.len()]);
+        out[28..32].copy_from_slice(&header_crc.to_le_bytes());
+        let start_crc = crc32(&out[12..32]);
+        out[8..12].copy_from_slice(&start_crc.to_le_bytes());
+        out
     }
 }

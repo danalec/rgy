@@ -1,4 +1,4 @@
-//! Clean-room reimplementation of `memmap2-rs` upstream commit f16835d (v0.9.0).
+//! Independent reimplementation of `memmap2-rs` upstream commit f16835d (v0.9.0).
 //! Written from the upstream source to understand the public API; no verbatim copies.
 
 #![allow(clippy::all)]

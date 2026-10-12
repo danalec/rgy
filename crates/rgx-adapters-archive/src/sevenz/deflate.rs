@@ -1,15 +1,21 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! DEFLATE compression (RFC 1951).
 //!
-//! Implements the DEFLATE algorithm used in ZIP, gzip, and PNG.
+//! Independent reimplementation of the DEFLATE algorithm used in ZIP,
+//! gzip, and PNG: LZ77 tokenisation followed by Huffman coding in three
+//! block modes — stored (uncompressed), fixed (predefined codes), and
+//! dynamic (per-block code-length tables).
 //!
 //! ## ISA-L Integration
 //!
 //! Behind the `isa-huffman` feature: [`DeflateEncoder::with_isal`] and
 //! [`DeflateEncoder::encode_fast`], which route over 64 KiB through
-//! [`super::isa_icf`]. **That module is a wrapper over this file's own encoder,
-//! not Intel ISA-L** — see its header. The streams are valid DEFLATE and
-//! decode through [`DeflateDecoder`]; they are not faster than the standard
-//! path, and the feature's name is the vendored code's, not a claim here.
+//! [`super::isa_icf`]. **That module is a wrapper over this file's own
+//! encoder, not Intel ISA-L** — see its header. The streams are valid
+//! DEFLATE and decode through [`DeflateDecoder`]; they are not faster
+//! than the standard path, and the feature's name is the vendored code's,
+//! not a claim here.
 
 use alloc::vec::Vec;
 
@@ -30,7 +36,7 @@ use super::isa_huffman::CompressionLevel as IsalCompressionLevel;
 pub enum CompressionLevel {
     /// No compression (store).
     None = 0,
-    /// Fast compression (level 1-3).
+    /// Fast compression (level 1–3).
     Fast = 3,
     /// Default compression (level 6).
     #[default]
@@ -50,7 +56,8 @@ impl From<u8> for CompressionLevel {
     }
 }
 
-// Fixed Huffman code lengths for literals/lengths (RFC 1951 section 3.2.6)
+// ── Fixed Huffman code lengths (RFC 1951 §3.2.6) ──────────────────────
+
 const fn fixed_literal_lengths() -> [u8; 288] {
     let mut lengths = [0u8; 288];
     let mut i = 0;
@@ -73,12 +80,12 @@ const fn fixed_literal_lengths() -> [u8; 288] {
     lengths
 }
 
-// Fixed Huffman code lengths for distances
 const fn fixed_distance_lengths() -> [u8; 32] {
     [5u8; 32]
 }
 
-// Length code base values and extra bits (RFC 1951)
+// ── Length / distance code tables (RFC 1951 §3.2.5) ───────────────────
+
 const LENGTH_BASE: [u16; 29] = [
     3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131,
     163, 195, 227, 258,
@@ -88,7 +95,6 @@ const LENGTH_EXTRA: [u8; 29] = [
     0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0,
 ];
 
-// Distance code base values and extra bits
 const DISTANCE_BASE: [u16; 30] = [
     1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537,
     2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577,
@@ -99,26 +105,31 @@ const DISTANCE_EXTRA: [u8; 30] = [
     13,
 ];
 
+/// Code length alphabet order for dynamic blocks (RFC 1951 §3.2.7).
+const CODE_LENGTH_ORDER: [usize; 19] = [
+    16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
+];
+
+// ── Encoder ────────────────────────────────────────────────────────────
+
 /// DEFLATE encoder.
 #[derive(Debug)]
 pub struct DeflateEncoder {
-    /// Compression level.
     level: CompressionLevel,
-    /// LZ77 encoder.
     lz77: Lz77Encoder,
-    /// Fixed literal/length decoder.
+    #[allow(dead_code)]
     fixed_literal_decoder: HuffmanDecoder,
-    /// Fixed distance decoder.
+    #[allow(dead_code)]
     fixed_distance_decoder: HuffmanDecoder,
 }
 
 impl DeflateEncoder {
-    /// Create a new DEFLATE encoder with default compression.
+    /// Create an encoder with default level 6.
     pub fn new() -> Self {
         Self::with_level(6)
     }
 
-    /// Create a DEFLATE encoder with a specific level (0-9).
+    /// Create an encoder for a specific level (0–9).
     pub fn with_level(level: u8) -> Self {
         let fixed_lit = fixed_literal_lengths();
         let fixed_dist = fixed_distance_lengths();
@@ -137,45 +148,35 @@ impl DeflateEncoder {
         }
     }
 
-    /// Create a DEFLATE encoder with ISA-L acceleration.
-    ///
-    /// Requires `isa-huffman` feature.
+    /// Create an encoder with ISA-L acceleration (requires `isa-huffman`).
     #[cfg(feature = "isa-huffman")]
     pub fn with_isal() -> Self {
-        Self::with_level(3) // ISA-L uses levels 0-3
+        Self::with_level(3)
     }
 
-    /// Encode using ISA-L pipeline for large data.
-    ///
-    /// Uses ISA-L for data >64KB, falls back to standard for small data.
-    ///
-    /// Requires `isa-huffman` feature.
+    /// Encode using the ISA-L pipeline for data over 64 KiB
+    /// (requires `isa-huffman`).
     #[cfg(feature = "isa-huffman")]
     pub fn encode_fast(&mut self, data: &[u8]) -> Vec<u8> {
-        const ISA_L_THRESHOLD: usize = 64 * 1024; // 64KB
-
+        const ISA_L_THRESHOLD: usize = 64 * 1024;
         if data.len() > ISA_L_THRESHOLD {
-            // Use ISA-L pipeline for large data (level 1 = fast)
             let mut isal_encoder = IsalDeflateEncoder::with_level(1);
             isal_encoder.encode(data)
         } else {
-            // Use standard encoding for small data
             self.encode(data)
         }
     }
 
-    /// Encode data using DEFLATE.
+    /// Encode data to a DEFLATE stream.
     pub fn encode(&mut self, data: &[u8]) -> Vec<u8> {
         if data.is_empty() {
-            // Empty data: just write end-of-block
             let mut writer = BitWriter::new();
             writer.write_bits(1, 1); // BFINAL = 1
             writer.write_bits(1, 2); // BTYPE = 01 (fixed)
-                                     // End of block code (256) — canonical code 0 with 7 bits, reversed = 0
             let lit_lengths = fixed_literal_lengths();
             let lit_codes = build_canonical_codes(&lit_lengths, MAX_DEFLATE_CODE_LEN);
             let eob = &lit_codes[256];
-            writer.write_bits(reverse_bits(eob.code, eob.bits) as u32, eob.bits);
+            writer.write_bits(reverse_bits(eob.code, eob.bits), eob.bits);
             return writer.finish();
         }
 
@@ -192,16 +193,13 @@ impl DeflateEncoder {
         let mut pos = 0;
 
         while pos < data.len() {
-            // Block header
             let final_block = pos + 65535 >= data.len();
             result.push(if final_block { 0x01 } else { 0x00 });
 
-            // Length and complement
             let len = (data.len() - pos).min(65535) as u16;
             result.extend_from_slice(&len.to_le_bytes());
             result.extend_from_slice(&(!len).to_le_bytes());
 
-            // Data
             let end = (pos + 65535).min(data.len());
             result.extend_from_slice(&data[pos..end]);
             pos = end;
@@ -210,12 +208,11 @@ impl DeflateEncoder {
         result
     }
 
-    /// Encode with fixed Huffman codes.
+    /// Encode with fixed Huffman codes (RFC 1951 §3.2.6).
     fn encode_fixed(&mut self, data: &[u8]) -> Vec<u8> {
         let tokens = self.lz77.compress(data);
         let mut writer = BitWriter::new();
 
-        // Write block header
         writer.write_bits(1, 1); // BFINAL = 1
         writer.write_bits(1, 2); // BTYPE = 01 (fixed Huffman)
 
@@ -228,23 +225,19 @@ impl DeflateEncoder {
             match token {
                 Lz77Token::Literal(byte) => {
                     let code = &literal_codes[*byte as usize];
-                    writer.write_bits(reverse_bits(code.code, code.bits) as u32, code.bits);
+                    writer.write_bits(reverse_bits(code.code, code.bits), code.bits);
                 }
                 Lz77Token::Match(m) => {
-                    // Write length code (reversed Huffman code)
                     let (len_code, len_extra) = encode_length(m.length);
                     let code = &literal_codes[len_code as usize];
-                    writer.write_bits(reverse_bits(code.code, code.bits) as u32, code.bits);
-                    // Extra bits are NOT reversed (they're plain values)
+                    writer.write_bits(reverse_bits(code.code, code.bits), code.bits);
                     if len_extra.1 > 0 {
                         writer.write_bits(len_extra.0 as u32, len_extra.1);
                     }
 
-                    // Write distance code (reversed Huffman code)
                     let (dist_code, dist_extra) = encode_distance(m.distance);
                     let code = &distance_codes[dist_code as usize];
-                    writer.write_bits(reverse_bits(code.code, code.bits) as u32, code.bits);
-                    // Extra bits are NOT reversed
+                    writer.write_bits(reverse_bits(code.code, code.bits), code.bits);
                     if dist_extra.1 > 0 {
                         writer.write_bits(dist_extra.0 as u32, dist_extra.1);
                     }
@@ -252,9 +245,9 @@ impl DeflateEncoder {
             }
         }
 
-        // Write end-of-block (symbol 256, reversed)
+        // End-of-block (symbol 256).
         let eob = &literal_codes[256];
-        writer.write_bits(reverse_bits(eob.code, eob.bits) as u32, eob.bits);
+        writer.write_bits(reverse_bits(eob.code, eob.bits), eob.bits);
 
         writer.finish()
     }
@@ -266,27 +259,28 @@ impl Default for DeflateEncoder {
     }
 }
 
+// ── Decoder ────────────────────────────────────────────────────────────
+
 /// DEFLATE decoder.
 #[derive(Debug)]
 pub struct DeflateDecoder {
-    /// LZ77 decoder.
     lz77: Lz77Decoder,
 }
 
 impl DeflateDecoder {
-    /// Create a new DEFLATE decoder.
+    /// Create a new decoder.
     pub fn new() -> Self {
         Self {
             lz77: Lz77Decoder::new(),
         }
     }
 
-    /// Decode DEFLATE compressed data.
+    /// Decode a DEFLATE stream.
     pub fn decode(&mut self, data: &[u8]) -> CompressResult<Vec<u8>> {
         self.lz77.reset();
         let mut reader = BitReader::new(data);
         let mut block_count = 0u32;
-        const MAX_BLOCKS: u32 = 100_000; // Safety limit for very large files
+        const MAX_BLOCKS: u32 = 100_000;
 
         loop {
             block_count += 1;
@@ -296,9 +290,7 @@ impl DeflateDecoder {
                 ));
             }
 
-            // Read block header - check if we have enough bits first
             if reader.peek_bits(3).is_none() {
-                // End of stream reached before final block - this is normal for truncated data
                 break;
             }
 
@@ -323,7 +315,6 @@ impl DeflateDecoder {
     /// Decode a stored (uncompressed) block.
     fn decode_stored_block(&mut self, reader: &mut BitReader) -> CompressResult<()> {
         reader.align();
-
         let len = reader.read_bits(16).ok_or(CompressError::UnexpectedEof)? as usize;
         let nlen = reader.read_bits(16).ok_or(CompressError::UnexpectedEof)? as usize;
 
@@ -331,7 +322,6 @@ impl DeflateDecoder {
             return Err(CompressError::CorruptedData("stored block length mismatch"));
         }
 
-        // Read raw bytes
         for _ in 0..len {
             let byte = reader.read_bits(8).ok_or(CompressError::UnexpectedEof)?;
             self.lz77.add_literal(byte as u8);
@@ -344,24 +334,16 @@ impl DeflateDecoder {
     fn decode_fixed_block(&mut self, reader: &mut BitReader) -> CompressResult<()> {
         let fixed_lit = fixed_literal_lengths();
         let fixed_dist = fixed_distance_lengths();
-
         let lit_decoder = HuffmanDecoder::from_lengths(&fixed_lit, MAX_DEFLATE_CODE_LEN as u8);
         let dist_decoder = HuffmanDecoder::from_lengths(&fixed_dist, MAX_DEFLATE_CODE_LEN as u8);
-
         self.decode_huffman_block(reader, &lit_decoder, &dist_decoder)
     }
 
-    /// Decode a dynamic Huffman block.
+    /// Decode a dynamic Huffman block (RFC 1951 §3.2.7).
     fn decode_dynamic_block(&mut self, reader: &mut BitReader) -> CompressResult<()> {
-        // Read code length counts
         let hlit = reader.read_bits(5).ok_or(CompressError::UnexpectedEof)? as usize + 257;
         let hdist = reader.read_bits(5).ok_or(CompressError::UnexpectedEof)? as usize + 1;
         let hclen = reader.read_bits(4).ok_or(CompressError::UnexpectedEof)? as usize + 4;
-
-        // Code length code order
-        const CODE_LENGTH_ORDER: [usize; 19] = [
-            16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
-        ];
 
         let mut code_length_lengths = [0u8; 19];
         for i in 0..hclen {
@@ -371,21 +353,15 @@ impl DeflateDecoder {
 
         let cl_decoder = HuffmanDecoder::from_lengths(&code_length_lengths, 7);
 
-        // Read literal/length and distance code lengths
         let mut all_lengths = Vec::with_capacity(hlit + hdist);
 
         while all_lengths.len() < hlit + hdist {
-            // Peek at bits (don't consume yet) - code length codes use max 7 bits
             let bits = reader.peek_bits(7).ok_or(CompressError::UnexpectedEof)?;
             match cl_decoder.decode(bits, 7) {
                 Some((symbol, consumed)) => {
-                    // Consume only the bits we used
                     reader.skip_bits(consumed);
-
                     match symbol {
-                        0..=15 => {
-                            all_lengths.push(symbol as u8);
-                        }
+                        0..=15 => all_lengths.push(symbol as u8),
                         16 => {
                             let count = reader.read_bits(2).ok_or(CompressError::UnexpectedEof)?
                                 as usize
@@ -430,7 +406,7 @@ impl DeflateDecoder {
         self.decode_huffman_block(reader, &lit_decoder, &dist_decoder)
     }
 
-    /// Decode a Huffman-coded block.
+    /// Decode one Huffman-coded block body (literals, lengths, distances).
     fn decode_huffman_block(
         &mut self,
         reader: &mut BitReader,
@@ -438,33 +414,23 @@ impl DeflateDecoder {
         dist_decoder: &HuffmanDecoder,
     ) -> CompressResult<()> {
         loop {
-            // Peek only the bits that actually remain: near the end of a
-            // stream fewer than 16 bits can still hold a valid code.
+            // Peek only the bits that remain: near the end of a stream
+            // fewer than 16 bits can still hold a valid code.
             let avail = core::cmp::min(16usize, reader.remaining_bits()) as u8;
             if avail == 0 {
                 break;
             }
             let bits = reader.peek_bits(avail).unwrap_or(0);
 
-            // Try to decode literal/length
             if let Some((symbol, consumed)) = lit_decoder.decode(bits, avail) {
-                // Consume the bits we used
                 reader.skip_bits(consumed);
 
                 match symbol {
-                    0..=255 => {
-                        self.lz77.add_literal(symbol as u8);
-                    }
-                    256 => {
-                        // End of block
-                        break;
-                    }
+                    0..=255 => self.lz77.add_literal(symbol as u8),
+                    256 => break, // end of block
                     257..=285 => {
-                        // Length code - read extra bits if needed
                         let len = decode_length(symbol as usize, reader)?;
 
-                        // Read distance — peek only what remains; a valid
-                        // distance code can fit in the tail bits.
                         let dist_avail = core::cmp::min(16usize, reader.remaining_bits()) as u8;
                         if dist_avail == 0 {
                             break;
@@ -484,7 +450,6 @@ impl DeflateDecoder {
                     _ => {}
                 }
             } else {
-                // No more valid codes - end of stream
                 break;
             }
         }
@@ -499,22 +464,9 @@ impl Default for DeflateDecoder {
     }
 }
 
-/// Read bits from reader for Huffman decoding.
-fn read_bits_from_reader(reader: &mut BitReader) -> CompressResult<u32> {
-    let mut bits = 0u32;
-    for i in 0..16 {
-        if let Some(b) = reader.read_bits(1) {
-            bits |= b << i;
-        } else if i > 0 {
-            return Ok(bits);
-        } else {
-            return Err(CompressError::UnexpectedEof);
-        }
-    }
-    Ok(bits)
-}
+// ── Length / distance code helpers ─────────────────────────────────────
 
-/// Encode length to (code, (extra_value, extra_bits)).
+/// Encode a match length to `(code, (extra_value, extra_bits))`.
 fn encode_length(length: u16) -> (u16, (u16, u8)) {
     for (code, &base) in LENGTH_BASE.iter().enumerate() {
         if code + 1 < LENGTH_BASE.len() && length < LENGTH_BASE[code + 1] {
@@ -523,10 +475,10 @@ fn encode_length(length: u16) -> (u16, (u16, u8)) {
             return (257 + code as u16, (extra_value, extra_bits));
         }
     }
-    (285, (0, 0)) // Max length
+    (285, (0, 0))
 }
 
-/// Encode distance to (code, (extra_value, extra_bits)).
+/// Encode a match distance to `(code, (extra_value, extra_bits))`.
 fn encode_distance(distance: u16) -> (u16, (u16, u8)) {
     for (code, &base) in DISTANCE_BASE.iter().enumerate() {
         if code + 1 < DISTANCE_BASE.len() && distance < DISTANCE_BASE[code + 1] {
@@ -538,12 +490,11 @@ fn encode_distance(distance: u16) -> (u16, (u16, u8)) {
     (29, (distance - DISTANCE_BASE[29], DISTANCE_EXTRA[29]))
 }
 
-/// Decode length code.
+/// Decode a length code (symbols 257–285).
 fn decode_length(code: usize, reader: &mut BitReader) -> CompressResult<u16> {
     if !(257..=285).contains(&code) {
         return Err(CompressError::CorruptedData("invalid length code"));
     }
-
     let idx = code - 257;
     let base = LENGTH_BASE[idx];
     let extra = LENGTH_EXTRA[idx];
@@ -558,12 +509,11 @@ fn decode_length(code: usize, reader: &mut BitReader) -> CompressResult<u16> {
     }
 }
 
-/// Decode distance code.
+/// Decode a distance code (symbols 0–29).
 fn decode_distance(code: usize, reader: &mut BitReader) -> CompressResult<u16> {
     if code > 29 {
         return Err(CompressError::CorruptedData("invalid distance code"));
     }
-
     let base = DISTANCE_BASE[code];
     let extra = DISTANCE_EXTRA[code];
 
@@ -577,6 +527,8 @@ fn decode_distance(code: usize, reader: &mut BitReader) -> CompressResult<u16> {
     }
 }
 
+// ── Tests ──────────────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -587,7 +539,6 @@ mod tests {
     fn test_deflate_empty() {
         let mut encoder = DeflateEncoder::new();
         let mut decoder = DeflateDecoder::new();
-
         let compressed = encoder.encode(b"");
         let decompressed = decoder.decode(&compressed).unwrap();
         assert!(decompressed.is_empty());
@@ -595,64 +546,42 @@ mod tests {
 
     #[test]
     fn test_deflate_fixed_codes() {
-        // Test that fixed Huffman codes are generated correctly
         let literal_lengths = fixed_literal_lengths();
         let distance_lengths = fixed_distance_lengths();
 
         let literal_codes = build_canonical_codes(&literal_lengths, MAX_DEFLATE_CODE_LEN);
         let distance_codes = build_canonical_codes(&distance_lengths, MAX_DEFLATE_CODE_LEN);
 
-        // Symbol 256 (EOB) should have 7 bits
         assert_eq!(literal_codes[256].bits, 7);
-        // Symbol 257 (length 3) should have 7 bits
         assert_eq!(literal_codes[257].bits, 7);
-
-        // All distance codes should have 5 bits
         for (i, code) in distance_codes.iter().enumerate() {
-            assert_eq!(code.bits, 5, "Distance code {} should have 5 bits", i);
+            assert_eq!(code.bits, 5, "Distance code {i} should have 5 bits");
         }
-
-        // Symbol 65 ('A') should have 8 or 9 bits depending on its position
-        // 65 is in range 0-143, so it should have 8 bits
         assert_eq!(literal_codes[65].bits, 8);
     }
 
     #[test]
     fn test_deflate_match_encoding_debug() {
-        // Test encoding of a simple match with debug output
         let mut writer = BitWriter::new();
-        writer.write_bits(1, 1); // BFINAL
-        writer.write_bits(1, 2); // BTYPE = fixed
+        writer.write_bits(1, 1);
+        writer.write_bits(1, 2);
 
         let literal_lengths = fixed_literal_lengths();
         let distance_lengths = fixed_distance_lengths();
         let literal_codes = build_canonical_codes(&literal_lengths, MAX_DEFLATE_CODE_LEN);
         let distance_codes = build_canonical_codes(&distance_lengths, MAX_DEFLATE_CODE_LEN);
 
-        // Write literal 'a' (ASCII 97) — reversed for DEFLATE stream
         let lit_code = &literal_codes[97];
-        writer.write_bits(
-            reverse_bits(lit_code.code, lit_code.bits) as u32,
-            lit_code.bits,
-        );
+        writer.write_bits(reverse_bits(lit_code.code, lit_code.bits), lit_code.bits);
 
-        // Write length code 257 (length 3) — reversed
         let len_code = &literal_codes[257];
-        writer.write_bits(
-            reverse_bits(len_code.code, len_code.bits) as u32,
-            len_code.bits,
-        );
+        writer.write_bits(reverse_bits(len_code.code, len_code.bits), len_code.bits);
 
-        // Write distance code 0 (distance 1) — reversed
         let dist_code = &distance_codes[0];
-        writer.write_bits(
-            reverse_bits(dist_code.code, dist_code.bits) as u32,
-            dist_code.bits,
-        );
+        writer.write_bits(reverse_bits(dist_code.code, dist_code.bits), dist_code.bits);
 
-        // Write EOB — reversed
         let eob = &literal_codes[256];
-        writer.write_bits(reverse_bits(eob.code, eob.bits) as u32, eob.bits);
+        writer.write_bits(reverse_bits(eob.code, eob.bits), eob.bits);
 
         let compressed = writer.finish();
 
@@ -662,7 +591,6 @@ mod tests {
             eprintln!("Total bits: {}", compressed.len() * 8);
         }
 
-        // Now manually decode to verify
         let mut reader = crate::sevenz::huffman::BitReader::new(&compressed);
 
         let bfinal = reader.read_bits(1).unwrap();
@@ -670,7 +598,6 @@ mod tests {
         assert_eq!(bfinal, 1);
         assert_eq!(btype, 1);
 
-        // Peek and decode literal 'a'
         let bits = reader.peek_bits(16).unwrap();
         #[cfg(feature = "std")]
         eprintln!("bits = {} (0x{:x})", bits, bits);
@@ -687,22 +614,19 @@ mod tests {
             "decode result: symbol = {}, consumed = {}",
             symbol, consumed
         );
-        assert_eq!(symbol, 97, "Expected literal 'a', got {}", symbol);
+        assert_eq!(symbol, 97, "Expected literal 'a', got {symbol}");
         reader.skip_bits(consumed);
 
-        // Peek and decode length code
         let bits = reader.peek_bits(16).unwrap();
         let (symbol2, consumed2) = lit_decoder
             .decode(bits, 16)
             .expect("Should decode length code");
-        assert_eq!(symbol2, 257, "Expected length code 257, got {}", symbol2);
+        assert_eq!(symbol2, 257, "Expected length code 257, got {symbol2}");
         reader.skip_bits(consumed2);
 
-        // Peek and decode distance code
-        let bits = reader.peek_bits(16).unwrap_or_else(|| {
-            // May have fewer than 16 bits remaining; try smaller peek
-            reader.peek_bits(8).unwrap_or(0)
-        });
+        let bits = reader
+            .peek_bits(16)
+            .unwrap_or_else(|| reader.peek_bits(8).unwrap_or(0));
         let dist_decoder =
             HuffmanDecoder::from_lengths(&distance_lengths, MAX_DEFLATE_CODE_LEN as u8);
         let (dist_symbol, dist_consumed) = dist_decoder
@@ -710,22 +634,19 @@ mod tests {
             .expect("Should decode distance code");
         assert_eq!(
             dist_symbol, 0,
-            "Expected distance code 0, got {}",
-            dist_symbol
+            "Expected distance code 0, got {dist_symbol}"
         );
         reader.skip_bits(dist_consumed);
 
-        // Peek and decode EOB
         let bits = reader
             .peek_bits(16)
             .unwrap_or_else(|| reader.peek_bits(8).unwrap_or(0));
         let (eob_symbol, _) = lit_decoder.decode(bits, 16).expect("Should decode EOB");
-        assert_eq!(eob_symbol, 256, "Expected EOB, got {}", eob_symbol);
+        assert_eq!(eob_symbol, 256, "Expected EOB, got {eob_symbol}");
     }
 
     #[test]
     fn test_deflate_match_encoding() {
-        // Test encoding of a simple match
         use crate::sevenz::lz77::{Lz77Token, Match};
 
         let _tokens = [
@@ -737,48 +658,33 @@ mod tests {
         ];
 
         let mut writer = BitWriter::new();
-        writer.write_bits(1, 1); // BFINAL
-        writer.write_bits(1, 2); // BTYPE = fixed
+        writer.write_bits(1, 1);
+        writer.write_bits(1, 2);
 
         let literal_lengths = fixed_literal_lengths();
         let distance_lengths = fixed_distance_lengths();
         let literal_codes = build_canonical_codes(&literal_lengths, MAX_DEFLATE_CODE_LEN);
         let distance_codes = build_canonical_codes(&distance_lengths, MAX_DEFLATE_CODE_LEN);
 
-        // Write literal 'a' (ASCII 97) — reversed for DEFLATE stream
         let lit_code = &literal_codes[97];
-        writer.write_bits(
-            reverse_bits(lit_code.code, lit_code.bits) as u32,
-            lit_code.bits,
-        );
+        writer.write_bits(reverse_bits(lit_code.code, lit_code.bits), lit_code.bits);
 
-        // Write length code 257 (length 3) — reversed
         let len_code = &literal_codes[257];
-        writer.write_bits(
-            reverse_bits(len_code.code, len_code.bits) as u32,
-            len_code.bits,
-        );
+        writer.write_bits(reverse_bits(len_code.code, len_code.bits), len_code.bits);
 
-        // Write distance code 0 (distance 1) — reversed
         let dist_code = &distance_codes[0];
-        writer.write_bits(
-            reverse_bits(dist_code.code, dist_code.bits) as u32,
-            dist_code.bits,
-        );
+        writer.write_bits(reverse_bits(dist_code.code, dist_code.bits), dist_code.bits);
 
-        // Write EOB — reversed
         let eob = &literal_codes[256];
-        writer.write_bits(reverse_bits(eob.code, eob.bits) as u32, eob.bits);
+        writer.write_bits(reverse_bits(eob.code, eob.bits), eob.bits);
 
         let compressed = writer.finish();
         eprintln!("compressed bytes: {:02x?}", compressed);
 
-        // Decode
         let mut decoder = DeflateDecoder::new();
         let decompressed = decoder.decode(&compressed).unwrap();
         eprintln!("decompressed: {:?}", decompressed);
 
-        // Should decode to "aaaa" (literal 'a' + match of 3 'a's)
         assert_eq!(decompressed, b"aaaa");
     }
 
@@ -786,14 +692,9 @@ mod tests {
     fn test_deflate_single_byte() {
         let mut encoder = DeflateEncoder::new();
         let mut decoder = DeflateDecoder::new();
-
-        let data = b"A"; // Single byte
+        let data = b"A";
         let compressed = encoder.encode(data);
-
-        // Block should be: BFINAL=1, BTYPE=01 (fixed), literal A, EOB
-        // That's 1 + 2 + 8 + 7 = 18 bits = 3 bytes (with padding)
         assert!(compressed.len() >= 3);
-
         let decompressed = decoder.decode(&compressed).unwrap();
         assert_eq!(data.as_slice(), decompressed.as_slice());
     }
@@ -802,26 +703,21 @@ mod tests {
     fn test_deflate_simple() {
         let mut encoder = DeflateEncoder::new();
         let mut decoder = DeflateDecoder::new();
-
         let data = b"Hello, World!";
         let compressed = encoder.encode(data);
-
         let decompressed = decoder.decode(&compressed).unwrap();
-
         assert_eq!(data.as_slice(), decompressed.as_slice());
     }
 
-    /// `encode_fast` routes over 64 KiB to `isa_icf`, and the round-trip has
-    /// to hold on that branch — it is the only place the feature's output is
-    /// exercised, and a stream that decoded on the standard path would say
-    /// nothing about it.
+    /// `encode_fast` routes over 64 KiB to `isa_icf`, and the round-trip
+    /// has to hold on that branch — it is the only place the feature's
+    /// output is exercised.
     #[test]
     #[cfg(feature = "isa-huffman")]
     fn encode_fast_round_trips_over_the_threshold() {
         let mut decoder = DeflateDecoder::new();
         let mut encoder = DeflateEncoder::with_isal();
 
-        // Over ISA_L_THRESHOLD, so it takes the isa_icf branch.
         let big = b"the quick brown fox jumps over the lazy dog. ".repeat(2_000);
         assert!(big.len() > 64 * 1024);
         assert_eq!(
@@ -829,8 +725,6 @@ mod tests {
             big.as_slice()
         );
 
-        // And under it, so it takes the standard branch: same decoder, same
-        // encoder object, both sides of the threshold in one test.
         let small = b"the quick brown fox";
         assert_eq!(
             decoder.decode(&encoder.encode_fast(small)).unwrap(),
@@ -842,11 +736,9 @@ mod tests {
     fn test_deflate_repeated() {
         let mut encoder = DeflateEncoder::new();
         let mut decoder = DeflateDecoder::new();
-
         let data = b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let compressed = encoder.encode(data);
         let decompressed = decoder.decode(&compressed).unwrap();
-
         assert_eq!(data.as_slice(), decompressed.as_slice());
     }
 
@@ -854,22 +746,17 @@ mod tests {
     fn test_deflate_stored() {
         let mut encoder = DeflateEncoder::with_level(0);
         let mut decoder = DeflateDecoder::new();
-
         let data = b"Hello, World!";
         let compressed = encoder.encode(data);
         let decompressed = decoder.decode(&compressed).unwrap();
-
         assert_eq!(data.as_slice(), decompressed.as_slice());
     }
 
     #[test]
     fn test_deflate_compression_ratio() {
         let mut encoder = DeflateEncoder::with_level(9);
-
-        // Repeated data should compress well
         let data = b"Hello, World! ".repeat(100);
         let compressed = encoder.encode(&data);
-
         assert!(compressed.len() < data.len());
     }
 
@@ -890,7 +777,6 @@ mod tests {
 
     #[test]
     fn test_deflate_vector_match() {
-        // Raw DEFLATE stream produced by CPython zlib (matches + literals).
         let compressed = include_bytes!("../../testdata/deflate_match.bin");
         let expected = include_bytes!("../../testdata/deflate_match.expected");
         let mut decoder = DeflateDecoder::new();

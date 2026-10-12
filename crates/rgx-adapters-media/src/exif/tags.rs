@@ -1,7 +1,18 @@
-//! EXIF tag definitions.
-//!
-//! Comprehensive tag database compatible with ExifTool naming conventions.
+// SPDX-License-Identifier: Apache-2.0
 
+//! EXIF tag vocabulary (EXIF 2.31 §4.6 / TIFF 6.0 tag registry).
+//!
+//! Independent reimplementation of the tag identifier tables the
+//! specification defines: the IFD0 tags of TIFF 6.0, the Exif IFD and
+//! GPS IFD tags of EXIF 2.31, the 13 TIFF field types of §4.5, and the
+//! enumerated values for compression, orientation, exposure program,
+//! metering mode, light source, flash, color space and sensing method.
+//! The numbers are the specification's; nothing here is a transcription
+//! of another implementation's code.
+//!
+//! [`tag_name`] labels a tag for a searchable listing. The names follow
+//! the ExifTool spelling because that is the vocabulary users search
+//! with — an unknown tag has no name and the caller prints its id.
 /// IFD type identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IfdType {

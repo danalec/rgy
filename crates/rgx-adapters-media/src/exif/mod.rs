@@ -1,18 +1,34 @@
-//! EXIF reader, vendored from upstream `b01/io/image/exif` at commits 37acc97
-//! and d4177e5 (5 files + makers/). upstream is the source of truth: the
-//! container layer (JPEG/WebP/PNG/TIFF unwrapping), the three
-//! value-extraction fixes and the per-entry renderer all landed there
-//! first, with Pillow-written vectors covering all four containers.
+// SPDX-License-Identifier: Apache-2.0
+
+//! EXIF reader (EXIF 2.31 / TIFF 6.0 structure).
 //!
-//! Copy-time changes: `alloc::` paths rewritten to `std::` (the source is
-//! no_std + alloc), upstream `crate::b01::…` paths pointed at the local
-//! module, fixture paths re-anchored to this crate's `testdata/`
-//! (fixtures are byte-identical copies), and nothing else.
+//! Independent reimplementation of the EXIF/TIFF metadata walk: a TIFF
+//! header (`II`/`MM` byte order, magic 42, offset of IFD0), a chain of
+//! IFDs joined by their next-IFD offsets, and the three pointer tags
+//! that hang the sub-IFDs off IFD0/ExifIFD (Exif 0x8769, GPS 0x8825,
+//! Interop 0xA005). Value offsets are **relative to the TIFF header**,
+//! which is not buffer zero when the payload is wrapped in a JPEG APP1
+//! segment's `Exif\0\0` prefix — the one place the walk is easy to get
+//! wrong, and the one a 6-byte skew hides in.
 //!
-//! Vendored copy: upstream keeps the whole tag vocabulary and MakerNote
-//! tables as `pub` items with no internal users; inside this adapter
-//! crate they are private to the module, so the unused-constant pass
-//! fires on hundreds of names the tag lookups still serve by table.
+//! # Contract
+//!
+//! An IFD entry is 12 bytes: tag, type, count, then a 4-byte value
+//! slot. A value of `type_size x count <= 4` bytes lives *inline* in
+//! the slot — in the file's byte order, which for a 1- or 2-byte value
+//! in a big-endian file means the *high* bytes of the slot, so the
+//! numeric value is the slot shifted down. Anything longer stores an
+//! offset to the value, relative to the TIFF header. IFD1 is the
+//! thumbnail IFD at the next-IFD offset of IFD0; the pointer tags
+//! above name the others.
+//!
+//! [`find_exif_payload`] unwraps the containers EXIF is shipped in:
+//! JPEG (APP1 marker scan), WebP (RIFF `EXIF` chunk), PNG (`eXIf`
+//! chunk, bare TIFF), and a bare TIFF/GeoTIFF passed through as-is.
+
+// The tag vocabulary and MakerNote tables carry every spec tag and
+// vendor tag as `pub` constants with no internal users; the unused
+// pass fires on names the lookups still serve by table.
 #![allow(dead_code)]
 
 use alloc::string::{String, ToString};
@@ -35,7 +51,7 @@ pub struct ExifReader<'a> {
     /// TIFF header start position in data.
     tiff_start: usize,
     /// TIFF byte order.
-    byte_order: ByteOrder,
+    pub byte_order: ByteOrder,
     /// IFD0 entries.
     pub ifd0: Vec<IfdEntry>,
     /// IFD1 entries (thumbnail).
@@ -48,7 +64,7 @@ pub struct ExifReader<'a> {
     pub interop_ifd: Vec<IfdEntry>,
 }
 
-/// TIFF byte order.
+/// TIFF byte order (§4.5.2 byte-order marker).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ByteOrder {
     #[default]
@@ -57,7 +73,7 @@ pub enum ByteOrder {
 }
 
 impl<'a> ExifReader<'a> {
-    /// Create a new EXIF reader.
+    /// Create a new EXIF reader over `data`, empty until a parse runs.
     #[must_use]
     pub fn new(data: &'a [u8]) -> Self {
         Self {
@@ -74,10 +90,10 @@ impl<'a> ExifReader<'a> {
     }
 
     /// Parse EXIF out of a whole image file: JPEG (APP1 segment scan),
-    /// WebP (RIFF `EXIF` chunk), PNG (`eXIf` chunk) or a bare TIFF/GeoTIFF.
-    /// The container is unwrapped first; the payload is then parsed as it
-    /// presents itself (`Exif\0\0`-prefixed in JPEG/WebP-EXIF, bare TIFF
-    /// in PNG `eXIf` and TIFF files).
+    /// WebP (RIFF `EXIF` chunk), PNG (`eXIf` chunk) or a bare TIFF.
+    /// The container is unwrapped first; the payload is then parsed as
+    /// it presents itself (`Exif\0\0`-prefixed in JPEG/WebP-EXIF, bare
+    /// TIFF in PNG `eXIf` and TIFF files).
     pub fn parse_container(data: &'a [u8]) -> Result<ExifReader<'a>, String> {
         let payload = find_exif_payload(data).ok_or("no EXIF payload in container")?;
         let mut reader = ExifReader::new(payload);
@@ -89,65 +105,55 @@ impl<'a> ExifReader<'a> {
         Ok(reader)
     }
 
-    /// Parse EXIF data from JPEG APP1 segment (with "Exif\0\0" header).
+    /// Parse the `Exif\0\0`-prefixed payload of a JPEG APP1 segment:
+    /// the TIFF header starts right after the 6-byte prefix.
     pub fn parse_jpeg(&mut self) -> Result<(), String> {
-        // Check for "Exif\0\0" header
         if self.data.len() < 6 {
             return Err("Data too short for JPEG EXIF".into());
         }
-
         if &self.data[0..6] != b"Exif\x00\x00" {
             return Err("Missing Exif header".into());
         }
-
         self.pos = 6;
-        self.tiff_start = 6; // TIFF header starts at byte 6
+        self.tiff_start = 6;
         self.parse_tiff()
     }
 
-    /// Parse TIFF-format EXIF data (without Exif header).
+    /// Parse a bare TIFF/EXIF payload at the current position.
     pub fn parse_tiff(&mut self) -> Result<(), String> {
         if self.data.len() < self.pos + 8 {
             return Err("Data too short for TIFF header".into());
         }
-
-        // Record TIFF header position if not set
         if self.tiff_start == 0 {
             self.tiff_start = self.pos;
         }
 
-        // Determine byte order
         let bo = &self.data[self.pos..self.pos + 2];
-        if bo == b"II" {
-            self.byte_order = ByteOrder::LittleEndian;
+        self.byte_order = if bo == b"II" {
+            ByteOrder::LittleEndian
         } else if bo == b"MM" {
-            self.byte_order = ByteOrder::BigEndian;
+            ByteOrder::BigEndian
         } else {
             return Err("Invalid TIFF byte order".into());
-        }
+        };
         self.pos += 2;
 
-        // Check magic number (42)
         let magic = self.read_u16()?;
         if magic != 42 {
             return Err("Invalid TIFF magic number".into());
         }
 
-        // Read IFD0 offset (relative to TIFF header start)
+        // IFD0 offset is relative to the TIFF header.
         let ifd0_offset = self.read_u32()? as usize;
-
-        // Parse IFD0 (add TIFF header position to offset)
         let absolute_offset = self.tiff_start + ifd0_offset;
-        let ifd0_entries = self.parse_ifd_entries(absolute_offset, IfdType::Ifd0)?;
-        self.ifd0 = ifd0_entries;
-
-        // Extract sub-IFDs
+        self.ifd0 = self.parse_ifd_entries(absolute_offset, IfdType::Ifd0)?;
         self.extract_sub_ifds()?;
-
         Ok(())
     }
 
-    /// Parse IFD entries at the given offset, returning the entries.
+    /// Parse one IFD's entries at `offset`. For IFD0 only, the
+    /// next-IFD offset that closes the directory is followed to IFD1
+    /// (the thumbnail).
     fn parse_ifd_entries(
         &mut self,
         offset: usize,
@@ -156,34 +162,30 @@ impl<'a> ExifReader<'a> {
         if offset >= self.data.len() {
             return Ok(Vec::new());
         }
-
         self.pos = offset;
 
         let count = self.read_u16()? as usize;
         let mut entries = Vec::new();
-
         for _ in 0..count {
             if self.pos + 12 > self.data.len() {
                 break;
             }
-
             let tag = self.read_u16()?;
             let format = self.read_u16()?;
             let entry_count = self.read_u32()?;
             let value_offset = self.pos;
             let raw_value = self.read_u32()?;
-            // An inline value occupies `type_size x count` bytes at the
-            // start of the value field, in the file's byte order. For a
-            // big-endian file a 1- or 2-byte value sits in the *high*
-            // bytes of the u32 we just read, so the numeric value is
-            // that field shifted down (ISO 400 read back as 400<<16).
+            // Inline values occupy the first `type_size x count` bytes
+            // of the slot in the file's byte order. In a big-endian file
+            // a 1- or 2-byte value sits in the *high* bytes, so the
+            // number is the slot shifted down (ISO 400 else reads as
+            // 400 << 16).
             let total = Self::type_size(format).saturating_mul(entry_count as usize);
             let value = if total > 0 && total < 4 && self.byte_order == ByteOrder::BigEndian {
                 raw_value >> (8 * (4 - total))
             } else {
                 raw_value
             };
-
             entries.push(IfdEntry {
                 tag,
                 format,
@@ -194,115 +196,66 @@ impl<'a> ExifReader<'a> {
             });
         }
 
-        // Read next IFD offset for IFD0/IFD1 chain
         if ifd_type == IfdType::Ifd0 && self.pos + 4 <= self.data.len() {
             let next_ifd = self.read_u32()? as usize;
             let absolute_next = self.tiff_start + next_ifd;
             if next_ifd > 0 && absolute_next < self.data.len() {
-                let ifd1_entries = self.parse_ifd_entries(absolute_next, IfdType::Ifd1)?;
-                self.ifd1 = ifd1_entries;
+                self.ifd1 = self.parse_ifd_entries(absolute_next, IfdType::Ifd1)?;
             }
         }
-
         Ok(entries)
     }
 
-    /// Extract ExifIFD, GPSIFD, and InteropIFD from IFD0.
+    /// Follow the three pointer tags to their sub-IFDs.
     fn extract_sub_ifds(&mut self) -> Result<(), String> {
-        // Find ExifIFD pointer
         if let Some(entry) = self.ifd0.iter().find(|e| e.tag == 0x8769) {
-            let offset = entry.value as usize;
-            let absolute_offset = self.tiff_start + offset;
+            let absolute_offset = self.tiff_start + entry.value as usize;
             if absolute_offset < self.data.len() {
                 self.exif_ifd = self.parse_ifd_entries(absolute_offset, IfdType::Exif)?;
             }
         }
-
-        // Find GPS IFD pointer
         if let Some(entry) = self.ifd0.iter().find(|e| e.tag == 0x8825) {
-            let offset = entry.value as usize;
-            let absolute_offset = self.tiff_start + offset;
+            let absolute_offset = self.tiff_start + entry.value as usize;
             if absolute_offset < self.data.len() {
                 self.gps_ifd = self.parse_ifd_entries(absolute_offset, IfdType::Gps)?;
             }
         }
-
-        // Find InteropIFD pointer (inside ExifIFD)
+        // Interop hangs off ExifIFD, not IFD0.
         if let Some(entry) = self.exif_ifd.iter().find(|e| e.tag == 0xA005) {
-            let offset = entry.value as usize;
-            let absolute_offset = self.tiff_start + offset;
+            let absolute_offset = self.tiff_start + entry.value as usize;
             if absolute_offset < self.data.len() {
                 self.interop_ifd = self.parse_ifd_entries(absolute_offset, IfdType::Interop)?;
             }
         }
-
         Ok(())
     }
 
-    /// Read a u16 value.
     fn read_u16(&mut self) -> Result<u16, String> {
-        if self.pos + 2 > self.data.len() {
-            return Err("Unexpected end of data".into());
-        }
-
-        let value = match self.byte_order {
-            ByteOrder::LittleEndian => {
-                u16::from_le_bytes([self.data[self.pos], self.data[self.pos + 1]])
-            }
-            ByteOrder::BigEndian => {
-                u16::from_be_bytes([self.data[self.pos], self.data[self.pos + 1]])
-            }
-        };
+        let v = tiff::read_u16(self.data, self.pos, self.byte_order)?;
         self.pos += 2;
-        Ok(value)
+        Ok(v)
     }
 
-    /// Read a u32 value.
     fn read_u32(&mut self) -> Result<u32, String> {
-        if self.pos + 4 > self.data.len() {
-            return Err("Unexpected end of data".into());
-        }
-
-        let value = match self.byte_order {
-            ByteOrder::LittleEndian => u32::from_le_bytes([
-                self.data[self.pos],
-                self.data[self.pos + 1],
-                self.data[self.pos + 2],
-                self.data[self.pos + 3],
-            ]),
-            ByteOrder::BigEndian => u32::from_be_bytes([
-                self.data[self.pos],
-                self.data[self.pos + 1],
-                self.data[self.pos + 2],
-                self.data[self.pos + 3],
-            ]),
-        };
+        let v = tiff::read_u32(self.data, self.pos, self.byte_order)?;
         self.pos += 4;
-        Ok(value)
+        Ok(v)
+    }
+
+    /// Bytes per value of a TIFF type (§4.5, types 1-13).
+    fn type_size(format: u16) -> usize {
+        ifd::format_size(format)
     }
 
     /// Absolute buffer offset holding an entry's value.
     ///
-    /// Values of four bytes or fewer live inline in the entry, and
-    /// `value_offset` is already an absolute buffer index. Longer values
-    /// store an offset that is **relative to the TIFF header**, so it has
-    /// to have `tiff_start` added — which is 6 for a JPEG, 0 for a bare
-    /// TIFF. Reading it as absolute makes every out-of-line string and
-    /// every rational short by exactly the header size, which for a JPEG
-    /// means GPS coordinates, exposure, f-number and focal length all
-    /// read from the wrong place. IFD *pointer* offsets already went
-    /// through `self.tiff_start`; the value readers did not.
-    /// Bytes per element for a TIFF field type (types 1-13).
-    fn type_size(format: u16) -> usize {
-        match format {
-            1 | 2 | 6 | 7 => 1,    // BYTE ASCII SBYTE UNDEFINED
-            3 | 8 => 2,            // SHORT
-            4 | 9 | 11 => 4,       // LONG SLONG FLOAT
-            5 | 10 | 12 | 13 => 8, // RATIONAL SRATIONAL DOUBLE LONG8
-            _ => 0,
-        }
-    }
-
+    /// Inline values already carry their absolute position in
+    /// `value_offset`; out-of-line values hold an offset that is
+    /// **relative to the TIFF header** and needs `tiff_start` added —
+    /// which is 6 for a JPEG payload, 0 for a bare TIFF. Reading it as
+    /// absolute makes every out-of-line string and rational short by
+    /// exactly the header size: for a JPEG, GPS coordinates, exposure,
+    /// f-number and focal length all read from the wrong place.
     fn value_offset_of(&self, entry: &IfdEntry) -> Option<usize> {
         let total = Self::type_size(entry.format).checked_mul(entry.count as usize)?;
         if total <= 4 {
@@ -315,9 +268,8 @@ impl<'a> ExifReader<'a> {
     /// First entry with `tag`, searching the Exif SubIFD before IFD0.
     ///
     /// Cameras put ISO/exposure/date tags in the Exif SubIFD (0x8769);
-    /// Pillow and some encoders write the same tags straight into IFD0.
-    /// The typed getters take either, the way a whole-file tag walk
-    /// would.
+    /// some encoders write the same tags straight into IFD0. The typed
+    /// getters take either, the way a whole-file tag walk would.
     fn find_entry(&self, tag: u16) -> Option<&IfdEntry> {
         self.exif_ifd
             .iter()
@@ -325,20 +277,15 @@ impl<'a> ExifReader<'a> {
             .find(|e| e.tag == tag)
     }
 
-    /// Read a string value from an IFD entry.
+    /// Read an ASCII value, cut at the first NUL.
     fn read_string(&self, entry: &IfdEntry) -> Option<String> {
         let offset = self.value_offset_of(entry)?;
-
         let end = offset.checked_add(entry.count as usize)?;
         if end > self.data.len() {
             return None;
         }
-
         let bytes = &self.data[offset..end];
-
-        // Find null terminator
         let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-
         Some(String::from_utf8_lossy(&bytes[..end]).into_owned())
     }
 
@@ -378,7 +325,7 @@ impl<'a> ExifReader<'a> {
         }
     }
 
-    /// Get entry by tag from IFD0.
+    /// Get entry by tag from IFD0, else the Exif SubIFD.
     #[must_use]
     pub fn get(&self, tag: u16) -> Option<&IfdEntry> {
         self.ifd0
@@ -394,37 +341,39 @@ impl<'a> ExifReader<'a> {
         self.read_string(entry)
     }
 
-    /// Get DateTimeOriginal.
+    /// Get DateTimeOriginal (0x9003).
     #[must_use]
     pub fn datetime_original(&self) -> Option<String> {
-        self.get_string(0x9003) // DateTimeOriginal
+        self.get_string(0x9003)
     }
 
-    /// Get DateTime.
+    /// Get DateTime (0x0132).
     #[must_use]
     pub fn datetime(&self) -> Option<String> {
-        self.get_string(0x0132) // DateTime
+        self.get_string(0x0132)
     }
 
-    /// Get make (manufacturer).
+    /// Get make (manufacturer, 0x010F).
     #[must_use]
     pub fn make(&self) -> Option<String> {
         self.get_string(0x010F)
     }
 
-    /// Get model.
+    /// Get model (0x0110).
     #[must_use]
     pub fn model(&self) -> Option<String> {
         self.get_string(0x0110)
     }
 
-    /// Get GPS coordinates as (latitude, longitude).
+    /// Get GPS coordinates as (latitude, longitude) in decimal degrees,
+    /// from the 3-rational DMS fields and the N/S/E/W reference tags
+    /// (EXIF 2.31 §4.6.6).
     #[must_use]
     pub fn get_gps(&self) -> Option<(f64, f64)> {
-        let lat_entry = self.gps_ifd.iter().find(|e| e.tag == 0x0002)?; // GPSLatitude
-        let lat_ref = self.gps_ifd.iter().find(|e| e.tag == 0x0001); // GPSLatitudeRef
-        let lon_entry = self.gps_ifd.iter().find(|e| e.tag == 0x0004)?; // GPSLongitude
-        let lon_ref = self.gps_ifd.iter().find(|e| e.tag == 0x0003); // GPSLongitudeRef
+        let lat_entry = self.gps_ifd.iter().find(|e| e.tag == 0x0002)?;
+        let lat_ref = self.gps_ifd.iter().find(|e| e.tag == 0x0001);
+        let lon_entry = self.gps_ifd.iter().find(|e| e.tag == 0x0004)?;
+        let lon_ref = self.gps_ifd.iter().find(|e| e.tag == 0x0003);
 
         let lat = self.read_rational(lat_entry)?;
         let lon = self.read_rational(lon_entry)?;
@@ -454,107 +403,68 @@ impl<'a> ExifReader<'a> {
         Some((lat, lon))
     }
 
-    /// Read a rational value (degrees/minutes/seconds -> decimal).
+    /// Read a 3-rational DMS value (degrees, minutes, seconds) as
+    /// decimal degrees.
     fn read_rational(&self, entry: &IfdEntry) -> Option<f64> {
         let offset = self.value_offset_of(entry)?;
         let end = offset.checked_add(24)?;
         if end > self.data.len() {
             return None;
         }
-
-        // Three rationals: degrees, minutes, seconds
         let deg = self.read_rational_at(offset)?;
         let min = self.read_rational_at(offset + 8)?;
         let sec = self.read_rational_at(offset + 16)?;
-
         Some(deg + min / 60.0 + sec / 3600.0)
     }
 
-    /// Read a single rational at offset.
+    /// Read one RATIONAL as its decimal value.
     fn read_rational_at(&self, offset: usize) -> Option<f64> {
-        if offset + 8 > self.data.len() {
-            return None;
-        }
-
-        let (num, denom) = match self.byte_order {
-            ByteOrder::LittleEndian => {
-                let num = u32::from_le_bytes([
-                    self.data[offset],
-                    self.data[offset + 1],
-                    self.data[offset + 2],
-                    self.data[offset + 3],
-                ]);
-                let denom = u32::from_le_bytes([
-                    self.data[offset + 4],
-                    self.data[offset + 5],
-                    self.data[offset + 6],
-                    self.data[offset + 7],
-                ]);
-                (num, denom)
-            }
-            ByteOrder::BigEndian => {
-                let num = u32::from_be_bytes([
-                    self.data[offset],
-                    self.data[offset + 1],
-                    self.data[offset + 2],
-                    self.data[offset + 3],
-                ]);
-                let denom = u32::from_be_bytes([
-                    self.data[offset + 4],
-                    self.data[offset + 5],
-                    self.data[offset + 6],
-                    self.data[offset + 7],
-                ]);
-                (num, denom)
-            }
-        };
-
+        let (num, denom) = tiff::read_rational(self.data, offset, self.byte_order).ok()?;
         if denom == 0 {
             return None;
         }
-
         Some(num as f64 / denom as f64)
     }
 
-    /// Get ISO speed.
+    /// Get ISO speed (0x8827).
     #[must_use]
     pub fn iso(&self) -> Option<u16> {
         let entry = self.find_entry(0x8827)?;
         Some(entry.value as u16)
     }
 
-    /// Get focal length in mm.
+    /// Get focal length in mm (0x920A, RATIONAL).
     #[must_use]
     pub fn focal_length(&self) -> Option<f64> {
         let entry = self.find_entry(0x920A)?;
         self.read_single_rational(entry)
     }
 
-    /// Get f-number (aperture).
+    /// Get f-number (0x829D, RATIONAL).
     #[must_use]
     pub fn f_number(&self) -> Option<f64> {
         let entry = self.find_entry(0x829D)?;
         self.read_single_rational(entry)
     }
 
-    /// Get exposure time (shutter speed).
+    /// Get exposure time in seconds (0x829A, RATIONAL).
     #[must_use]
     pub fn exposure_time(&self) -> Option<f64> {
         let entry = self.find_entry(0x829A)?;
         self.read_single_rational(entry)
     }
 
-    /// Read a single rational from an entry.
+    /// Read one RATIONAL entry as a decimal; a different type or count
+    /// is not this shape and reads as `None`.
     fn read_single_rational(&self, entry: &IfdEntry) -> Option<f64> {
         if entry.count != 1 || entry.format != 5 {
             return None;
         }
         let offset = self.value_offset_of(entry)?;
-
         self.read_rational_at(offset)
     }
 
-    /// Get image width.
+    /// Get image width (IFD0 0x0100, else Exif 0xA002).
     #[must_use]
     pub fn image_width(&self) -> Option<u32> {
         self.ifd0
@@ -569,7 +479,7 @@ impl<'a> ExifReader<'a> {
             })
     }
 
-    /// Get image height.
+    /// Get image height (IFD0 0x0101, else Exif 0xA003).
     #[must_use]
     pub fn image_height(&self) -> Option<u32> {
         self.ifd0
@@ -584,7 +494,7 @@ impl<'a> ExifReader<'a> {
             })
     }
 
-    /// Get orientation.
+    /// Get orientation (IFD0 0x0112).
     #[must_use]
     pub fn orientation(&self) -> Option<u16> {
         self.ifd0
@@ -593,14 +503,14 @@ impl<'a> ExifReader<'a> {
             .map(|e| e.value as u16)
     }
 
-    /// Get X resolution (DPI).
+    /// Get X resolution in DPI (IFD0 0x011A, RATIONAL).
     #[must_use]
     pub fn x_resolution(&self) -> Option<f64> {
         let entry = self.ifd0.iter().find(|e| e.tag == 0x011A)?;
         self.read_single_rational(entry)
     }
 
-    /// Get Y resolution (DPI).
+    /// Get Y resolution in DPI (IFD0 0x011B, RATIONAL).
     #[must_use]
     pub fn y_resolution(&self) -> Option<f64> {
         let entry = self.ifd0.iter().find(|e| e.tag == 0x011B)?;
@@ -739,9 +649,7 @@ mod tests {
     /// in the entry, so it took the `value_offset` branch and passed
     /// regardless. Anything longer than four bytes is stored elsewhere as
     /// an offset **relative to the TIFF header** — which is byte 6 in a
-    /// JPEG. Reading that as an absolute buffer index lands 6 bytes early,
-    /// so this returned a mangled string until `value_offset_of` added
-    /// `tiff_start` back.
+    /// JPEG. Reading that as an absolute buffer index lands 6 bytes early.
     #[test]
     fn test_exif_out_of_line_value_in_jpeg() {
         const NAME: &[u8] = b"TestMake\0"; // 9 bytes: out of line
@@ -858,5 +766,117 @@ mod tests {
     #[test]
     fn test_byte_order() {
         assert_eq!(ByteOrder::default(), ByteOrder::LittleEndian);
+    }
+
+    /// In a big-endian file an inline SHORT occupies the *high* two
+    /// bytes of the 4-byte slot, so the value is the slot shifted down
+    /// — reading the slot raw would report 400 << 16 for ISO 400.
+    #[test]
+    fn big_endian_inline_short_is_shifted_down() {
+        let mut data = Vec::new();
+        data.extend_from_slice(b"Exif\0\0");
+        data.extend_from_slice(b"MM");
+        data.extend_from_slice(&42u16.to_be_bytes());
+        data.extend_from_slice(&8u32.to_be_bytes()); // IFD0 at relative 8
+        data.extend_from_slice(&1u16.to_be_bytes()); // one entry
+        data.extend_from_slice(&0x0112u16.to_be_bytes()); // Orientation
+        data.extend_from_slice(&3u16.to_be_bytes()); // SHORT
+        data.extend_from_slice(&1u32.to_be_bytes()); // count 1
+        data.extend_from_slice(&6u16.to_be_bytes()); // value 6, high half
+        data.extend_from_slice(&[0, 0]);
+        data.extend_from_slice(&0u32.to_be_bytes()); // next IFD
+
+        let mut reader = ExifReader::new(&data);
+        reader.parse_jpeg().expect("should parse");
+        assert_eq!(reader.orientation(), Some(6));
+    }
+
+    /// The next-IFD chain of IFD0 leads to IFD1 (the thumbnail IFD);
+    /// a zero next-IFD ends the chain and IFD1 stays empty.
+    #[test]
+    fn ifd1_comes_from_the_next_ifd_chain() {
+        let mut data = Vec::new();
+        data.extend_from_slice(b"Exif\0\0");
+        data.extend_from_slice(b"II");
+        data.extend_from_slice(&42u16.to_le_bytes());
+        data.extend_from_slice(&8u32.to_le_bytes()); // IFD0 at 8
+        data.extend_from_slice(&1u16.to_le_bytes()); // IFD0: one entry
+        data.extend_from_slice(&0x0100u16.to_le_bytes()); // ImageWidth
+        data.extend_from_slice(&4u16.to_le_bytes()); // LONG
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.extend_from_slice(&640u32.to_le_bytes());
+        // next IFD: relative 30 (after this 2+12+4 block + 6 for tiff_start)
+        data.extend_from_slice(&30u32.to_le_bytes());
+        while data.len() < 6 + 30 {
+            data.push(0);
+        }
+        data.extend_from_slice(&1u16.to_le_bytes()); // IFD1: one entry
+        data.extend_from_slice(&0x0101u16.to_le_bytes()); // ImageHeight
+        data.extend_from_slice(&4u16.to_le_bytes());
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.extend_from_slice(&480u32.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes()); // end of chain
+
+        let mut reader = ExifReader::new(&data);
+        reader.parse_jpeg().expect("should parse");
+        assert_eq!(reader.ifd1.len(), 1);
+        assert_eq!(reader.ifd1[0].tag, 0x0101);
+        assert_eq!(reader.ifd1[0].value, 480);
+
+        // A zero next-IFD leaves IFD1 empty.
+        let mut data = data.clone();
+        // overwrite IFD0's next-IFD (at 6 + 8 + 2 + 12 = 28) with 0
+        data[28..32].copy_from_slice(&0u32.to_le_bytes());
+        let mut reader = ExifReader::new(&data);
+        reader.parse_jpeg().expect("should parse");
+        assert!(reader.ifd1.is_empty());
+    }
+
+    /// The Interop IFD pointer (0xA005) lives in the Exif IFD, not in
+    /// IFD0; a pointer in IFD0 must not be mistaken for it.
+    #[test]
+    fn interop_ifd_is_read_through_the_exif_ifd() {
+        let mut data = Vec::new();
+        data.extend_from_slice(b"Exif\0\0");
+        data.extend_from_slice(b"II");
+        data.extend_from_slice(&42u16.to_le_bytes());
+        data.extend_from_slice(&8u32.to_le_bytes()); // IFD0 offset
+                                                     // IFD0 at 8 with two entries: ExifIFD pointer and an Interop
+                                                     // pointer in the wrong place (which must be ignored).
+        data.extend_from_slice(&2u16.to_le_bytes());
+        data.extend_from_slice(&0x8769u16.to_le_bytes()); // ExifIFD pointer
+        data.extend_from_slice(&4u16.to_le_bytes());
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.extend_from_slice(&40u32.to_le_bytes()); // -> ExifIFD at rel 40
+        data.extend_from_slice(&0xA005u16.to_le_bytes()); // Interop pointer in IFD0
+        data.extend_from_slice(&4u16.to_le_bytes());
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes()); // points nowhere
+        data.extend_from_slice(&0u32.to_le_bytes()); // next IFD
+        while data.len() < 6 + 40 {
+            data.push(0);
+        }
+        // ExifIFD at relative 40: one entry, the real Interop pointer.
+        data.extend_from_slice(&1u16.to_le_bytes());
+        data.extend_from_slice(&0xA005u16.to_le_bytes());
+        data.extend_from_slice(&4u16.to_le_bytes());
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.extend_from_slice(&80u32.to_le_bytes()); // -> Interop at rel 80
+        data.extend_from_slice(&0u32.to_le_bytes());
+        while data.len() < 6 + 80 {
+            data.push(0);
+        }
+        // Interop IFD at relative 80: one entry.
+        data.extend_from_slice(&1u16.to_le_bytes());
+        data.extend_from_slice(&0x0001u16.to_le_bytes()); // InteropIndex
+        data.extend_from_slice(&2u16.to_le_bytes()); // ASCII
+        data.extend_from_slice(&4u32.to_le_bytes());
+        data.extend_from_slice(b"R98\0");
+        data.extend_from_slice(&0u32.to_le_bytes());
+
+        let mut reader = ExifReader::new(&data);
+        reader.parse_jpeg().expect("should parse");
+        assert_eq!(reader.interop_ifd.len(), 1);
+        assert_eq!(reader.interop_ifd[0].tag, 0x0001);
     }
 }

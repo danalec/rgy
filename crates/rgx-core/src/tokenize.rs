@@ -1,4 +1,4 @@
-//! Clean-room Unicode tokenizer for the token index.
+//! Unicode tokenizer for the token index.
 //!
 //! The token index in [`super::index`] keys on whole tokens, not bytes; a
 //! query like `foo bar` is "documents that contain `foo` AND `bar` near each

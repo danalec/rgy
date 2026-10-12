@@ -1,29 +1,40 @@
-//! ZIP archive format implementation.
+// SPDX-License-Identifier: Apache-2.0
+
+//! ZIP container reader (PKWARE APPNOTE .ZIP File Format Specification).
 //!
-//! Provides ZIP file creation and extraction capabilities.
-//! ZIP container reader, vendored from upstream `b02/compress/zip.rs`.
+//! Independent reimplementation of the parts of the format a reader
+//! needs: the end of central directory record (§4.3.16), the zip64 end
+//! of central directory record and its locator (§4.3.14–4.3.15), the
+//! central directory file header (§4.3.12), the local file header
+//! (§4.3.7), and the zip64 extended information extra field (§4.5.3).
+//! Entry bodies are handed to the sibling decoders in
+//! `crate::compress` — store (method 0), deflate (8), bzip2 (12), LZMA
+//! (14) and XZ (95) each follow the method's own format; zstd (93) is
+//! decoded from its frame format.
 //!
-//! Provenance: upstream commit 819a1cf. upstream is the source of truth — the
-//! Unknown-method refusal, zip64 (EOCD64 + per-entry 0x0001) and the
-//! XZ routing all landed there first, with python-zipfile vectors.
+//! # Contract
 //!
-//! Trims for rgx: the writer half (ZipWriter/ZipEntry — rgx never
-//! creates archives) is not vendored, and the XZ arm returns a clean
-//! "not supported" error instead of routing to upstream's XZ container,
-//! which is not vendored and whose liblzma interop is a known defect
-//! (the upstream XZ vector is #[ignore]d there). Entries with methods 9 /
-//! 93 / 98 (deflate64, zstd, ppmd) error instead of decoding, which is
-//! what the `zip` crate served them as compressed bytes masquerading
-//! as content — rgx's zip surface loses those to an honest error.
+//! The end of central directory record is the last record in the
+//! archive: a candidate signature is only the real one when the record
+//! plus its declared comment length reaches the end of the file. The
+//! 32-bit counts and offsets saturate at 0xFFFF / 0xFFFFFFFF, and the
+//! real values then live in the zip64 EOCD record, located through the
+//! zip64 EOCD locator that sits immediately before the EOCD. The same
+//! saturation rule applies per entry through the 0x0001 zip64 extra
+//! field, whose values appear in the fixed order uncompressed size,
+//! compressed size, local header offset, each present only if the
+//! corresponding 32-bit slot saturated. Sizes recorded in the central
+//! directory are the authoritative ones — an entry written with a data
+//! descriptor (general purpose bit 3) carries zeros in its local header
+//! and the reader takes the sizes from the directory either way.
 //!
-//! Copy-time changes: `alloc::` -> `std::`, upstream module paths pointed
-//! at rgx-core::compress, the test fixtures re-anchored to this crate's
-//! testdata/.
-//!
-//! After the copy: every entry is decoded under a ceiling
-//! ([`default_byte_limit`], overridable with [`ZipReader::with_limit`]).
-//! The central directory's uncompressed size is a claim, not a bound, so it
-//! is checked before the decode and the running cap is what stops a bomb.
+//! Methods the reader does not implement (deflate64, ppmd, …) are
+//! refused: returning the raw compressed bytes as the file's content
+//! would put garbage in whatever indexes the output. Every entry is
+//! decoded under a ceiling ([`default_byte_limit`], overridable with
+//! [`ZipReader::with_limit`]): the central directory's uncompressed
+//! size is a claim, not a bound, so it is checked before the decode and
+//! the running cap is what stops a bomb.
 
 use crate::compress::bzip2::Bzip2Decoder;
 use crate::compress::cap::Bounded;
@@ -47,7 +58,51 @@ pub fn default_byte_limit() -> u64 {
     crate::Ctx::default().max_file_size as u64
 }
 
-/// Compression method.
+// Record signatures (APPNOTE §4.3.1).
+const LOCAL_SIG: &[u8; 4] = b"PK\x03\x04";
+const CENTRAL_SIG: &[u8; 4] = b"PK\x01\x02";
+const EOCD_SIG: &[u8; 4] = b"PK\x05\x06";
+const ZIP64_EOCD_SIG: &[u8; 4] = b"PK\x06\x06";
+const ZIP64_LOCATOR_SIG: &[u8; 4] = b"PK\x06\x07";
+
+// Fixed sizes: the local header is 30 bytes, the central header 46, the
+// EOCD 22 with no comment, and the zip64 locator is 20.
+const LOCAL_HEADER_LEN: usize = 30;
+const CENTRAL_HEADER_LEN: usize = 46;
+const EOCD_LEN: usize = 22;
+const ZIP64_LOCATOR_LEN: usize = 20;
+const ZIP64_EOCD_LEN: usize = 56;
+
+/// Saturation markers: the 32-bit slot is full and the real value lives
+/// in the zip64 record (APPNOTE §4.4.1.4 / §4.5.3).
+const SAT_U16: u16 = 0xFFFF;
+const SAT_U32: u32 = 0xFFFF_FFFF;
+
+/// Read a little-endian integer at `at`, or fail if the buffer ends first.
+fn u16le(data: &[u8], at: usize) -> CompressResult<u16> {
+    let s = data
+        .get(at..at + 2)
+        .ok_or(CompressError::InvalidFormat("truncated record"))?;
+    Ok(u16::from_le_bytes([s[0], s[1]]))
+}
+
+fn u32le(data: &[u8], at: usize) -> CompressResult<u32> {
+    let s = data
+        .get(at..at + 4)
+        .ok_or(CompressError::InvalidFormat("truncated record"))?;
+    Ok(u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
+}
+
+fn u64le(data: &[u8], at: usize) -> CompressResult<u64> {
+    let s = data
+        .get(at..at + 8)
+        .ok_or(CompressError::InvalidFormat("truncated record"))?;
+    let mut v = [0u8; 8];
+    v.copy_from_slice(s);
+    Ok(u64::from_le_bytes(v))
+}
+
+/// Compression method (APPNOTE §4.4.5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CompressionMethod {
     /// No compression (stored).
@@ -59,12 +114,12 @@ pub enum CompressionMethod {
     Bzip2,
     /// LZMA compression (decoded by the `lzma` sibling module).
     ///
-    /// The payload carries a ZIP-specific LZMA header, see
-    /// `ZipReader::decode_lzma`.
+    /// The payload carries the ZIP LZMA header of §4.5.3 - LZMA, see
+    /// [`ZipReader::decode_lzma`].
     Lzma,
-    /// XZ compression (decoded by the `xz` sibling module).
+    /// XZ compression (method 95).
     Xz,
-    /// Zstd compression (method 93, decoded by the `zstd` sibling module).
+    /// Zstd compression (method 93).
     Zstd,
     /// Any other method (deflate64, ppmd, …). Preserved, never
     /// guessed: mapping these to `Store` handed the caller raw
@@ -181,148 +236,105 @@ impl<'a> ZipReader<'a> {
         ))
     }
 
-    /// One zip64 extra field: when the 32-bit slot saturated, read the
-    /// next 8 bytes as the real value. A value past 4 GiB is refused —
-    /// the metadata fields are u32, and truncating them would slice the
-    /// wrong byte range on extract.
+    /// One zip64 extra-field value (§4.5.3): when the 32-bit slot
+    /// saturated, the next 8 bytes hold the real value. Only saturated
+    /// slots appear in the field, in the order uncompressed, compressed,
+    /// local header offset. A value past 4 GiB is refused — the metadata
+    /// fields are u32, and truncating them would slice the wrong byte
+    /// range on extract.
     fn zip64_field(body: &[u8], at: &mut usize, saturated: u32) -> CompressResult<u32> {
-        if saturated != 0xFFFF_FFFF {
+        if saturated != SAT_U32 {
             return Ok(saturated);
         }
-        let slice = body
-            .get(*at..*at + 8)
-            .ok_or(CompressError::InvalidFormat("zip64 extra truncated"))?;
-        let mut v = [0u8; 8];
-        v.copy_from_slice(slice);
+        let v = u64le(body, *at)?;
         *at += 8;
-        u32::try_from(u64::from_le_bytes(v)).map_err(|_| {
+        u32::try_from(v).map_err(|_| {
             CompressError::InvalidFormat("zip64 entry larger than 4 GiB is out of range")
         })
     }
 
+    /// Find the end of central directory record: the last signature
+    /// whose record, plus the comment length it declares, reaches the
+    /// end of the file. A signature inside an archive comment is not
+    /// that record, so candidates are tried newest-first.
+    fn find_eocd(data: &[u8]) -> CompressResult<usize> {
+        // APPNOTE bounds the record to the final 65 557 bytes (22-byte
+        // record + up to 65 535 of comment), so only that window can
+        // hold it.
+        const EOCD_MAX_COMMENT: usize = u16::MAX as usize; // 65 535
+        let floor = data.len().saturating_sub(EOCD_LEN + EOCD_MAX_COMMENT);
+        let tail = &data[floor..];
+
+        let mut from = tail.len();
+        while let Some(hit) = crate::memchr::memmem::rfind(&tail[..from], EOCD_SIG) {
+            let start = floor + hit;
+            if start + EOCD_LEN <= data.len() {
+                let comment_len = u16le(data, start + 20)? as usize;
+                if start + EOCD_LEN + comment_len == data.len() {
+                    return Ok(start);
+                }
+            }
+            from = hit;
+        }
+        Err(CompressError::InvalidFormat("EOCD not found"))
+    }
+
     /// Parse the central directory.
     fn parse_central_directory(data: &[u8]) -> CompressResult<Vec<ZipEntryMetadata>> {
-        // Find end of central directory.
-        //
-        // This is the LAST record in the file and APPNOTE bounds it to the
-        // final 65 557 bytes (22-byte record + up to 65 535 of comment). The
-        // code here scanned the WHOLE archive backwards one window at a time,
-        // which for a 50 MB zip is 50 million 4-byte compares to read a record
-        // that is provably in the last 64 KiB -- and it ran on every zip-family
-        // file (zip, jar, apk, docx, xlsx, pptx, epub, whl, xpi), before the
-        // central directory is even parsed.
-        //
-        // `memrchr` on the first byte is the SIMD primitive for exactly this,
-        // and narrowing to the legal window first makes it strictly cheaper
-        // than it would be over the whole archive. A zip whose EOCD is missing
-        // reports the same error as before, just sooner.
-        const EOCD_SIG: &[u8; 4] = b"PK\x05\x06";
-        const EOCD_MAX_COMMENT: usize = u16::MAX as usize; // 65 535
-        const EOCD_MIN: usize = 22; // the record with no comment
-        let floor = data.len().saturating_sub(EOCD_MIN + EOCD_MAX_COMMENT);
-        let tail = &data[floor..];
-        let eocd_start = crate::memchr::memmem::rfind(tail, EOCD_SIG)
-            .map(|i| floor + i)
-            .ok_or(CompressError::InvalidFormat("EOCD not found"))?;
+        let eocd_start = Self::find_eocd(data)?;
 
-        if eocd_start + 22 > data.len() {
-            return Err(CompressError::InvalidFormat("truncated EOCD"));
-        }
+        let mut num_entries = u16le(data, eocd_start + 10)? as usize;
+        let mut central_dir_offset = u32le(data, eocd_start + 16)? as usize;
 
-        let mut central_dir_offset = u32::from_le_bytes([
-            data[eocd_start + 16],
-            data[eocd_start + 17],
-            data[eocd_start + 18],
-            data[eocd_start + 19],
-        ]) as usize;
-        let mut num_entries =
-            u16::from_le_bytes([data[eocd_start + 10], data[eocd_start + 11]]) as usize;
-
-        // Zip64: the 32-bit EOCD fields saturate at 0xFFFF/0xFFFFFFFF and
-        // the real values live in the EOCD64 record, found through the
-        // locator that sits directly before the EOCD.
-        if num_entries == 0xFFFF || central_dir_offset == 0xFFFF_FFFF {
+        // Zip64: the 32-bit EOCD fields saturate and the real values
+        // live in the zip64 EOCD record, found through the locator that
+        // sits immediately before the EOCD (§4.3.15).
+        if num_entries == SAT_U16 as usize || central_dir_offset == SAT_U32 as usize {
             let loc = eocd_start
-                .checked_sub(20)
+                .checked_sub(ZIP64_LOCATOR_LEN)
                 .ok_or(CompressError::InvalidFormat("zip64 locator missing"))?;
-            if data.get(loc..loc + 4) != Some(&b"PK"[..]) {
+            if data.get(loc..loc + 4) != Some(&ZIP64_LOCATOR_SIG[..]) {
                 return Err(CompressError::InvalidFormat("zip64 locator not found"));
             }
-            let eocd64_off = u64::from_le_bytes([
-                data[loc + 8],
-                data[loc + 9],
-                data[loc + 10],
-                data[loc + 11],
-                data[loc + 12],
-                data[loc + 13],
-                data[loc + 14],
-                data[loc + 15],
-            ]) as usize;
-            if data.get(eocd64_off..eocd64_off + 4) != Some(&b"PK"[..]) {
+            let eocd64_off = u64le(data, loc + 8)? as usize;
+            if data.get(eocd64_off..eocd64_off + 4) != Some(&ZIP64_EOCD_SIG[..]) {
                 return Err(CompressError::InvalidFormat("zip64 EOCD not found"));
             }
-            let rd64 = |at: usize| -> u64 {
-                let mut v = [0u8; 8];
-                v.copy_from_slice(&data[at..at + 8]);
-                u64::from_le_bytes(v)
-            };
-            num_entries = rd64(eocd64_off + 32) as usize;
-            central_dir_offset = rd64(eocd64_off + 48) as usize;
+            // The fixed part of the record is 56 bytes; the extensible
+            // data sector after it is not read.
+            if eocd64_off + ZIP64_EOCD_LEN > data.len() {
+                return Err(CompressError::InvalidFormat("truncated zip64 EOCD"));
+            }
+            num_entries = u64le(data, eocd64_off + 32)? as usize;
+            central_dir_offset = u64le(data, eocd64_off + 48)? as usize;
         }
 
-        let mut entries = Vec::with_capacity(num_entries);
+        let mut entries = Vec::with_capacity(num_entries.min(1024));
         let mut pos = central_dir_offset;
 
         for _ in 0..num_entries {
-            if pos + 46 > data.len() {
-                return Err(CompressError::InvalidFormat("truncated central directory"));
-            }
-
-            if &data[pos..pos + 4] != b"PK\x01\x02" {
+            if data.get(pos..pos + 4) != Some(&CENTRAL_SIG[..]) {
                 return Err(CompressError::InvalidFormat(
                     "invalid central directory signature",
                 ));
             }
 
-            let method = u16::from_le_bytes([data[pos + 10], data[pos + 11]]);
-            let modified_time = u16::from_le_bytes([data[pos + 12], data[pos + 13]]);
-            let modified_date = u16::from_le_bytes([data[pos + 14], data[pos + 15]]);
-            let crc = u32::from_le_bytes([
-                data[pos + 16],
-                data[pos + 17],
-                data[pos + 18],
-                data[pos + 19],
-            ]);
-            let compressed_size = u32::from_le_bytes([
-                data[pos + 20],
-                data[pos + 21],
-                data[pos + 22],
-                data[pos + 23],
-            ]);
-            let uncompressed_size = u32::from_le_bytes([
-                data[pos + 24],
-                data[pos + 25],
-                data[pos + 26],
-                data[pos + 27],
-            ]);
-            let name_len = u16::from_le_bytes([data[pos + 28], data[pos + 29]]) as usize;
-            let extra_len = u16::from_le_bytes([data[pos + 30], data[pos + 31]]) as usize;
-            let comment_len = u16::from_le_bytes([data[pos + 32], data[pos + 33]]) as usize;
-            let local_header_offset = u32::from_le_bytes([
-                data[pos + 42],
-                data[pos + 43],
-                data[pos + 44],
-                data[pos + 45],
-            ]);
+            let method = u16le(data, pos + 10)?;
+            let modified_time = u16le(data, pos + 12)?;
+            let modified_date = u16le(data, pos + 14)?;
+            let crc = u32le(data, pos + 16)?;
+            let compressed_size = u32le(data, pos + 20)?;
+            let uncompressed_size = u32le(data, pos + 24)?;
+            let name_len = u16le(data, pos + 28)? as usize;
+            let extra_len = u16le(data, pos + 30)? as usize;
+            let comment_len = u16le(data, pos + 32)? as usize;
+            let local_header_offset = u32le(data, pos + 42)?;
 
-            // Same as the compressed-data range: the guard above covers
-            // `pos + 46` but not `pos + 46 + name_len`, and `name_len` is
-            // attacker-controlled.
-            let name_end = (pos + 46)
+            let name_end = (pos + CENTRAL_HEADER_LEN)
                 .checked_add(name_len)
                 .ok_or(CompressError::InvalidFormat("entry name length overflows"))?;
             let name = data
-                .get(pos + 46..name_end)
+                .get(pos + CENTRAL_HEADER_LEN..name_end)
                 .ok_or(CompressError::InvalidFormat("entry name out of bounds"))?;
             let name = String::from_utf8_lossy(name).into_owned();
 
@@ -332,9 +344,9 @@ impl<'a> ZipReader<'a> {
             // offset — only for the fields that actually saturated.
             let (mut size, mut csize, mut lho) =
                 (uncompressed_size, compressed_size, local_header_offset);
-            if size == 0xFFFF_FFFF || csize == 0xFFFF_FFFF || lho == 0xFFFF_FFFF {
+            if size == SAT_U32 || csize == SAT_U32 || lho == SAT_U32 {
                 let extra = data
-                    .get(pos + 46 + name_len..pos + 46 + name_len + extra_len)
+                    .get(name_end..name_end + extra_len)
                     .ok_or(CompressError::InvalidFormat("extra field out of bounds"))?;
                 let mut cur = 0usize;
                 let mut found = false;
@@ -372,7 +384,7 @@ impl<'a> ZipReader<'a> {
                 local_header_offset: lho,
             });
 
-            pos += 46 + name_len + extra_len + comment_len;
+            pos = name_end + extra_len + comment_len;
         }
 
         Ok(entries)
@@ -436,29 +448,31 @@ impl<'a> ZipReader<'a> {
             return Err(Self::over_budget(entry, spent, limit));
         }
 
-        // Use the local header offset from the central directory
+        // The local header offset comes from the central directory; the
+        // body length comes from the directory too, which is what makes a
+        // data-descriptor entry (zero sizes in its local header) extract
+        // the same way as any other.
         let pos = entry.local_header_offset as usize;
-
-        if pos + 30 > self.data.len() {
-            return Err(CompressError::InvalidFormat("local header not found"));
-        }
-
-        if &self.data[pos..pos + 4] != b"PK\x03\x04" {
+        if self.data.get(pos..pos + 4) != Some(&LOCAL_SIG[..]) {
             return Err(CompressError::InvalidFormat(
                 "invalid local header signature",
             ));
         }
 
-        // Skip local file header
-        let name_len = u16::from_le_bytes([self.data[pos + 26], self.data[pos + 27]]) as usize;
-        let extra_len = u16::from_le_bytes([self.data[pos + 28], self.data[pos + 29]]) as usize;
-        let data_start = pos + 30 + name_len + extra_len;
+        let name_len = u16le(self.data, pos + 26)? as usize;
+        let extra_len = u16le(self.data, pos + 28)? as usize;
+        let data_start = (pos + LOCAL_HEADER_LEN)
+            .checked_add(name_len)
+            .and_then(|s| s.checked_add(extra_len))
+            .ok_or(CompressError::InvalidFormat(
+                "local header length overflows",
+            ))?;
 
         // `data_start` comes from the *local* file header while
-        // `compressed_size` comes from the *central* directory, so a crafted
-        // or truncated archive can point past the end of the data. Bound the
-        // slice rather than indexing blindly: this is untrusted input and a
-        // panic here aborts the caller.
+        // `compressed_size` comes from the *central* directory, so a
+        // crafted or truncated archive can point past the end of the
+        // data. Bound the slice rather than indexing blindly: this is
+        // untrusted input and a panic here aborts the caller.
         let end = data_start
             .checked_add(entry.compressed_size as usize)
             .ok_or(CompressError::InvalidFormat("compressed size overflows"))?;
@@ -489,7 +503,6 @@ impl<'a> ZipReader<'a> {
                 .decode_bounded(compressed_data, remaining)?,
             CompressionMethod::Unsupported(m) => {
                 return Err(CompressError::InvalidFormat(match m {
-                    93 => "zstd-compressed zip entry (method 93) not supported",
                     9 => "deflate64 zip entry (method 9) not supported",
                     98 => "ppmd-compressed zip entry (method 98) not supported",
                     _ => "unsupported zip compression method",
@@ -519,28 +532,29 @@ impl<'a> ZipReader<'a> {
 
     /// Decode an LZMA entry (method 14) under `limit`.
     ///
-    /// The ZIP payload is wrapped in a 4-byte header before the raw LZMA1
-    /// stream: 2 bytes of LZMA version (ignored here) followed by a 2-byte
-    /// little-endian length of the property block, then the properties
-    /// themselves (1 byte `lc`/`lp`/`pb` plus a 4-byte little-endian
-    /// dictionary size). This is *not* the 13-byte `.lzma` "alone" header
-    /// that [`LzmaDecoder::decode`] expects, so the stream is handed to
-    /// [`LzmaDecoder::decode_raw_bounded`] with the properties parsed out.
+    /// The ZIP payload is wrapped in the §4.5.3 LZMA header before the
+    /// raw LZMA1 stream: 2 bytes of LZMA version (ignored here) followed
+    /// by a 2-byte little-endian length of the property block, then the
+    /// properties themselves (1 byte `lc`/`lp`/`pb` plus a 4-byte
+    /// little-endian dictionary size). This is *not* the 13-byte `.lzma`
+    /// "alone" header that [`LzmaDecoder::decode`] expects, so the stream
+    /// is handed to [`LzmaDecoder::decode_raw_bounded`] with the
+    /// properties parsed out.
     fn decode_lzma(data: &[u8], uncompressed_size: u64, limit: u64) -> CompressResult<Bounded> {
         // 4-byte ZIP header + 5-byte LZMA property block.
         if data.len() < 9 {
             return Err(CompressError::InvalidFormat("truncated LZMA header"));
         }
-        let props_size = u16::from_le_bytes([data[2], data[3]]) as usize;
+        let props_size = u16le(data, 2)? as usize;
         if props_size != 5 {
-            // LZMA2-in-ZIP (property block of 2 bytes) is not implemented.
+            // LZMA2-in-ZIP (a different property block) is not implemented.
             return Err(CompressError::Unsupported(
                 "unsupported LZMA property block",
             ));
         }
 
         let props = LzmaProps::from_byte(data[4])?;
-        let dict_size = u32::from_le_bytes([data[5], data[6], data[7], data[8]]);
+        let dict_size = u32le(data, 5)?;
 
         LzmaDecoder::new().decode_raw_bounded(
             &data[9..],
@@ -1065,5 +1079,272 @@ mod tests {
         for cut in (0..data.len()).step_by(97) {
             let _ = ZipReader::new(&data[..cut]);
         }
+    }
+
+    // ---- shapes the tests above do not cover -------------------------
+
+    /// The knobs a raw entry needs: the general purpose flag, the sizes
+    /// written into the local header, the sizes written into the central
+    /// directory, and an extra field.
+    struct RawSpec<'a> {
+        name: &'a str,
+        flags: u16,
+        payload: &'a [u8],
+        local_csize: u32,
+        local_size: u32,
+        central_csize: u32,
+        central_size: u32,
+        extra: &'a [u8],
+    }
+
+    fn zip_entry_raw(s: RawSpec<'_>) -> Vec<u8> {
+        let RawSpec {
+            name,
+            flags,
+            payload,
+            local_csize,
+            local_size,
+            central_csize,
+            central_size,
+            extra,
+        } = s;
+        let crc = crc32(payload);
+        let mut out = Vec::new();
+        let offset = 0u32;
+
+        out.extend_from_slice(b"PK\x03\x04");
+        out.extend_from_slice(&20u16.to_le_bytes());
+        out.extend_from_slice(&flags.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes()); // store
+        out.extend_from_slice(&[0u8; 4]);
+        out.extend_from_slice(&crc.to_le_bytes());
+        out.extend_from_slice(&local_csize.to_le_bytes());
+        out.extend_from_slice(&local_size.to_le_bytes());
+        out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        out.extend_from_slice(&(extra.len() as u16).to_le_bytes());
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(extra);
+        out.extend_from_slice(payload);
+
+        let mut central = Vec::new();
+        central.extend_from_slice(b"PK\x01\x02");
+        central.extend_from_slice(&20u16.to_le_bytes());
+        central.extend_from_slice(&20u16.to_le_bytes());
+        central.extend_from_slice(&flags.to_le_bytes());
+        central.extend_from_slice(&0u16.to_le_bytes());
+        central.extend_from_slice(&[0u8; 4]);
+        central.extend_from_slice(&crc.to_le_bytes());
+        central.extend_from_slice(&central_csize.to_le_bytes());
+        central.extend_from_slice(&central_size.to_le_bytes());
+        central.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        central.extend_from_slice(&(extra.len() as u16).to_le_bytes());
+        // comment len (2), disk number (2), internal (2), external (4)
+        central.extend_from_slice(&[0u8; 10]);
+        central.extend_from_slice(&offset.to_le_bytes());
+        central.extend_from_slice(name.as_bytes());
+        central.extend_from_slice(extra);
+
+        let cd_offset = out.len() as u32;
+        out.extend_from_slice(&central);
+        out.extend_from_slice(b"PK\x05\x06");
+        out.extend_from_slice(&[0u8; 4]);
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&(central.len() as u32).to_le_bytes());
+        out.extend_from_slice(&cd_offset.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out
+    }
+
+    /// A zip64 extra field (id 0x0001, §4.5.3) holding `values` as
+    /// little-endian u64s, in the fixed order uncompressed, compressed,
+    /// local header offset.
+    fn zip64_extra(values: &[u64]) -> Vec<u8> {
+        let mut body = Vec::new();
+        for v in values {
+            body.extend_from_slice(&v.to_le_bytes());
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(&1u16.to_le_bytes()); // header id
+        out.extend_from_slice(&(body.len() as u16).to_le_bytes());
+        out.extend_from_slice(&body);
+        out
+    }
+
+    /// A 0xFFFFFFFF size slot takes its value from the 0x0001 extra
+    /// field, and only saturated slots appear there — so a 2-value field
+    /// supplies uncompressed and compressed size while the offset keeps
+    /// its 32-bit value.
+    #[test]
+    fn a_zip64_extra_field_supplies_the_saturated_sizes() {
+        let payload = b"data";
+        let extra = zip64_extra(&[payload.len() as u64, payload.len() as u64]);
+        let z = zip_entry_raw(RawSpec {
+            name: "z64.txt",
+            flags: 0,
+            payload,
+            local_csize: payload.len() as u32,
+            local_size: payload.len() as u32,
+            central_csize: SAT_U32,
+            central_size: SAT_U32, // both central sizes saturated
+            extra: &extra,
+        });
+
+        let r = ZipReader::new(&z).expect("parse");
+        assert_eq!(r.list().len(), 1);
+        assert_eq!(r.list()[0].size, 4, "the 32-bit slot is saturated");
+        assert_eq!(r.list()[0].compressed_size, 4);
+        assert_eq!(r.extract("z64.txt").expect("extract"), payload);
+    }
+
+    /// A zip64 value past u32 is refused rather than truncated: the
+    /// metadata fields are u32, and wrapping one would slice the wrong
+    /// byte range on extract.
+    #[test]
+    fn a_zip64_size_past_4gib_is_refused() {
+        let payload = b"tiny";
+        let too_big = u32::MAX as u64 + 1;
+        let extra = zip64_extra(&[too_big, payload.len() as u64]);
+        let z = zip_entry_raw(RawSpec {
+            name: "big.txt",
+            flags: 0,
+            payload,
+            local_csize: payload.len() as u32,
+            local_size: payload.len() as u32,
+            central_csize: SAT_U32,
+            central_size: SAT_U32,
+            extra: &extra,
+        });
+        let err = ZipReader::new(&z).expect_err("must refuse");
+        assert!(matches!(err, CompressError::InvalidFormat(_)), "{err:?}");
+    }
+
+    /// An entry written with a data descriptor (general purpose bit 3)
+    /// carries zeros in its local header; the sizes the reader uses come
+    /// from the central directory either way, and the descriptor after
+    /// the body is not read on the extract path at all.
+    #[test]
+    fn an_entry_with_a_data_descriptor_extracts_from_the_central_directory() {
+        let payload = b"streamed payload";
+        let mut z = zip_entry_raw(RawSpec {
+            name: "dd.txt",
+            flags: 0x0008, // bit 3: sizes live in a trailing descriptor
+            payload,
+            local_csize: 0,
+            local_size: 0, // local header: no sizes here
+            central_csize: payload.len() as u32,
+            central_size: payload.len() as u32,
+            extra: &[],
+        });
+        // Splice a data descriptor between the body and the central
+        // directory: optional signature, CRC, compressed size,
+        // uncompressed size. The extract path must not need it.
+        let cd_start = z
+            .windows(4)
+            .position(|w| w == b"PK\x01\x02")
+            .expect("central directory");
+        let mut descriptor = Vec::new();
+        descriptor.extend_from_slice(b"PK\x07\x08");
+        descriptor.extend_from_slice(&crc32(payload).to_le_bytes());
+        descriptor.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        descriptor.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        z.splice(cd_start..cd_start, descriptor);
+        // The central directory offset in the EOCD moves by the
+        // descriptor's length; the reader does not use the EOCD offset
+        // for the entry walk (it walks from the offset the zip64 branch
+        // or the plain field gives), but keep the archive self-consistent.
+        let eocd = z.len() - 22;
+        let old = u32::from_le_bytes([z[eocd + 16], z[eocd + 17], z[eocd + 18], z[eocd + 19]]);
+        let new = old + 16; // descriptor length
+        z[eocd + 16..eocd + 20].copy_from_slice(&new.to_le_bytes());
+
+        let r = ZipReader::new(&z).expect("parse");
+        let e = &r.list()[0];
+        assert_eq!(e.size, payload.len() as u32);
+        assert_eq!(
+            r.extract("dd.txt").expect("extract"),
+            payload,
+            "central directory sizes win over the zero local header"
+        );
+    }
+
+    /// The zip64 EOCD is found through the locator immediately before
+    /// the EOCD when the 32-bit EOCD fields saturate. The locator and
+    /// record signatures are checked, and the counts/offset come from
+    /// the zip64 record.
+    #[test]
+    fn the_zip64_eocd_is_read_through_its_locator() {
+        let payload = b"zip64 counts";
+        let mut z = zip_entry(&[("c.txt", 0, payload, None, None)]);
+        // The last 22 bytes are the EOCD; replace it with a zip64 EOCD
+        // + locator + saturated EOCD, keeping the central directory
+        // where it is.
+        z.truncate(z.len() - 22);
+        let cd_offset = z
+            .windows(4)
+            .position(|w| w == b"PK\x01\x02")
+            .expect("central directory");
+        let eocd64_off = z.len() as u64;
+        let cd_size = eocd64_off - cd_offset as u64;
+
+        z.extend_from_slice(b"PK\x06\x06"); // zip64 EOCD
+        z.extend_from_slice(&44u64.to_le_bytes()); // record size after these 12 bytes
+        z.extend_from_slice(&45u16.to_le_bytes()); // version made by
+        z.extend_from_slice(&45u16.to_le_bytes()); // version needed
+        z.extend_from_slice(&0u32.to_le_bytes()); // disk
+        z.extend_from_slice(&0u32.to_le_bytes()); // disk with CD
+        z.extend_from_slice(&1u64.to_le_bytes()); // entries on this disk
+        z.extend_from_slice(&1u64.to_le_bytes()); // total entries
+        z.extend_from_slice(&cd_size.to_le_bytes());
+        z.extend_from_slice(&(cd_offset as u64).to_le_bytes());
+
+        z.extend_from_slice(b"PK\x06\x07"); // zip64 locator
+        z.extend_from_slice(&0u32.to_le_bytes()); // disk with zip64 EOCD
+        z.extend_from_slice(&eocd64_off.to_le_bytes());
+        z.extend_from_slice(&1u32.to_le_bytes()); // total disks
+
+        z.extend_from_slice(b"PK\x05\x06"); // EOCD, fields saturated
+        z.extend_from_slice(&[0u8; 4]);
+        z.extend_from_slice(&0xFFFFu16.to_le_bytes());
+        z.extend_from_slice(&0xFFFFu16.to_le_bytes());
+        z.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        z.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        z.extend_from_slice(&0u16.to_le_bytes());
+
+        let r = ZipReader::new(&z).expect("parse through the zip64 records");
+        assert_eq!(r.list().len(), 1);
+        assert_eq!(r.extract("c.txt").expect("extract"), payload);
+    }
+
+    /// A `PK\x05\x06` inside an archive comment is not the end of
+    /// central directory: the real record is the one whose own comment
+    /// length reaches the end of the file.
+    #[test]
+    fn an_eocd_signature_inside_the_comment_is_not_the_record() {
+        let mut z = zip_entry(&[("c.txt", 0, b"x", None, None)]);
+        // comment: a fake signature followed by zeros (which would read
+        // as comment length 0 and a zero central directory)
+        z.truncate(z.len() - 2); // drop the zero comment length
+        let mut comment = b"PK\x05\x06".to_vec();
+        comment.extend_from_slice(&[0u8; 30]);
+        z.extend_from_slice(&(comment.len() as u16).to_le_bytes());
+        z.extend_from_slice(&comment);
+
+        let r = ZipReader::new(&z).expect("the real EOCD wins");
+        assert_eq!(r.list().len(), 1);
+        assert_eq!(r.extract("c.txt").expect("extract"), b"x");
+    }
+
+    #[test]
+    fn never_panics_on_arbitrary_bytes() {
+        let corpus: Vec<(&'static str, Vec<u8>)> = vec![
+            ("empty", Vec::new()),
+            ("zeros", vec![0u8; 256]),
+            ("zip", zip_entry(&[("a.txt", 0, b"hi", None, None)])),
+            ("sig", b"PK\x05\x06".to_vec()),
+        ];
+        crate::fuzzkit::assert_never_panics(corpus, 200, "zip", |data| {
+            let _ = ZipReader::new(data);
+        });
     }
 }

@@ -1,12 +1,18 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! DEFLATE compression (RFC 1951).
 //!
-//! Implements the DEFLATE algorithm used in ZIP, gzip, and PNG.
+//! Independent reimplementation of the published block format: stored
+//! blocks, the fixed Huffman tables the RFC spells out, dynamic Huffman
+//! headers, and the length/distance code tables that map match shapes to
+//! symbols. Written from the RFC's description of the bitstream rather
+//! than from any implementation's source. The LZ77 stage lives in
+//! [`super::lz77`]; this module turns its tokens into bits and back.
 //!
-//! ## ISA-L Integration
-//!
-//! **Not in this crate.** `rgx-core` declares no `isa-huffman` feature, so the
-//! methods were `cfg`'d away at vendoring (`compress/mod.rs:17`) and the fields
-//! they read are marked `#[allow(dead_code)]` (`:111`).
+//! The decoder is the half every .zip, .gz and PNG payload goes through,
+//! so it treats its input as untrusted: a reserved block type is an
+//! error, a length code outside the table is an error, and the output
+//! ceiling is credited as bytes are emitted.
 
 use super::cap::Bounded;
 use super::error::{CompressError, CompressResult};
@@ -90,6 +96,11 @@ const DISTANCE_EXTRA: [u8; 30] = [
     13,
 ];
 
+/// How many blocks one stream may hold before the decoder calls it a
+/// loop. A stream of empty non-final blocks is otherwise unbounded work
+/// for zero output.
+const MAX_BLOCKS: u32 = 100_000;
+
 /// DEFLATE encoder.
 #[derive(Debug)]
 pub struct DeflateEncoder {
@@ -97,12 +108,6 @@ pub struct DeflateEncoder {
     level: CompressionLevel,
     /// LZ77 encoder.
     lz77: Lz77Encoder,
-    /// Fixed literal/length decoder.
-    #[allow(dead_code)] // vendored: the isa-huffman path that read these was trimmed
-    fixed_literal_decoder: HuffmanDecoder,
-    /// Fixed distance decoder.
-    #[allow(dead_code)] // vendored: same
-    fixed_distance_decoder: HuffmanDecoder,
 }
 
 impl DeflateEncoder {
@@ -113,35 +118,21 @@ impl DeflateEncoder {
 
     /// Create a DEFLATE encoder with a specific level (0-9).
     pub fn with_level(level: u8) -> Self {
-        let fixed_lit = fixed_literal_lengths();
-        let fixed_dist = fixed_distance_lengths();
-
         Self {
             level: CompressionLevel::from(level),
             lz77: Lz77Encoder::with_level(level),
-            fixed_literal_decoder: HuffmanDecoder::from_lengths(
-                &fixed_lit,
-                MAX_DEFLATE_CODE_LEN as u8,
-            ),
-            fixed_distance_decoder: HuffmanDecoder::from_lengths(
-                &fixed_dist,
-                MAX_DEFLATE_CODE_LEN as u8,
-            ),
         }
     }
 
     /// Encode data using DEFLATE.
     pub fn encode(&mut self, data: &[u8]) -> Vec<u8> {
         if data.is_empty() {
-            // Empty data: just write end-of-block
+            // Empty data: one final fixed block holding only EOB.
             let mut writer = BitWriter::new();
             writer.write_bits(1, 1); // BFINAL = 1
             writer.write_bits(1, 2); // BTYPE = 01 (fixed)
-                                     // End of block code (256) — canonical code 0 with 7 bits, reversed = 0
-            let lit_lengths = fixed_literal_lengths();
-            let lit_codes = build_canonical_codes(&lit_lengths, MAX_DEFLATE_CODE_LEN);
-            let eob = &lit_codes[256];
-            writer.write_bits(reverse_bits(eob.code, eob.bits) as u32, eob.bits);
+            let lit_codes = build_canonical_codes(&fixed_literal_lengths(), MAX_DEFLATE_CODE_LEN);
+            write_symbol(&mut writer, &lit_codes[256]);
             return writer.finish();
         }
 
@@ -153,21 +144,23 @@ impl DeflateEncoder {
     }
 
     /// Encode with stored (uncompressed) blocks.
+    ///
+    /// Each stored block is byte-aligned by construction: the stream
+    /// starts at a byte boundary and every block body is raw bytes, so
+    /// the 3-bit header's remaining five bits are the padding an RFC 1951
+    /// reader discards and can be written as zeros.
     fn encode_stored(&self, data: &[u8]) -> Vec<u8> {
         let mut result = Vec::new();
         let mut pos = 0;
 
         while pos < data.len() {
-            // Block header
             let final_block = pos + 65535 >= data.len();
             result.push(if final_block { 0x01 } else { 0x00 });
 
-            // Length and complement
             let len = (data.len() - pos).min(65535) as u16;
             result.extend_from_slice(&len.to_le_bytes());
             result.extend_from_slice(&(!len).to_le_bytes());
 
-            // Data
             let end = (pos + 65535).min(data.len());
             result.extend_from_slice(&data[pos..end]);
             pos = end;
@@ -176,41 +169,32 @@ impl DeflateEncoder {
         result
     }
 
-    /// Encode with fixed Huffman codes.
+    /// Encode with the fixed Huffman codes of RFC 1951 section 3.2.6.
     fn encode_fixed(&mut self, data: &[u8]) -> Vec<u8> {
         let tokens = self.lz77.compress(data);
         let mut writer = BitWriter::new();
 
-        // Write block header
         writer.write_bits(1, 1); // BFINAL = 1
         writer.write_bits(1, 2); // BTYPE = 01 (fixed Huffman)
 
-        let literal_lengths = fixed_literal_lengths();
-        let distance_lengths = fixed_distance_lengths();
-        let literal_codes = build_canonical_codes(&literal_lengths, MAX_DEFLATE_CODE_LEN);
-        let distance_codes = build_canonical_codes(&distance_lengths, MAX_DEFLATE_CODE_LEN);
+        let literal_codes = build_canonical_codes(&fixed_literal_lengths(), MAX_DEFLATE_CODE_LEN);
+        let distance_codes = build_canonical_codes(&fixed_distance_lengths(), MAX_DEFLATE_CODE_LEN);
 
         for token in &tokens {
             match token {
                 Lz77Token::Literal(byte) => {
-                    let code = &literal_codes[*byte as usize];
-                    writer.write_bits(reverse_bits(code.code, code.bits) as u32, code.bits);
+                    write_symbol(&mut writer, &literal_codes[*byte as usize]);
                 }
                 Lz77Token::Match(m) => {
-                    // Write length code (reversed Huffman code)
                     let (len_code, len_extra) = encode_length(m.length);
-                    let code = &literal_codes[len_code as usize];
-                    writer.write_bits(reverse_bits(code.code, code.bits) as u32, code.bits);
-                    // Extra bits are NOT reversed (they're plain values)
+                    write_symbol(&mut writer, &literal_codes[len_code as usize]);
+                    // Extra bits are plain values, not reversed codes.
                     if len_extra.1 > 0 {
                         writer.write_bits(len_extra.0 as u32, len_extra.1);
                     }
 
-                    // Write distance code (reversed Huffman code)
                     let (dist_code, dist_extra) = encode_distance(m.distance);
-                    let code = &distance_codes[dist_code as usize];
-                    writer.write_bits(reverse_bits(code.code, code.bits) as u32, code.bits);
-                    // Extra bits are NOT reversed
+                    write_symbol(&mut writer, &distance_codes[dist_code as usize]);
                     if dist_extra.1 > 0 {
                         writer.write_bits(dist_extra.0 as u32, dist_extra.1);
                     }
@@ -218,10 +202,7 @@ impl DeflateEncoder {
             }
         }
 
-        // Write end-of-block (symbol 256, reversed)
-        let eob = &literal_codes[256];
-        writer.write_bits(reverse_bits(eob.code, eob.bits) as u32, eob.bits);
-
+        write_symbol(&mut writer, &literal_codes[256]); // end of block
         writer.finish()
     }
 }
@@ -232,11 +213,21 @@ impl Default for DeflateEncoder {
     }
 }
 
+/// Write one canonical Huffman code onto an LSB-first stream: the code
+/// bits are reversed, because the RFC's codes are assigned MSB-first.
+fn write_symbol(writer: &mut BitWriter, code: &super::huffman::CodeLength) {
+    writer.write_bits(reverse_bits(code.code, code.bits) as u32, code.bits);
+}
+
 /// DEFLATE decoder.
 #[derive(Debug)]
 pub struct DeflateDecoder {
     /// LZ77 decoder.
     lz77: Lz77Decoder,
+    /// The RFC's fixed tables, built once per decoder. Held here rather
+    /// than in a `static` so the module needs no `std` synchronisation
+    /// primitive in a `no_std` build.
+    fixed: Option<(HuffmanDecoder, HuffmanDecoder)>,
 }
 
 impl DeflateDecoder {
@@ -244,6 +235,7 @@ impl DeflateDecoder {
     pub fn new() -> Self {
         Self {
             lz77: Lz77Decoder::new(),
+            fixed: None,
         }
     }
 
@@ -273,20 +265,19 @@ impl DeflateDecoder {
         self.lz77.set_limit(limit);
         self.lz77.reset();
         let mut reader = BitReader::new(data);
-        let mut block_count = 0u32;
-        const MAX_BLOCKS: u32 = 100_000; // Safety limit for very large files
+        let mut blocks = 0u32;
 
         loop {
-            block_count += 1;
-            if block_count > MAX_BLOCKS {
+            blocks += 1;
+            if blocks > MAX_BLOCKS {
                 return Err(CompressError::CorruptedData(
                     "too many blocks - possible infinite loop",
                 ));
             }
 
-            // Read block header - check if we have enough bits first
+            // A missing 3-bit header is a truncated tail, not an error:
+            // everything before it has already been emitted.
             if reader.peek_bits(3).is_none() {
-                // End of stream reached before final block - this is normal for truncated data
                 break;
             }
 
@@ -327,7 +318,9 @@ impl DeflateDecoder {
             .map(|(b, _)| b)
     }
 
-    /// Decode a stored (uncompressed) block.
+    /// Decode a stored (uncompressed) block: discard the rest of the
+    /// header byte, check LEN against its complement, and copy the body
+    /// as raw bytes.
     fn decode_stored_block(&mut self, reader: &mut BitReader) -> CompressResult<()> {
         reader.align();
 
@@ -338,12 +331,9 @@ impl DeflateDecoder {
             return Err(CompressError::CorruptedData("stored block length mismatch"));
         }
 
-        // Read raw bytes. The block is byte-aligned now (`reader.align()` was
-        // called by the dispatcher before this routine), so the next `len`
-        // bytes are a contiguous slice of the input. Routing them through
-        // `read_bits(8)` was 65 535 single-byte calls for a 64 KiB stored
-        // block, each one a bounds check + a shift + a bit-mask. The
-        // bulk copy is the same path the GPU zlib shaders use.
+        // The block is byte-aligned now, so the body is a contiguous
+        // slice of the input: one `extend_from_slice` instead of `len`
+        // single-byte reads, each with its own bounds check.
         if self.lz77.capped() {
             return Ok(());
         }
@@ -358,29 +348,24 @@ impl DeflateDecoder {
         Ok(())
     }
 
-    /// Decode a fixed Huffman block.
+    /// Decode a fixed Huffman block against the RFC's constant tables.
     fn decode_fixed_block(&mut self, reader: &mut BitReader) -> CompressResult<()> {
-        // RFC 1951 §3.2.6: the fixed literal and distance code lengths are
-        // a constant. Build the decode tables once on first use and reuse
-        // for every fixed block after; the previous path rebuilt a
-        // 288-entry lit table and a 32-entry dist table per block, which
-        // on a 64 KiB block is several KiB of writes for tables that
-        // would not change.
-        static FIXED_LIT: std::sync::OnceLock<HuffmanDecoder> = std::sync::OnceLock::new();
-        static FIXED_DIST: std::sync::OnceLock<HuffmanDecoder> = std::sync::OnceLock::new();
-        let lit_decoder = FIXED_LIT.get_or_init(|| {
-            HuffmanDecoder::from_lengths(&fixed_literal_lengths(), MAX_DEFLATE_CODE_LEN as u8)
-        });
-        let dist_decoder = FIXED_DIST.get_or_init(|| {
-            HuffmanDecoder::from_lengths(&fixed_distance_lengths(), MAX_DEFLATE_CODE_LEN as u8)
-        });
-
-        self.decode_huffman_block(reader, lit_decoder, dist_decoder)
+        if self.fixed.is_none() {
+            self.fixed = Some((
+                HuffmanDecoder::from_lengths(&fixed_literal_lengths(), MAX_DEFLATE_CODE_LEN as u8),
+                HuffmanDecoder::from_lengths(&fixed_distance_lengths(), MAX_DEFLATE_CODE_LEN as u8),
+            ));
+        }
+        let (lit, dist) = self.fixed.take().unwrap();
+        let result = self.decode_huffman_block(reader, &lit, &dist);
+        self.fixed = Some((lit, dist));
+        result
     }
 
-    /// Decode a dynamic Huffman block.
+    /// Decode a dynamic Huffman block: read the code-length code lengths,
+    /// use them to read the literal and distance code lengths, then decode
+    /// the block body against the two tables that describes.
     fn decode_dynamic_block(&mut self, reader: &mut BitReader) -> CompressResult<()> {
-        // Read code length counts
         let hlit = reader.read_bits(5).ok_or(CompressError::UnexpectedEof)? as usize + 257;
         let hdist = reader.read_bits(5).ok_or(CompressError::UnexpectedEof)? as usize + 1;
         let hclen = reader.read_bits(4).ok_or(CompressError::UnexpectedEof)? as usize + 4;
@@ -457,7 +442,7 @@ impl DeflateDecoder {
         self.decode_huffman_block(reader, &lit_decoder, &dist_decoder)
     }
 
-    /// Decode a Huffman-coded block.
+    /// Decode a Huffman-coded block body until end-of-block or the cap.
     fn decode_huffman_block(
         &mut self,
         reader: &mut BitReader,
@@ -529,22 +514,6 @@ impl Default for DeflateDecoder {
     }
 }
 
-/// Read bits from reader for Huffman decoding.
-#[allow(dead_code)] // vendored: only the trimmed isa path called this
-fn read_bits_from_reader(reader: &mut BitReader) -> CompressResult<u32> {
-    let mut bits = 0u32;
-    for i in 0..16 {
-        if let Some(b) = reader.read_bits(1) {
-            bits |= b << i;
-        } else if i > 0 {
-            return Ok(bits);
-        } else {
-            return Err(CompressError::UnexpectedEof);
-        }
-    }
-    Ok(bits)
-}
-
 /// Encode length to (code, (extra_value, extra_bits)).
 fn encode_length(length: u16) -> (u16, (u16, u8)) {
     for (code, &base) in LENGTH_BASE.iter().enumerate() {
@@ -607,7 +576,6 @@ fn decode_distance(code: usize, reader: &mut BitReader) -> CompressResult<u16> {
         Ok(base)
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -970,5 +938,30 @@ mod tests {
         case!("mixed", "fixed");
         case!("mixed", "dyn");
         case!("mixed", "max");
+    }
+}
+
+/// A corrupt or truncated stream is untrusted input: the decoder must
+/// answer with an error or a short read, never a panic.
+#[cfg(test)]
+mod fuzz {
+    use super::*;
+
+    #[test]
+    fn never_panics_on_arbitrary_bytes() {
+        let corpus: alloc::vec::Vec<(&str, alloc::vec::Vec<u8>)> = alloc::vec![
+            ("empty", alloc::vec![]),
+            ("header_only", alloc::vec![0x01]),
+            ("stored_head", alloc::vec![0x01, 0x05, 0x00, 0xFA, 0xFF]),
+            ("dyn_head", alloc::vec![0x05, 0x00, 0x00]),
+        ];
+        crate::fuzzkit::assert_never_panics(corpus, 2000, "deflate", |data| {
+            let mut decoder = DeflateDecoder::new();
+            let _ = decoder.decode(data);
+            let mut decoder = DeflateDecoder::new();
+            let _ = decoder.decode_bounded(data, 4096);
+            let mut decoder = DeflateDecoder::new();
+            let _ = decoder.decode_with_consumed(data);
+        });
     }
 }

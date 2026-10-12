@@ -1,4 +1,4 @@
-//! Clean-room reimplementation of memmap2-rs advice enums.
+//! Independent reimplementation of memmap2-rs advice enums.
 
 #![allow(clippy::upper_case_acronyms)]
 

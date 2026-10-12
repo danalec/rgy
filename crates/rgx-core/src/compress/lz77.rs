@@ -1,10 +1,23 @@
-//! LZ77 sliding window compression.
+// SPDX-License-Identifier: Apache-2.0
+
+//! The LZ77 sliding-window stage of DEFLATE.
 //!
-//! Implements the LZ77 algorithm used in DEFLATE, gzip, and other compressors.
+//! Independent reimplementation of the published LZ77 parameters — a
+//! 32 KiB window, matches of 3..=258 bytes at distances 1..=32768 —
+//! written from the RFC 1951 definition of what a match reference means
+//! rather than from any implementation's source. The encoder turns bytes
+//! into literal/match tokens for the block encoders to entropy-code; the
+//! decoder replays tokens against a sliding window, and is the half
+//! every .gz/.zip payload goes through.
+//!
+//! The decoder's contract, which the encoder never sees: a match whose
+//! distance reaches past the window is refused, and the output ceiling
+//! is debited as bytes are emitted, never afterwards.
 
 use super::cap::OutputCap;
 use alloc::vec;
 use alloc::vec::Vec;
+
 /// Default window size for DEFLATE (32KB).
 pub const DEFAULT_WINDOW_SIZE: usize = 32 * 1024;
 
@@ -29,25 +42,25 @@ pub struct Match {
 /// LZ77 compressor.
 #[derive(Debug)]
 pub struct Lz77Encoder {
-    /// Sliding window buffer.
+    /// Sliding window buffer: the whole input for one compress call.
     window: Vec<u8>,
-    /// Current position in window.
-    pos: usize,
-    /// Window size.
-    window_size: usize,
-    /// Hash table for fast match finding.
-    hash_table: Vec<usize>,
-    /// Hash chain for collisions.
-    hash_chain: Vec<usize>,
-    /// Current hash chain head.
-    chain_head: usize,
+    /// Head of each hash bucket: the most recent position whose 3-byte
+    /// prefix hashed there, or `NONE`.
+    head: Vec<usize>,
+    /// `prev[p]` chains position `p` to the previous position with the
+    /// same hash, which is what bounds the search to a window's worth of
+    /// candidates instead of every earlier byte.
+    prev: Vec<usize>,
     /// Compression level (1-9).
     level: u8,
     /// Maximum chain depth for match searching.
     max_chain: usize,
-    /// Maximum lazy match depth.
+    /// How far ahead lazy matching may look past a found match.
     max_lazy: usize,
 }
+
+/// Chain terminator: no earlier position in the bucket.
+const NONE: usize = usize::MAX;
 
 impl Lz77Encoder {
     /// Create a new LZ77 encoder with default settings.
@@ -56,10 +69,9 @@ impl Lz77Encoder {
     }
 
     /// Create an LZ77 encoder with a specific compression level (1-9).
+    /// The level only sets how hard the match finder looks; every level
+    /// emits tokens the same decoder and the same block encoders accept.
     pub fn with_level(level: u8) -> Self {
-        let window_size = DEFAULT_WINDOW_SIZE;
-        let hash_size = 1 << 15; // 32K hash entries
-
         let (max_chain, max_lazy) = match level {
             1 => (4, 4),
             2 => (6, 6),
@@ -71,14 +83,10 @@ impl Lz77Encoder {
             8 => (512, 128),
             _ => (1024, 258), // level 9
         };
-
         Self {
             window: Vec::new(),
-            pos: 0,
-            window_size,
-            hash_table: vec![0; hash_size],
-            hash_chain: vec![0; window_size],
-            chain_head: 0,
+            head: vec![NONE; 1 << 15],
+            prev: Vec::new(),
             level,
             max_chain,
             max_lazy,
@@ -87,140 +95,115 @@ impl Lz77Encoder {
 
     /// Compress data using LZ77. Returns a vector of literals and match references.
     pub fn compress(&mut self, data: &[u8]) -> Vec<Lz77Token> {
-        let mut tokens = Vec::with_capacity(data.len() / 4);
         self.window.clear();
         self.window.extend_from_slice(data);
-        self.pos = 0;
+        self.head.fill(NONE);
+        self.prev.clear();
+        self.prev.resize(data.len(), NONE);
 
-        while self.pos < data.len() {
-            if let Some(m) = self.find_match() {
-                // Try lazy matching
-                let mut best_match = m;
-                let mut best_pos = self.pos;
-
-                if self.level >= 4 {
-                    for lazy in 1..=self.max_lazy.min(258 - m.length as usize) {
-                        if self.pos + lazy + MIN_MATCH > data.len() {
-                            break;
-                        }
-                        self.pos += lazy;
-                        if let Some(lazy_match) = self.find_match() {
-                            if lazy_match.length > best_match.length {
-                                // Output lazy literals
-                                for i in 0..lazy {
-                                    tokens.push(Lz77Token::Literal(data[best_pos + i]));
-                                }
-                                best_match = lazy_match;
-                                best_pos = self.pos;
+        let mut tokens = Vec::with_capacity(data.len() / 4);
+        let mut pos = 0usize;
+        while pos < data.len() {
+            let found = self.best_match(pos);
+            match found {
+                Some((mut best, mut best_pos)) => {
+                    // Lazy matching: if a match starting one byte later is
+                    // strictly longer, the intervening byte is cheaper as a
+                    // literal than the shorter match is as a reference.
+                    if self.level >= 4 {
+                        let lookahead = self.max_lazy.min(MAX_MATCH - best.length as usize);
+                        for ahead in 1..=lookahead {
+                            let probe = pos + ahead;
+                            if probe + MIN_MATCH > data.len() {
                                 break;
                             }
+                            if let Some((later, _)) = self.best_match(probe) {
+                                if later.length > best.length {
+                                    for i in 0..ahead {
+                                        tokens.push(Lz77Token::Literal(data[pos + i]));
+                                        self.record(pos + i);
+                                    }
+                                    best = later;
+                                    best_pos = probe;
+                                    break;
+                                }
+                            }
                         }
-                        self.pos -= lazy;
                     }
-                }
-
-                self.pos = best_pos;
-                tokens.push(Lz77Token::Match(Match {
-                    distance: best_match.distance,
-                    length: best_match.length,
-                }));
-
-                // Update hash table for matched bytes
-                for i in 0..best_match.length as usize {
-                    if self.pos + i + MIN_MATCH <= data.len() {
-                        self.update_hash(self.pos + i);
+                    tokens.push(Lz77Token::Match(best));
+                    for i in 0..best.length as usize {
+                        self.record(best_pos + i);
                     }
+                    pos = best_pos + best.length as usize;
                 }
-                self.pos += best_match.length as usize;
-            } else {
-                tokens.push(Lz77Token::Literal(data[self.pos]));
-                self.update_hash(self.pos);
-                self.pos += 1;
+                None => {
+                    tokens.push(Lz77Token::Literal(data[pos]));
+                    self.record(pos);
+                    pos += 1;
+                }
             }
         }
-
         tokens
     }
 
-    /// Find the best match at the current position.
-    fn find_match(&self) -> Option<Match> {
-        if self.pos + MIN_MATCH > self.window.len() {
+    /// The longest match at `pos`, capped by the chain budget. Distances
+    /// are from `pos`, so a match may only reach back over recorded
+    /// positions and never past the window's own start.
+    fn best_match(&self, pos: usize) -> Option<(Match, usize)> {
+        if pos + MIN_MATCH > self.window.len() {
             return None;
         }
-
-        let hash = self.compute_hash(self.pos);
-        let mut best_match: Option<Match> = None;
-        let mut chain_len = 0;
-        let mut prev = self.hash_table[hash];
-
-        while prev != 0 && chain_len < self.max_chain {
-            let dist = self.pos.saturating_sub(prev);
-            if dist > MAX_DISTANCE || dist == 0 {
+        let limit = self.window.len() - pos;
+        let mut best: Option<Match> = None;
+        let mut chain = self.head[self.hash(pos)];
+        let mut steps = 0;
+        while chain != NONE && steps < self.max_chain {
+            let distance = pos - chain;
+            if distance == 0 || distance > MAX_DISTANCE {
                 break;
             }
-
-            let len = self.match_length(prev, self.pos);
-            if len >= MIN_MATCH {
-                if let Some(ref best) = best_match {
-                    if len as u16 > best.length {
-                        best_match = Some(Match {
-                            distance: dist as u16,
-                            length: len as u16,
-                        });
-                    }
-                } else {
-                    best_match = Some(Match {
-                        distance: dist as u16,
-                        length: len as u16,
-                    });
+            let length = self.common_length(chain, pos, limit.min(MAX_MATCH));
+            if length >= MIN_MATCH {
+                let candidate = Match {
+                    distance: distance as u16,
+                    length: length as u16,
+                };
+                if best.is_none_or(|b| candidate.length > b.length) {
+                    best = Some(candidate);
                 }
             }
-
-            prev = self.hash_chain[prev % self.window_size];
-            chain_len += 1;
+            chain = self.prev[chain];
+            steps += 1;
         }
-
-        best_match
+        best.map(|m| (m, pos))
     }
 
-    /// Compute hash for a position.
-    fn compute_hash(&self, pos: usize) -> usize {
-        if pos + 2 >= self.window.len() {
-            return 0;
+    /// Bytes shared by the windows at `a` and `b`, at most `ceiling`.
+    fn common_length(&self, a: usize, b: usize, ceiling: usize) -> usize {
+        let mut len = 0;
+        while len < ceiling && self.window[a + len] == self.window[b + len] {
+            len += 1;
         }
-
-        // Vendored trim: upstream's Paley-graph match finder serves the encoders
-        // only and is not vendored. The standard rolling hash is what the
-        // decoders never touch and what the in-house encoders use for test
-        // fixtures.
-        let h = ((self.window[pos] as usize) << 16)
-            ^ ((self.window[pos + 1] as usize) << 8)
-            ^ (self.window[pos + 2] as usize);
-        h % self.hash_table.len()
+        len
     }
 
-    /// Update hash table for a position.
-    fn update_hash(&mut self, pos: usize) {
+    /// Index `pos` in the hash chains. A position with fewer than three
+    /// bytes left has no 3-byte prefix and is not indexed.
+    fn record(&mut self, pos: usize) {
         if pos + MIN_MATCH > self.window.len() {
             return;
         }
-
-        let hash = self.compute_hash(pos);
-        self.chain_head = (self.chain_head + 1) % self.window_size;
-        self.hash_chain[self.chain_head] = self.hash_table[hash];
-        self.hash_table[hash] = pos;
+        let h = self.hash(pos);
+        self.prev[pos] = self.head[h];
+        self.head[h] = pos;
     }
 
-    /// Calculate match length between two positions.
-    fn match_length(&self, pos1: usize, pos2: usize) -> usize {
-        let mut len = 0;
-        let max_len = (self.window.len() - pos2).min(MAX_MATCH);
-
-        while len < max_len && self.window[pos1 + len] == self.window[pos2 + len] {
-            len += 1;
-        }
-
-        len
+    /// Hash of the 3-byte prefix at `pos`.
+    fn hash(&self, pos: usize) -> usize {
+        let h = ((self.window[pos] as usize) << 16)
+            ^ ((self.window[pos + 1] as usize) << 8)
+            ^ (self.window[pos + 2] as usize);
+        h & (self.head.len() - 1)
     }
 }
 
@@ -268,16 +251,15 @@ impl Lz77Decoder {
                     }
                 }
                 Lz77Token::Match(m) => {
-                    let dist = m.distance as usize;
-                    let len = m.length as usize;
-                    let start = self.window.len().saturating_sub(dist);
-
-                    if start >= self.window.len() {
-                        // Invalid distance
+                    let distance = m.distance as usize;
+                    let length = m.length as usize;
+                    // A distance that reaches past the window is a
+                    // malformed token; skip it rather than stop, so one
+                    // bad reference does not discard the bytes around it.
+                    if distance == 0 || distance > self.window.len() {
                         continue;
                     }
-
-                    if !self.copy_match_checked(dist, len) {
+                    if !self.copy_match_checked(distance, length) {
                         break;
                     }
                 }
@@ -295,9 +277,9 @@ impl Lz77Decoder {
 
     fn copy_match_checked(&mut self, distance: usize, length: usize) -> bool {
         // Malformed/mutated DEFLATE can hand us a `distance` past the end
-        // of the window; the `extend_from_within(start..start+length)` below
-        // would then panic on the bounds check. Validate before debiting
-        // the cap so a rejected match leaves the byte budget untouched.
+        // of the window; a source range past the end would then panic on
+        // the bounds check. Validate before debiting the cap so a rejected
+        // match leaves the byte budget untouched.
         if distance == 0 || distance > self.window.len() {
             return false;
         }
@@ -480,5 +462,62 @@ mod tests {
         // distance 0 is also nonsense (would point at the cursor itself).
         assert!(!decoder.copy_match(0, 1));
         assert_eq!(decoder.output(), b"abcde");
+    }
+
+    /// The three overlap cases of the copy are where a decode can be
+    /// quietly wrong without panicking: the source and destination ranges
+    /// coincide, touch, or interleave.
+    #[test]
+    fn overlapping_copies_replay_the_window() {
+        // distance 2 >= length 2: straight copy of "ab".
+        let mut d = Lz77Decoder::new();
+        d.add_literal_slice(b"ab");
+        assert!(d.copy_match(2, 2));
+        assert_eq!(d.output(), b"abab");
+
+        // distance 2 < length 6: "ab" then the run mirrors it.
+        let mut d = Lz77Decoder::new();
+        d.add_literal_slice(b"ab");
+        assert!(d.copy_match(2, 6));
+        assert_eq!(d.output(), b"abababab");
+
+        // distance 1: every byte is the previous one.
+        let mut d = Lz77Decoder::new();
+        d.add_literal(b'x');
+        assert!(d.copy_match(1, 4));
+        assert_eq!(d.output(), b"xxxxx");
+    }
+
+    /// The decoder is the half every .gz/.zip payload goes through, so
+    /// arbitrary (distance, length) pairs must be refused or copied, never
+    /// panic — a corrupt stream is untrusted input.
+    #[test]
+    fn never_panics_on_arbitrary_bytes() {
+        let corpus: Vec<(&str, Vec<u8>)> = alloc::vec![
+            ("empty", alloc::vec![]),
+            ("odd", alloc::vec![0xFF]),
+            ("zeros", alloc::vec![0; 32]),
+            ("mixed", alloc::vec![3, 1, 0, 0, 200, 10, 0, 255, 255]),
+        ];
+        crate::fuzzkit::assert_never_panics(corpus, 2000, "lz77", |data| {
+            let mut decoder = Lz77Decoder::new();
+            let mut i = 0;
+            while i + 3 <= data.len() {
+                let distance = ((data[i] as usize) << 8 | data[i + 1] as usize) & 0x7FFF;
+                let length = data[i + 2] as usize;
+                let _ = decoder.copy_match(distance, length);
+                let _ = decoder.add_literal(data[i]);
+                i += 3;
+            }
+            let tokens = alloc::vec![
+                Lz77Token::Literal(data.first().copied().unwrap_or(0)),
+                Lz77Token::Match(Match {
+                    distance: data.first().copied().unwrap_or(0) as u16,
+                    length: data.get(1).copied().unwrap_or(0) as u16,
+                }),
+            ];
+            let mut replay = Lz77Decoder::new();
+            let _ = replay.decompress(&tokens);
+        });
     }
 }

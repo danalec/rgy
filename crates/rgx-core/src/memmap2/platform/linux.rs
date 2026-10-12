@@ -1,4 +1,4 @@
-//! Clean-room reimplementation of memmap2-rs Linux side.
+//! Independent reimplementation of memmap2-rs Linux side.
 
 use std::io;
 use std::os::unix::io::RawFd;

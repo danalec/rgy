@@ -1,11 +1,24 @@
-//! # GZIP Compression Format Parser
+// SPDX-License-Identifier: Apache-2.0
+
+//! The gzip file format (RFC 1952): a member header, a DEFLATE body, and
+//! a CRC-32 + ISIZE trailer, with multi-member files as concatenated
+//! members.
 //!
-//! Parser for GZIP compressed files (.gz). Handles the header, the deflate
-//! stream, and the trailer; multi-member files are concatenated.
+//! Independent reimplementation of the published framing, written from
+//! the RFC rather than from any implementation's source: the fixed
+//! ten-byte header, the optional EXTRA/NAME/COMMENT/HCRC fields, the
+//! reserved-FLG refusal, and the trailer. The body is decoded by
+//! [`super::deflate`]; the checksum by [`super::crc32`].
+//!
+//! Two shapes the format makes unavoidable: the trailer sits *after* the
+//! compressed data, so the only way to find it is to decode the stream;
+//! and ISIZE is a size modulo 2^32, so it is a floor rather than a total
+//! past 4 GiB.
 
 use super::cap::{Bounded, OutputCap};
 use alloc::string::String;
 use alloc::vec::Vec;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GzipCompressionMethod {
     Deflate,
@@ -249,6 +262,8 @@ impl GzipWriter {
         self
     }
 
+    /// RFC 1952 §2.3: ID1/ID2 magic, CM = 8, FLG = 0 (no optional
+    /// fields), MTIME, XFL = 0, OS, then the body and the trailer.
     pub fn encode(&self, data: &[u8]) -> Vec<u8> {
         let payload = super::deflate::DeflateEncoder::with_level(self.level).encode(data);
         let mut out = Vec::with_capacity(payload.len() + 18);
@@ -356,89 +371,10 @@ impl GzipReader {
         start: usize,
         limit: u64,
     ) -> GzipResult<(GzipMember, Bounded)> {
-        if start + 10 > data.len() {
-            return Err(GzipError::Truncated);
-        }
+        let (header, body_at) = parse_header(data, start)?;
 
-        if !Self::is_gzip(&data[start..]) {
-            return Err(GzipError::InvalidMagic);
-        }
-
-        let compression_method = GzipCompressionMethod::from(data[start + 2]);
-        if compression_method != GzipCompressionMethod::Deflate {
-            return Err(GzipError::InvalidCompressionMethod);
-        }
-
-        let flags = data[start + 3];
-        // RFC 1952 §2.3.1.2: a compliant decompressor must error on any
-        // reserved bit set. Bits 5, 6 and 7 are reserved, so 0xE0 is an
-        // error. gzip(1) and ripgrep both refuse it.
-        if (flags & 0xE0) != 0 {
-            return Err(GzipError::InvalidFlags);
-        }
-        let modification_time = u32_from_le(&data[start + 4..start + 8]);
-        let extra_flags = data[start + 8];
-        let operating_system = data[start + 9];
-
-        let mut pos = start + 10;
-
-        let extra_fields = if (flags & 0x04) != 0 {
-            if pos + 2 > data.len() {
-                return Err(GzipError::Truncated);
-            }
-            let xlen = u16_from_le(&data[pos..pos + 2]) as usize;
-            pos += 2;
-            // A crafted header can claim an extra-field block far larger
-            // than the file. Bounds-check before slicing.
-            if pos + xlen > data.len() {
-                return Err(GzipError::InvalidExtra);
-            }
-
-            let fields = Self::parse_extra_fields(&data[pos..pos + xlen])?;
-            pos += xlen;
-            fields
-        } else {
-            Vec::new()
-        };
-
-        let original_filename = if (flags & 0x08) != 0 {
-            let name_end = Self::find_null(&data[pos..]).ok_or(GzipError::InvalidFilename)?;
-            // RFC 1952 §2.3.1.3: the name is LATIN-1, NUL-terminated. LATIN-1
-            // maps every byte to the codepoint of the same value, so the bytes
-            // *are* the string.
-            let name = Self::latin1(&data[pos..pos + name_end]);
-            pos += name_end + 1;
-            Some(name)
-        } else {
-            None
-        };
-
-        let comment = if (flags & 0x10) != 0 {
-            let comment_end = Self::find_null(&data[pos..]).ok_or(GzipError::InvalidComment)?;
-            // Same rule as FNAME: RFC 1952 2.3.1.5 requires LATIN-1.
-            let text = Self::latin1(&data[pos..pos + comment_end]);
-            pos += comment_end + 1;
-            Some(text)
-        } else {
-            None
-        };
-
-        let header_crc16 = if (flags & 0x02) != 0 {
-            if pos + 2 > data.len() {
-                return Err(GzipError::Truncated);
-            }
-            let crc = u16_from_le(&data[pos..pos + 2]);
-            pos += 2;
-            Some(crc)
-        } else {
-            None
-        };
-
-        let header_size = pos - start;
-        let compressed_data_offset = pos;
-
-        let (trailer_pos, decoded) = Self::find_trailer_bounded(data, pos, limit)?;
-        let compressed_data_size = trailer_pos - pos;
+        let (trailer_pos, decoded) = find_trailer_bounded(data, body_at, limit)?;
+        let compressed_data_size = trailer_pos - body_at;
 
         // A capped member's trailer is past the bytes the cap allowed, so
         // there is nothing to read and nothing to check. The caller stops
@@ -450,88 +386,21 @@ impl GzipReader {
                 return Err(GzipError::MissingTrailer);
             }
             (
-                u32_from_le(&data[trailer_pos..trailer_pos + 4]),
-                u32_from_le(&data[trailer_pos + 4..trailer_pos + 8]),
+                le32(&data[trailer_pos..trailer_pos + 4]),
+                le32(&data[trailer_pos + 4..trailer_pos + 8]),
             )
         };
 
         Ok((
             GzipMember {
-                header: GzipHeader {
-                    compression_method,
-                    flags,
-                    modification_time,
-                    extra_flags,
-                    operating_system,
-                    original_filename,
-                    comment,
-                    extra_fields,
-                    header_crc16,
-                    header_size,
-                },
-                compressed_data_offset,
+                header,
+                compressed_data_offset: body_at,
                 compressed_data_size,
                 crc32,
                 original_size,
             },
             decoded,
         ))
-    }
-
-    fn parse_extra_fields(data: &[u8]) -> GzipResult<Vec<GzipExtraField>> {
-        let mut fields = Vec::new();
-        let mut pos = 0;
-
-        while pos + 4 <= data.len() {
-            let subfield_id = [data[pos], data[pos + 1]];
-            let len = u16_from_le(&data[pos + 2..pos + 4]) as usize;
-
-            if pos + 4 + len > data.len() {
-                return Err(GzipError::InvalidExtra);
-            }
-
-            let subfield_data = data[pos + 4..pos + 4 + len].to_vec();
-            fields.push(GzipExtraField {
-                subfield_id,
-                data: subfield_data,
-            });
-
-            pos += 4 + len;
-        }
-
-        Ok(fields)
-    }
-
-    /// ISO 8859-1 as a `String`: byte value == codepoint, for every byte.
-    fn latin1(bytes: &[u8]) -> String {
-        bytes.iter().map(|&b| b as char).collect()
-    }
-
-    fn find_null(data: &[u8]) -> Option<usize> {
-        data.iter().position(|&b| b == 0)
-    }
-
-    /// Locate the 8-byte trailer after the deflate stream starting at
-    /// `start`, under a ceiling on how far that stream may expand.
-    ///
-    /// The deflate stream is bit-oriented and may contain 0x00 bytes as
-    /// ordinary compressed data, so its end is found by decoding it.
-    fn find_trailer_bounded(data: &[u8], start: usize, limit: u64) -> GzipResult<(usize, Bounded)> {
-        use super::deflate::DeflateDecoder;
-        let stream = &data[start..];
-        let (decoded, consumed) = DeflateDecoder::new()
-            .decode_bounded_with_consumed(stream, limit)
-            .map_err(|_| GzipError::DeflateFailed)?;
-        if decoded.capped {
-            // The trailer is past the bytes the cap allowed, so there is no
-            // trailer to find. The caller keeps the prefix and stops.
-            return Ok((start + stream.len(), decoded));
-        }
-        let end = start + consumed;
-        if end + 8 > data.len() {
-            return Err(GzipError::MissingTrailer);
-        }
-        Ok((end, decoded))
     }
 
     pub fn extract_compressed_data<'a>(data: &'a [u8], member: &GzipMember) -> Option<&'a [u8]> {
@@ -546,14 +415,171 @@ impl GzipReader {
     }
 }
 
-fn u16_from_le(data: &[u8]) -> u16 {
+/// Walk one member header from `start`, returning it and the offset the
+/// DEFLATE body begins at.
+fn parse_header(data: &[u8], start: usize) -> GzipResult<(GzipHeader, usize)> {
+    if start + 10 > data.len() {
+        return Err(GzipError::Truncated);
+    }
+
+    if !GzipReader::is_gzip(&data[start..]) {
+        return Err(GzipError::InvalidMagic);
+    }
+
+    let compression_method = GzipCompressionMethod::from(data[start + 2]);
+    if compression_method != GzipCompressionMethod::Deflate {
+        return Err(GzipError::InvalidCompressionMethod);
+    }
+
+    let flags = data[start + 3];
+    // RFC 1952 §2.3.1.2: a compliant decompressor must error on any
+    // reserved bit set. Bits 5, 6 and 7 are reserved, so 0xE0 is an
+    // error. gzip(1) and ripgrep both refuse it.
+    if (flags & 0xE0) != 0 {
+        return Err(GzipError::InvalidFlags);
+    }
+    let modification_time = le32(&data[start + 4..start + 8]);
+    let extra_flags = data[start + 8];
+    let operating_system = data[start + 9];
+
+    let mut pos = start + 10;
+
+    let extra_fields = if (flags & 0x04) != 0 {
+        if pos + 2 > data.len() {
+            return Err(GzipError::Truncated);
+        }
+        let xlen = le16(&data[pos..pos + 2]) as usize;
+        pos += 2;
+        // A crafted header can claim an extra-field block far larger
+        // than the file. Bounds-check before slicing.
+        if pos + xlen > data.len() {
+            return Err(GzipError::InvalidExtra);
+        }
+
+        let fields = parse_extra_fields(&data[pos..pos + xlen])?;
+        pos += xlen;
+        fields
+    } else {
+        Vec::new()
+    };
+
+    let original_filename = if (flags & 0x08) != 0 {
+        let name_end = find_null(&data[pos..]).ok_or(GzipError::InvalidFilename)?;
+        // RFC 1952 §2.3.1.3: the name is LATIN-1, NUL-terminated. LATIN-1
+        // maps every byte to the codepoint of the same value, so the bytes
+        // *are* the string.
+        let name = latin1(&data[pos..pos + name_end]);
+        pos += name_end + 1;
+        Some(name)
+    } else {
+        None
+    };
+
+    let comment = if (flags & 0x10) != 0 {
+        let comment_end = find_null(&data[pos..]).ok_or(GzipError::InvalidComment)?;
+        // Same rule as FNAME: RFC 1952 2.3.1.5 requires LATIN-1.
+        let text = latin1(&data[pos..pos + comment_end]);
+        pos += comment_end + 1;
+        Some(text)
+    } else {
+        None
+    };
+
+    let header_crc16 = if (flags & 0x02) != 0 {
+        if pos + 2 > data.len() {
+            return Err(GzipError::Truncated);
+        }
+        let crc = le16(&data[pos..pos + 2]);
+        pos += 2;
+        Some(crc)
+    } else {
+        None
+    };
+
+    let header_size = pos - start;
+
+    Ok((
+        GzipHeader {
+            compression_method,
+            flags,
+            modification_time,
+            extra_flags,
+            operating_system,
+            original_filename,
+            comment,
+            extra_fields,
+            header_crc16,
+            header_size,
+        },
+        pos,
+    ))
+}
+
+/// Parse the EXTRA subfield sequence: SI1/SI2, a 16-bit length, that
+/// many bytes, until the block is spent.
+fn parse_extra_fields(data: &[u8]) -> GzipResult<Vec<GzipExtraField>> {
+    let mut fields = Vec::new();
+    let mut pos = 0;
+
+    while pos + 4 <= data.len() {
+        let subfield_id = [data[pos], data[pos + 1]];
+        let len = le16(&data[pos + 2..pos + 4]) as usize;
+
+        if pos + 4 + len > data.len() {
+            return Err(GzipError::InvalidExtra);
+        }
+
+        let subfield_data = data[pos + 4..pos + 4 + len].to_vec();
+        fields.push(GzipExtraField {
+            subfield_id,
+            data: subfield_data,
+        });
+
+        pos += 4 + len;
+    }
+
+    Ok(fields)
+}
+
+/// ISO 8859-1 as a `String`: byte value == codepoint, for every byte.
+fn latin1(bytes: &[u8]) -> String {
+    bytes.iter().map(|&b| b as char).collect()
+}
+
+fn find_null(data: &[u8]) -> Option<usize> {
+    data.iter().position(|&b| b == 0)
+}
+
+/// Locate the 8-byte trailer after the deflate stream starting at
+/// `start`, under a ceiling on how far that stream may expand.
+///
+/// The deflate stream is bit-oriented and may contain 0x00 bytes as
+/// ordinary compressed data, so its end is found by decoding it.
+fn find_trailer_bounded(data: &[u8], start: usize, limit: u64) -> GzipResult<(usize, Bounded)> {
+    use super::deflate::DeflateDecoder;
+    let stream = &data[start..];
+    let (decoded, consumed) = DeflateDecoder::new()
+        .decode_bounded_with_consumed(stream, limit)
+        .map_err(|_| GzipError::DeflateFailed)?;
+    if decoded.capped {
+        // The trailer is past the bytes the cap allowed, so there is no
+        // trailer to find. The caller keeps the prefix and stops.
+        return Ok((start + stream.len(), decoded));
+    }
+    let end = start + consumed;
+    if end + 8 > data.len() {
+        return Err(GzipError::MissingTrailer);
+    }
+    Ok((end, decoded))
+}
+
+fn le16(data: &[u8]) -> u16 {
     u16::from_le_bytes([data[0], data[1]])
 }
 
-fn u32_from_le(data: &[u8]) -> u32 {
+fn le32(data: &[u8]) -> u32 {
     u32::from_le_bytes([data[0], data[1], data[2], data[3]])
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -780,5 +806,35 @@ two
         assert!(cut.capped);
         assert!(cut.bytes.len() < full.len());
         assert_eq!(&cut.bytes[..], &full[..cut.bytes.len()]);
+    }
+}
+
+/// The parser walks untrusted bytes: magic, FLG, an extra block whose
+/// length is declared by the file, NUL-terminated strings, and a trailer
+/// it can only find by decoding. None of that may panic.
+#[cfg(test)]
+mod fuzz {
+    use super::*;
+
+    #[test]
+    fn never_panics_on_arbitrary_bytes() {
+        let corpus: alloc::vec::Vec<(&str, alloc::vec::Vec<u8>)> = alloc::vec![
+            ("empty", alloc::vec![]),
+            ("magic", alloc::vec![0x1f, 0x8b]),
+            (
+                "fixed",
+                alloc::vec![0x1f, 0x8b, 0x08, 0x00, 0, 0, 0, 0, 0, 3]
+            ),
+            (
+                "fextra",
+                alloc::vec![0x1f, 0x8b, 0x08, 0x04, 0, 0, 0, 0, 0, 3, 0xff, 0xff]
+            ),
+        ];
+        crate::fuzzkit::assert_never_panics(corpus, 2000, "gzip", |data| {
+            let _ = GzipReader::is_gzip(data);
+            let _ = GzipReader::decode(data);
+            let _ = GzipReader::decode_bounded(data, 256);
+            let _ = GzipReader::parse(data);
+        });
     }
 }

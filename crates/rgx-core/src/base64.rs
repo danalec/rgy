@@ -1,16 +1,30 @@
-//! Base64 encode/decode, vendored from upstream
-//! (`src/b02/encoding/base64.rs`, `b02::encoding`).
+// SPDX-License-Identifier: Apache-2.0
+
+//! Base64 encode/decode (RFC 4648).
 //!
-//! In-house replacement for the `base64` crate. The upstream source already
-//! provided the strict RFC 4648 §3.5 path added upstream
-//! (`base64_decode_strict`, `base64_decode_bytes_strict`); rgx uses the
-//! strict entry points throughout because a decode *failure* is a format
-//! signal for the `tiktoken` adapter and a content guard for MIME
-//! attachments, and a lenient decoder would silently widen both.
+//! Independent reimplementation of the RFC 4648 base64 transform: the §4
+//! standard alphabet with `=` padding, the §5 URL-safe alphabet with `-`
+//! and `_`, and the §3.5 canonical-encoding rule the strict decoders
+//! enforce. rgx uses the strict entry points wherever a decode *failure*
+//! is itself a signal — a format check for the `tiktoken` adapter, a
+//! content guard for MIME attachments — because a lenient decoder would
+//! silently widen both.
 //!
-//! The file is otherwise unmodified from upstream apart from:
-//! - `alloc::` imports rewritten to `std::` (rgx is `std`-only);
-//! - `core::error::Error` kept as-is (stable since 1.81).
+//! # Contract
+//!
+//! Encode maps each 3-byte quantum to 4 sextets over the configured
+//! alphabet, left-padded to 3 bytes on a short final quantum and filled
+//! with `=` (or nothing, when `pad` is false) to a 4-character group.
+//!
+//! Decode first drops ASCII whitespace — MIME bodies wrap at 76 columns
+//! and a header value may arrive with the wrapping still in it — then
+//! treats the remaining bytes as a sequence of 4-character quanta. A
+//! leftover of one character is impossible (6 bits cannot cover a byte)
+//! and is rejected in both modes. `strict` additionally requires the
+//! canonical padding count of §3.5 and zero pad bits in the final
+//! quantum; the lenient mode accepts an unpadded tail and drops whatever
+//! the unused low bits of the last sextet held, because that is what
+//! decades of MIME decoders do and what the mail adapters need.
 
 use alloc::borrow::Cow;
 use alloc::format;
@@ -42,34 +56,35 @@ pub struct Base64Config {
     pub pad: bool,
 }
 
+/// The RFC 4648 §4 alphabet (`A-Za-z0-9+/`) with `=` padding.
 pub const STANDARD: Base64Config = Base64Config {
     charset: b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/",
     pad: true,
 };
 
+/// The §4 alphabet without padding, as used in e.g. JWT payloads.
 pub const STANDARD_NO_PAD: Base64Config = Base64Config {
     charset: b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/",
     pad: false,
 };
 
+/// The RFC 4648 §5 URL-safe alphabet (`A-Za-z0-9-_`) with `=` padding.
 pub const URL_SAFE: Base64Config = Base64Config {
     charset: b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_",
     pad: true,
 };
 
+/// The §5 alphabet without padding, as used in e.g. unpadded URL tokens.
 pub const URL_SAFE_NO_PAD: Base64Config = Base64Config {
     charset: b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_",
     pad: false,
 };
 
-/// Pre-computed decode table for the URL-safe Base64 alphabet
-/// (`A-Za-z0-9-_`, no padding). 0xFF marks invalid characters.
-/// Built at compile time from `URL_SAFE_NO_PAD.charset` so the
-/// standard alphabet never pays a 256-byte init at runtime.
+/// Inverse of a 64-byte alphabet: `DECODE[c]` is the sextet value of
+/// byte `c`, or `0xFF` when `c` is not in the alphabet. Built at compile
+/// time from the alphabet itself so no runtime init is paid.
 const DECODE_TABLE_URL_SAFE: [u8; 256] = build_decode_table(URL_SAFE_NO_PAD.charset);
 
-/// Pre-computed decode table for the standard Base64 alphabet
-/// (`A-Za-z0-9+/`, padded).
 const DECODE_TABLE_STANDARD: [u8; 256] = build_decode_table(STANDARD.charset);
 
 const fn build_decode_table(charset: &[u8; 64]) -> [u8; 256] {
@@ -88,8 +103,8 @@ fn decode_table_for(charset: &[u8; 64]) -> Cow<'_, [u8; 256]> {
     } else if charset == URL_SAFE_NO_PAD.charset.as_slice() {
         Cow::Borrowed(&DECODE_TABLE_URL_SAFE)
     } else {
-        // Custom charset: build per call. None of the in-tree callers
-        // hit this branch; the API supports it for completeness.
+        // A caller-supplied alphabet has no shared inverse table; none of
+        // the in-tree call sites take this branch.
         Cow::Owned(build_decode_table(charset))
     }
 }
@@ -98,14 +113,13 @@ pub fn base64_encode(input: &[u8]) -> String {
     base64_encode_with(input, STANDARD)
 }
 
+/// Encode over the §5 alphabet with no padding.
 pub fn base64_encode_url(input: &[u8]) -> String {
     base64_encode_with(input, URL_SAFE_NO_PAD)
 }
 
 pub fn base64_encode_with(input: &[u8], config: Base64Config) -> String {
     let charset = config.charset;
-    let pad = config.pad;
-
     let mut output = String::with_capacity(input.len().div_ceil(3) * 4);
 
     for chunk in input.chunks(3) {
@@ -120,10 +134,10 @@ pub fn base64_encode_with(input: &[u8], config: Base64Config) -> String {
             output.push(charset[((b1 & 0x0F) << 2) | (b2 >> 6)] as char);
             if chunk.len() > 2 {
                 output.push(charset[b2 & 0x3F] as char);
-            } else if pad {
+            } else if config.pad {
                 output.push('=');
             }
-        } else if pad {
+        } else if config.pad {
             output.push('=');
             output.push('=');
         }
@@ -136,6 +150,7 @@ pub fn base64_decode(input: &str) -> Result<Vec<u8>, Base64Error> {
     base64_decode_with(input, STANDARD)
 }
 
+/// Lenient decode over the §5 alphabet.
 pub fn base64_decode_url(input: &str) -> Result<Vec<u8>, Base64Error> {
     base64_decode_with(input, URL_SAFE_NO_PAD)
 }
@@ -143,7 +158,7 @@ pub fn base64_decode_url(input: &str) -> Result<Vec<u8>, Base64Error> {
 /// Strict RFC 4648 §3.5 decoding: canonical padding is required and
 /// non-zero trailing bits in the final quantum are rejected.
 ///
-/// The lenient `base64_decode` accepts unpadded input and silently drops
+/// The lenient [`base64_decode`] accepts unpadded input and silently drops
 /// non-zero trailing bits, which is convenient for MIME but wrong for a
 /// format check — `"Zh=="` would decode to `b"f"` even though the only
 /// canonical encoding of `f` is `"Zg=="`.
@@ -152,9 +167,6 @@ pub fn base64_decode_strict(input: &str) -> Result<Vec<u8>, Base64Error> {
 }
 
 pub fn base64_decode_with(input: &str, config: Base64Config) -> Result<Vec<u8>, Base64Error> {
-    // `decode_bytes` already filters ASCII whitespace inline; a pre-clean
-    // pass would just heap-allocate the same buffer twice. The early
-    // bytes-as-`&[u8]` view avoids one allocation and a copy.
     decode_bytes(input.as_bytes(), config, false)
 }
 
@@ -176,9 +188,9 @@ pub fn base64_decode_bytes_strict(
 }
 
 /// Lenient decode of raw bytes for MIME bodies, where line breaks are
-/// legal whitespace between base64 quanta. Errors are returned, but
-/// the typical caller (mail / mbox adapters) only cares about whether
-/// the decode succeeded.
+/// legal whitespace between base64 quanta. Errors are returned, but the
+/// typical caller (mail / mbox adapters) only cares about whether the
+/// decode succeeded.
 pub fn base64_decode_skipping_ws(
     input: &[u8],
     config: Base64Config,
@@ -187,24 +199,14 @@ pub fn base64_decode_skipping_ws(
 }
 
 fn decode_bytes(input: &[u8], config: Base64Config, strict: bool) -> Result<Vec<u8>, Base64Error> {
-    let charset = config.charset;
-    // The hot path is a slice with no whitespace -- a config blob or a
-    // header value that arrived straight from the caller. The check is
-    // one pass over the input; if it sees any byte that is whitespace,
-    // fall back to the filtered `Vec` path that the comment below
-    // describes. A base64 without line breaks (the common MIME body
-    // case after header concatenation) pays nothing for this scan; a
-    // stream with 76-char line breaks allocates once instead of taking
-    // the always-on allocation.
+    let decode_table = decode_table_for(config.charset);
+
+    // The hot path is a buffer with no whitespace — a config blob or a
+    // header value handed over as it arrived. One scan decides between
+    // borrowing the input and allocating a filtered copy; the copy is
+    // only built when whitespace is actually present.
     let owned_buf;
-    let input_trimmed: &[u8] = if input.iter().any(|&b| b.is_ascii_whitespace()) {
-        // Skip MIME whitespace (CR/LF/space/tab) inline rather than
-        // building a filtered `Vec<u8>` first. The caller passes the raw
-        // body bytes of a MIME part, which is mostly base64 with line
-        // breaks every 76 chars; allocating a second copy just to drop
-        // those breaks would double the peak heap on every part. The
-        // strict path here still rejects non-whitespace invalid bytes;
-        // only `is_ascii_whitespace` is dropped.
+    let data: &[u8] = if input.iter().any(|&b| b.is_ascii_whitespace()) {
         let mut buf = Vec::with_capacity(input.len());
         for &b in input {
             if !b.is_ascii_whitespace() {
@@ -216,15 +218,15 @@ fn decode_bytes(input: &[u8], config: Base64Config, strict: bool) -> Result<Vec<
     } else {
         input
     };
-    // The padding count is read off the input *with* the trailing
-    // `=` still attached, since the strict path's expected vs actual
-    // comparison is in terms of the padded form the caller sent. After
-    // this we strip the trailing `=` so the data-path chunks iterate
-    // over only the data characters.
-    let padding_count = input_trimmed.iter().filter(|&&c| c == b'=').count();
-    let input_trimmed = strip_trailing_padding(input_trimmed);
 
-    if input_trimmed.len() % 4 == 1 {
+    // The canonical-padding check of §3.5 counts the `=` characters the
+    // caller sent; the data path then sees only the alphabet characters.
+    let pad_count = data.iter().filter(|&&c| c == b'=').count();
+    let data = strip_trailing_padding(data);
+
+    // One leftover character is 6 bits — not a byte, and not a legal
+    // quantum, padded or not.
+    if data.len() % 4 == 1 {
         return Err(Base64Error {
             message: "Invalid length".into(),
             position: 0,
@@ -232,62 +234,52 @@ fn decode_bytes(input: &[u8], config: Base64Config, strict: bool) -> Result<Vec<
     }
 
     if strict {
-        // Canonical padding: a quantum of n data chars carries exactly
-        // 4 - n '=' characters, and nothing else is allowed. This is the
-        // check the lenient path deliberately skips.
-        let rem = input_trimmed.len() % 4;
-        let expected_padding = match rem {
+        // A quantum of n data characters carries exactly `4 - n` pads:
+        // 0 data chars is an empty input (0 pads), 2 → 2, 3 → 1, 4 → 0.
+        let expected_padding = match data.len() % 4 {
             0 => 0,
             2 => 2,
             3 => 1,
             _ => 0,
         };
-        if padding_count != expected_padding {
+        if pad_count != expected_padding {
             return Err(Base64Error {
-                message: format!(
-                    "Invalid padding: expected {expected_padding}, found {padding_count}"
-                ),
-                position: input_trimmed.len(),
+                message: format!("Invalid padding: expected {expected_padding}, found {pad_count}"),
+                position: data.len(),
             });
         }
-    } else if input_trimmed.len() % 4 == 1 && padding_count == 0 {
-        return Err(Base64Error {
-            message: "Invalid length".into(),
-            position: 0,
-        });
     }
 
-    let decode_table = decode_table_for(charset);
+    let mut output = Vec::with_capacity(data.len() / 4 * 3);
+    let quanta = data.len().div_ceil(4);
 
-    let mut output = Vec::with_capacity(input_trimmed.len() / 4 * 3);
-
-    for (chunk_idx, chunk) in input_trimmed.chunks(4).enumerate() {
-        let chunk_len = chunk.len();
-        let is_last_chunk = chunk_idx + 1 >= input_trimmed.len().div_ceil(4);
-
-        let v0 = decode_value(chunk[0], chunk_idx * 4, &decode_table)?;
-        let v1 = decode_value(chunk[1], chunk_idx * 4 + 1, &decode_table)?;
+    for (chunk_idx, chunk) in data.chunks(4).enumerate() {
+        let base = chunk_idx * 4;
+        let v0 = decode_value(chunk[0], base, &decode_table)?;
+        let v1 = decode_value(chunk[1], base + 1, &decode_table)?;
 
         output.push((v0 << 2) | (v1 >> 4));
 
-        if chunk_len >= 3 {
-            let v2 = decode_value(chunk[2], chunk_idx * 4 + 2, &decode_table)?;
+        if chunk.len() >= 3 {
+            let v2 = decode_value(chunk[2], base + 2, &decode_table)?;
             output.push(((v1 & 0x0F) << 4) | (v2 >> 2));
 
-            if chunk_len >= 4 {
-                let v3 = decode_value(chunk[3], chunk_idx * 4 + 3, &decode_table)?;
+            if chunk.len() >= 4 {
+                let v3 = decode_value(chunk[3], base + 3, &decode_table)?;
                 output.push(((v2 & 0x03) << 6) | v3);
-            } else if strict && is_last_chunk && v2 & 0x03 != 0 {
-                // trailing bits past the final byte must be zero
+            } else if strict && chunk_idx + 1 == quanta && v2 & 0x03 != 0 {
+                // The 2 bits the final byte did not need must be zero in
+                // a canonical encoding.
                 return Err(Base64Error {
                     message: "Non-zero trailing bits in final quantum".into(),
-                    position: input_trimmed.len(),
+                    position: data.len(),
                 });
             }
-        } else if strict && is_last_chunk && v1 & 0x0F != 0 {
+        } else if strict && chunk_idx + 1 == quanta && v1 & 0x0F != 0 {
+            // Same rule for the 4 bits a 2-character quantum leaves over.
             return Err(Base64Error {
                 message: "Non-zero trailing bits in final quantum".into(),
-                position: input_trimmed.len(),
+                position: data.len(),
             });
         }
     }
@@ -401,5 +393,85 @@ mod tests {
         assert!(!encoded.contains('/'));
         assert!(!encoded.contains('='));
         assert_eq!(base64_decode_url(&encoded).unwrap(), input);
+    }
+
+    #[test]
+    fn a_quantum_of_one_data_character_is_never_valid() {
+        // 6 bits cannot produce a byte; the length check runs before any
+        // alphabet lookup, so these fail on length alone.
+        for s in ["A", "AAAAA", "Zm9vA"] {
+            assert!(base64_decode(s).is_err(), "{s}");
+            assert!(base64_decode_strict(s).is_err(), "{s}");
+        }
+    }
+
+    #[test]
+    fn strict_padding_is_canonical_after_a_full_quantum() {
+        // The padding count is over the whole input, not per final
+        // quantum: "Zm9vZg" is two quanta and needs exactly two pads.
+        assert_eq!(base64_decode_strict("Zm9vZg==").unwrap(), b"foof");
+        assert!(base64_decode_strict("Zm9vZg=").is_err());
+        assert!(base64_decode_strict("Zm9vZg").is_err());
+        assert!(base64_decode_strict("Zm9vZg===").is_err());
+    }
+
+    #[test]
+    fn interior_padding_is_rejected_in_both_modes() {
+        // `=` is not an alphabet character, so it can only sit at the
+        // end; anywhere else it is a decode error, not a pad.
+        assert!(base64_decode("Z=g=").is_err());
+        assert!(base64_decode_strict("Zm9v=YmFy").is_err());
+    }
+
+    #[test]
+    fn the_two_alphabets_do_not_share_characters() {
+        // §4 and §5 differ exactly in the 62nd/63rd symbols: a `+`/`/`
+        // input is not URL-safe, a `-`/`_` input is not standard.
+        assert!(base64_decode_url("ab+d").is_err());
+        assert!(base64_decode_url("ab/d").is_err());
+        assert!(base64_decode_strict("ab-d").is_err());
+        assert!(base64_decode_strict("ab_d").is_err());
+        // The same sextet sequence decodes on each side of the split
+        // when each side gets its own alphabet.
+        assert_eq!(
+            base64_decode_with("ab-d", URL_SAFE_NO_PAD).unwrap(),
+            base64_decode("ab+d").unwrap()
+        );
+    }
+
+    #[test]
+    fn url_safe_padded_config_roundtrips() {
+        // URL_SAFE pads; URL_SAFE_NO_PAD does not. Both decode either
+        // form — padding is a decode-time count, not an alphabet fact.
+        let input = b"\xff\xfe\xfd\xfc\xfb";
+        let padded = base64_encode_with(input, URL_SAFE);
+        assert!(padded.contains('='));
+        assert_eq!(base64_decode_with_strict(&padded, URL_SAFE).unwrap(), input);
+        assert_eq!(base64_decode_url(&padded).unwrap(), input);
+    }
+
+    #[test]
+    fn no_pad_configs_encode_without_padding() {
+        assert_eq!(base64_encode_with(b"f", STANDARD_NO_PAD), "Zg");
+        assert_eq!(base64_encode_with(b"fo", STANDARD_NO_PAD), "Zm8");
+        assert_eq!(base64_encode_with(b"f", URL_SAFE_NO_PAD), "Zg");
+    }
+
+    #[test]
+    fn decode_never_panics_on_arbitrary_bytes() {
+        let corpus: Vec<(&'static str, Vec<u8>)> = vec![
+            ("valid", b"Zm9vYmFy".to_vec()),
+            ("padded", b"Zg==".to_vec()),
+            ("url", b"ab-_".to_vec()),
+            ("wrapped", b"Zm9v\nYmFy".to_vec()),
+            ("pads", b"====".to_vec()),
+        ];
+        crate::fuzzkit::assert_never_panics(corpus, 200, "base64", |data| {
+            let _ = base64_decode_skipping_ws(data, STANDARD);
+            let _ = base64_decode_bytes_strict(data, STANDARD);
+            let _ = base64_decode_skipping_ws(data, URL_SAFE_NO_PAD);
+            let _ = base64_decode_bytes_strict(data, URL_SAFE_NO_PAD);
+            let _ = base64_decode_bytes_strict(data, URL_SAFE);
+        });
     }
 }

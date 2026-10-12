@@ -1,133 +1,185 @@
-//! Burrows-Wheeler Transform (BWT).
+// SPDX-License-Identifier: Apache-2.0
+
+//! The Burrows-Wheeler transform and the two coders that follow it in the
+//! bzip2 pipeline: move-to-front and zero-run coding.
 //!
-//! Implements BWT for use in BZIP2 compression.
+//! Independent implementations of the published algorithms, written from
+//! the transform definition rather than from any implementation's source.
+//! The forward transform sorts cyclic rotations; the inverse is the
+//! last-column walk over the first-column occurrence map, which places
+//! each recovered byte at its final index and so needs no reverse pass.
+//! The move-to-front coder and the zero-run coder here are the standalone
+//! forms the tests hold; the bzip2 bit-stream carries its own run coding
+//! around these.
 
 use alloc::vec;
 use alloc::vec::Vec;
-/// Burrows-Wheeler Transform.
+
+/// Burrows-Wheeler transform of cyclic rotations.
 #[derive(Debug, Default)]
 pub struct Bwt;
 
 impl Bwt {
-    /// Create a new BWT processor.
+    /// A transform processor. Stateless; kept a struct so callers do not
+    /// change shape if a transform ever needs scratch space.
     pub fn new() -> Self {
         Self
     }
 
-    /// Perform forward BWT. Returns (transformed_data, original_index).
-    ///
-    /// Uses prefix doubling to sort cyclic shifts in O(n log n), which stays
-    /// fast even on highly repetitive inputs (the naive rotation comparison
-    /// degenerates to O(n^2) there).
+    /// Forward transform: `(transformed, original_index)`, where
+    /// `transformed[i]` is the byte preceding rotation `i` in sorted
+    /// order and `original_index` is where the original string sits
+    /// among those sorted rotations.
     pub fn transform(&mut self, data: &[u8]) -> (Vec<u8>, usize) {
         if data.is_empty() {
             return (Vec::new(), 0);
         }
-
         let n = data.len();
-        let mut sa: Vec<usize> = (0..n).collect();
-        let mut rank: Vec<u32> = data.iter().map(|&b| b as u32).collect();
-        let mut tmp = vec![0u32; n];
+        let order = sorted_rotations(data);
 
-        let mut k = 1usize;
-        while k < n {
-            // Sort cyclic shifts by their 2k-prefix: (rank[i], rank[i+k]).
-            sa.sort_by_key(|&i| (rank[i], rank[(i + k) % n]));
-
-            // Re-rank the 2k-prefixes.
-            tmp[sa[0]] = 0;
-            let mut r = 0u32;
-            for j in 1..n {
-                let (a, b) = (sa[j - 1], sa[j]);
-                if rank[a] != rank[b] || rank[(a + k) % n] != rank[(b + k) % n] {
-                    r += 1;
-                }
-                tmp[b] = r;
-            }
-            core::mem::swap(&mut rank, &mut tmp);
-            if r as usize == n - 1 {
-                break;
-            }
-            k *= 2;
-        }
-
-        // Find original string position and build output
         let mut original_index = 0;
         let mut output = Vec::with_capacity(n);
-
-        for (i, &idx) in sa.iter().enumerate() {
-            if idx == 0 {
+        for (i, &start) in order.iter().enumerate() {
+            if start == 0 {
                 original_index = i;
             }
-            output.push(data[(idx + n - 1) % n]);
+            // The byte preceding rotation `start` is the last column entry
+            // of row `i`.
+            output.push(data[(start + n - 1) % n]);
         }
-
         (output, original_index)
     }
 
-    /// Perform inverse BWT.
-    ///
-    /// # Arguments
-    /// * `data` - Transformed data (last column of sorted rotations).
-    /// * `original_index` - Position of original string in sorted rotations.
+    /// Inverse transform of `data` (the last column) given where the
+    /// original string sat in the sorted order. An `original_index` past
+    /// the end cannot place the original string, and is answered with
+    /// empty output rather than a panic: the index is caller-supplied and
+    /// a malformed one must not be a crash.
     pub fn inverse(&mut self, data: &[u8], original_index: usize) -> Vec<u8> {
         if data.is_empty() {
             return Vec::new();
         }
-
         let n = data.len();
-
-        // bzip2 caps the BWT block at 900,000 bytes. `u32` for the transform
-        // vector therefore halves the per-block heap of a 900 KiB block from
-        // 7.2 MiB to 3.6 MiB and the cache footprint on the inverse walk
-        // fits in L2.
+        if original_index >= n {
+            return Vec::new();
+        }
+        // bzip2 caps the BWT block at 900,000 bytes, so a u32 row index
+        // covers every block this transform is ever handed and halves the
+        // per-block heap against usize.
         debug_assert!(n <= u32::MAX as usize);
 
-        // Count occurrences of each byte
-        let mut counts = [0usize; 256];
+        // The first column is `data` sorted. `starts[b]` is where byte
+        // `b`'s run begins there; `rank[i]` is which occurrence of
+        // `data[i]` row `i` is in that run. The map `i ->
+        // starts[data[i]] + rank[i]` is the LF mapping: one step from a
+        // last-column position to the first-column position of the same
+        // rotation.
+        let mut starts = [0u32; 256];
         for &b in data {
-            counts[b as usize] += 1;
+            starts[b as usize] += 1;
         }
-
-        // Cumulative counts: starting positions of each byte in the sorted first column.
-        let mut cumsum = [0u32; 256];
-        let mut sum: u32 = 0;
-        for i in 0..256 {
-            cumsum[i] = sum;
-            sum += counts[i] as u32;
+        let mut total = 0u32;
+        for slot in starts.iter_mut() {
+            let count = *slot;
+            *slot = total;
+            total += count;
         }
-
-        // Build the transformation vector: T[i] maps from position i in the
-        // last column to the position in the first column.
-        let mut transform: alloc::vec::Vec<u32> = alloc::vec![0u32; n];
-        let mut positions = [0u32; 256];
-
+        let mut seen = [0u32; 256];
+        let mut map = vec![0u32; n];
         for (i, &b) in data.iter().enumerate() {
             let b = b as usize;
-            // Position in first column for this occurrence of b
-            let first_col_pos = cumsum[b] + positions[b];
-            // T[i] = position in first column
-            transform[i] = first_col_pos;
-            positions[b] += 1;
+            map[i] = starts[b] + seen[b];
+            seen[b] += 1;
         }
 
-        // Pre-size the output so the inverse loop is one index assignment per
-        // byte instead of one capacity re-check per push.
-        let mut output: alloc::vec::Vec<u8> = alloc::vec![0u8; n];
-        let mut idx: u32 = original_index as u32;
-
-        for slot in &mut output {
-            *slot = data[idx as usize];
-            idx = transform[idx as usize];
+        // Walk the map, writing each recovered byte at its final index:
+        // the output is recovered back-to-front this way, so no separate
+        // reverse pass is needed.
+        let mut output = vec![0u8; n];
+        let mut row = original_index as u32;
+        let mut slot = n;
+        while slot > 0 {
+            slot -= 1;
+            output[slot] = data[row as usize];
+            row = map[row as usize];
         }
-
-        // Output is in reverse order, need to reverse it
-        output.reverse();
         output
     }
 }
 
-/// Move-to-Front (MTF) encoding.
+/// Order the cyclic rotations of `data` by their full rotation, by
+/// prefix doubling: rotations are ranked on their first `k` bytes, and
+/// the rank of a `2k`-prefix is the pair `(rank[i], rank[i+k])`. Each
+/// refinement is two stable counting sorts — one per half of the pair —
+/// so the whole sort stays O(n log n) even on the highly repetitive
+/// inputs where a naive rotation comparison degenerates to O(n²).
+fn sorted_rotations(data: &[u8]) -> Vec<usize> {
+    let n = data.len();
+    // Rank of a 1-prefix is the byte itself; order on it.
+    let mut rank: Vec<u32> = data.iter().map(|&b| b as u32).collect();
+    let mut order: Vec<usize> = (0..n).collect();
+    count_sort_by(&mut order, |i| rank[i], 256);
+    // Make the 1-prefix ranks dense before the first doubling step.
+    rerank(&mut rank, &order, n);
+
+    let mut k = 1usize;
+    while k < n {
+        if rank[order[n - 1]] == (n - 1) as u32 {
+            break; // every rotation has a distinct rank
+        }
+        // Pair (rank[i], rank[i+k]) orders the 2k-prefix. The second
+        // half sorts first so a stable sort on the first half leaves the
+        // pairs ascending.
+        count_sort_by(&mut order, |i| rank[(i + k) % n], n + 1);
+        count_sort_by(&mut order, |i| rank[i], n + 1);
+        rerank(&mut rank, &order, k);
+        k *= 2;
+    }
+    order
+}
+
+/// Stable counting sort of `order` on `key(rotation)`.
+fn count_sort_by(order: &mut [usize], key: impl Fn(usize) -> u32, range: usize) {
+    let n = order.len();
+    let mut counts = vec![0u32; range];
+    for &i in order.iter() {
+        counts[key(i) as usize] += 1;
+    }
+    let mut total = 0u32;
+    for c in counts.iter_mut() {
+        let count = *c;
+        *c = total;
+        total += count;
+    }
+    let mut sorted = vec![0usize; n];
+    for &i in order.iter() {
+        let slot = &mut counts[key(i) as usize];
+        sorted[*slot as usize] = i;
+        *slot += 1;
+    }
+    order.copy_from_slice(&sorted);
+}
+
+/// Re-rank the rotations in `order` on their `2*half`-prefixes, where
+/// `rank` already ranks the `half`-prefixes. `half == n` compares only
+/// `rank[i]` against itself and densifies the initial ranks. When all
+/// prefixes are distinct the highest rank is `n - 1` and the caller stops.
+fn rerank(rank: &mut Vec<u32>, order: &[usize], half: usize) {
+    let n = order.len();
+    let mut next = vec![0u32; n];
+    next[order[0]] = 0;
+    let mut level = 0u32;
+    for w in order.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        if rank[a] != rank[b] || rank[(a + half) % n] != rank[(b + half) % n] {
+            level += 1;
+        }
+        next[b] = level;
+    }
+    *rank = next;
+}
+
+/// Move-to-front (MTF) encoding.
 #[derive(Debug)]
 pub struct MtfEncoder {
     /// Symbol table (initialized 0-255).
@@ -150,107 +202,92 @@ impl MtfEncoder {
         Self { table }
     }
 
-    /// Encode data using MTF.
+    /// Encode data using MTF: each byte becomes its index in the
+    /// current table, then moves to the front of the table.
     pub fn encode(&mut self, data: &[u8]) -> Vec<u8> {
-        data.iter()
-            .map(|&b| {
-                // Find position of b in table
-                let pos = self.table.iter().position(|&x| x == b).unwrap_or(0) as u8;
-
-                // Move b to front
-                for i in (0..pos as usize).rev() {
-                    self.table[i + 1] = self.table[i];
-                }
-                self.table[0] = b;
-
-                pos
-            })
-            .collect()
+        let mut out = Vec::with_capacity(data.len());
+        for &b in data {
+            let pos = self.table.iter().position(|&x| x == b).unwrap_or(0);
+            self.move_to_front(pos);
+            self.table[0] = b;
+            out.push(pos as u8);
+        }
+        out
     }
 
-    /// Decode MTF-encoded data.
+    /// Decode MTF-encoded data: each index becomes the byte at that
+    /// table position, which then moves to the front.
     pub fn decode(&mut self, data: &[u8]) -> Vec<u8> {
-        data.iter()
-            .map(|&pos| {
-                let b = self.table[pos as usize];
-
-                // Move b to front
-                for i in (0..pos as usize).rev() {
-                    self.table[i + 1] = self.table[i];
-                }
-                self.table[0] = b;
-
-                b
-            })
-            .collect()
+        let mut out = Vec::with_capacity(data.len());
+        for &pos in data {
+            let b = self.table[pos as usize];
+            self.move_to_front(pos as usize);
+            self.table[0] = b;
+            out.push(b);
+        }
+        out
     }
 
     /// Reset the symbol table.
     pub fn reset(&mut self) {
-        for i in 0..256 {
-            self.table[i] = i as u8;
+        for (i, slot) in self.table.iter_mut().enumerate() {
+            *slot = i as u8;
         }
+    }
+
+    /// Shift `table[0..pos]` up one slot so `pos` can fall to the front.
+    fn move_to_front(&mut self, pos: usize) {
+        self.table.copy_within(0..pos, 1);
     }
 }
 
-/// Run-Length Encoding (RLE) for BZIP2.
-///
-/// BZIP2 uses RLE after MTF to encode runs of zeros.
+/// Run-length encoding of zero runs, the coder bzip2 applies after MTF.
 #[derive(Debug, Default)]
 pub struct Rle;
 
 impl Rle {
     /// Encode runs of zeros.
     ///
-    /// A zero run uses values 0-254; a non-zero byte is an escape (255)
-    /// followed by the byte.
+    /// A zero run uses values 0-254 (run length minus one); a non-zero
+    /// byte is an escape (255) followed by the byte.
     pub fn encode(data: &[u8]) -> Vec<u8> {
         let mut output = Vec::with_capacity(data.len());
         let mut i = 0;
-
         while i < data.len() {
             if data[i] == 0 {
-                // Count run of zeros
                 let mut count = 0usize;
                 while i < data.len() && data[i] == 0 && count < 255 {
                     count += 1;
                     i += 1;
                 }
-                // Output count (1-255 zeros encoded as 0-254)
                 output.push((count - 1) as u8);
             } else {
-                // Output escape (255) followed by the byte value
-                // This distinguishes non-zero bytes from zero run counts
                 output.push(255);
                 output.push(data[i]);
                 i += 1;
             }
         }
-
         output
     }
 
-    /// Decode runs of zeros.
+    /// Decode runs of zeros. A trailing escape with nothing after it
+    /// simply ends the stream.
     pub fn decode(data: &[u8]) -> Vec<u8> {
         let mut output = Vec::with_capacity(data.len());
         let mut i = 0;
-
         while i < data.len() {
             if data[i] == 255 {
-                // Escaped non-zero byte
                 i += 1;
                 if i < data.len() {
                     output.push(data[i]);
                     i += 1;
                 }
             } else {
-                // Zero run: value 0-254 means 1-255 zeros
                 let count = (data[i] as usize) + 1;
                 output.extend(core::iter::repeat_n(0, count));
                 i += 1;
             }
         }
-
         output
     }
 }
@@ -365,5 +402,64 @@ mod tests {
         let final_out = bwt.inverse(&mtf_in, idx);
 
         assert_eq!(data.as_slice(), final_out.as_slice());
+    }
+
+    /// The four-hundred-byte scale is where a doubling sort that
+    /// re-ranked wrong still round-trips small inputs: the inverse is
+    /// checking the transform's own permutation, not the sort's
+    /// correctness, until the rotations outnumber the loop steps.
+    #[test]
+    fn transform_and_inverse_agree_at_pipeline_scale() {
+        let mut bwt = Bwt::new();
+        let mut data = Vec::new();
+        for i in 0..200u32 {
+            data.push((i % 7) as u8);
+            data.extend_from_slice(b"abcabc");
+            data.push((i % 251) as u8);
+        }
+        let (transformed, idx) = bwt.transform(&data);
+        assert_eq!(transformed.len(), data.len());
+        assert!(idx < data.len());
+        let inverse = bwt.inverse(&transformed, idx);
+        assert_eq!(data, inverse);
+    }
+
+    /// `inverse` takes a caller-supplied row index. One past the end is
+    /// malformed input, not a crash: a pack reader that hands the
+    /// transform a corrupt block index must not take the process down.
+    #[test]
+    fn inverse_refuses_a_row_index_past_the_end() {
+        let mut bwt = Bwt::new();
+        assert!(bwt.inverse(b"abc", 3).is_empty());
+        assert!(bwt.inverse(b"abc", usize::MAX).is_empty());
+        // In range, the transform still works.
+        let (transformed, idx) = bwt.transform(b"abc");
+        assert_eq!(bwt.inverse(&transformed, idx), b"abc".to_vec());
+    }
+
+    /// Decoders must survive arbitrary bytes: panic is the failure mode
+    /// fuzzing is for, Err and empty output are fine.
+    #[test]
+    fn never_panics_on_arbitrary_bytes() {
+        let corpus: Vec<(&str, Vec<u8>)> = alloc::vec![
+            ("empty", alloc::vec![]),
+            ("one", alloc::vec![0]),
+            ("escape_tail", alloc::vec![255]),
+            ("mixed", alloc::vec![0, 0, 255, 65, 1, 255]),
+            ("long", alloc::vec![0, 1, 255, 255, 0, 200]),
+        ];
+        crate::fuzzkit::assert_never_panics(corpus, 2000, "bwt", |data| {
+            let _ = Rle::decode(data);
+            let mut mtf = MtfEncoder::new();
+            let _ = mtf.decode(data);
+            let mut bwt = Bwt::new();
+            let idx = if data.is_empty() {
+                0
+            } else {
+                data[0] as usize % (data.len() + 1)
+            };
+            let _ = bwt.inverse(data, idx);
+            let _ = bwt.inverse(data, data.len());
+        });
     }
 }

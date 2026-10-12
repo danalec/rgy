@@ -1,96 +1,89 @@
-//! CRC-64/XZ, the check type `0x04` used by the .xz container format.
+// SPDX-License-Identifier: Apache-2.0
+
+//! CRC-64/XZ, the check type `0x04` of the .xz container format.
 //!
-//! # Algorithm
+//! Independent reimplementation of the published CRC parameters, written
+//! from the polynomial and the bit-at-a-time recurrence rather than from
+//! any implementation's source. The register starts all-ones, bits are
+//! mixed least-significant-first, and the result is complemented — which
+//! is what distinguishes this variant from its neighbours.
 //!
-//! CRC-64/XZ is a *reflected* (LSB-first) CRC over the ECMA-182 polynomial:
-//!
-//! | parameter | value                          |
-//! |-----------|--------------------------------|
-//! | width     | 64                             |
-//! | poly      | `0x42F0E1EBA9EA3693` (ECMA-182)|
-//! | init      | `0xFFFFFFFFFFFFFFFF`           |
-//! | refin     | true (LSB-first)               |
-//! | refout    | true                           |
-//! | xorout    | `0xFFFFFFFFFFFFFFFF`           |
+//! | parameter | value                           |
+//! |-----------|---------------------------------|
+//! | width     | 64                              |
+//! | poly      | `0x42F0E1EBA9EA3693` (ECMA-182) |
+//! | init      | `0xFFFFFFFFFFFFFFFF`            |
+//! | refin     | true (LSB-first)                |
+//! | refout    | true                            |
+//! | xorout    | `0xFFFFFFFFFFFFFFFF`            |
 //!
 //! `check("123456789") = 0x995DC9BBDF1939FA`
 //!
-//! # Traps in the CRC-64 family
-//!
-//! This is *not* CRC-64/ECMA-182 (`init=0`, MSB-first, `xorout=0`, whose check
-//! value is `0x6C40DF5F0B497347`), and it is not the ISO polynomial
-//! `0x000000000000001B`. Feeding the *un-reflected* ECMA-182 polynomial into
-//! the LSB-first table loop below yields a third, unnamed CRC again (check
-//! value `0xB86883E6FA710A9F`); the loop must use the reflected form,
-//! `0xC96C5795D7870F42`.
+//! Two neighbours this must not drift into: CRC-64/ECMA-182 proper
+//! (`init = 0`, MSB-first, `xorout = 0`, check `0x6C40DF5F0B497347`), and
+//! the unnamed CRC you get by feeding the un-reflected polynomial to an
+//! LSB-first loop (check `0xB86883E6FA710A9F`). The loop below works on
+//! the reflected form `0xC96C5795D7870F42`, derived here from the normal
+//! form rather than typed in.
 
-/// ECMA-182 polynomial in its normal (MSB-first) form.
+/// The ECMA-182 polynomial in its normal (MSB-first) form.
 const ECMA_182: u64 = 0x42F0_E1EB_A9EA_3693;
 
-const fn reverse64(v: u64) -> u64 {
+/// Reflected forms are what an LSB-first recurrence steps against.
+const fn reflect64(value: u64) -> u64 {
     let mut out = 0u64;
     let mut i = 0;
     while i < 64 {
-        out = (out << 1) | ((v >> i) & 1);
+        out = (out << 1) | ((value >> i) & 1);
         i += 1;
     }
     out
 }
 
-/// ECMA-182 in the reflected (LSB-first) form the table below operates on.
-const POLY: u64 = reverse64(ECMA_182);
+/// ECMA-182 as the recurrence below consumes it.
+const POLY: u64 = reflect64(ECMA_182);
 
-// Guard against reintroducing the un-reflected polynomial here, which is the
-// one bug this module previously had.
+// The one bug this module has had is the un-reflected polynomial here;
+// pinning the expected value keeps a future edit honest.
 const _: () = assert!(POLY == 0xC96C_5795_D787_0F42);
 
-/// Reflected CRC-64 lookup table.
-const TABLE: [u64; 256] = {
-    let mut table = [0u64; 256];
+/// The register before any input, and its complement after.
+const INIT: u64 = 0xFFFF_FFFF_FFFF_FFFF;
+
+/// `STEP[k]` absorbs byte `k` of an 8-byte little-endian step: the
+/// one-byte recurrence folded `k` more zero bytes deep. Eight input bytes
+/// then cost eight independent lookups and seven XORs instead of eight
+/// dependent lookup-shift rounds.
+const STEP: [[u64; 256]; 8] = build_step();
+
+const fn build_step() -> [[u64; 256]; 8] {
+    let mut step = [[0u64; 256]; 8];
     let mut i = 0;
     while i < 256 {
         let mut crc = i as u64;
-        let mut j = 0;
-        while j < 8 {
-            if crc & 1 != 0 {
-                crc = (crc >> 1) ^ POLY;
+        let mut bit = 0;
+        while bit < 8 {
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ POLY
             } else {
-                crc >>= 1;
-            }
-            j += 1;
+                crc >> 1
+            };
+            bit += 1;
         }
-        table[i] = crc;
+        step[0][i] = crc;
         i += 1;
     }
-    table
-};
-
-/// Eight tables, one per byte position in a little-endian u64 of input.
-///
-/// `TABLES[0]` is the single-byte table above; each subsequent table
-/// folds one more zero-byte of input into the register. Eight of them
-/// let the inner loop absorb a whole u64 in eight independent lookups
-/// and seven XORs, with no shared register between bytes. The
-/// byte-at-a-time loop carries a 7-deep dependent chain
-/// (crc -> index -> TABLE entry -> XOR) and tops out around 200 MB/s on
-/// uncompressed .xz streams; this layout lets the out-of-order core
-/// retire the whole group without waiting for the previous byte.
-const TABLES: [[u64; 256]; 8] = build_tables();
-
-const fn build_tables() -> [[u64; 256]; 8] {
-    let mut tables = [[0u64; 256]; 8];
-    tables[0] = TABLE;
     let mut k = 1;
     while k < 8 {
         let mut i = 0;
         while i < 256 {
-            let prev = tables[k - 1][i];
-            tables[k][i] = (prev >> 8) ^ TABLE[(prev & 0xFF) as usize];
+            let prev = step[k - 1][i];
+            step[k][i] = (prev >> 8) ^ step[0][(prev & 0xFF) as usize];
             i += 1;
         }
         k += 1;
     }
-    tables
+    step
 }
 
 /// Calculate the CRC-64/XZ of `data` (check type `0x04`).
@@ -103,33 +96,35 @@ const fn build_tables() -> [[u64; 256]; 8] {
 /// ```
 #[must_use]
 pub fn crc64(data: &[u8]) -> u64 {
-    let mut crc = !0u64;
+    let mut crc = INIT;
     let mut buf = data;
-    // Slice-by-8: XOR the next 8 input bytes into crc in little-endian
-    // byte order, then do 8 independent lookups against the expanded
-    // tables. For a *reflected* polynomial, the low byte of the
-    // register still has 7 zero-byte folds pending (the input byte
-    // itself was just XORed in, not processed), so byte 0 of crc
-    // indexes TABLES[7] — the table that absorbs the longest tail.
-    // Byte 7 of crc is already "fully folded" by the single-byte
-    // table (TABLES[0]). This matches the liblzma crc64.c ordering.
     while buf.len() >= 8 {
         let block = u64::from_le_bytes(buf[..8].try_into().unwrap());
         buf = &buf[8..];
+        // Little-endian XOR puts byte 0 of the block in the low byte of
+        // the register. Byte 0 still has seven zero-byte folds pending,
+        // so it indexes STEP[7]; byte 7 is already fully folded and takes
+        // STEP[0].
         crc ^= block;
-        crc = TABLES[7][(crc & 0xFF) as usize]
-            ^ TABLES[6][((crc >> 8) & 0xFF) as usize]
-            ^ TABLES[5][((crc >> 16) & 0xFF) as usize]
-            ^ TABLES[4][((crc >> 24) & 0xFF) as usize]
-            ^ TABLES[3][((crc >> 32) & 0xFF) as usize]
-            ^ TABLES[2][((crc >> 40) & 0xFF) as usize]
-            ^ TABLES[1][((crc >> 48) & 0xFF) as usize]
-            ^ TABLES[0][((crc >> 56) & 0xFF) as usize];
+        crc = fold8(crc);
     }
     for &b in buf {
-        crc = (crc >> 8) ^ TABLE[(crc as u8 ^ b) as usize];
+        crc = (crc >> 8) ^ STEP[0][(crc as u8 ^ b) as usize];
     }
     !crc
+}
+
+/// Fold all eight bytes of a just-XORed little-endian word through the
+/// eight tables, no two lookups dependent on each other.
+fn fold8(mix: u64) -> u64 {
+    STEP[7][(mix & 0xFF) as usize]
+        ^ STEP[6][((mix >> 8) & 0xFF) as usize]
+        ^ STEP[5][((mix >> 16) & 0xFF) as usize]
+        ^ STEP[4][((mix >> 24) & 0xFF) as usize]
+        ^ STEP[3][((mix >> 32) & 0xFF) as usize]
+        ^ STEP[2][((mix >> 40) & 0xFF) as usize]
+        ^ STEP[1][((mix >> 48) & 0xFF) as usize]
+        ^ STEP[0][((mix >> 56) & 0xFF) as usize]
 }
 
 #[cfg(test)]
@@ -219,5 +214,19 @@ mod tests {
         let stored = u64::from_le_bytes(STREAM[84..92].try_into().unwrap());
         assert_eq!(crc64(PLAINTEXT), stored);
         assert_eq!(stored, 0xBFAD_2A0F_1092_618F);
+    }
+
+    /// A checksum that panics on arbitrary bytes is a crash every
+    /// corrupted file can trigger; Err is fine, panic is not.
+    #[test]
+    fn never_panics_on_arbitrary_bytes() {
+        let corpus: Vec<(&str, Vec<u8>)> = alloc::vec![
+            ("empty", alloc::vec![]),
+            ("check", b"123456789".to_vec()),
+            ("long", alloc::vec![0x5A; 4096]),
+        ];
+        crate::fuzzkit::assert_never_panics(corpus, 2000, "crc64", |data| {
+            let _ = crc64(data);
+        });
     }
 }

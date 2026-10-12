@@ -1,4 +1,4 @@
-//! Clean-room reimplementation of memmap2-rs read-write MmapMut handle.
+//! Independent reimplementation of memmap2-rs read-write MmapMut handle.
 
 use std::fmt;
 use std::io;

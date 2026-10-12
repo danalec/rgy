@@ -1,4 +1,11 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Compression error types.
+//!
+//! This crate's own error vocabulary for the codec decoders in this
+//! tree (mirrored from `rgx-core`'s `compress::error`, same shape).
+//! The variants are the contract the decoders fail with; nothing here
+//! is derived from a third-party implementation.
 
 use alloc::string::String;
 use core::fmt;

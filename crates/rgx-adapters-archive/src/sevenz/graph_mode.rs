@@ -1,7 +1,13 @@
-//! Minimal match-finding strategy selector, vendored from the 7-Zip
-//! project's `CPP/7zip/Compress/LZMA_Optimal` (only the pieces the LZ
-//! encoder needs; the graph-theoretic optimizer itself is not part of
-//! this copy).
+// SPDX-License-Identifier: Apache-2.0
+
+//! Match-finding strategy selection for the LZ encoders in this crate.
+//!
+//! rgx's own code, shared with `lz4/graph_optimize.rs`: the enum picks
+//! between a plain hash-chain finder and the Paley-graph-inspired hash
+//! below, which is an original mixing function — a multiplicative
+//! round, a quadratic-residue-style avalanche, and a final diffusion
+//! keyed on the Paley prime 131101. Not derived from 7-Zip or any
+//! other third-party implementation.
 
 /// Selects match-finding strategy for compression encoders.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

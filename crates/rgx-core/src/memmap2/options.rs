@@ -1,4 +1,4 @@
-//! Clean-room reimplementation of memmap2-rs MmapOptions builder.
+//! Independent reimplementation of memmap2-rs MmapOptions builder.
 
 use std::fmt;
 use std::io;

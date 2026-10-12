@@ -1,17 +1,33 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! SHA-256 (FIPS 180-4).
 //!
-//! Ported from `upstream::b02::crypto::hash::sha256`, trimmed to what the xz
-//! reader needs: an incremental hasher and a 32-byte digest. upstream keeps
-//! the full `Hasher`/`HashOutput` trait surface because a dozen other
-//! digests live beside it there; nothing in rgx shares that, so carrying
-//! the traits would be indirection with one implementor.
+//! Independent reimplementation of the FIPS 180-4 SHA-256 hash: the §4.1.2
+//! boolean and rotation functions, the §4.2.2 initial hash value H(0), the
+//! §4.2.3 round constants K, the §5.1 padding rule, and the §5.2 /
+//! §6.2 message schedule and block compression. Trimmed to what rgx
+//! needs — an incremental hasher and a 32-byte digest — because nothing
+//! in this tree shares the multi-digest trait surface the larger digest
+//! libraries carry.
 //!
 //! The one thing not optional here is the *uncompressed* direction: the
 //! xz Check this exists for is the only integrity check in the format
 //! that is computed over the plaintext, so a SHA-256 computed over the
 //! bytes on disk would validate the wrong thing and pass on any file a
 //! third party had tampered with.
+//!
+//! # Contract
+//!
+//! [`Sha256`] absorbs bytes in any split and produces the same digest
+//! (§5.2 "the message is padded and parsed"), so `update` may be called
+//! any number of times. `finalize` implements §5.1 exactly: append the
+//! bit `1`, then `0` bits until 56 bytes remain in the final block, then
+//! the message length in bits as a 64-bit big-endian integer. A message
+//! whose last block has no room for the length runs through a second
+//! padded block; the tests pin both branches.
 
+/// K[t] is the first 32 bits of the fractional parts of the cube roots
+/// of the first 64 primes (FIPS 180-4 §4.2.3).
 const K: [u32; 64] = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
     0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
@@ -23,35 +39,43 @@ const K: [u32; 64] = [
     0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ];
 
+/// H(0): the first 32 bits of the fractional parts of the square roots
+/// of the first 8 primes (FIPS 180-4 §4.2.2).
 const H0: [u32; 8] = [
     0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
 ];
 
+/// Ch(x, y, z) = (x AND y) XOR ((NOT x) AND z) — §4.1.2.
 #[inline]
 fn ch(x: u32, y: u32, z: u32) -> u32 {
     (x & y) ^ (!x & z)
 }
 
+/// Maj(x, y, z) = (x AND y) XOR (x AND z) XOR (y AND z) — §4.1.2.
 #[inline]
 fn maj(x: u32, y: u32, z: u32) -> u32 {
     (x & y) ^ (x & z) ^ (y & z)
 }
 
+/// Σ0(x) — §4.1.2.
 #[inline]
 fn sigma0(x: u32) -> u32 {
     x.rotate_right(2) ^ x.rotate_right(13) ^ x.rotate_right(22)
 }
 
+/// Σ1(x) — §4.1.2.
 #[inline]
 fn sigma1(x: u32) -> u32 {
     x.rotate_right(6) ^ x.rotate_right(11) ^ x.rotate_right(25)
 }
 
+/// σ0(x) — §4.1.2.
 #[inline]
 fn gamma0(x: u32) -> u32 {
     x.rotate_right(7) ^ x.rotate_right(18) ^ (x >> 3)
 }
 
+/// σ1(x) — §4.1.2.
 #[inline]
 fn gamma1(x: u32) -> u32 {
     x.rotate_right(17) ^ x.rotate_right(19) ^ (x >> 10)
@@ -120,6 +144,9 @@ impl Sha256 {
         }
     }
 
+    /// §5.1 padding: append `1`, then `0` bits until 56 bytes remain in
+    /// the block, then the message length in bits as a 64-bit big-endian
+    /// integer.
     pub fn finalize(mut self) -> [u8; 32] {
         let bit_len = self.total_len * 8;
 
@@ -164,12 +191,14 @@ impl Sha256 {
     }
 }
 
-/// Scalar SHA-256 block compression. Kept as a free function so the
-/// hardware dispatch in `Sha256::process_block` falls through to it on
-/// any CPU that lacks the matching ISA extension, and so the
-/// `sha256_hw` module can re-use it as the backend stub when the
+/// Scalar SHA-256 block compression (FIPS 180-4 §6.2). Kept as a free
+/// function so the hardware dispatch in `Sha256::process_block` falls
+/// through to it on any CPU that lacks the matching ISA extension, and
+/// so the `sha256_hw` module can re-use it as the backend stub when the
 /// hardware backends are not yet active on stable Rust.
 pub(crate) fn process_block_scalar(h: &mut [u32; 8], block: &[u8; 64]) {
+    // W[0..16] is the block as 16 big-endian words; W[16..64] is the
+    // schedule expansion σ0/σ1 of §6.2.
     let mut w = [0u32; 64];
     for i in 0..16 {
         w[i] = u32::from_be_bytes([
@@ -252,6 +281,43 @@ mod tests {
         );
     }
 
+    /// The §5.1 padding boundary: a 55-byte message still fits its
+    /// length in the block, 56 does not and takes a second padded
+    /// block. The digests are from an external SHA-256 (python hashlib)
+    /// and pin both branches and the two block sizes around them.
+    #[test]
+    fn padding_length_fits_or_spills_exactly_at_56_bytes() {
+        let cases: &[(usize, &str)] = &[
+            (
+                55,
+                "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318",
+            ),
+            (
+                56,
+                "b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a",
+            ),
+            (
+                57,
+                "f13b2d724659eb3bf47f2dd6af1accc87b81f09f59f2b75e5c0bed6589dfe8c6",
+            ),
+            (
+                63,
+                "7d3e74a05d7db15bce4ad9ec0658ea98e3f06eeecf16b4c6fff2da457ddc2f34",
+            ),
+            (
+                64,
+                "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb",
+            ),
+            (
+                65,
+                "635361c48bb9eab14198e76ea8ab7f1a41685d6ad62aa9146d301d4f17eb0ae0",
+            ),
+        ];
+        for (n, expected) in cases {
+            assert_eq!(&hex(&Sha256::hash(&vec![b'a'; *n])), expected, "len {n}");
+        }
+    }
+
     /// Feeding the same bytes in every possible split must give the same
     /// digest: the block buffering is the only thing that could get this
     /// wrong, and a bug there would still pass the fixed-size tests.
@@ -266,5 +332,18 @@ mod tests {
             h.update(&data[split..]);
             assert_eq!(h.finalize(), once, "split at {split}");
         }
+    }
+
+    #[test]
+    fn never_panics_on_arbitrary_bytes() {
+        let corpus: Vec<(&'static str, Vec<u8>)> = vec![
+            ("empty", Vec::new()),
+            ("abc", b"abc".to_vec()),
+            ("block", vec![0u8; 64]),
+            ("spill", vec![0xff; 56]),
+        ];
+        crate::fuzzkit::assert_never_panics(corpus, 100, "sha256", |data| {
+            let _ = Sha256::hash(data);
+        });
     }
 }

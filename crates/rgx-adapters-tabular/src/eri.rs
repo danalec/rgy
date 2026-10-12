@@ -1,10 +1,10 @@
-//! Zen-Rs Index (`.eri`) — an NTFS path index rendered as one
+//! Everything-Rs Index (`.eri`) — an NTFS path index rendered as one
 //! path per line.
 //!
 //! **What this is not.** It is not a query engine and it does not open
 //! a volume. An `.eri` is a flat table of
 //! `(frn, parent, name, path, size, attrs)` records produced by
-//! `zen-rs save <volume> <file>`, which reads the MFT once
+//! `everything-rs save <volume> <file>`, which reads the MFT once
 //! with Administrator rights. This adapter only decodes those bytes,
 //! so it runs unprivileged, on any platform, and needs no NTFS.
 //!

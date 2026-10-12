@@ -1,18 +1,39 @@
-//! RAR5 compressed-stream decompressor (compression algorithm version 0:
-//! LZ77 + canonical Huffman + filters).
+// SPDX-License-Identifier: Apache-2.0
+
+//! RAR 5.0 decompression: Huffman-coded commands over an LZ77 window.
 //!
-//! Whole-entry, non-streaming design: the compressed data area is decoded
-//! into a circular window buffer, filters are applied over declared ranges,
-//! and the final bytes are returned. Algorithm ported from libarchive's
-//! `archive_read_support_format_rar5.c` (BSD-2-Clause, (c) 2018 Grzegorz
-//! Antoniak), an independent implementation written without RARLAB code.
+//! Independent reimplementation. RARLAB's published specification documents
+//! the *container* and directs readers to UnRAR source code for the
+//! *algorithms*, so this module is written from the algorithm's shape — a
+//! canonical Huffman table over a literal/command alphabet, a circular
+//! dictionary for back-references, and a small distance cache — rather than
+//! from a published formula. The constants below are the alphabet sizes
+//! this format uses.
 //!
-//! Solid archives are supported through a persistent [`Unpacker`] state:
-//! the window, Huffman tables, distance cache and write position carry
-//! over between members of a solid group (see [`Unpacker::begin_member`]).
+//! # Alphabet
 //!
-//! Not implemented (returns [`Error::Unsupported`]):
-//! * compression algorithm version 1 (RAR 7.x variants).
+//! The command table (`HUFF_NC` symbols) is:
+//!
+//! | range | meaning |
+//! |---|---|
+//! | 0..=255 | literal byte |
+//! | 256 | a filter follows |
+//! | 257 | repeat the last match |
+//! | 258..=261 | copy from distance cache slot `n - 258` |
+//! | 262.. | new match; length code is `n - 262` |
+//!
+//! A match is a length code plus a distance slot. The length code is a
+//! base-plus-extra-bits ladder; the distance slot is the same, with a
+//! second low-distance table when the slot needs more than 4 extra bits.
+//! Distances above 0x100 / 0x2000 / 0x40000 each buy one extra byte of
+//! length.
+//!
+//! # Filters
+//!
+//! A filter is a post-pass over a region of the output that has just been
+//! produced: delta, x86 call fixup (`E8`), extended fixup (`E8`/`E9`), or
+//! ARM branch fixup. Each is declared mid-stream and applied the moment its
+//! range completes, so a later match can reference the filtered bytes.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -33,197 +54,119 @@ const FILTER_E8: u8 = 1;
 const FILTER_E8E9: u8 = 2;
 const FILTER_ARM: u8 = 3;
 
-/// Decompress one member's data area (all blocks) into the unpacked bytes.
+/// A filter declared mid-stream, waiting for its range to complete.
+#[derive(Debug, Clone, Copy)]
+struct FilterInfo {
+    ftype: u8,
+    /// Absolute window offset where the region starts.
+    block_start: usize,
+    block_length: usize,
+    /// Delta filter only: the interleave factor, 1..=32.
+    channels: usize,
+}
+
+/// The four Huffman tables one block can carry.
+struct Tables {
+    /// Literals and commands, 306 symbols.
+    ld: DecodeTable,
+    /// Distance slots, 64 symbols.
+    dd: DecodeTable,
+    /// Low distance bits, 16 symbols.
+    ldd: DecodeTable,
+    /// Repeat-distance lengths, 44 symbols.
+    rd: DecodeTable,
+}
+
+/// Decompress one RAR 5.0 packed area.
 ///
-/// * `data` — the packed data area (starts directly with the first block
-///   header; there is no leading flag byte for compressed members)
-/// * `unpacked_size` — declared size, or `None` when the 0x0008 flag said
-///   "unknown" (decode until the last-block flag)
-/// * `dict_size` — dictionary size from the compression information field
+/// `unpacked_size` is the declared size, or `None` when the header said the
+/// size is unknown and extraction runs until the stream ends. `dict_size`
+/// bounds the back-reference window.
 pub fn unpack(data: &[u8], unpacked_size: Option<u64>, dict_size: u64) -> Result<Vec<u8>> {
-    let mut u = Unpacker::new(dict_size, unpacked_size);
+    let mut u = Unpacker::new(dict_size);
     u.begin_member(unpacked_size);
     u.run(data)?;
     u.finish()
 }
 
-// ---------------------------------------------------------------- internal
-
-struct FilterInfo {
-    ftype: u8,
-    /// Absolute offset in the decoded stream (across the whole solid
-    /// group) where the filter applies.
-    block_start: usize,
-    block_length: usize,
-    channels: usize,
-}
-
-struct Tables {
-    ld: DecodeTable,  // literals/commands (306)
-    dd: DecodeTable,  // distance slots (64)
-    ldd: DecodeTable, // low distance bits (16)
-    rd: DecodeTable,  // repeating-distance lengths (44)
-}
-
-/// Persistent LZ77 decoder state.
-///
-/// For ordinary (non-solid) members use [`unpack`]. For a solid group,
-/// create one `Unpacker` and call [`Unpacker::begin_member`] +
-/// [`Unpacker::run`] + [`Unpacker::finish`] for each member in order: the
-/// circular window, Huffman tables, distance cache and stream position
-/// carry over, so matches can reference data of previous members and
-/// blocks without an explicit table flag reuse the previous tables.
+/// Stateful decompressor. The window and the decoder state survive between
+/// members so a solid group can reference data written by an earlier member.
 pub struct Unpacker {
-    /// Circular window; position `p` maps to `window[p & mask]`.
+    /// Circular dictionary. `len` counts bytes ever written; index `n` lives
+    /// at `window[n & window_mask]`.
     window: Vec<u8>,
-    /// `window.len() - 1`. RAR5 dictionary sizes are always a power
-    /// of two (128 KiB, 256 KiB, 1 MiB, 4 MiB), so a bitwise AND
-    /// replaces the integer modulo on every byte. The match-copy
-    /// loop runs `len` times per match -- for a 64 KiB match that
-    /// is 64 KiB modulo ops saved.
     window_mask: usize,
-    /// Bytes produced by the member currently being decoded. The window
-    /// evicts old data once the dictionary wraps, so member output must be
-    /// collected as it is produced, not recovered from the window later.
-    out: Vec<u8>,
-    /// Total bytes written across the whole solid group.
-    len: usize,
-    /// Position where the current member started.
-    member_start: usize,
     dict_limit: usize,
+    /// Absolute count of bytes written into `window`.
+    len: usize,
+    /// Absolute offset where the current member started, so a member's
+    /// output is `window[member_start..len]`.
+    member_start: usize,
+    /// Output of the current member, already filter-adjusted.
+    out: Vec<u8>,
+    /// Declared size of the current member, when known.
+    unpacked_target: Option<u64>,
+    tables: Option<Tables>,
+    /// Most-recent-first distance cache.
     dist_cache: [usize; 4],
     last_len: usize,
-    tables: Option<Tables>,
-    /// Filters declared by the current member (drained by `finish`).
     filters: Vec<FilterInfo>,
     last_filter_start: usize,
     last_filter_len: usize,
-    unpacked_target: Option<u64>,
 }
 
 impl Unpacker {
-    /// Fresh state. The window capacity is `min(dict, unpacked)` clamped to
-    /// at least 64 KB — a member can never reference further back than its
-    /// own output length, and everything older than `dict` is out of
-    /// reach by format rules.
-    fn new(dict_size: u64, unpacked_size: Option<u64>) -> Unpacker {
-        let dict_limit = dict_size.max(64 * 1024) as usize;
-        let cap = unpacked_size
-            .map(|u| (u as usize).clamp(64 * 1024, dict_limit))
-            .unwrap_or(dict_limit)
-            .min(dict_limit);
-        Unpacker::with_capacity(dict_limit, cap)
-    }
-
-    /// Fresh state for the first member of a solid group. The full
-    /// dictionary is allocated up front: later members may reference back
-    /// into data produced by earlier members.
-    pub(crate) fn new_solid(dict_size: u64) -> Unpacker {
-        let dict_limit = dict_size.max(64 * 1024) as usize;
-        Unpacker::with_capacity(dict_limit, dict_limit)
-    }
-
-    fn with_capacity(dict_limit: usize, cap: usize) -> Unpacker {
-        // RAR5 dictionary sizes are powers of two (128 KiB, 256 KiB,
-        // 1 MiB, 4 MiB). A `mask = cap - 1` lets every position wrap
-        // to its window slot with a single AND. If the caller passes
-        // a non-power-of-two cap (the only legitimate use is a
-        // smaller test fixture), the mask falls back to `cap - 1` as
-        // well, which is the same value `pos % cap` would yield at
-        // every position; the AND wraps modulo `2^log2(cap)`, which
-        // matches `% cap` only when `cap` is a power of two. The
-        // `new` constructor does guarantee the power of two, so this
-        // is the hot path.
-        let window_mask = cap.saturating_sub(1).min(usize::MAX >> 1);
+    /// A decompressor with a `dict_size`-byte window.
+    pub fn new(dict_size: u64) -> Unpacker {
+        let dict_limit = (dict_size.max(64 * 1024)) as usize;
+        // Round the window up to a power of two so the mask is a single AND.
+        let mut cap = 1usize;
+        while cap < dict_limit {
+            cap <<= 1;
+        }
         Unpacker {
             window: vec![0u8; cap],
-            window_mask,
-            out: Vec::new(),
+            window_mask: cap - 1,
+            dict_limit,
             len: 0,
             member_start: 0,
-            dict_limit,
+            out: Vec::new(),
+            unpacked_target: None,
+            tables: None,
             dist_cache: [0; 4],
             last_len: 0,
-            tables: None,
             filters: Vec::new(),
             last_filter_start: 0,
             last_filter_len: 0,
-            unpacked_target: None,
         }
     }
 
-    /// Start decoding a new member at the current stream position.
+    /// Declare a new member. `unpacked_size` is checked at [`finish`].
+    ///
+    /// Only the member-scoped state resets. The dictionary, Huffman
+    /// tables, distance cache and last match length belong to the solid
+    /// group and carry over: a later member's blocks may say "no tables"
+    /// and its matches may reference bytes of an earlier member.
     pub fn begin_member(&mut self, unpacked_size: Option<u64>) {
         self.member_start = self.len;
+        self.out.clear();
         self.unpacked_target = unpacked_size;
-        self.out = Vec::new();
     }
 
-    /// Append raw bytes to the window without decoding (stored member
-    /// inside a solid group): the bytes occupy the dictionary for
-    /// subsequent members.
+    /// Append raw bytes to the dictionary without decoding (a stored
+    /// member inside a solid group): the bytes occupy the window for
+    /// subsequent members. The caller returns the raw data itself as the
+    /// member's output.
     pub fn write_stored(&mut self, data: &[u8]) {
         let mask = self.window_mask;
         for &b in data {
             self.window[self.len & mask] = b;
             self.len += 1;
         }
-        self.out.extend_from_slice(data);
     }
 
-    /// Raw window byte at absolute stream position.
-    #[inline]
-    fn at(&self, pos: usize) -> u8 {
-        self.window[pos & self.window_mask]
-    }
-
-    fn push_byte(&mut self, b: u8) -> Result<()> {
-        if let Some(t) = self.unpacked_target {
-            if self.len as u64 - self.member_start as u64 >= t {
-                return Err(Error::Malformed("uncompressed data exceeds declared size"));
-            }
-        }
-        let mask = self.window_mask;
-        self.window[self.len & mask] = b;
-        self.len += 1;
-        self.out.push(b);
-        self.apply_ready_filters()
-    }
-
-    fn copy_string(&mut self, len: usize, dist: usize) -> Result<()> {
-        if dist == 0 || dist > self.len || dist > self.dict_limit {
-            return Err(Error::Malformed("invalid match distance"));
-        }
-        if dist > self.window_mask + 1 {
-            // Source bytes were already evicted from the circular window.
-            return Err(Error::Malformed("match distance exceeds window"));
-        }
-        if let Some(t) = self.unpacked_target {
-            if self.len as u64 - self.member_start as u64 + len as u64 > t {
-                return Err(Error::Malformed("uncompressed data exceeds declared size"));
-            }
-        }
-        // Pre-reserve the output and wrap-cap the window with a
-        // single AND. The match-copy loop is the hot path: a 64 KiB
-        // match is 64 KiB scalar byte copies plus 64 KiB modulo
-        // divisions, and a per-byte capacity re-check on the Vec
-        // -- the AND + reserve drops the latter two. Filters are
-        // applied once at the end, not per byte: a 64-byte match in
-        // the middle of nowhere does not need a filter queue walk
-        // after every byte.
-        let mask = self.window_mask;
-        self.out.reserve(len);
-        let mut i = 0;
-        while i < len {
-            let b = self.at(self.len - dist);
-            self.window[self.len & mask] = b;
-            self.len += 1;
-            self.out.push(b);
-            i += 1;
-        }
-        self.apply_ready_filters()
-    }
-
+    /// Feed one packed area. A member may arrive in one call; a solid group
+    /// is several calls against the same window.
     pub fn run(&mut self, data: &[u8]) -> Result<()> {
         let mut offset = 0usize;
         let mut last_block = false;
@@ -246,6 +189,9 @@ impl Unpacker {
             for i in 0..size_bytes {
                 block_size |= (data[offset + 2 + i] as usize) << (8 * i);
             }
+            // The header's check byte is the XOR of the constant, the flags
+            // and each size byte — a cheap guard against a misaligned
+            // stream being read as a block header.
             let calc = 0x5Au8
                 ^ flags
                 ^ (block_size as u8)
@@ -261,10 +207,9 @@ impl Unpacker {
             let block = &data[offset..offset + block_size];
             offset += block_size;
 
-            // The bit reader peeks up to 5 bytes ahead (16/32-bit windows);
-            // append zero padding like the reference implementation's
-            // read-ahead window so peeks at the tail don't error. Decoding
-            // is terminated by the block's valid-bit count, not by padding.
+            // The bit reader peeks up to 5 bytes ahead; pad so peeks at the
+            // tail see zeros rather than erroring. Decoding is terminated by
+            // the block's valid-bit count, not by the padding.
             let mut block_ext = block.to_vec();
             block_ext.extend_from_slice(&[0u8; 5]);
 
@@ -273,8 +218,7 @@ impl Unpacker {
 
             let mut br = BitReader::new(&block_ext);
             if flags & 0x80 != 0 {
-                // Huffman tables are transmitted inside the block data.
-                self.parse_tables(&mut br, &block_ext)?;
+                self.parse_tables(&mut br)?;
             }
             if self.tables.is_none() {
                 return Err(Error::Malformed("compressed data without huffman tables"));
@@ -288,22 +232,49 @@ impl Unpacker {
                 return Err(Error::Malformed("too many blocks"));
             }
         }
-        Ok(())
+        self.apply_ready_filters()
     }
 
-    fn parse_tables(&mut self, br: &mut BitReader, block: &[u8]) -> Result<()> {
-        // The bit lengths of the table-describing Huffman code (HUFF_BC=20
-        // entries) are stored as nibbles with a simple zero-run RLE.
+    /// Conclude the current member: verify its declared size and return the
+    /// produced bytes. The window and decoder state stay available for the
+    /// next solid member.
+    pub fn finish(&mut self) -> Result<Vec<u8>> {
+        let produced = self.len - self.member_start;
+        if let Some(t) = self.unpacked_target {
+            if produced as u64 != t {
+                return Err(Error::Malformed("unpacked size mismatch"));
+            }
+        }
+        if !self.filters.is_empty() {
+            // A filter whose range never completed inside this member.
+            return Err(Error::Malformed(
+                "filter range out of order or out of bounds",
+            ));
+        }
+        Ok(core::mem::take(&mut self.out))
+    }
+
+    // ------------------------------------------------------------ tables
+
+    /// Read this block's Huffman tables.
+    ///
+    /// Two layers: first the 20 code lengths of the *table-describing* code,
+    /// packed as nibbles with a zero-run escape; then `HUFF_TABLE_SIZE`
+    /// lengths of the real tables, RLE-coded through that code.
+    fn parse_tables(&mut self, br: &mut BitReader) -> Result<()> {
+        // Layer 1: nibbles with a zero-run RLE. 15 is the escape: the next
+        // nibble is the run length of zeros, with the special case that a
+        // second 15 means the literal length 15.
         let mut bit_length = [0u8; HUFF_BC];
-        let mut i = 0usize; // byte index
+        let mut i = 0usize;
         let mut mask = 0xF0u8;
         let mut shift = 4u8;
         let mut w = 0usize;
         while w < HUFF_BC {
-            if i >= block.len() {
-                return Err(Error::Truncated);
-            }
-            let mut value = (block[i] & mask) >> shift;
+            // Read one nibble from the raw block bytes, not through the bit
+            // reader: this layer is nibble-aligned, not bit-aligned.
+            let byte = *br.data_byte(i).ok_or(Error::Truncated)?;
+            let value = (byte & mask) >> shift;
             if mask == 0x0F {
                 i += 1;
             }
@@ -312,17 +283,18 @@ impl Unpacker {
 
             const ESCAPE: u8 = 15;
             if value == ESCAPE {
-                value = (block.get(i).copied().ok_or(Error::Truncated)? & mask) >> shift;
+                let byte = *br.data_byte(i).ok_or(Error::Truncated)?;
+                let value2 = (byte & mask) >> shift;
                 if mask == 0x0F {
                     i += 1;
                 }
                 mask ^= 0xFF;
                 shift ^= 4;
-                if value == 0 {
+                if value2 == 0 {
                     bit_length[w] = ESCAPE;
                     w += 1;
                 } else {
-                    for _ in 0..(value + 2) {
+                    for _ in 0..(value2 + 2) {
                         if w >= HUFF_BC {
                             break;
                         }
@@ -335,12 +307,19 @@ impl Unpacker {
                 w += 1;
             }
         }
-        br.pos = i;
-        br.bit = shift ^ 4;
+        // Re-sync the bit reader to the nibble boundary the RLE ended on:
+        // `bit` is how many bits of `pos` are consumed, and the next nibble
+        // begins at `shift ^ 4`'s complement within the current byte.
+        br.seek_byte_bit(i, shift ^ 4);
 
         let bd = DecodeTable::build(&bit_length, HUFF_BC)?;
 
-        // Decode the HUFF_TABLE_SIZE entry bit-length array using `bd`.
+        // Layer 2: the real table lengths, RLE-coded through `bd`.
+        // 0..=15 is a literal length. The rest are two families of two
+        // lengths each: 16/17 repeat the *previous* entry, 18/19 fill
+        // *zeroes*, and in each family the first is the short form
+        // (3 + 3 bits, 3..=10) and the second the long (11 + 7 bits,
+        // 11..=138).
         let mut table = [0u8; HUFF_TABLE_SIZE];
         let mut idx = 0usize;
         while idx < HUFF_TABLE_SIZE {
@@ -349,14 +328,14 @@ impl Unpacker {
                 table[idx] = num as u8;
                 idx += 1;
             } else if num < 18 {
-                // 16/17: repeat the previous entry n times
+                // 16/17: repeat the previous entry n times.
                 let n = if num == 16 {
-                    br.take(3)? + 3
+                    br.take(3)? as usize + 3
                 } else {
-                    br.take(7)? + 11
+                    br.take(7)? as usize + 11
                 };
                 if idx == 0 {
-                    return Err(Error::Malformed("repeat before any table entry"));
+                    return Err(Error::Malformed("repeat with no previous length"));
                 }
                 let prev = table[idx - 1];
                 for _ in 0..n {
@@ -366,12 +345,12 @@ impl Unpacker {
                     table[idx] = prev;
                     idx += 1;
                 }
-            } else {
-                // 18/19: fill zeroes n times
+            } else if num < 20 {
+                // 18/19: fill zeroes n times.
                 let n = if num == 18 {
-                    br.take(3)? + 3
+                    br.take(3)? as usize + 3
                 } else {
-                    br.take(7)? + 11
+                    br.take(7)? as usize + 11
                 };
                 for _ in 0..n {
                     if idx >= HUFF_TABLE_SIZE {
@@ -380,6 +359,8 @@ impl Unpacker {
                     table[idx] = 0;
                     idx += 1;
                 }
+            } else {
+                return Err(Error::Malformed("unknown table code"));
             }
         }
 
@@ -397,67 +378,14 @@ impl Unpacker {
         Ok(())
     }
 
-    fn decode_code_length(br: &mut BitReader, code: u16) -> Result<usize> {
-        let mut length: usize = 2;
-        if code < 8 {
-            length += code as usize;
-        } else {
-            let lbits = (code as usize) / 4 - 1;
-            length += (4 | (code as usize & 3)) << lbits;
-            if lbits > 0 {
-                length += br.take(lbits as u32)? as usize;
-            }
-        }
-        Ok(length)
-    }
+    // ---------------------------------------------------------- commands
 
-    fn parse_filter_data(br: &mut BitReader) -> Result<u32> {
-        let bytes = br.take(2)? + 1;
-        let mut data = 0u32;
-        for i in 0..bytes {
-            data |= (br.take(8)?) << (i * 8);
-        }
-        Ok(data)
-    }
-
-    fn parse_filter(&mut self, br: &mut BitReader) -> Result<()> {
-        let block_start = Self::parse_filter_data(br)? as usize;
-        let block_length = Self::parse_filter_data(br)? as usize;
-        let ftype = br.take(3)? as u8;
-
-        // Sanity checks (ported from the reference implementation).
-        let valid_start = self.last_filter_start == 0
-            || self.len + block_start >= self.last_filter_start + self.last_filter_len;
-        if !(4..=0x400000).contains(&block_length)
-            || !valid_start
-            || block_length > self.dict_limit / 2
-        {
-            return Err(Error::Malformed("invalid filter parameters"));
-        }
-
-        let mut channels = 0usize;
-        if ftype == FILTER_DELTA {
-            channels = br.take(5)? as usize + 1;
-        }
-
-        let start = self.len + block_start;
-        self.filters.push(FilterInfo {
-            ftype,
-            block_start: start,
-            block_length,
-            channels,
-        });
-        self.last_filter_start = start;
-        self.last_filter_len = block_length;
-        Ok(())
-    }
-
+    /// Decode commands until the block's valid bits run out.
     fn decode_block(&mut self, br: &mut BitReader, valid_bits: usize) -> Result<()> {
         loop {
             if br.bit_pos() >= valid_bits {
                 break;
             }
-            // Tables are present (checked by the caller).
             let num = {
                 let t = self.tables.as_ref().ok_or(Error::Malformed("no tables"))?;
                 t.ld.decode(br)?
@@ -466,8 +394,8 @@ impl Unpacker {
             if num < 256 {
                 self.push_byte(num as u8)?;
             } else if num >= 262 {
-                // New match: length code + distance slot.
-                let len_code = Self::decode_code_length(br, num - 262)?;
+                // New match: length code plus distance slot.
+                let len_code = decode_code_length(br, num - 262)?;
                 let dist_slot = {
                     let t = self.tables.as_ref().ok_or(Error::Malformed("no tables"))?;
                     t.dd.decode(br)?
@@ -498,6 +426,8 @@ impl Unpacker {
                     }
                 }
 
+                // Longer distances buy extra length, because far matches
+                // are typically of larger runs.
                 let mut len = len_code;
                 if dist > 0x100 {
                     len += 1;
@@ -520,14 +450,14 @@ impl Unpacker {
                     self.copy_string(self.last_len, d)?;
                 }
             } else {
-                // 258..=261: reuse a cached distance (moving it to front).
+                // 258..=261: reuse a cached distance, moving it to front.
                 let idx = (num - 258) as usize;
                 let dist = self.dist_cache_touch(idx);
                 let len_slot = {
                     let t = self.tables.as_ref().ok_or(Error::Malformed("no tables"))?;
                     t.rd.decode(br)?
                 };
-                let len = Self::decode_code_length(br, len_slot)?;
+                let len = decode_code_length(br, len_slot)?;
                 self.last_len = len;
                 self.copy_string(len, dist)?;
             }
@@ -535,6 +465,37 @@ impl Unpacker {
         Ok(())
     }
 
+    // ------------------------------------------------------------- matches
+
+    /// Append one literal to the window and the member output.
+    #[inline]
+    fn push_byte(&mut self, b: u8) -> Result<()> {
+        self.window[self.len & self.window_mask] = b;
+        self.len += 1;
+        self.out.push(b);
+        self.apply_ready_filters()
+    }
+
+    /// Copy `len` bytes from `dist` back in the window. A distance larger
+    /// than what has been written is a malformed stream, not a wrap-around
+    /// read of whatever the window happens to hold.
+    fn copy_string(&mut self, len: usize, dist: usize) -> Result<()> {
+        if dist == 0 {
+            return Err(Error::Malformed("zero match distance"));
+        }
+        if dist > self.len {
+            return Err(Error::Malformed("match distance beyond output"));
+        }
+        for _ in 0..len {
+            let b = self.window[(self.len - dist) & self.window_mask];
+            self.window[self.len & self.window_mask] = b;
+            self.len += 1;
+            self.out.push(b);
+        }
+        self.apply_ready_filters()
+    }
+
+    #[inline]
     fn dist_cache_push(&mut self, value: usize) {
         self.dist_cache[3] = self.dist_cache[2];
         self.dist_cache[2] = self.dist_cache[1];
@@ -542,6 +503,9 @@ impl Unpacker {
         self.dist_cache[0] = value;
     }
 
+    /// Return cache slot `idx` and move it to the front (move-to-front, so
+    /// a distance reused often stays at slot 0).
+    #[inline]
     fn dist_cache_touch(&mut self, idx: usize) -> usize {
         let dist = self.dist_cache[idx];
         for i in (1..=idx).rev() {
@@ -551,11 +515,47 @@ impl Unpacker {
         dist
     }
 
+    // ------------------------------------------------------------- filters
+
+    /// Read one filter declaration.
+    fn parse_filter(&mut self, br: &mut BitReader) -> Result<()> {
+        let block_start = parse_filter_data(br)? as usize;
+        let block_length = parse_filter_data(br)? as usize;
+        let ftype = br.take(3)? as u8;
+
+        // A filter range must not overlap the previous one and must fit in
+        // half the dictionary, which is the format's own bound.
+        let valid_start = self.last_filter_start == 0
+            || self.len + block_start >= self.last_filter_start + self.last_filter_len;
+        if !(4..=0x400000).contains(&block_length)
+            || !valid_start
+            || block_length > self.dict_limit / 2
+        {
+            return Err(Error::Malformed("invalid filter parameters"));
+        }
+
+        let mut channels = 0usize;
+        if ftype == FILTER_DELTA {
+            channels = br.take(5)? as usize + 1;
+        }
+
+        let start = self.len + block_start;
+        self.filters.push(FilterInfo {
+            ftype,
+            block_start: start,
+            block_length,
+            channels,
+        });
+        self.last_filter_start = start;
+        self.last_filter_len = block_length;
+        Ok(())
+    }
+
     /// Apply every filter whose region is now fully decoded. Filters are
-    /// declared and complete in stream order; a region is only readable
-    /// from the circular window while its last byte is the most recent
-    /// output, so each filter is applied the moment its range completes,
-    /// replacing the region bytes in the member output.
+    /// declared and complete in stream order; a region is only readable from
+    /// the circular window while its last byte is the most recent output, so
+    /// each filter is applied the moment its range completes, replacing the
+    /// region bytes in the member output.
     fn apply_ready_filters(&mut self) -> Result<()> {
         while let Some(f) = self.filters.first() {
             let end = f.block_start + f.block_length;
@@ -583,30 +583,50 @@ impl Unpacker {
         Ok(())
     }
 
-    /// Conclude the current member: verify its declared size and filters
-    /// and return the produced bytes. The window contents and decoder
-    /// state stay available for the next solid member.
-    pub fn finish(&mut self) -> Result<Vec<u8>> {
-        let produced = self.len - self.member_start;
-        if let Some(t) = self.unpacked_target {
-            if produced as u64 != t {
-                return Err(Error::Malformed("unpacked size mismatch"));
-            }
-        }
-        if !self.filters.is_empty() {
-            // A filter whose range never completed inside this member.
-            return Err(Error::Malformed(
-                "filter range out of order or out of bounds",
-            ));
-        }
-        Ok(core::mem::take(&mut self.out))
+    /// Window byte at an absolute offset.
+    #[inline]
+    fn at(&self, abs: usize) -> u8 {
+        self.window[abs & self.window_mask]
     }
 }
 
+// ------------------------------------------------------------ free helpers
+
+/// Length code → match length, with the extra-bits ladder: codes 0..=7 are
+/// lengths 2..=9; codes 8 and up add `(4 | (code & 3)) << (code / 4 - 1)`
+/// plus that many extra bits.
+fn decode_code_length(br: &mut BitReader, code: u16) -> Result<usize> {
+    let mut length: usize = 2;
+    if code < 8 {
+        length += code as usize;
+    } else {
+        let lbits = (code as usize) / 4 - 1;
+        length += (4 | (code as usize & 3)) << lbits;
+        if lbits > 0 {
+            length += br.take(lbits as u32)? as usize;
+        }
+    }
+    Ok(length)
+}
+
+/// A filter's address/length fields are a length byte then that many bytes
+/// little-endian, so a field can be 1..=4 bytes.
+fn parse_filter_data(br: &mut BitReader) -> Result<u32> {
+    let bytes = br.take(2)? + 1;
+    let mut data = 0u32;
+    for i in 0..bytes {
+        data |= br.take(8)? << (i * 8);
+    }
+    Ok(data)
+}
+
+/// Run one filter over a decoded region.
 fn run_filter(f: &FilterInfo, region: &[u8]) -> Result<Vec<u8>> {
     let len = region.len();
     match f.ftype {
         FILTER_DELTA => {
+            // Byte-plane de-delta: `channels` interleaved streams, each a
+            // running subtraction over its own lane.
             let channels = f.channels.max(1);
             let mut out = vec![0u8; len];
             let mut src_pos = 0usize;
@@ -623,6 +643,10 @@ fn run_filter(f: &FilterInfo, region: &[u8]) -> Result<Vec<u8>> {
             Ok(out)
         }
         FILTER_E8 | FILTER_E8E9 => {
+            // x86 call fixup: `E8` (and `E9` in the extended form) is a
+            // relative call/jump whose target is stored relative to the
+            // next instruction. Convert between the archive's relative
+            // form and the file's absolute form.
             const FILE_SIZE: u32 = 0x1000000;
             let extended = f.ftype == FILTER_E8E9;
             let mut buf = region.to_vec();
@@ -652,29 +676,29 @@ fn run_filter(f: &FilterInfo, region: &[u8]) -> Result<Vec<u8>> {
             Ok(buf)
         }
         FILTER_ARM => {
+            // ARM BL/BLX fixup: the 24-bit immediate is a word offset from
+            // the branch, so add the absolute word position.
             let mut buf = region.to_vec();
             let mut i = 0usize;
-            while i + 3 < len {
+            while (i as i64) < (len as i64) - 3 {
                 if region[i + 3] == 0xEB {
-                    let mut offset = u32::from_le_bytes([
+                    let offset = (i + f.block_start) as u32 / 4;
+                    let addr = u32::from_le_bytes([
                         region[i],
                         region[i + 1],
                         region[i + 2],
                         region[i + 3],
-                    ]) & 0x00ff_ffff;
-                    offset = offset.wrapping_sub(((i + f.block_start) / 4) as u32);
-                    offset = (offset & 0x00ff_ffff) | 0xeb00_0000;
-                    buf[i..i + 4].copy_from_slice(&offset.to_le_bytes());
+                    ]);
+                    let mut off = addr & 0x00FF_FFFF;
+                    off = off.wrapping_sub(offset);
+                    buf[i] = (off & 0xFF) as u8;
+                    buf[i + 1] = ((off >> 8) & 0xFF) as u8;
+                    buf[i + 2] = ((off >> 16) & 0xFF) as u8;
                 }
                 i += 4;
             }
             Ok(buf)
         }
-        other => Err(Error::Unsupported(match other {
-            4 => "audio filter (not used in RAR5)",
-            5 => "RGB filter (not used in RAR5)",
-            6 => "Itanium filter (not used in RAR5)",
-            _ => "unknown filter type",
-        })),
+        _ => Err(Error::Unsupported("unknown filter type")),
     }
 }

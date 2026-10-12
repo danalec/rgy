@@ -1,7 +1,16 @@
-//! Huffman coding implementation.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Huffman codes and bit-level I/O, the entropy layer under DEFLATE and
+//! the shared helpers under bzip2.
 //!
-//! Provides Huffman tree construction, encoding, and decoding for use in
-//! DEFLATE, BZIP2, and Brotli compression algorithms.
+//! Independent implementations of the published pieces: the canonical
+//! code assignment of RFC 1951 §3.2.2 (codes of one length taken in
+//! symbol order, each length starting where the previous left off), the
+//! Larmore–Hirschberg length-limited construction, and the bit orderings
+//! the two formats speak — LSB-first for DEFLATE, MSB-first for bzip2.
+//! The symbol decoder is a two-level table: a first level over the low
+//! bits the stream offers first, and sub-tables only for the codes too
+//! long to land there.
 
 use alloc::boxed::Box;
 use alloc::collections::BinaryHeap;
@@ -145,45 +154,6 @@ pub fn build_canonical_codes(lengths: &[u8], max_bits: usize) -> Vec<CodeLength>
     codes
 }
 
-/// Huffman decoder lookup table.
-///
-/// Uses a table-driven approach for fast decoding.
-#[derive(Debug, Clone)]
-pub struct HuffmanDecoder {
-    /// Lookup table entries.
-    table: Vec<DecoderEntry>,
-    /// Number of bits for primary lookup.
-    table_bits: u8,
-    /// Code lengths for slow-path decoding.
-    #[allow(dead_code)] // vendored: encoder-side table
-    lengths: Vec<u8>,
-    /// Canonical codes for slow-path decoding.
-    #[allow(dead_code)]
-    codes: Vec<CodeLength>,
-    /// Precomputed long codes for codes longer than table_bits.
-    long_codes: Vec<LongCode>,
-}
-
-/// Precomputed long code for slow-path decoding (> table_bits).
-#[derive(Debug, Clone, Copy)]
-struct LongCode {
-    reversed: u16,
-    mask: u16,
-    symbol: u16,
-    len: u8,
-}
-
-/// Decoder table entry.
-#[derive(Debug, Clone, Copy)]
-struct DecoderEntry {
-    /// Symbol value (if leaf).
-    symbol: u16,
-    /// Number of bits for this entry (0 if not a leaf).
-    bits: u8,
-    /// Whether this is a valid entry.
-    valid: bool,
-}
-
 /// Reverse the bottom `len` bits of `code`.
 ///
 /// Used to convert between MSB-first canonical Huffman codes and the
@@ -204,6 +174,40 @@ pub fn reverse_bits(code: u16, len: u8) -> u16 {
     result
 }
 
+/// One slot of the symbol decoder's first level.
+#[derive(Debug, Clone, Copy)]
+struct Slot {
+    /// Symbol this slot resolves to, when `bits` is non-zero.
+    symbol: u16,
+    /// Bits consumed when this slot is a whole code; 0 when empty or
+    /// when the code lives in a sub-table.
+    bits: u8,
+    /// Where this slot's sub-table starts in `sub_slots`, when the code
+    /// runs past the first level.
+    sub_base: u32,
+    /// Bits the sub-table indexes: `code_len - table_bits` at its widest.
+    sub_bits: u8,
+}
+
+/// Huffman decoder lookup table.
+///
+/// Two levels, sized to the codes actually present: a first level of
+/// `1 << table_bits` slots covers every code that lands inside it whole,
+/// and each first-level slot that a longer code passes through carries a
+/// sub-table of `1 << sub_bits` slots for exactly those codes. Codes are
+/// matched on their bit-reversed values, because canonical codes are
+/// prefix-free read MSB-first while DEFLATE packs bits LSB-first.
+#[derive(Debug, Clone)]
+pub struct HuffmanDecoder {
+    table: Vec<Slot>,
+    table_bits: u8,
+    sub_slots: Vec<Slot>,
+    /// Code lengths retained for slow-path callers and for the encoder
+    /// side that rebuilds codes from the same lengths.
+    #[allow(dead_code)] // vendored: encoder-side table
+    lengths: Vec<u8>,
+}
+
 impl HuffmanDecoder {
     /// Build a decoder from code lengths.
     ///
@@ -216,60 +220,103 @@ impl HuffmanDecoder {
     /// - The encoder must also write reversed codes via `write_bits(reverse_bits(code, len), len)`
     pub fn from_lengths(lengths: &[u8], max_bits: u8) -> Self {
         let table_bits = max_bits.min(12); // Limit table size
-        let table_size = 1 << table_bits;
-        let mut table = vec![
-            DecoderEntry {
-                symbol: 0,
-                bits: 0,
-                valid: false,
-            };
-            table_size
-        ];
+        let table_size = 1usize << table_bits;
+        let empty = Slot {
+            symbol: 0,
+            bits: 0,
+            sub_base: 0,
+            sub_bits: 0,
+        };
+        let mut table = vec![empty; table_size];
+        let mut sub_slots: Vec<Slot> = Vec::new();
 
         let codes = build_canonical_codes(lengths, max_bits as usize);
-        let mut long_codes = Vec::new();
 
+        // Group the codes that run past the first level by the low
+        // `table_bits` of their reversed value — that is the first-level
+        // slot the stream will look them up through.
+        let mut long: Vec<(usize, u16, u8, u16)> = Vec::new(); // (slot key, reversed, len, symbol)
         for (symbol, code_len) in codes.iter().enumerate() {
             if code_len.bits == 0 {
                 continue;
             }
-
-            let code = code_len.code;
-            let len = code_len.bits;
-
-            // Reverse the canonical code bits for LSB-first table indexing.
-            // This ensures the prefix-free property holds for the bottom bits.
-            let reversed = reverse_bits(code, len);
-
-            if len <= table_bits {
-                // Fill all table entries where the bottom `len` bits equal `reversed`.
-                let count = 1usize << (table_bits - len);
-                for i in 0..count {
-                    let idx = (i << len) | (reversed as usize);
-                    if idx < table_size {
-                        table[idx] = DecoderEntry {
-                            symbol: symbol as u16,
-                            bits: len,
-                            valid: true,
-                        };
-                    }
+            let reversed = reverse_bits(code_len.code, code_len.bits);
+            if code_len.bits <= table_bits {
+                // Every index whose low `bits` bits are the reversed code,
+                // for all patterns of the bits above them.
+                let stride = 1usize << code_len.bits;
+                let mut i = 0;
+                while i < table_size {
+                    table[i | reversed as usize] = Slot {
+                        symbol: symbol as u16,
+                        bits: code_len.bits,
+                        sub_base: 0,
+                        sub_bits: 0,
+                    };
+                    i += stride;
                 }
             } else {
-                long_codes.push(LongCode {
+                long.push((
+                    reversed as usize & (table_size - 1),
                     reversed,
-                    mask: (1u16 << len) - 1,
-                    symbol: symbol as u16,
-                    len,
-                });
+                    code_len.bits,
+                    symbol as u16,
+                ));
             }
+        }
+
+        // One sub-table per first-level slot the long codes share. The
+        // sub-table is wide enough for the longest code in the group.
+        long.sort_unstable();
+        let mut i = 0;
+        while i < long.len() {
+            let key = long[i].0;
+            let mut j = i;
+            let mut widest = 0u8;
+            while j < long.len() && long[j].0 == key {
+                widest = widest.max(long[j].2);
+                j += 1;
+            }
+            let sub_bits = widest - table_bits;
+            let sub_base = sub_slots.len() as u32;
+            let width = 1usize << sub_bits;
+            sub_slots.resize(
+                sub_slots.len() + width,
+                Slot {
+                    symbol: 0,
+                    bits: 0,
+                    sub_base: 0,
+                    sub_bits: 0,
+                },
+            );
+            for &(_, reversed, len, symbol) in &long[i..j] {
+                let within = (reversed >> table_bits) as usize;
+                let stride = 1usize << (len - table_bits);
+                let mut k = 0;
+                while k < width {
+                    sub_slots[sub_base as usize + (k | within)] = Slot {
+                        symbol,
+                        bits: len,
+                        sub_base: 0,
+                        sub_bits: 0,
+                    };
+                    k += stride;
+                }
+            }
+            table[key] = Slot {
+                symbol: 0,
+                bits: 0,
+                sub_base,
+                sub_bits,
+            };
+            i = j;
         }
 
         Self {
             table,
             table_bits,
+            sub_slots,
             lengths: lengths.to_vec(),
-            codes,
-            long_codes,
         }
     }
 
@@ -280,37 +327,47 @@ impl HuffmanDecoder {
     ///
     /// Returns `(symbol, bits_consumed)` or `None` if no valid code matches.
     pub fn decode(&self, bits: u32, available_bits: u8) -> Option<(u16, u8)> {
-        // Fast path: the bits under the cursor fit the table whole, so a
-        // single table lookup with one mask and one index check is the
-        // whole decoder.
-        if available_bits >= self.table_bits {
-            let mask = (1u32 << self.table_bits) - 1;
-            let idx = (bits & mask) as usize;
-            let entry = &self.table[idx];
-            if entry.valid {
+        let mask = (1u32 << self.table_bits) - 1;
+        let idx = (bits & mask) as usize;
+        let slot = self.table[idx];
+
+        if available_bits < self.table_bits {
+            // Not enough bits to cover the first level. Only a code that
+            // fits entirely inside what the stream has can match.
+            if slot.bits != 0 && slot.bits <= available_bits {
+                return Some((slot.symbol, slot.bits));
+            }
+            return None;
+        }
+
+        if slot.bits != 0 {
+            return Some((slot.symbol, slot.bits));
+        }
+        if slot.sub_bits == 0 {
+            return None;
+        }
+
+        // Second level: the code runs past the first table. It can only
+        // match when the stream actually holds the sub-table's width.
+        let need = self.table_bits + slot.sub_bits;
+        if available_bits < need {
+            // A code shorter than the sub-table's width may still match
+            // inside it; check the entries whose bits fit what we have.
+            let sub_mask = (1u32 << slot.sub_bits) - 1;
+            let within = ((bits >> self.table_bits) & sub_mask) as usize;
+            let entry = self.sub_slots[slot.sub_base as usize + within];
+            if entry.bits != 0 && entry.bits <= available_bits {
                 return Some((entry.symbol, entry.bits));
             }
-        } else {
-            // Not enough bits to cover the table: trim to what is available
-            // and fall through to the long-code scan below.
-            let lookup_bits = self.table_bits.min(available_bits);
-            let mask = (1u32 << lookup_bits) - 1;
-            let idx = (bits & mask) as usize;
-            if idx < self.table.len() {
-                let entry = &self.table[idx];
-                if entry.valid && entry.bits <= available_bits {
-                    return Some((entry.symbol, entry.bits));
-                }
-            }
+            return None;
         }
 
-        // Slow path: scan precomputed long codes for codes longer than table_bits.
-        for lc in &self.long_codes {
-            if lc.len <= available_bits && (bits as u16 & lc.mask) == lc.reversed {
-                return Some((lc.symbol, lc.len));
-            }
+        let sub_mask = (1u32 << slot.sub_bits) - 1;
+        let within = ((bits >> self.table_bits) & sub_mask) as usize;
+        let entry = self.sub_slots[slot.sub_base as usize + within];
+        if entry.bits != 0 {
+            return Some((entry.symbol, entry.bits));
         }
-
         None
     }
 
@@ -324,8 +381,10 @@ impl HuffmanDecoder {
 #[derive(Debug, Clone, Default)]
 pub struct BitWriter {
     buffer: Vec<u8>,
-    current_byte: u8,
-    bit_pos: u8,
+    /// Bits not yet flushed to `buffer`, least-significant first.
+    pending: u64,
+    /// How many bits `pending` holds. Always < 8 between writes' tails.
+    pending_bits: u8,
 }
 
 impl BitWriter {
@@ -333,52 +392,62 @@ impl BitWriter {
     pub fn new() -> Self {
         Self {
             buffer: Vec::new(),
-            current_byte: 0,
-            bit_pos: 0,
+            pending: 0,
+            pending_bits: 0,
         }
     }
 
     /// Write bits (LSB first).
     pub fn write_bits(&mut self, value: u32, num_bits: u8) {
-        for i in 0..num_bits {
-            let bit = ((value >> i) & 1) as u8;
-            self.current_byte |= bit << self.bit_pos;
-            self.bit_pos += 1;
-
-            if self.bit_pos == 8 {
-                self.buffer.push(self.current_byte);
-                self.current_byte = 0;
-                self.bit_pos = 0;
-            }
-        }
+        debug_assert!(num_bits <= 32);
+        let mask = if num_bits == 32 {
+            u32::MAX
+        } else {
+            (1u32 << num_bits) - 1
+        };
+        self.pending |= ((value & mask) as u64) << self.pending_bits;
+        self.pending_bits += num_bits;
+        self.flush_bytes();
     }
 
     /// Write bits (MSB first, for BZIP2).
     pub fn write_bits_msb(&mut self, value: u64, num_bits: u8) {
-        for i in (0..num_bits).rev() {
-            let bit = ((value >> i) & 1) as u8;
-            self.current_byte |= bit << self.bit_pos;
-            self.bit_pos += 1;
-
-            if self.bit_pos == 8 {
-                self.buffer.push(self.current_byte);
-                self.current_byte = 0;
-                self.bit_pos = 0;
-            }
+        debug_assert!(num_bits <= 64);
+        // The stream is filled least-significant bit first, so the value's
+        // most significant bit — which must land in the stream first —
+        // goes into the lowest pending slot: the written pattern is the
+        // bottom `num_bits` of `value`, reversed.
+        let mut reversed = 0u64;
+        let mut val = value;
+        for _ in 0..num_bits {
+            reversed = (reversed << 1) | (val & 1);
+            val >>= 1;
         }
+        self.pending |= reversed << self.pending_bits;
+        self.pending_bits += num_bits;
+        self.flush_bytes();
     }
 
     /// Finish writing and return the buffer.
     pub fn finish(mut self) -> Vec<u8> {
-        if self.bit_pos > 0 {
-            self.buffer.push(self.current_byte);
+        if self.pending_bits > 0 {
+            self.buffer.push(self.pending as u8);
         }
         self.buffer
     }
 
     /// Get current bit position.
     pub fn bit_position(&self) -> usize {
-        self.buffer.len() * 8 + self.bit_pos as usize
+        self.buffer.len() * 8 + self.pending_bits as usize
+    }
+
+    /// Move whole bytes out of `pending` into `buffer`.
+    fn flush_bytes(&mut self) {
+        while self.pending_bits >= 8 {
+            self.buffer.push(self.pending as u8);
+            self.pending >>= 8;
+            self.pending_bits -= 8;
+        }
     }
 }
 
@@ -648,6 +717,83 @@ mod tests {
             assert_eq!(decoded, sym, "Symbol {} roundtrip failed", sym);
             assert_eq!(consumed, bits);
         }
+    }
+
+    /// The old suite only ever decoded codes shorter than the table.
+    /// Lengths 1..=15 with a second 15 fill the Kraft sum exactly, which
+    /// is the shape that forces codes through the sub-table the decoder
+    /// builds for anything past `table_bits`.
+    #[test]
+    fn a_code_longer_than_the_table_still_decodes() {
+        let mut lengths = [0u8; 16];
+        for (i, slot) in lengths.iter_mut().enumerate() {
+            *slot = (i as u8) + 1;
+        }
+        lengths[15] = 15; // lengths 1..=15 plus a second 15: Kraft sum 1
+        let codes = build_canonical_codes(&lengths, 15);
+        let decoder = HuffmanDecoder::from_lengths(&lengths, 15);
+        assert_eq!(decoder.table_bits(), 12, "table must be smaller than 15");
+
+        for (sym, code) in codes.iter().enumerate() {
+            if code.bits == 0 {
+                continue;
+            }
+            let rev = reverse_bits(code.code, code.bits);
+            let mut writer = BitWriter::new();
+            writer.write_bits(rev as u32, code.bits);
+            let data = writer.finish();
+            let reader = BitReader::new(&data);
+            let bits = reader.peek_bits(code.bits).unwrap();
+            let (decoded, consumed) = decoder
+                .decode(bits, code.bits)
+                .unwrap_or_else(|| panic!("symbol {sym} of {} bits did not decode", code.bits));
+            assert_eq!(decoded as usize, sym);
+            assert_eq!(consumed, code.bits);
+        }
+    }
+
+    /// Bit I/O is on the path of every stream; a reader that panics on
+    /// truncated or arbitrary bytes turns a corrupt file into a crash.
+    #[test]
+    fn never_panics_on_arbitrary_bytes() {
+        let corpus: Vec<(&str, Vec<u8>)> = alloc::vec![
+            ("empty", alloc::vec![]),
+            ("one", alloc::vec![0xFF]),
+            ("short", alloc::vec![0x00, 0x80]),
+            ("long", alloc::vec![0xA5; 64]),
+        ];
+        crate::fuzzkit::assert_never_panics(corpus, 2000, "huffman", |data| {
+            let mut reader = BitReader::new(data);
+            for n in [1u8, 3, 7, 8, 15, 16, 24] {
+                let _ = reader.peek_bits(n);
+                let _ = reader.read_bits(n);
+                let _ = reader.read_bits_msb(n);
+                reader.skip_bits(n % 9);
+            }
+            let _ = reader.read_bits_msb_64(32);
+            reader.align();
+            let _ = reader.has_more();
+            let _ = reader.remaining_bytes();
+            let _ = reader.remaining_bits();
+
+            let mut writer = BitWriter::new();
+            if let Some(&b) = data.first() {
+                writer.write_bits(b as u32, 5);
+                writer.write_bits_msb(b as u64, 7);
+                writer.write_bits_msb(b as u64, 64);
+                let _ = writer.bit_position();
+                let _ = writer.finish();
+            }
+
+            if !data.is_empty() {
+                let lengths: Vec<u8> = data.iter().take(32).map(|b| b % 16).collect();
+                let decoder = HuffmanDecoder::from_lengths(&lengths, 15);
+                if let Some(bits) = BitReader::new(data).peek_bits(16) {
+                    let _ = decoder.decode(bits, 16);
+                    let _ = decoder.decode(bits, 4);
+                }
+            }
+        });
     }
 }
 

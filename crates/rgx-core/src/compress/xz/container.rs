@@ -1,25 +1,22 @@
-//! XZ container structure: stream header, block headers, index and stream
-//! footer, around the LZMA2 decoder in [`crate::compress::lzma`].
+// SPDX-License-Identifier: Apache-2.0
+
+//! The .xz container format: stream headers and footers, blocks with
+//! optional declared sizes, padding, integrity checks, and the index the
+//! footer points at.
 //!
-//! Layout is per the .xz file format specification (version 1.2.1), and
-//! the constants and bit positions below are quoted from it:
+//! Independent reimplementation of the published container format
+//! (stream/block/index/footer framing, the multibyte integer encoding,
+//! and the four check types), written from the format description rather
+//! than from any implementation's source. The compressed payload is
+//! LZMA2, decoded by [`crate::compress::lzma`].
 //!
-//! ```text
-//! Stream = Stream Header, Block*, Index, Stream Footer
-//! ```
-//!
-//! Everything structural is validated: the Stream Header and each Block
-//! Header carry a CRC32, reserved bits must be zero, and padding must be
-//! null. That matters for a search tool specifically — a container that
-//! misparses a corrupt file does not fail, it silently extracts the wrong
-//! bytes into the searchable corpus.
-//!
-//! Stream Padding (null bytes between streams) is accepted and skipped, so
-//! concatenated `.xz` streams decode — through [`XzReader::decompress_all`],
-//! which is what a standalone file calls for (§2: a file is one *or more*
-//! Streams). [`XzReader::decompress`] stops at the end of the first Stream
-//! and is the right one only when the data is embedded in another format,
-//! where the bytes after it belong to the outer container.
+//! The format's own caution governs the decode: §3.1.4 says the Block
+//! Header and Index fields "may contain (intentionally or
+//! unintentionally) invalid information", so the extent of the
+//! Compressed Data is walked from the LZMA2 control bytes, a declared
+//! Compressed Size is only trusted once it matches that walk (§3.1.3),
+//! and the Index is checked against what the blocks *really* occupied
+//! (§4.2/§4.3) rather than against what their headers claimed.
 
 use crate::compress::crc32::crc32;
 use crate::compress::error::{CompressError, CompressResult};
@@ -27,32 +24,36 @@ use crate::compress::lzma::LzmaDecoder;
 use alloc::format;
 use alloc::vec::Vec;
 
-/// Stream Header magic: `FD 37 7A 58 5A 00`.
+/// The six-byte stream magic (§2.1.1.1).
 pub const XZ_MAGIC: [u8; 6] = [0xFD, b'7', b'z', b'X', b'Z', 0x00];
-/// Stream Footer magic: `59 5A` ("YZ").
+
+/// The two-byte stream footer magic (§2.1.2).
 pub const FOOTER_MAGIC: [u8; 2] = *b"YZ";
 
-/// Stream Header is 6 magic + 2 flags + 4 CRC32.
+/// Stream Header: magic + flags + CRC32 (§2.1.1).
 const STREAM_HEADER_LEN: usize = 12;
-/// Stream Footer is 4 CRC32 + 4 backward size + 2 flags + 2 magic.
+
+/// Stream Footer: CRC32 + backward size + flags + magic (§2.1.2).
 const STREAM_FOOTER_LEN: usize = 12;
 
-/// LZMA2 filter ID (§5.3.1).
+/// The LZMA2 filter id (§5.3.1) — the only filter this decoder runs.
 const FILTER_LZMA2: u64 = 0x21;
 
-/// Largest Block Header the size byte can express: `(0xFF + 1) * 4`.
+/// A Block Header larger than this is not something the format needs.
 const MAX_BLOCK_HEADER: usize = 1024;
 
-/// Check IDs and their sizes (§2.1.1.2).
-///
-/// All four that the specification defines are verifiable here, so none
-/// of them is a silent pass: a stream whose Check cannot be evaluated is
-/// an error rather than a file that decodes unchecked.
+// Check types (§2.1.1.2 / §3.3).
 const CHECK_NONE: u8 = 0x00;
 const CHECK_CRC32: u8 = 0x01;
 const CHECK_CRC64: u8 = 0x04;
 const CHECK_SHA256: u8 = 0x0A;
 
+fn invalid(msg: &'static str) -> CompressError {
+    CompressError::InvalidFormat(msg)
+}
+
+/// Bytes the Check field occupies for a check id, or `None` when the id
+/// is not one the format defines.
 fn check_size(id: u8) -> Option<usize> {
     match id {
         CHECK_NONE => Some(0),
@@ -63,45 +64,41 @@ fn check_size(id: u8) -> Option<usize> {
     }
 }
 
-/// A structural error. `InvalidFormat` carries a `&'static str`, so every
-/// message here is a literal; the two messages that genuinely need a
-/// value use `UnsupportedFormat(String)` instead.
-fn err(msg: &'static str) -> CompressError {
-    CompressError::InvalidFormat(msg)
-}
-
-/// A variable-length integer as defined in §1.2.
-///
-/// Little-endian 7-bit groups; every byte but the last has the high bit
-/// set. Limited to 63 bits, so at most 9 bytes, and a non-canonical
-/// encoding (a continuation byte whose low bits are all zero) is
-/// rejected — the spec requires minimal-length encoding.
+/// One multibyte integer (§1.2): seven data bits per byte, little-endian
+/// groups, a continuation bit set on every byte but the last. The
+/// encoding is canonical — no redundant trailing zero group — so a
+/// non-canonical integer is an error, not a value.
 fn read_vli(data: &[u8], pos: &mut usize) -> CompressResult<u64> {
-    let start = *pos;
-    let mut value: u64 = 0;
-    let mut shift = 0;
+    // At most 9 groups of 7 bits carry the 63-bit value space; anything
+    // longer cannot be a well-formed integer no matter what the bits say.
+    let mut groups: Vec<u8> = Vec::with_capacity(9);
     loop {
         let Some(&byte) = data.get(*pos) else {
-            return Err(err("truncated multibyte integer"));
+            return Err(invalid("truncated multibyte integer"));
         };
         *pos += 1;
-        if shift == 63 && (byte & 0x7F) > 1 {
-            return Err(err("multibyte integer exceeds 63 bits"));
-        }
-        if shift > 63 {
-            return Err(err("multibyte integer too long"));
-        }
-        value |= u64::from(byte & 0x7F) << shift;
+        groups.push(byte);
         if byte & 0x80 == 0 {
-            // Canonical form: a multi-byte encoding must not end in 0x00,
-            // and a multi-byte value must not fit in one byte.
-            if *pos - start > 1 && byte == 0x00 {
-                return Err(err("non-canonical multibyte integer"));
-            }
-            return Ok(value);
+            break;
         }
-        shift += 7;
+        if groups.len() == 9 {
+            return Err(invalid("multibyte integer too long"));
+        }
     }
+    let last = *groups.last().expect("loop always pushes one");
+    // Canonical form: a multi-byte encoding must not end in 0x00.
+    if groups.len() > 1 && last == 0x00 {
+        return Err(invalid("non-canonical multibyte integer"));
+    }
+    let mut value: u64 = 0;
+    for (i, &byte) in groups.iter().enumerate() {
+        let piece = u64::from(byte & 0x7F);
+        if i == 8 && piece > 1 {
+            return Err(invalid("multibyte integer exceeds 63 bits"));
+        }
+        value |= piece << (7 * i);
+    }
+    Ok(value)
 }
 
 /// Everything a Block Header tells us that the decoder needs.
@@ -121,19 +118,25 @@ struct BlockHeader {
     uncompressed_size: Option<u64>,
 }
 
+/// One filter's flags as the Block Header carries them (§3.1.5).
+struct FilterFlags {
+    id: u64,
+    props: Vec<u8>,
+}
+
 /// Parse a Block Header at `data[*pos..]` (§3.1).
 fn parse_block_header(data: &[u8], pos: &mut usize) -> CompressResult<BlockHeader> {
     let start = *pos;
     let first = *data
         .get(start)
-        .ok_or_else(|| err("truncated block header"))?;
+        .ok_or_else(|| invalid("truncated block header"))?;
     let len = (first as usize + 1) * 4;
     let end = start
         .checked_add(len)
         .filter(|e| *e <= data.len())
-        .ok_or_else(|| err("truncated block header"))?;
+        .ok_or_else(|| invalid("truncated block header"))?;
     if len > MAX_BLOCK_HEADER {
-        return Err(err("block header too large"));
+        return Err(invalid("block header too large"));
     }
     let header = &data[start..end];
 
@@ -145,80 +148,93 @@ fn parse_block_header(data: &[u8], pos: &mut usize) -> CompressResult<BlockHeade
         header[len - 1],
     ]);
     if crc32(&header[..len - 4]) != stored {
-        return Err(err("block header CRC32 mismatch"));
+        return Err(invalid("block header CRC32 mismatch"));
     }
 
-    // §3.1.2
-    let flags = *header.get(1).ok_or_else(|| err("truncated block header"))?;
+    let mut fields_end = len - 4;
+    let mut cursor = 2usize;
+    let flags = *header
+        .get(1)
+        .ok_or_else(|| invalid("truncated block header"))?;
     if flags & 0x3C != 0 {
-        return Err(err("reserved block flag bits set"));
+        return Err(invalid("reserved block flag bits set"));
     }
     let filter_count = (flags & 0x03) as usize + 1;
-    let has_compressed_size = flags & 0x40 != 0;
-    let has_uncompressed_size = flags & 0x80 != 0;
-
-    // Everything after the two header bytes up to the CRC32 is fields plus
-    // zero padding.
-    let mut p = 2;
-    let fields_end = len - 4;
-    let compressed_size = if has_compressed_size {
-        Some(read_vli(header, &mut p)?)
+    let compressed_size = if flags & 0x40 != 0 {
+        Some(read_vli(header, &mut cursor)?)
     } else {
         None
     };
-    let uncompressed_size = if has_uncompressed_size {
-        Some(read_vli(header, &mut p)?)
+    let uncompressed_size = if flags & 0x80 != 0 {
+        Some(read_vli(header, &mut cursor)?)
     } else {
         None
     };
 
-    // §3.1.5: a list of Filter Flags, each (id, props size, properties).
+    let filters = read_filter_chain(header, &mut cursor, fields_end, filter_count)?;
+
+    // §3.1.6: the remainder is padding and must be null.
+    if header[cursor..fields_end].iter().any(|&b| b != 0) {
+        return Err(invalid("block header padding is not null"));
+    }
+
     // LZMA2 must be the last filter, so only the last one matters to us;
     // any earlier filter would have to run first and changes the data, so
     // a chain we do not implement is rejected rather than half-applied.
-    let mut last: Option<(u64, &[u8])> = None;
-    for _ in 0..filter_count {
-        let id = read_vli(header, &mut p)?;
-        let props_len = read_vli(header, &mut p)? as usize;
-        let props_end = p
-            .checked_add(props_len)
-            .filter(|e| *e <= fields_end)
-            .ok_or_else(|| err("filter properties run past the block header"))?;
-        last = Some((id, &header[p..props_end]));
-        p = props_end;
-    }
-
-    // §3.1.6: the remainder is padding and must be null.
-    if header[p..fields_end].iter().any(|&b| b != 0) {
-        return Err(err("block header padding is not null"));
-    }
-
-    let Some((filter_id, props)) = last else {
-        return Err(err("block header declares no filters"));
+    let Some(last) = filters.last() else {
+        return Err(invalid("block header declares no filters"));
     };
-    if filter_id != FILTER_LZMA2 {
+    if last.id != FILTER_LZMA2 {
         return Err(CompressError::UnsupportedFormat(format!(
-            "xz: unsupported filter 0x{filter_id:x} (only LZMA2 is implemented)"
+            "xz: unsupported filter 0x{:x} (only LZMA2 is implemented)",
+            last.id
         )));
     }
-    if filter_count > 1 {
+    if filters.len() > 1 {
         return Err(CompressError::UnsupportedFormat(
             "xz: multi-filter chains are not implemented".into(),
         ));
     }
-    if props.len() != 1 {
-        return Err(err("LZMA2 properties must be exactly one byte"));
+    if last.props.len() != 1 {
+        return Err(invalid("LZMA2 properties must be exactly one byte"));
     }
-    let dict_size = lzma2_dict_size(props[0])?;
+    let dict_size = lzma2_dict_size(last.props[0])?;
 
+    fields_end = 0; // end of the field walk; `len` is what the caller advances by
+    let _ = fields_end;
     *pos = end;
     Ok(BlockHeader {
         len,
-        filter_id,
+        filter_id: last.id,
         dict_size,
         compressed_size,
         uncompressed_size,
     })
+}
+
+/// Read the Filter Flags list: each entry is an id, a properties length,
+/// and that many property bytes (§3.1.5).
+fn read_filter_chain(
+    header: &[u8],
+    cursor: &mut usize,
+    fields_end: usize,
+    count: usize,
+) -> CompressResult<Vec<FilterFlags>> {
+    let mut filters = Vec::with_capacity(count);
+    for _ in 0..count {
+        let id = read_vli(header, cursor)?;
+        let props_len = read_vli(header, cursor)? as usize;
+        let props_end = cursor
+            .checked_add(props_len)
+            .filter(|e| *e <= fields_end)
+            .ok_or_else(|| invalid("filter properties run past the block header"))?;
+        filters.push(FilterFlags {
+            id,
+            props: header[*cursor..props_end].to_vec(),
+        });
+        *cursor = props_end;
+    }
+    Ok(filters)
 }
 
 /// LZMA2 dictionary size from its one properties byte (§5.3.1).
@@ -227,11 +243,11 @@ fn parse_block_header(data: &[u8], pos: &mut usize) -> CompressResult<BlockHeade
 /// with raw value 40 meaning `u32::MAX`.
 fn lzma2_dict_size(byte: u8) -> CompressResult<u32> {
     if byte & 0xC0 != 0 {
-        return Err(err("reserved bits set in LZMA2 dictionary size"));
+        return Err(invalid("reserved bits set in LZMA2 dictionary size"));
     }
     let bits = byte & 0x3F;
     if bits > 40 {
-        return Err(err("LZMA2 dictionary size above 4 GiB"));
+        return Err(invalid("LZMA2 dictionary size above 4 GiB"));
     }
     if bits == 40 {
         return Ok(u32::MAX);
@@ -240,64 +256,85 @@ fn lzma2_dict_size(byte: u8) -> CompressResult<u32> {
     Ok(size)
 }
 
-/// Length of the LZMA2 chunk stream at the front of `data`, or `None` if
-/// it is truncated or malformed.
+/// Length of the LZMA2 chunk stream at the front of `data`.
 ///
 /// The LZMA2 framing is self-delimiting, so this is how the extent of
 /// Compressed Data is found when the Block Header does not declare a
 /// Compressed Size — which is the common case for files from the `xz`
 /// CLI.
-///
-/// Chunk headers: `0x00` ends the stream; `0x01`/`0x02` are uncompressed
-/// chunks followed by two big-endian size bytes; `0x80..=0xFF` is an LZMA
-/// chunk with two big-endian size fields (and a properties byte when the
-/// control byte is `>= 0xC0`).
 fn lzma2_stream_len(data: &[u8]) -> CompressResult<usize> {
     let mut pos = 0usize;
     loop {
         let Some(&control) = data.get(pos) else {
-            return Err(err("LZMA2 stream is not terminated"));
+            return Err(invalid("LZMA2 stream is not terminated"));
         };
         pos += 1;
-        match control {
-            0x00 => return Ok(pos),
-            0x01 | 0x02 => {
-                if pos + 2 > data.len() {
-                    return Err(err("truncated LZMA2 uncompressed chunk header"));
-                }
-                let size = (u16::from_be_bytes([data[pos], data[pos + 1]]) as usize) + 1;
+        match classify_chunk(control)? {
+            ChunkKind::End => return Ok(pos),
+            ChunkKind::Uncompressed => {
+                let size = read_be16(data, pos)? as usize + 1;
                 pos += 2;
-                if pos + size > data.len() {
-                    return Err(err("truncated LZMA2 uncompressed chunk"));
-                }
-                pos += size;
+                pos = take_payload(data, pos, size)?;
             }
-            0x80..=0xFF => {
-                if pos + 4 > data.len() {
-                    return Err(err("truncated LZMA2 chunk header"));
-                }
-                let unpacked = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
-                let packed = u16::from_be_bytes([data[pos + 2], data[pos + 3]]) as usize;
+            ChunkKind::Lzma { has_props } => {
+                let _unpacked = read_be16(data, pos)?;
+                let packed = read_be16(data, pos + 2)? as usize;
                 pos += 4;
-                if control >= 0xC0 {
-                    pos += 1; // properties byte
+                if has_props {
+                    pos += 1;
                 }
-                let size = packed + 1;
-                if pos + size > data.len() {
-                    return Err(err("truncated LZMA2 chunk"));
-                }
-                let _ = unpacked;
-                pos += size;
-            }
-            _ => {
-                return Err(err("invalid LZMA2 control byte"));
+                pos = take_payload(data, pos, packed + 1)?;
             }
         }
     }
 }
 
+/// What an LZMA2 control byte says the next chunk is.
+enum ChunkKind {
+    End,
+    Uncompressed,
+    Lzma { has_props: bool },
+}
+
+fn classify_chunk(control: u8) -> CompressResult<ChunkKind> {
+    match control {
+        0x00 => Ok(ChunkKind::End),
+        0x01 | 0x02 => Ok(ChunkKind::Uncompressed),
+        0x80..=0xFF => Ok(ChunkKind::Lzma {
+            has_props: control >= 0xC0,
+        }),
+        _ => Err(invalid("invalid LZMA2 control byte")),
+    }
+}
+
+fn read_be16(data: &[u8], at: usize) -> CompressResult<u16> {
+    let b0 = *data
+        .get(at)
+        .ok_or_else(|| invalid("truncated LZMA2 chunk header"))?;
+    let b1 = *data
+        .get(at + 1)
+        .ok_or_else(|| invalid("truncated LZMA2 chunk header"))?;
+    Ok(u16::from_be_bytes([b0, b1]))
+}
+
+fn take_payload(data: &[u8], pos: usize, size: usize) -> CompressResult<usize> {
+    let end = pos
+        .checked_add(size)
+        .filter(|e| *e <= data.len())
+        .ok_or_else(|| invalid("truncated LZMA2 chunk"))?;
+    Ok(end)
+}
+
 /// XZ reader.
 pub struct XzReader;
+
+/// What one block contributed to the decode, kept for the Index check.
+struct BlockExtent {
+    /// Unpadded Size (§4.3.1): header + compressed data + check.
+    unpadded: u64,
+    /// Bytes the block actually produced.
+    uncompressed: u64,
+}
 
 impl XzReader {
     /// Decompress a single `.xz` stream.
@@ -322,132 +359,39 @@ impl XzReader {
     ) -> CompressResult<crate::compress::cap::Bounded> {
         use crate::compress::cap::{Bounded, OutputCap};
         if data.len() < STREAM_HEADER_LEN + STREAM_FOOTER_LEN {
-            return Err(err("file is too short to be an XZ stream"));
+            return Err(invalid("file is too short to be an XZ stream"));
         }
         if data[..6] != XZ_MAGIC {
-            return Err(err("bad magic bytes"));
+            return Err(invalid("bad magic bytes"));
         }
         let check_id = parse_stream_header(data)?;
 
         let mut out = Vec::new();
         let mut cap = OutputCap::new(limit);
         let mut pos = STREAM_HEADER_LEN;
-        // What each Block really occupied, for the section 4.3 check
-        // below. `unpadded` excludes the Block Padding, per section
-        // 4.3.1: the size of the Block Header, the Compressed Data and
-        // the Check.
-        let mut real: Vec<(usize, usize)> = Vec::new();
-        let block_start = pos;
+        let mut extents: Vec<BlockExtent> = Vec::new();
         // Stop at the Index, which begins with a 0x00 byte where a Block
         // Header Size would be.
         while pos < data.len() && data[pos] != 0x00 {
-            let header_start = pos;
-            let header = parse_block_header(data, &mut pos)?;
-            let data_start = pos;
-
-            if let Some(declared) = header.uncompressed_size {
-                if !cap.fits(declared) {
-                    return Ok(Bounded::stopped(out, Some(declared), limit));
+            let before = pos;
+            match decode_one_block(data, &mut pos, check_id, &mut cap)? {
+                BlockOutcome::Done { bytes, extent } => {
+                    extents.push(extent);
+                    out.extend_from_slice(&bytes);
+                }
+                BlockOutcome::Capped { bytes, declared } => {
+                    out.extend_from_slice(&bytes);
+                    return Ok(Bounded::stopped(out, declared, limit));
                 }
             }
-            // The real extent of the Compressed Data, walked from the
-            // LZMA2 control bytes. Section 3.1.4 says this is the only
-            // reliable way to learn it: "the Block Header and Index
-            // fields may contain (intentionally or unintentionally)
-            // invalid information".
-            let real_len = lzma2_stream_len(&data[data_start..])?;
-            if let Some(declared) = header.compressed_size {
-                // §3.1.2: a declared Compressed Size of zero is invalid.
-                if declared == 0 {
-                    return Err(err("Compressed Size must be non-zero"));
-                }
-                // §3.1.3: "If the Compressed Size doesn't match the size of
-                // the Compressed Data field, the decoder MUST indicate an
-                // error." Trusting the declared value instead let a file
-                // that `xz -t` calls corrupt decode here, and it also made
-                // the section 4.3 check below compare the Index against a
-                // size that was itself never verified.
-                if declared as usize != real_len {
-                    return Err(err("Compressed Size does not match the Compressed Data"));
-                }
-            }
-            let compressed_len = real_len;
-            let compressed = data
-                .get(data_start..data_start + compressed_len)
-                .ok_or_else(|| err("compressed data out of range"))?;
-
-            let decoded = LzmaDecoder::new().decode_lzma2_bounded(
-                compressed,
-                header.dict_size,
-                cap.remaining(),
-            )?;
-            if decoded.capped {
-                out.extend_from_slice(&decoded.bytes);
-                return Ok(Bounded::stopped(out, None, limit));
-            }
-            cap.take(decoded.bytes.len() as u64);
-            if let Some(declared) = header.uncompressed_size {
-                if declared != decoded.bytes.len() as u64 {
-                    return Err(err("Uncompressed Size does not match the decoded data"));
-                }
-            }
-            // §3 orders a Block as Header, Compressed Data, Block Padding,
-            // Check — the Check is NOT immediately after the Compressed
-            // Data. §3.3 inserts 0-3 null bytes so that the Block is a
-            // multiple of four, which (because the Block Header is itself
-            // a multiple of four and starts four-byte aligned) means the
-            // Check sits at the next four-byte boundary. Reading the Check
-            // straight after the Compressed Data finds padding instead and
-            // reports a bogus mismatch on every real file.
-            let block_end = pad_to_four(data, data_start + compressed_len)?;
-            verify_check(data, block_end, check_id, &decoded.bytes)?;
-            // Unpadded Size is the Block Header, the Compressed Data
-            // and the Check -- and NOT the Block Padding, which sits
-            // between the data and the Check and is the one thing this
-            // field excludes. Adding up to `block_end` instead counts it,
-            // and is off by 0-3 bytes on every block.
-            real.push((
-                (data_start - header_start) + compressed_len + check_size_of(check_id),
-                decoded.bytes.len(),
-            ));
-            out.extend_from_slice(&decoded.bytes);
-
-            pos = block_end + check_size_of(check_id);
+            let _ = before;
             if pos > data.len() {
-                return Err(err("truncated before the index"));
+                return Err(invalid("truncated before the index"));
             }
         }
 
-        let index_start = pos;
-        let (_, sizes) = parse_index_and_footer(data, index_start)?;
-
-        // §4.2: the Number of Records is the number of Blocks, and a
-        // decoder that has decoded them all and finds a different count
-        // MUST error.
-        if sizes.len() != real.len() {
-            return Err(err(
-                "Index Record count does not match the number of Blocks",
-            ));
-        }
-        // §4.3: the Records must match the real sizes of the Blocks they
-        // describe. This is the check that was missing: a rewritten
-        // Index passed every other check here and decoded anyway, while
-        // `xz -t` called the file corrupt. §3.1.4 is the reason it has
-        // to be the *real* sizes and not the ones the Block Header
-        // claims -- the header "may contain (intentionally or
-        // unintentionally) invalid information".
-        for (i, (unpadded, uncompressed)) in sizes.iter().enumerate() {
-            let (real_unpadded, real_uncompressed) = real[i];
-            if *unpadded != real_unpadded {
-                return Err(err("Index Record Unpadded Size does not match the Block"));
-            }
-            if *uncompressed as usize != real_uncompressed {
-                return Err(err(
-                    "Index Record Uncompressed Size does not match the Block",
-                ));
-            }
-        }
-        let _ = block_start;
+        let records = check_index_and_footer(data, pos, &extents)?;
+        let _ = records;
         Ok(Bounded::complete(out, None, limit))
     }
 
@@ -471,212 +415,299 @@ impl XzReader {
         while pos < data.len() {
             if data[pos] == 0x00 {
                 if !saw_stream {
-                    return Err(err("Stream Padding before the first Stream"));
+                    return Err(invalid("Stream Padding before the first Stream"));
                 }
                 let start = pos;
                 while pos < data.len() && data[pos] == 0x00 {
                     pos += 1;
                 }
                 if !(pos - start).is_multiple_of(4) {
-                    return Err(err("Stream Padding is not a multiple of four bytes"));
+                    return Err(invalid("Stream Padding is not a multiple of four bytes"));
                 }
                 continue;
             }
             let start = pos;
             let stream = Self::decompress(&data[start..])?;
             out.extend_from_slice(&stream);
-            pos = start + stream_len(&data[start..])?;
+            pos = start + stream_span(&data[start..])?;
             saw_stream = true;
         }
         if !saw_stream {
-            return Err(err("not an XZ file: no Stream"));
+            return Err(invalid("not an XZ file: no Stream"));
         }
         Ok(out)
     }
+}
+
+/// How one block turned out.
+enum BlockOutcome {
+    Done {
+        bytes: Vec<u8>,
+        extent: BlockExtent,
+    },
+    /// The cap stopped this block; the caller keeps the prefix. declared
+    /// is the block's own Uncompressed Size claim, when it made one.
+    Capped {
+        bytes: Vec<u8>,
+        declared: Option<u64>,
+    },
+}
+
+/// Decode the block at `*pos`, advancing past its padding and Check.
+fn decode_one_block(
+    data: &[u8],
+    pos: &mut usize,
+    check_id: u8,
+    cap: &mut crate::compress::cap::OutputCap,
+) -> CompressResult<BlockOutcome> {
+    let header_start = *pos;
+    let header = parse_block_header(data, pos)?;
+    let data_start = *pos;
+
+    if let Some(declared) = header.uncompressed_size {
+        if !cap.fits(declared) {
+            return Ok(BlockOutcome::Capped {
+                bytes: Vec::new(),
+                declared: Some(declared),
+            });
+        }
+    }
+    // The real extent of the Compressed Data, walked from the LZMA2
+    // control bytes. Section 3.1.4 says this is the only reliable way to
+    // learn it: "the Block Header and Index fields may contain
+    // (intentionally or unintentionally) invalid information".
+    let real_len = lzma2_stream_len(&data[data_start..])?;
+    if let Some(declared) = header.compressed_size {
+        // §3.1.2: a declared Compressed Size of zero is invalid.
+        if declared == 0 {
+            return Err(invalid("Compressed Size must be non-zero"));
+        }
+        // §3.1.3: "If the Compressed Size doesn't match the size of
+        // the Compressed Data field, the decoder MUST indicate an
+        // error." Trusting the declared value instead let a file
+        // that `xz -t` calls corrupt decode here, and it also made
+        // the section 4.3 check below compare the Index against a
+        // size that was itself never verified.
+        if declared as usize != real_len {
+            return Err(invalid(
+                "Compressed Size does not match the Compressed Data",
+            ));
+        }
+    }
+    let compressed = data
+        .get(data_start..data_start + real_len)
+        .ok_or_else(|| invalid("compressed data out of range"))?;
+
+    let decoded =
+        LzmaDecoder::new().decode_lzma2_bounded(compressed, header.dict_size, cap.remaining())?;
+    if decoded.capped {
+        return Ok(BlockOutcome::Capped {
+            bytes: decoded.bytes,
+            declared: header.uncompressed_size,
+        });
+    }
+    cap.take(decoded.bytes.len() as u64);
+    if let Some(declared) = header.uncompressed_size {
+        if declared != decoded.bytes.len() as u64 {
+            return Err(invalid("Uncompressed Size does not match the decoded data"));
+        }
+    }
+    // §3 orders a Block as Header, Compressed Data, Block Padding,
+    // Check — the Check is NOT immediately after the Compressed
+    // Data. §3.3 inserts 0-3 null bytes so that the Block is a
+    // multiple of four, which (because the Block Header is itself
+    // a multiple of four and starts four-byte aligned) means the
+    // Check sits at the next four-byte boundary.
+    let block_end = pad_to_four(data, data_start + real_len)?;
+    let check_len = check_size_of(check_id);
+    verify_check(data, block_end, check_id, &decoded.bytes)?;
+    // Unpadded Size is the Block Header, the Compressed Data
+    // and the Check -- and NOT the Block Padding, which sits
+    // between the data and the Check and is the one thing this
+    // field excludes.
+    let extent = BlockExtent {
+        unpadded: ((data_start - header_start) + real_len + check_len) as u64,
+        uncompressed: decoded.bytes.len() as u64,
+    };
+    *pos = block_end + check_len;
+    Ok(BlockOutcome::Done {
+        bytes: decoded.bytes,
+        extent,
+    })
+}
+
+/// Parse the Index and Stream Footer (§3.4, §2.1.2) and return the
+/// footer's Backward Size with the record list as `(unpadded size,
+/// uncompressed size)` pairs. No comparison against the blocks happens
+/// here; that is §4.3's job and lives in [`check_index_and_footer`].
+fn parse_index_and_footer(
+    data: &[u8],
+    index_start: usize,
+) -> CompressResult<(u64, Vec<(u64, u64)>)> {
+    let mut p = index_start;
+    // §3.4: the Index starts with a null indicator byte.
+    if *data.get(p).ok_or_else(|| invalid("truncated index"))? != 0x00 {
+        return Err(invalid("index indicator is not zero"));
+    }
+    p += 1;
+    let count = read_vli(data, &mut p)?;
+    let mut records = Vec::with_capacity(count.min(4096) as usize);
+    for _ in 0..count {
+        let unpadded = read_vli(data, &mut p)?;
+        let uncompressed = read_vli(data, &mut p)?;
+        records.push((unpadded, uncompressed));
+    }
+    let index_end = pad_to_four(data, p)?;
+    let stored = read_le32(data, index_end, "truncated index CRC")?;
+    if crc32(&data[index_start..index_end]) != stored {
+        return Err(invalid("index CRC32 mismatch"));
+    }
+    let index_size = index_end + 4 - index_start;
+
+    // Stream Footer (§2.1.2).
+    let footer = data
+        .get(index_end + 4..index_end + 4 + STREAM_FOOTER_LEN)
+        .ok_or_else(|| invalid("truncated stream footer"))?;
+    let backward_size = u32::from_le_bytes([footer[4], footer[5], footer[6], footer[7]]);
+    // Backward Size counts the Index in four-byte units, minus one.
+    if (backward_size as usize + 1) * 4 != index_size {
+        return Err(invalid(
+            "stream footer backward size does not match the index",
+        ));
+    }
+    if footer[8..10] != data[6..8] {
+        return Err(invalid("stream footer flags do not match the header"));
+    }
+    if footer[10..12] != FOOTER_MAGIC {
+        return Err(invalid("bad stream footer magic"));
+    }
+    let fcrc = u32::from_le_bytes([footer[0], footer[1], footer[2], footer[3]]);
+    if crc32(&footer[4..10]) != fcrc {
+        return Err(invalid("stream footer CRC32 mismatch"));
+    }
+    Ok((u64::from(backward_size), records))
+}
+
+/// Parse the Index and Stream Footer and check both against what the
+/// blocks really occupied (§3.4, §2.1.2, §4.2, §4.3).
+fn check_index_and_footer(
+    data: &[u8],
+    index_start: usize,
+    extents: &[BlockExtent],
+) -> CompressResult<Vec<(u64, u64)>> {
+    let (_, records) = parse_index_and_footer(data, index_start)?;
+
+    // §4.2: the Number of Records is the number of Blocks, and a
+    // decoder that has decoded them all and finds a different count
+    // MUST error.
+    if records.len() != extents.len() {
+        return Err(invalid(
+            "Index Record count does not match the number of Blocks",
+        ));
+    }
+    // §4.3: the Records must match the real sizes of the Blocks they
+    // describe. §3.1.4 is the reason it has to be the *real* sizes and
+    // not the ones the Block Header claims.
+    for (i, (unpadded, uncompressed)) in records.iter().enumerate() {
+        let real = &extents[i];
+        if *unpadded != real.unpadded {
+            return Err(invalid(
+                "Index Record Unpadded Size does not match the Block",
+            ));
+        }
+        if *uncompressed != real.uncompressed {
+            return Err(invalid(
+                "Index Record Uncompressed Size does not match the Block",
+            ));
+        }
+    }
+    Ok(records)
+}
+/// Validate the Stream Header and return the Check ID (§2.1.1).
+fn parse_stream_header(data: &[u8]) -> CompressResult<u8> {
+    let flags = &data[6..8];
+    // §2.1.1.2: the first byte is always null; the second is the Check ID
+    // in its low four bits, with the rest reserved.
+    if flags[0] != 0 || flags[1] & 0xF0 != 0 {
+        return Err(invalid("reserved stream flag bits set"));
+    }
+    let check_id = flags[1] & 0x0F;
+    if check_size(check_id).is_none() {
+        return Err(invalid("unsupported check type"));
+    }
+    // §2.1.1.3: CRC32 of the two flag bytes.
+    let stored = read_le32(data, 8, "truncated stream header")?;
+    if crc32(flags) != stored {
+        return Err(invalid("stream header CRC32 mismatch"));
+    }
+    Ok(check_id)
+}
+
+/// Verify the Check that follows a block's padding (§3.3).
+fn verify_check(data: &[u8], at: usize, check_id: u8, decoded: &[u8]) -> CompressResult<()> {
+    let size = check_size(check_id).unwrap_or(0);
+    let stored = data
+        .get(at..at + size)
+        .ok_or_else(|| invalid("truncated block check"))?;
+    let ok = match check_id {
+        CHECK_NONE => true,
+        CHECK_CRC32 => {
+            u32::from_le_bytes([stored[0], stored[1], stored[2], stored[3]]) == crc32(decoded)
+        }
+        CHECK_CRC64 => {
+            u64::from_le_bytes([
+                stored[0], stored[1], stored[2], stored[3], stored[4], stored[5], stored[6],
+                stored[7],
+            ]) == super::crc64::crc64(decoded)
+        }
+        CHECK_SHA256 => crate::sha256::Sha256::hash(decoded) == stored[..],
+        _ => return Err(invalid("unsupported check type")),
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(invalid("block check mismatch"))
+    }
+}
+
+/// Skip Block Padding: 0-3 null bytes up to the next four-byte boundary
+/// (§3.3).
+fn pad_to_four(data: &[u8], pos: usize) -> CompressResult<usize> {
+    let mut p = pos;
+    while !p.is_multiple_of(4) {
+        if *data
+            .get(p)
+            .ok_or_else(|| invalid("truncated block padding"))?
+            != 0
+        {
+            return Err(invalid("block padding is not null"));
+        }
+        p += 1;
+    }
+    Ok(p)
+}
+
+/// Total length of the stream at the front of `data`, padding included.
+fn stream_span(data: &[u8]) -> CompressResult<usize> {
+    let check_len = check_size_of(data[7] & 0x0F);
+    let mut pos = STREAM_HEADER_LEN;
+    while pos < data.len() && data[pos] != 0x00 {
+        parse_block_header(data, &mut pos)?;
+        let compressed = lzma2_stream_len(&data[pos..])?;
+        pos = pad_to_four(data, pos + compressed)? + check_len;
+    }
+    let (backward_size, _) = parse_index_and_footer(data, pos)?;
+    Ok(pos + (backward_size as usize + 1) * 4 + STREAM_FOOTER_LEN)
 }
 
 fn check_size_of(check_id: u8) -> usize {
     check_size(check_id).unwrap_or(0)
 }
 
-/// Validate the Stream Header and return the Check ID (§2.1.1).
-fn parse_stream_header(data: &[u8]) -> CompressResult<u8> {
-    let flags = &data[6..8];
-    // §2.1.1.2: the first byte is always null; the second is the Check ID
-    // in bits 0-3 with bits 4-7 reserved and required to be zero.
-    if flags[0] != 0x00 {
-        return Err(err("first Stream Flags byte is not null"));
-    }
-    if flags[1] & 0xF0 != 0 {
-        return Err(err("reserved Stream Flags bits set"));
-    }
-    let stored = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
-    if crc32(flags) != stored {
-        return Err(err("stream header CRC32 mismatch"));
-    }
-    let check_id = flags[1] & 0x0F;
-    if check_size_of(check_id) == 0 && check_id != CHECK_NONE {
-        return Err(CompressError::UnsupportedFormat(format!(
-            "xz: unsupported Check ID 0x{check_id:x}"
-        )));
-    }
-    Ok(check_id)
+fn read_le32(data: &[u8], at: usize, what: &'static str) -> CompressResult<u32> {
+    let b = data.get(at..at + 4).ok_or_else(|| invalid(what))?;
+    Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
 }
-
-/// Validate the Check that follows a block's Compressed Data (§3.4).
-fn verify_check(data: &[u8], at: usize, check_id: u8, decoded: &[u8]) -> CompressResult<()> {
-    let size = check_size_of(check_id);
-    let stored = data
-        .get(at..at + size)
-        .ok_or_else(|| err("truncated check"))?;
-    let ok = match check_id {
-        CHECK_NONE => true,
-        CHECK_CRC32 => {
-            let want = u32::from_le_bytes([stored[0], stored[1], stored[2], stored[3]]);
-            crc32(decoded) == want
-        }
-        CHECK_CRC64 => {
-            let want = u64::from_le_bytes([
-                stored[0], stored[1], stored[2], stored[3], stored[4], stored[5], stored[6],
-                stored[7],
-            ]);
-            super::crc64::crc64(decoded) == want
-        }
-        // The Check is calculated over the *uncompressed* data (§3.4.2),
-        // not over what is on disk, which is what makes SHA-256 worth
-        // having here: it is the only check in the format that is not
-        // merely error-detecting.
-        CHECK_SHA256 => crate::sha256::Sha256::hash(decoded) == stored[..],
-        // parse_stream_header has already rejected these.
-        _ => true,
-    };
-    if !ok {
-        return Err(err("check mismatch"));
-    }
-    Ok(())
-}
-
-/// Parse the Index and Stream Footer, and confirm the footer's Backward
-/// Size matches the real Index length (§4, §2.1.2).
-/// The stream's end offset, and the Index Records' (Unpadded,
-/// Uncompressed) sizes for the caller to check against what it decoded.
-fn parse_index_and_footer(
-    data: &[u8],
-    index_start: usize,
-) -> CompressResult<(usize, Vec<(usize, u64)>)> {
-    let mut pos = index_start;
-    if data.get(pos) != Some(&0x00) {
-        return Err(err("index indicator missing"));
-    }
-    pos += 1;
-    let records = read_vli(data, &mut pos)?;
-    // Each record is two multibyte integers. They used to be read and
-    // thrown away, which is the gap section 4.3 closes: "If the decoder
-    // has decoded all the Blocks of the Stream, it MUST verify that the
-    // contents of the Records match the real Unpadded Size and
-    // Uncompressed Size of the respective Blocks." Collecting them here
-    // costs a Vec and is the only way the caller can do that.
-    // `records` is a 63-bit integer straight off disk, and the Index
-    // CRC32 that would catch a lie about it is only verified at the end
-    // of this function -- so it cannot be used as an allocation size.
-    // Taking it at its word made a 92-byte corrupt file abort the whole
-    // search with "capacity overflow" (and a slightly smaller one with a
-    // multi-terabyte allocation failure), where before this loop simply
-    // ran out of file. Every Record is two VLIs, so the remaining bytes
-    // bound the count; anything above that is a file that will not parse.
-    let cap = records.min(data.len() as u64) as usize;
-    let mut sizes = Vec::with_capacity(cap);
-    for _ in 0..records {
-        let unpadded = read_vli(data, &mut pos)?;
-        let uncompressed = read_vli(data, &mut pos)?;
-        // §4.3.1: "The value MUST never be zero", and the minimum for the
-        // current Block structure is five.
-        if unpadded == 0 {
-            return Err(err("Index Record Unpadded Size must be non-zero"));
-        }
-        if unpadded < 5 {
-            return Err(err(
-                "Index Record Unpadded Size is below the minimum of five",
-            ));
-        }
-        sizes.push((unpadded as usize, uncompressed));
-    }
-    // §4.4: index padding to a multiple of four, must be null.
-    while !pos.is_multiple_of(4) {
-        match data.get(pos) {
-            Some(0) => pos += 1,
-            Some(_) => return Err(err("index padding is not null")),
-            None => return Err(err("truncated index")),
-        }
-    }
-    // §4.5
-    let stored = data
-        .get(pos..pos + 4)
-        .ok_or_else(|| err("truncated index CRC32"))?;
-    let stored_crc = u32::from_le_bytes([stored[0], stored[1], stored[2], stored[3]]);
-    if crc32(&data[index_start..pos]) != stored_crc {
-        return Err(err("index CRC32 mismatch"));
-    }
-    pos += 4;
-    // Backward Size covers the whole Index field, CRC32 included.
-    let index_len = pos - index_start;
-
-    // §2.1.2: Stream Footer.
-    let footer = data
-        .get(pos..pos + STREAM_FOOTER_LEN)
-        .ok_or_else(|| err("truncated stream footer"))?;
-    if footer[10..12] != FOOTER_MAGIC[..] {
-        return Err(err("bad footer magic"));
-    }
-    let footer_crc = u32::from_le_bytes([footer[0], footer[1], footer[2], footer[3]]);
-    if crc32(&footer[4..10]) != footer_crc {
-        return Err(err("stream footer CRC32 mismatch"));
-    }
-    let backward = u32::from_le_bytes([footer[4], footer[5], footer[6], footer[7]]) as usize;
-    // §2.1.2.2: real_backward_size = (stored + 1) * 4
-    if (backward + 1) * 4 != index_len {
-        return Err(err("Backward Size does not match the real index size"));
-    }
-    // The footer's Stream Flags are a copy of the header's.
-    if footer[8..10] != data[6..8] {
-        return Err(err("stream footer flags differ from the header"));
-    }
-    Ok((pos + STREAM_FOOTER_LEN, sizes))
-}
-
-/// Skip the 0-3 null Block Padding bytes that pad a Block up to a multiple
-/// of four, per §3.3, and return the offset of the Check that follows.
-fn pad_to_four(data: &[u8], pos: usize) -> CompressResult<usize> {
-    let target = pos.next_multiple_of(4);
-    let slice = data
-        .get(pos..target)
-        .ok_or_else(|| err("block padding runs past end of file"))?;
-    if slice.iter().any(|&b| b != 0) {
-        return Err(err("block padding is not null"));
-    }
-    Ok(target)
-}
-
-/// Total length of the single stream at the start of `data`.
-fn stream_len(data: &[u8]) -> CompressResult<usize> {
-    let mut pos = STREAM_HEADER_LEN;
-    let check_id = parse_stream_header(data)?;
-    while pos < data.len() && data[pos] != 0x00 {
-        let header = parse_block_header(data, &mut pos)?;
-        let start = pos;
-        let compressed_len = match header.compressed_size {
-            Some(declared) => declared as usize,
-            None => lzma2_stream_len(&data[start..])?,
-        };
-        let block_end = pad_to_four(data, start + compressed_len)?;
-        pos = block_end + check_size_of(check_id);
-        if pos > data.len() {
-            return Err(err("truncated before the index"));
-        }
-    }
-    parse_index_and_footer(data, pos).map(|(end, _)| end)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1174,5 +1205,35 @@ mod tests {
             &TINY_L9E_PLAIN[..b.bytes.len()],
             "not the real prefix"
         );
+    }
+}
+
+/// The container framing is untrusted input: bad VLI encodings, a header
+/// that declares a size nothing verifies, an index that disagrees with
+/// the blocks. None of it may panic.
+#[cfg(test)]
+mod fuzz {
+    use super::*;
+
+    #[test]
+    fn never_panics_on_arbitrary_bytes() {
+        let corpus: alloc::vec::Vec<(&str, alloc::vec::Vec<u8>)> = alloc::vec![
+            ("empty", alloc::vec![]),
+            ("magic", XZ_MAGIC.to_vec()),
+            ("header", {
+                let mut v = XZ_MAGIC.to_vec();
+                v.extend_from_slice(&[0, 4, 0, 0, 0, 0]);
+                v
+            }),
+        ];
+        crate::fuzzkit::assert_never_panics(corpus, 2000, "xz", |data| {
+            let _ = XzReader::decompress(data);
+            let _ = XzReader::decompress_bounded(data, 4096);
+            let _ = XzReader::decompress_all(data);
+            let mut p = 0usize;
+            let _ = read_vli(data, &mut p);
+            let mut p = 0usize;
+            let _ = parse_block_header(data, &mut p);
+        });
     }
 }

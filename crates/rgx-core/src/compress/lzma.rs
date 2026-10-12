@@ -1,26 +1,28 @@
-//! Carries the encoder half (`RangeEncoder` and friends), which rgx
-//! never calls: it decodes lzma and does not produce it. Kept for the
-//! same reason the archive and 7z trees keep their write paths.
-#![allow(dead_code)]
-//! LZMA (Lempel-Ziv-Markov chain Algorithm) compression.
+// SPDX-License-Identifier: Apache-2.0
+
+//! LZMA1 and the LZMA2 chunk layer: range coding over a Markov
+//! probability model, the literal/match/repeat state machine, and the
+//! dictionary those symbols draw on.
 //!
-//! Standards-compliant LZMA1/LZMA2 implementation: range encoder and
-//! decoder with context modeling, bit-tree and reverse bit-tree codes,
-//! and the LZMA2 chunk layer used by xz and 7z. Validated against
-//! liblzma-generated test vectors (see `testdata/lzma_*.bin`).
-//! LZMA/LZMA2 decoder, vendored from upstream `b02/compress/lzma.rs`.
+//! Independent reimplementation of the published LZMA specification
+//! (range coder, 11-bit probability model, the literal/match state
+//! machine and its length/distance codes) plus the LZMA2 chunk framing
+//! xz and 7z use, written from those format descriptions rather than
+//! from any implementation's source. Decoding only — rgx reads LZMA for
+//! zip method 14 and the xz container and produces neither. Validated
+//! against liblzma-generated vectors in `testdata/lzma_*.bin`.
 //!
-//! Provenance: upstream at the time of the copy, verified against 12
-//! liblzma-generated vectors that travel with it. Needed by the vendored
-//! zip container for method 14. The `graph_optimize` import serves the
-//! encoder's match finder, which is not vendored: the decoder half is
-//! what rgx uses.
+//! Two contracts the containers depend on: FORMAT_ALONE's header declares
+//! the uncompressed size in bytes 5..13, so a stream that declares more
+//! than the ceiling is refused before decoding anything; and a match is
+//! never allowed to cross the target a chunk is aiming at, which is what
+//! makes a truncated or over-declared chunk an error instead of a silent
+//! overshoot.
 
 use crate::compress::cap::Bounded;
 use crate::compress::error::{CompressError, CompressResult};
 use alloc::vec;
 use alloc::vec::Vec;
-// Vendored trim: GraphMode served the encoder match finder (not vendored).
 
 /// LZMA properties
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,26 +43,31 @@ impl Default for LzmaProps {
 }
 
 impl LzmaProps {
+    /// Decode the one-byte properties field: `(pb * 5 + lp) * 9 + lc`.
     pub fn from_byte(byte: u8) -> Result<Self, CompressError> {
-        if byte >= 9 * 5 * 5 {
-            return Err(CompressError::InvalidFormat("LZMA properties out of range"));
+        if byte >= 225 {
+            return Err(CompressError::InvalidFormat("invalid LZMA properties"));
         }
-        Ok(Self {
-            lc: byte % 9,
-            lp: (byte / 9) % 5,
-            pb: byte / 45,
-        })
+        let lc = byte % 9;
+        let rest = byte / 9;
+        let lp = rest % 5;
+        let pb = rest / 5;
+        Ok(Self { lc, lp, pb })
     }
 
     pub fn to_byte(self) -> u8 {
-        self.lc + self.lp * 9 + self.pb * 45
+        (self.pb * 5 + self.lp) * 9 + self.lc
     }
 }
 
+/// Smallest dictionary the format allows (4 KiB).
 pub const LZMA_DICT_MIN: u32 = 1 << 12;
+/// Largest dictionary the format allows (128 MiB).
 pub const LZMA_DICT_MAX: u32 = 1 << 27;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Compression level knob for producers. Carried for API stability; this
+/// crate decodes LZMA and does not produce it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct LzmaLevel(pub u8);
 
 impl LzmaLevel {
@@ -71,227 +78,166 @@ impl LzmaLevel {
     pub const ULTRA: Self = Self(9);
 }
 
-impl Default for LzmaLevel {
-    fn default() -> Self {
-        Self::NORMAL
-    }
-}
-
+/// Model constants from the specification.
+const PROB_TOTAL: u16 = 2048; // 2^11: the model's full scale
+const PROB_INIT: u16 = PROB_TOTAL / 2; // an even coin for a new bit
 const NUM_STATES: usize = 12;
 const NUM_POS_BITS_MAX: usize = 4;
 const NUM_LEN_TO_POS_STATES: usize = 4;
+const NUM_POS_SLOTS: usize = 64; // 6-bit tree
+const NUM_FULL_DISTANCES: usize = 1 << (END_POS_MODEL_INDEX >> 1); // 128
+/// SpecPos: the reverse bit-trees for distance slots 4..13, indexed by
+/// (distance_base - slot). Size 115 covers the last slot's walk, which
+/// reads 32 entries from offset 83.
+const NUM_POS_SPECIAL: usize = NUM_FULL_DISTANCES - END_POS_MODEL_INDEX + 1; // 115
 const END_POS_MODEL_INDEX: usize = 14;
-const NUM_FULL_DISTANCES: usize = 1 << (END_POS_MODEL_INDEX / 2);
-const NUM_POS_SLOTS: usize = 1 << 6;
-const ALIGN_BITS: usize = 4;
+const ALIGN_BITS: u32 = 4;
 const ALIGN_TABLE_SIZE: usize = 1 << ALIGN_BITS;
 const MATCH_MIN_LEN: usize = 2;
+const LEN_LOW_BITS: u32 = 3;
+const LEN_MID_BITS: u32 = 3;
+const LEN_HIGH_BITS: u32 = 8;
+const LEN_LOW_SIZE: usize = 1 << LEN_LOW_BITS;
+const LEN_MID_SIZE: usize = 1 << LEN_MID_BITS;
+const LEN_HIGH_SIZE: usize = 1 << LEN_HIGH_BITS;
 
-/// Probability array shared by the reverse bit trees of distance slots
-/// 4..13, indexed by `(distance_base - slot)`. Size 115 covers the last
-/// tree (slot 13 starts at index 83 and needs 32 probabilities).
-const NUM_POS_SPECIAL: usize = NUM_FULL_DISTANCES - END_POS_MODEL_INDEX + 1; // 115
-
-const PROB_INIT: u16 = 1024;
-const PROB_BITS: u32 = 11;
-const BIT_MODEL_TOTAL: u32 = 2048;
-const MOVE_BITS: u32 = 5;
-const TOP_VALUE: u32 = 1 << 24;
-
-/// Range encoder
-struct RangeEncoder {
-    range: u64,
-    low: u64,
-    cache: u8,
-    cache_size: u64,
-    output: Vec<u8>,
-}
-
-impl RangeEncoder {
-    fn new() -> Self {
-        Self {
-            range: 0xFFFFFFFF,
-            low: 0,
-            cache: 0,
-            cache_size: 1,
-            output: Vec::new(),
-        }
-    }
-
-    fn normalize(&mut self) {
-        if self.range < TOP_VALUE as u64 {
-            self.range <<= 8;
-            self.shift_low();
-        }
-    }
-
-    fn shift_low(&mut self) {
-        if self.low < 0xFF000000 || (self.low >> 32) != 0 {
-            let carry = (self.low >> 32) as u8;
-            let mut temp = self.cache;
-            let mut n = self.cache_size;
-            while n > 0 {
-                self.output.push(temp.wrapping_add(carry));
-                temp = 0xFF;
-                n -= 1;
-            }
-            self.cache_size = 0;
-            self.cache = (self.low >> 24) as u8;
-        }
-        self.cache_size += 1;
-        // Keep only the low 32 bits: bits 24..31 were just moved to the
-        // cache and any carry (bit 32+) was folded into the output.
-        self.low = (self.low << 8) & 0xFFFFFFFF;
-    }
-
-    fn encode_bit(&mut self, prob: &mut u16, bit: u32) {
-        let bound = (self.range >> PROB_BITS) * (*prob as u64);
-
-        if bit == 0 {
-            self.range = bound;
-            *prob += ((BIT_MODEL_TOTAL - *prob as u32) >> MOVE_BITS) as u16;
-        } else {
-            self.low += bound;
-            self.range -= bound;
-            *prob -= *prob >> MOVE_BITS;
-        }
-        self.normalize();
-    }
-
-    /// MSB-first bit tree (used for lengths, pos slots and literals).
-    fn encode_bit_tree(&mut self, probs: &mut [u16], value: u32, bits: u32) {
-        let mut m = 1u32;
-        for i in (0..bits).rev() {
-            let bit = (value >> i) & 1;
-            self.encode_bit(&mut probs[m as usize], bit);
-            m = (m << 1) | bit;
-        }
-    }
-
-    fn encode_direct(&mut self, value: u32, bits: u32) {
-        for i in (0..bits).rev() {
-            self.range >>= 1;
-            self.low += self.range & (((value >> i) & 1) as u64 * 0xFFFFFFFFFFFFFFFF);
-            self.normalize();
-        }
-    }
-
-    /// LSB-first (reverse) bit tree (used for align bits and the shared
-    /// distance-slot trees of slots 4..13).
-    fn encode_reverse(&mut self, probs: &mut [u16], value: u32, bits: u32) {
-        let mut m = 1;
-        for i in 0..bits {
-            let bit = (value >> i) & 1;
-            self.encode_bit(&mut probs[m as usize], bit);
-            m = (m << 1) | bit;
-        }
-    }
-
-    fn finish(mut self) -> Vec<u8> {
-        for _ in 0..5 {
-            self.shift_low();
-        }
-        self.output
-    }
-}
-
-/// Range decoder (LZMA1 raw stream: leading 0x00 byte + 4-byte init code).
-struct RangeDecoder<'a> {
+/// The range coder's state: a 32-bit window over the code and the range
+/// it is decoding within. Bits come out one at a time against 11-bit
+/// probabilities.
+struct RangeReader<'a> {
     input: &'a [u8],
     pos: usize,
-    range: u32,
     code: u32,
+    range: u32,
 }
 
-impl<'a> RangeDecoder<'a> {
+impl<'a> RangeReader<'a> {
     fn new(input: &'a [u8]) -> CompressResult<Self> {
-        if input.len() < 5 {
+        if input.is_empty() {
             return Err(CompressError::UnexpectedEof);
         }
-        let code = u32::from_be_bytes([input[1], input[2], input[3], input[4]]);
+        // First byte is a required zero marker; the next five fill `code`.
+        if input[0] != 0 {
+            return Err(CompressError::InvalidFormat("bad LZMA range coder init"));
+        }
+        let mut code = 0u32;
+        for i in 1..5 {
+            code = (code << 8) | *input.get(i).ok_or(CompressError::UnexpectedEof)? as u32;
+        }
         Ok(Self {
             input,
             pos: 5,
-            range: u32::MAX,
             code,
+            range: 0xFFFF_FFFF,
         })
     }
 
-    #[inline]
-    fn next_byte(&mut self) -> u32 {
-        let b = if self.pos < self.input.len() {
-            self.input[self.pos]
-        } else {
-            0
-        };
+    fn next_byte(&mut self) -> CompressResult<u32> {
+        let b = *self
+            .input
+            .get(self.pos)
+            .ok_or(CompressError::UnexpectedEof)?;
         self.pos += 1;
-        b as u32
+        Ok(b as u32)
     }
 
-    #[inline]
-    fn normalize(&mut self) {
-        if self.range < TOP_VALUE {
-            let b = self.next_byte();
-            self.code = (self.code << 8) | b;
+    /// Keep `range` in its top byte by pulling in a fresh one.
+    fn normalize(&mut self) -> CompressResult<()> {
+        if self.range < 1 << 24 {
             self.range <<= 8;
+            self.code = (self.code << 8) | self.next_byte()?;
         }
+        Ok(())
     }
 
-    #[inline]
-    fn decode_bit(&mut self, prob: &mut u16) -> u32 {
-        let bound = (self.range >> PROB_BITS) * (*prob as u32);
-        if self.code < bound {
+    /// Decode one bit against `prob`, updating it toward the bit seen.
+    fn bit(&mut self, prob: &mut u16) -> CompressResult<u32> {
+        let bound = (self.range >> 11) * (*prob as u32);
+        let bit = if self.code < bound {
             self.range = bound;
-            *prob += ((BIT_MODEL_TOTAL - *prob as u32) >> MOVE_BITS) as u16;
-            self.normalize();
+            *prob += (PROB_TOTAL - *prob) >> 5;
             0
         } else {
             self.range -= bound;
             self.code -= bound;
-            *prob -= *prob >> MOVE_BITS;
-            self.normalize();
+            *prob -= *prob >> 5;
             1
-        }
+        };
+        self.normalize()?;
+        Ok(bit)
     }
 
-    #[inline]
-    fn decode_direct(&mut self, bits: u32) -> u32 {
-        let mut result = 0u32;
+    /// A fixed-width field of direct bits, most significant first.
+    fn direct(&mut self, bits: u32) -> CompressResult<u32> {
+        let mut value = 0u32;
         for _ in 0..bits {
             self.range >>= 1;
-            self.code = self.code.wrapping_sub(self.range);
-            let t = 0u32.wrapping_sub(self.code >> 31);
-            self.code = self.code.wrapping_add(self.range & t);
-            result = (result << 1).wrapping_add(t.wrapping_add(1));
-            self.normalize();
+            let bit = u32::from(self.code >= self.range);
+            self.code -= self.range & (0u32.wrapping_sub(bit));
+            value = (value << 1) | bit;
+            self.normalize()?;
         }
-        result
+        Ok(value)
     }
 
-    fn decode_bit_tree(&mut self, probs: &mut [u16], bits: u32) -> u32 {
-        let mut m = 1u32;
+    /// Bit-tree code read most-significant bit first.
+    fn tree(&mut self, probs: &mut [u16], bits: u32) -> CompressResult<u32> {
+        let mut index = 1usize;
         for _ in 0..bits {
-            let b = self.decode_bit(&mut probs[m as usize]);
-            m = (m << 1) | b;
+            let b = self.bit(&mut probs[index])? as usize;
+            index = (index << 1) | b;
         }
-        m - (1 << bits)
+        Ok((index - (1usize << bits)) as u32)
     }
 
-    fn decode_bit_tree_reverse(&mut self, probs: &mut [u16], bits: u32) -> u32 {
-        let mut m = 1u32;
-        let mut result = 0u32;
+    /// Bit-tree code read least-significant bit first (the distance
+    /// align tree and the tail of wide distances).
+    fn tree_reverse(&mut self, probs: &mut [u16], bits: u32) -> CompressResult<u32> {
+        let mut index = 1usize;
+        let mut value = 0u32;
         for i in 0..bits {
-            let b = self.decode_bit(&mut probs[m as usize]);
-            m = (m << 1) | b;
-            result |= b << i;
+            let b = self.bit(&mut probs[index])? as usize;
+            index = (index << 1) | b;
+            value |= (b as u32) << i;
         }
-        result
+        Ok(value)
     }
 }
 
-/// LZMA state machine
-#[derive(Debug, Clone, Copy)]
-struct LzmaState {
+/// Match-length coder: two single-bit switches pick low/mid/high trees.
+struct LengthCoder {
+    choice: u16,
+    choice2: u16,
+    low: [[u16; LEN_LOW_SIZE]; 1 << NUM_POS_BITS_MAX],
+    mid: [[u16; LEN_MID_SIZE]; 1 << NUM_POS_BITS_MAX],
+    high: [u16; LEN_HIGH_SIZE],
+}
+
+impl LengthCoder {
+    fn new() -> Self {
+        Self {
+            choice: PROB_INIT,
+            choice2: PROB_INIT,
+            low: [[PROB_INIT; LEN_LOW_SIZE]; 1 << NUM_POS_BITS_MAX],
+            mid: [[PROB_INIT; LEN_MID_SIZE]; 1 << NUM_POS_BITS_MAX],
+            high: [PROB_INIT; LEN_HIGH_SIZE],
+        }
+    }
+
+    /// A match length in `0..=271`; the caller adds the minimum length.
+    fn decode(&mut self, rc: &mut RangeReader, pos_state: usize) -> CompressResult<usize> {
+        if rc.bit(&mut self.choice)? == 0 {
+            Ok(rc.tree(&mut self.low[pos_state], LEN_LOW_BITS)? as usize)
+        } else if rc.bit(&mut self.choice2)? == 0 {
+            Ok(8 + rc.tree(&mut self.mid[pos_state], LEN_MID_BITS)? as usize)
+        } else {
+            Ok(16 + rc.tree(&mut self.high, LEN_HIGH_BITS)? as usize)
+        }
+    }
+}
+
+/// The four most-recent match distances and the 12-state machine.
+struct Machine {
     state: usize,
     rep0: u32,
     rep1: u32,
@@ -299,7 +245,7 @@ struct LzmaState {
     rep3: u32,
 }
 
-impl LzmaState {
+impl Machine {
     fn new() -> Self {
         Self {
             state: 0,
@@ -310,33 +256,35 @@ impl LzmaState {
         }
     }
 
-    fn update_literal(&mut self) {
-        if self.state < 4 {
-            self.state = 0;
+    fn after_literal(&mut self) {
+        self.state = if self.state < 4 {
+            0
         } else if self.state < 10 {
-            self.state -= 3;
+            self.state - 3
         } else {
-            self.state -= 6;
-        }
+            self.state - 6
+        };
     }
 
-    fn update_match(&mut self) {
+    fn after_match(&mut self) {
         self.state = if self.state < 7 { 7 } else { 10 };
     }
 
-    fn update_rep(&mut self) {
+    fn after_rep(&mut self) {
         self.state = if self.state < 7 { 8 } else { 11 };
     }
 
-    fn update_short_rep(&mut self) {
+    fn after_short_rep(&mut self) {
         self.state = if self.state < 7 { 9 } else { 11 };
     }
 
-    fn is_char(&self) -> bool {
+    /// True when the previous symbol was a literal (the matched-literal
+    /// path is only for states where a match just preceded).
+    fn after_literal_context(&self) -> bool {
         self.state < 7
     }
 
-    fn update_reps(&mut self, dist: u32) {
+    fn push_rep(&mut self, dist: u32) {
         self.rep3 = self.rep2;
         self.rep2 = self.rep1;
         self.rep1 = self.rep0;
@@ -344,111 +292,76 @@ impl LzmaState {
     }
 }
 
-/// Length coder models (shared shape between encoder and decoder)
-#[derive(Clone)]
-struct LenModels {
-    choice: u16,
-    choice2: u16,
-    low: [[u16; 8]; 16],
-    mid: [[u16; 8]; 16],
-    high: [u16; 256],
-}
-
-impl LenModels {
-    fn new() -> Self {
-        Self {
-            choice: PROB_INIT,
-            choice2: PROB_INIT,
-            low: [[PROB_INIT; 8]; 16],
-            mid: [[PROB_INIT; 8]; 16],
-            high: [PROB_INIT; 256],
-        }
-    }
-
-    fn encode(&mut self, rc: &mut RangeEncoder, pos_state: usize, len: usize) {
-        if len < 8 {
-            rc.encode_bit(&mut self.choice, 0);
-            rc.encode_bit_tree(&mut self.low[pos_state][..], len as u32, 3);
-        } else if len < 16 {
-            rc.encode_bit(&mut self.choice, 1);
-            rc.encode_bit(&mut self.choice2, 0);
-            rc.encode_bit_tree(&mut self.mid[pos_state][..], (len - 8) as u32, 3);
-        } else {
-            rc.encode_bit(&mut self.choice, 1);
-            rc.encode_bit(&mut self.choice2, 1);
-            rc.encode_bit_tree(&mut self.high[..], (len - 16) as u32, 8);
-        }
-    }
-
-    fn decode(&mut self, rc: &mut RangeDecoder, pos_state: usize) -> CompressResult<usize> {
-        if rc.decode_bit(&mut self.choice) == 0 {
-            Ok(rc.decode_bit_tree(&mut self.low[pos_state][..], 3) as usize)
-        } else if rc.decode_bit(&mut self.choice2) == 0 {
-            Ok(8 + rc.decode_bit_tree(&mut self.mid[pos_state][..], 3) as usize)
-        } else {
-            Ok(16 + rc.decode_bit_tree(&mut self.high[..], 8) as usize)
-        }
-    }
-}
-
-/// Full probability model set + state, shared by LZMA1 and LZMA2 decode.
-struct LzmaCore {
-    st: LzmaState,
-    is_match: [[u16; NUM_POS_BITS_MAX + 1]; NUM_STATES],
+/// The full probability model and the symbol loop.
+struct LzmaEngine {
+    machine: Machine,
+    is_match: [[u16; 1 << NUM_POS_BITS_MAX]; NUM_STATES],
     is_rep: [u16; NUM_STATES],
-    is_rep0: [u16; NUM_STATES],
-    is_rep1: [u16; NUM_STATES],
-    is_rep2: [u16; NUM_STATES],
-    is_rep0_long: [[u16; NUM_POS_BITS_MAX + 1]; NUM_STATES],
-    rep_len: LenModels,
-    match_len: LenModels,
+    is_rep_g0: [u16; NUM_STATES],
+    is_rep_g1: [u16; NUM_STATES],
+    is_rep_g2: [u16; NUM_STATES],
+    is_rep0_long: [[u16; 1 << NUM_POS_BITS_MAX]; NUM_STATES],
+    match_len: LengthCoder,
+    rep_len: LengthCoder,
     literal: Vec<[u16; 0x300]>,
     pos_slot: [[u16; NUM_POS_SLOTS]; NUM_LEN_TO_POS_STATES],
     pos_special: [u16; NUM_POS_SPECIAL],
     align: [u16; ALIGN_TABLE_SIZE],
 }
 
-impl LzmaCore {
+impl LzmaEngine {
     fn new(props: LzmaProps) -> Self {
+        let lit_len = 0x300 << (props.lc + props.lp);
         Self {
-            st: LzmaState::new(),
-            is_match: [[PROB_INIT; NUM_POS_BITS_MAX + 1]; NUM_STATES],
+            machine: Machine::new(),
+            is_match: [[PROB_INIT; 1 << NUM_POS_BITS_MAX]; NUM_STATES],
             is_rep: [PROB_INIT; NUM_STATES],
-            is_rep0: [PROB_INIT; NUM_STATES],
-            is_rep1: [PROB_INIT; NUM_STATES],
-            is_rep2: [PROB_INIT; NUM_STATES],
-            is_rep0_long: [[PROB_INIT; NUM_POS_BITS_MAX + 1]; NUM_STATES],
-            rep_len: LenModels::new(),
-            match_len: LenModels::new(),
-            literal: vec![[PROB_INIT; 0x300]; 1 << (props.lc + props.lp)],
+            is_rep_g0: [PROB_INIT; NUM_STATES],
+            is_rep_g1: [PROB_INIT; NUM_STATES],
+            is_rep_g2: [PROB_INIT; NUM_STATES],
+            is_rep0_long: [[PROB_INIT; 1 << NUM_POS_BITS_MAX]; NUM_STATES],
+            match_len: LengthCoder::new(),
+            rep_len: LengthCoder::new(),
+            literal: vec![[PROB_INIT; 0x300]; lit_len],
             pos_slot: [[PROB_INIT; NUM_POS_SLOTS]; NUM_LEN_TO_POS_STATES],
             pos_special: [PROB_INIT; NUM_POS_SPECIAL],
             align: [PROB_INIT; ALIGN_TABLE_SIZE],
         }
     }
 
-    /// Reset state machine, reps and all probabilities (LZMA2 state reset).
     fn reset_state(&mut self) {
-        let lit_len = self.literal.len();
-        self.st = LzmaState::new();
-        self.is_match = [[PROB_INIT; NUM_POS_BITS_MAX + 1]; NUM_STATES];
-        self.is_rep = [PROB_INIT; NUM_STATES];
-        self.is_rep0 = [PROB_INIT; NUM_STATES];
-        self.is_rep1 = [PROB_INIT; NUM_STATES];
-        self.is_rep2 = [PROB_INIT; NUM_STATES];
-        self.is_rep0_long = [[PROB_INIT; NUM_POS_BITS_MAX + 1]; NUM_STATES];
-        self.rep_len = LenModels::new();
-        self.match_len = LenModels::new();
-        self.literal = vec![[PROB_INIT; 0x300]; lit_len];
-        self.pos_slot = [[PROB_INIT; NUM_POS_SLOTS]; NUM_LEN_TO_POS_STATES];
-        self.pos_special = [PROB_INIT; NUM_POS_SPECIAL];
-        self.align = [PROB_INIT; ALIGN_TABLE_SIZE];
+        // Sizes come from the properties the engine was built with; a
+        // state reset refills probabilities, it does not resize the model.
+        self.machine = Machine::new();
+        for row in self.is_match.iter_mut() {
+            row.fill(PROB_INIT);
+        }
+        self.is_rep.fill(PROB_INIT);
+        self.is_rep_g0.fill(PROB_INIT);
+        self.is_rep_g1.fill(PROB_INIT);
+        self.is_rep_g2.fill(PROB_INIT);
+        for row in self.is_rep0_long.iter_mut() {
+            row.fill(PROB_INIT);
+        }
+        self.match_len = LengthCoder::new();
+        self.rep_len = LengthCoder::new();
+        for entry in self.literal.iter_mut() {
+            entry.fill(PROB_INIT);
+        }
+        for row in self.pos_slot.iter_mut() {
+            row.fill(PROB_INIT);
+        }
+        self.pos_special.fill(PROB_INIT);
+        self.align.fill(PROB_INIT);
     }
 
     fn pos_mask(props: &LzmaProps) -> usize {
         (1 << props.pb) - 1
     }
 
+    /// Which literal probability set a byte at `pos_abs` uses: the
+    /// low `lp` bits of the position (relative to the dictionary start)
+    /// and the top `lc` bits of the previous byte.
     fn lit_state(props: &LzmaProps, out: &[u8], pos_abs: usize, dict_base: usize) -> usize {
         let lc = props.lc as usize;
         let lp = props.lp as usize;
@@ -472,7 +385,7 @@ impl LzmaCore {
     /// a bomb stops where the cap is instead of failing as corrupt.
     fn decode_chunk(
         &mut self,
-        rc: &mut RangeDecoder,
+        rc: &mut RangeReader,
         props: &LzmaProps,
         out: &mut Vec<u8>,
         unpack: usize,
@@ -488,17 +401,17 @@ impl LzmaCore {
             // output length.
             let pos_state = (out.len() - dict_base) & pos_mask;
 
-            if rc.decode_bit(&mut self.is_match[self.st.state][pos_state]) == 0 {
+            if rc.bit(&mut self.is_match[self.machine.state][pos_state])? == 0 {
                 // Literal
                 let probs = &mut self.literal[Self::lit_state(props, out, out.len(), dict_base)];
                 let mut symbol = 1usize;
-                if self.st.is_char() {
+                if self.machine.after_literal_context() {
                     while symbol < 0x100 {
-                        let b = rc.decode_bit(&mut probs[symbol]) as usize;
+                        let b = rc.bit(&mut probs[symbol])? as usize;
                         symbol = (symbol << 1) | b;
                     }
                 } else {
-                    let dist = self.st.rep0 as usize;
+                    let dist = self.machine.rep0 as usize;
                     let mb_pos =
                         out.len()
                             .checked_sub(dist + 1)
@@ -515,25 +428,25 @@ impl LzmaCore {
                     while symbol < 0x100 {
                         match_byte <<= 1;
                         let match_bit = match_byte & offset;
-                        let b = rc.decode_bit(&mut probs[offset + match_bit + symbol]) as usize;
+                        let b = rc.bit(&mut probs[offset + match_bit + symbol])? as usize;
                         symbol = (symbol << 1) | b;
                         offset &= !(match_bit ^ (b * 0x100));
                     }
                 }
                 out.push((symbol - 0x100) as u8);
-                self.st.update_literal();
+                self.machine.after_literal();
                 continue;
             }
 
             // Match or rep
             let len;
-            if rc.decode_bit(&mut self.is_rep[self.st.state]) != 0 {
+            if rc.bit(&mut self.is_rep[self.machine.state])? != 0 {
                 // Rep match
-                if rc.decode_bit(&mut self.is_rep0[self.st.state]) == 0 {
-                    if rc.decode_bit(&mut self.is_rep0_long[self.st.state][pos_state]) == 0 {
+                if rc.bit(&mut self.is_rep_g0[self.machine.state])? == 0 {
+                    if rc.bit(&mut self.is_rep0_long[self.machine.state][pos_state])? == 0 {
                         // Short rep: copy 1 byte
-                        self.st.update_short_rep();
-                        let dist = self.st.rep0 as usize;
+                        self.machine.after_short_rep();
+                        let dist = self.machine.rep0 as usize;
                         let src = out
                             .len()
                             .checked_sub(dist + 1)
@@ -549,47 +462,42 @@ impl LzmaCore {
                     }
                 } else {
                     let dist;
-                    if rc.decode_bit(&mut self.is_rep1[self.st.state]) == 0 {
-                        dist = self.st.rep1;
-                    } else if rc.decode_bit(&mut self.is_rep2[self.st.state]) == 0 {
-                        dist = self.st.rep2;
-                        self.st.rep2 = self.st.rep1;
+                    if rc.bit(&mut self.is_rep_g1[self.machine.state])? == 0 {
+                        dist = self.machine.rep1;
+                    } else if rc.bit(&mut self.is_rep_g2[self.machine.state])? == 0 {
+                        dist = self.machine.rep2;
+                        self.machine.rep2 = self.machine.rep1;
                     } else {
-                        dist = self.st.rep3;
-                        self.st.rep3 = self.st.rep2;
-                        self.st.rep2 = self.st.rep1;
+                        dist = self.machine.rep3;
+                        self.machine.rep3 = self.machine.rep2;
+                        self.machine.rep2 = self.machine.rep1;
                     }
-                    self.st.rep1 = self.st.rep0;
-                    self.st.rep0 = dist;
+                    self.machine.rep1 = self.machine.rep0;
+                    self.machine.rep0 = dist;
                 }
                 len = self.rep_len.decode(rc, pos_state)? + MATCH_MIN_LEN;
-                self.st.update_rep();
+                self.machine.after_rep();
             } else {
                 // Simple match
-                self.st.rep3 = self.st.rep2;
-                self.st.rep2 = self.st.rep1;
-                self.st.rep1 = self.st.rep0;
+                self.machine.push_rep(0);
                 len = self.match_len.decode(rc, pos_state)? + MATCH_MIN_LEN;
-                self.st.update_match();
+                self.machine.after_match();
 
                 let len_state = (len - MATCH_MIN_LEN).min(NUM_LEN_TO_POS_STATES - 1);
-                let slot = rc.decode_bit_tree(&mut self.pos_slot[len_state][..], 6) as usize;
+                let slot = rc.tree(&mut self.pos_slot[len_state][..], 6)? as usize;
 
                 let mut dist;
                 if slot < 4 {
                     dist = slot as u32;
                 } else {
-                    let num_direct = (slot >> 1) - 1;
+                    let num_direct = ((slot >> 1) - 1) as u32;
                     dist = (2 | (slot & 1) as u32) << num_direct;
                     if slot < END_POS_MODEL_INDEX {
                         let start = (dist - slot as u32) as usize;
-                        dist += rc.decode_bit_tree_reverse(
-                            &mut self.pos_special[start..],
-                            num_direct as u32,
-                        );
+                        dist += rc.tree_reverse(&mut self.pos_special[start..], num_direct)?;
                     } else {
-                        dist += rc.decode_direct((num_direct - ALIGN_BITS) as u32) << ALIGN_BITS;
-                        dist += rc.decode_bit_tree_reverse(&mut self.align[..], ALIGN_BITS as u32);
+                        dist += rc.direct(num_direct - ALIGN_BITS)? << ALIGN_BITS;
+                        dist += rc.tree_reverse(&mut self.align[..], ALIGN_BITS)?;
                     }
                 }
 
@@ -597,12 +505,12 @@ impl LzmaCore {
                     // End-of-stream marker
                     return Ok(true);
                 }
-                self.st.rep0 = dist;
+                self.machine.rep0 = dist;
             }
 
             // Copy match. LZMA distances are zero-based: the source is
             // `dist + 1` bytes back.
-            let dist = self.st.rep0 as usize;
+            let dist = self.machine.rep0 as usize;
             if dist + 1 > out.len() - dict_base {
                 return Err(CompressError::InvalidFormat(
                     "LZMA match distance out of range",
@@ -634,9 +542,7 @@ impl LzmaCore {
         Ok(false)
     }
 }
-// Vendored trim: the encoder half (LzmaEncoder, the range encoder and the
-// Paley-graph match finder it drives) is not vendored — rgx decodes LZMA
-// for zip method 14 and nothing else.
+
 pub struct LzmaDecoder;
 
 impl LzmaDecoder {
@@ -708,8 +614,8 @@ impl LzmaDecoder {
         unpack_size: Option<u64>,
         limit: u64,
     ) -> CompressResult<Bounded> {
-        let mut rc = RangeDecoder::new(input)?;
-        let mut core = LzmaCore::new(props);
+        let mut rc = RangeReader::new(input)?;
+        let mut core = LzmaEngine::new(props);
         let mut out: Vec<u8> = Vec::with_capacity(unpack_size.unwrap_or(0).min(1 << 26) as usize);
         let mut cap = super::cap::OutputCap::new(limit);
         let mut counted = 0u64;
@@ -801,7 +707,7 @@ impl LzmaDecoder {
         let mut out: Vec<u8> = Vec::new();
         let mut cap = super::cap::OutputCap::new(limit);
         let mut props: Option<LzmaProps> = None;
-        let mut core: Option<LzmaCore> = None;
+        let mut core: Option<LzmaEngine> = None;
         let mut need_dict_reset = true;
         // After an uncompressed chunk the LZMA state is invalid until a
         // chunk resets it (control >= 0xA0).
@@ -872,7 +778,7 @@ impl LzmaDecoder {
                     input = &input[1..];
                     let p = LzmaProps::from_byte(b)?;
                     props = Some(p);
-                    core = Some(LzmaCore::new(p));
+                    core = Some(LzmaEngine::new(p));
                     state_valid = true;
                     need_props = false;
                 } else if !state_valid {
@@ -885,7 +791,7 @@ impl LzmaDecoder {
                     let p = props.ok_or(CompressError::InvalidFormat(
                         "LZMA2 chunk without properties",
                     ))?;
-                    core = Some(LzmaCore::new(p));
+                    core = Some(LzmaEngine::new(p));
                     state_valid = true;
                 } else if control >= 0xA0 {
                     // State reset (keeps props)
@@ -901,7 +807,7 @@ impl LzmaDecoder {
                 let chunk = &input[..packed];
                 input = &input[packed..];
 
-                let mut rc = RangeDecoder::new(chunk)?;
+                let mut rc = RangeReader::new(chunk)?;
                 let before = out.len() as u64;
                 c.decode_chunk(
                     &mut rc,
@@ -946,7 +852,6 @@ impl Default for LzmaDecoder {
         Self::new()
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1172,5 +1077,35 @@ mod tests {
         );
         assert_eq!(b.declared, None, "nothing was declared");
         assert_eq!(b.bytes, &expected[..1000], "not the real prefix");
+    }
+}
+
+/// The decoders read untrusted bytes through a range coder whose
+/// probabilities steer every branch: truncated input, a bad properties
+/// byte, a distance past the dictionary, a chunk that over-declares its
+/// size. None may panic.
+#[cfg(test)]
+mod fuzz {
+    use super::*;
+
+    #[test]
+    fn never_panics_on_arbitrary_bytes() {
+        let corpus: alloc::vec::Vec<(&str, alloc::vec::Vec<u8>)> = alloc::vec![
+            ("empty", alloc::vec![]),
+            (
+                "header_only",
+                alloc::vec![0x5D, 0, 0, 0, 1, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]
+            ),
+            ("lzma2_end", alloc::vec![0x00]),
+            ("lzma2_reset", alloc::vec![0x01, 0x00, 0x00, 0x41]),
+        ];
+        crate::fuzzkit::assert_never_panics(corpus, 2000, "lzma", |data| {
+            let _ = LzmaDecoder::new().decode(data);
+            let _ = LzmaDecoder::new().decode_bounded(data, 1 << 16);
+            let props = LzmaProps::default();
+            let _ = LzmaDecoder::new().decode_raw(data, props, 1 << 16, None);
+            let _ = LzmaDecoder::new().decode_lzma2(data, 1 << 16);
+            let _ = LzmaDecoder::new().decode_lzma2_bounded(data, 1 << 16, 1 << 12);
+        });
     }
 }
