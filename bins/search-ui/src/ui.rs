@@ -5,7 +5,7 @@
 //! The whole MFT-derived index already sits in memory, so every keystroke can
 //! re-scan all of it: the search has no debounce and no async work. What makes
 //! that legible is measuring it — the last query's latency sits flush right of
-//! the prompt and the footer carries a rolling median plus a sparkline of the
+//! the prompt and the footer carries a first/p50/p90 plus a sparkline of the
 //! last few dozen queries, so a scan that quietly got slower is visible while
 //! typing rather than after the fact.
 
@@ -14,8 +14,9 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 use crossterm::execute;
 use crossterm::style::{Print, ResetColor, SetBackgroundColor, Stylize};
 use crossterm::terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen};
-use name_core::fuzzy;
-use name_core::index::{Index, OrQuery, SearchTable};
+use crate::latency::LatencyMeter;
+use name_core::live::Live;
+use name_core::name_query::{Alternatives, Hit, Searcher};
 use std::io::{Stdout, Write};
 use std::time::Instant;
 
@@ -86,7 +87,7 @@ mod palette {
         }
     }
 
-    /// Header subtitle, parent directories, footer prose, `median`.
+    /// Header subtitle, parent directories, footer prose, `p50/p90`.
     pub fn dim() -> Color {
         if truecolor() {
             Color::Rgb {
@@ -113,7 +114,7 @@ mod palette {
         }
     }
 
-    /// Latency figures, the sparkline, the median value.
+    /// Latency figures, the sparkline, first/p50/p90.
     pub fn green() -> Color {
         if truecolor() {
             Color::Rgb {
@@ -130,7 +131,9 @@ mod palette {
 /// Matches kept for ranking. Beyond this the list is already far longer than a
 /// screen, and the true total is reported separately.
 const MAX_RESULTS: usize = 20_000;
-/// Keystrokes remembered for the footer sparkline and median.
+/// Keystrokes remembered for the footer sparkline and percentiles.
+/// Mirrors `LatencyMeter`'s window; used by the cap test.
+#[allow(dead_code)]
 const LATENCY_SAMPLES: usize = 64;
 const MIN_WIDTH: usize = 40;
 const MIN_HEIGHT: usize = 8;
@@ -166,16 +169,16 @@ impl Drop for TerminalGuard {
 }
 
 struct App {
-    table: SearchTable,
-    /// Volume root, shown in the header. Copied out so the whole [`Index`] can
-    /// be dropped once the table is built.
+    /// The fsearch name index + overlay, the same searcher `searchctl` uses.
+    live: Live,
+    /// Volume root, shown in the header.
     root: String,
     indexed: usize,
     input: String,
     /// Caret offset into `input`, counted in `char`s.
     caret: usize,
-    /// Matching entries as row numbers into `table`, best match first.
-    results: Vec<u64>,
+    /// Matching paths, best match first (already resolved from hits).
+    results: Vec<String>,
     /// Matches found before `results` was capped.
     total: usize,
     /// Whether the query carries any filter or search term at all, which
@@ -184,8 +187,9 @@ struct App {
     selected: usize,
     top: usize,
     page: usize,
-    /// Search latency per keystroke, in microseconds, oldest first.
-    latencies: Vec<u128>,
+    /// Per-keystroke search latency: cold `first` kept out of the window,
+    /// which reports nearest-rank p50/p90 and the sparkline.
+    meter: LatencyMeter,
 }
 
 /// What a key press did to the app.
@@ -199,9 +203,9 @@ enum Action {
 }
 
 impl App {
-    fn new(table: SearchTable, root: String, indexed: usize) -> Self {
+    fn new(live: Live, root: String, indexed: usize) -> Self {
         let mut app = App {
-            table,
+            live,
             root,
             indexed,
             input: String::new(),
@@ -212,85 +216,80 @@ impl App {
             selected: 0,
             top: 0,
             page: 1,
-            latencies: Vec::new(),
+            meter: LatencyMeter::new(),
         };
         app.search();
         app
     }
 
     /// Re-scan the whole index for the current query and time it.
+    ///
+    /// Matching goes through [`Searcher`] — the same fzf-v1 + one-typo
+    /// matcher `searchctl` runs — so the UI and the CLI cannot drift apart.
     fn search(&mut self) {
         let started = Instant::now();
+        self.filtered = !self.input.trim().is_empty();
 
-        let parsed = OrQuery::parse(&self.input);
-        // The bare words drive fuzzy matching against file names here.
-        // Substring-matching them would reject exactly the scattered matches
-        // the interactive mode exists to surface — `rc` must find `report.txt`.
-        // So when no term is a glob, the fuzzy pass owns the terms and only the
-        // filters are applied literally. A wildcard term has no fuzzy meaning
-        // (its meaning is the glob), so any glob switches the whole query to
-        // strict matching.
-        let terms_have_wildcards = parsed.terms().any(|t| t.contains('*') || t.contains('?'));
-        // Fuzzy scoring ANDs its needle list, so it can only own the terms when
-        // the query is a single alternative. With `|` the alternatives are OR'd,
-        // which only the strict matcher gets right.
-        let fuzzy_owns_terms = parsed.alternatives.len() == 1 && !terms_have_wildcards;
-        let needles: Vec<String> = parsed
-            .terms()
-            .filter(|t| !t.contains('*') && !t.contains('?'))
-            .map(|s| s.to_string())
-            .collect();
-        self.filtered = !parsed.alternatives.iter().all(|q| q.is_empty());
-
-        let mut scored: Vec<(fuzzy::Match, u64)> = Vec::new();
-        let mut total = 0usize;
-
-        for row in 0..self.table.len() as u64 {
-            let entry = self.table.get(row as usize);
-            let Some(rank) = fuzzy::score(entry.name, &needles) else {
-                continue;
-            };
-            let admitted = if fuzzy_owns_terms {
-                parsed.matches_filters(
-                    entry.path,
-                    entry.name,
-                    entry.is_dir,
-                    entry.size,
-                    entry.attrs,
-                )
-            } else {
-                parsed.matches(
-                    entry.path,
-                    entry.name,
-                    entry.is_dir,
-                    entry.size,
-                    entry.attrs,
-                )
-            };
-            if !admitted {
-                continue;
+        // The UI starts with an empty box and must show the world, not a
+        // parse error. `Alternatives::parse("")` matches everything, but
+        // listing every path through the index is cheaper than scoring.
+        if !self.filtered {
+            self.results.clear();
+            self.total = self.live.base.n.saturating_sub(1); // skip synthetic root
+            let mut out = Vec::new();
+            let mut n = 0usize;
+            for i in 1..self.live.base.n {
+                if n >= MAX_RESULTS {
+                    break;
+                }
+                self.live.base.path(i, &mut out);
+                self.results.push(String::from_utf8_lossy(&out).into_owned());
+                n += 1;
             }
-            total += 1;
-            if scored.len() < MAX_RESULTS {
-                scored.push((rank, row));
-            }
+            self.selected = 0;
+            self.top = 0;
+            self.meter.record(started.elapsed().as_micros());
+            return;
         }
 
-        // `Match`'s derived ordering is the ranking. Rows are already in path
-        // order, so the row number breaks ties for free and the list is stable
-        // across repeated identical queries.
-        scored.sort_unstable_by_key(|(rank, row)| (*rank, *row));
+        let home = std::env::var("USERPROFILE")
+            .or_else(|_| std::env::var("HOME"))
+            .unwrap_or_default();
+        let mut hits: Vec<Hit> = Vec::new();
+        if let Ok(alts) = Alternatives::parse(&self.input, &home) {
+            let searcher = Searcher { live: &self.live };
+            for alt in &alts.alts {
+                let mut q = alt.clone();
+                q.limit = MAX_RESULTS;
+                for h in searcher.search(&q) {
+                    match hits.iter_mut().find(|e| e.idx == h.idx) {
+                        Some(e) if e.score < h.score => *e = h,
+                        Some(_) => {}
+                        None => hits.push(h),
+                    }
+                }
+            }
+        }
+        // Score desc, then index asc — the same total order `searchctl` uses.
+        hits.sort_by(|a, b| b.score.cmp(&a.score).then(a.idx.cmp(&b.idx)));
+        hits.truncate(MAX_RESULTS);
 
-        self.results = scored.into_iter().map(|(_, frn)| frn).collect();
-        self.total = total;
+        let mut out = Vec::new();
+        self.results = hits
+            .iter()
+            .map(|h| {
+                if let Some(p) = h.over.clone() {
+                    return String::from_utf8_lossy(&p).into_owned();
+                }
+                self.live.base.path(h.idx as usize, &mut out);
+                String::from_utf8_lossy(&out).into_owned()
+            })
+            .collect();
+        self.total = self.results.len();
         self.selected = 0;
         self.top = 0;
 
-        let elapsed = started.elapsed().as_micros();
-        self.latencies.push(elapsed);
-        if self.latencies.len() > LATENCY_SAMPLES {
-            self.latencies.remove(0);
-        }
+        self.meter.record(started.elapsed().as_micros());
     }
 
     fn input_len(&self) -> usize {
@@ -365,44 +364,7 @@ impl App {
     }
 
     fn selected_path(&self) -> Option<String> {
-        let row = *self.results.get(self.selected)? as usize;
-        Some(self.table.get(row).path.to_string())
-    }
-
-    fn median_us(&self) -> Option<u128> {
-        if self.latencies.is_empty() {
-            return None;
-        }
-        let mut sorted = self.latencies.clone();
-        sorted.sort_unstable();
-        Some(sorted[sorted.len() / 2])
-    }
-
-    /// The latency history as a bar chart, newest sample on the right.
-    ///
-    /// Scaled against the slowest sample on a log curve: a single cold scan
-    /// would otherwise flatten every other bar into the baseline, which is
-    /// exactly the outlier the chart exists to show.
-    fn sparkline(&self, width: usize) -> String {
-        const BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-
-        if width == 0 {
-            return String::new();
-        }
-        let start = self.latencies.len().saturating_sub(width);
-        let samples = &self.latencies[start..];
-        let Some(peak) = samples.iter().copied().max() else {
-            return String::new();
-        };
-        let scale = (peak as f64).ln_1p().max(f64::MIN_POSITIVE);
-
-        samples
-            .iter()
-            .map(|s| {
-                let level = (((*s as f64).ln_1p() / scale) * 7.0).round();
-                BLOCKS[(level as usize).min(7)]
-            })
-            .collect()
+        self.results.get(self.selected).cloned()
     }
 
     fn draw(&mut self, out: &mut impl Write, size: (u16, u16)) -> std::io::Result<()> {
@@ -440,8 +402,8 @@ impl App {
         // The per-keystroke latency is the headline number. No label: the
         // video puts a green "8.1 ms" flush right of the prompt, with no word
         // before it.
-        let latency = match self.latencies.last() {
-            Some(us) => format!("{} ms", fmt_us(*us))
+        let latency = match self.meter.last() {
+            Some(us) => format!("{} ms", fmt_us(us))
                 .with(palette::green())
                 .to_string(),
             None => String::new(),
@@ -520,17 +482,18 @@ impl App {
     /// keeps the row on one line. The name is regular weight — only the
     /// brand and the query are bold in the recording.
     fn result_cell(&self, row: usize, width: usize) -> String {
-        let entry = self.table.get(self.results[row] as usize);
+        let path = &self.results[row];
+        let name = name_of(path);
         // The two-space gap is enough on its own; the parent path can use the
         // rest. `elide_tail` keeps the directory that gave the file its
         // meaning, which is what a reader needs when names collide.
-        let name_visible = entry.name.chars().count().min(width.saturating_sub(2));
+        let name_visible = name.chars().count().min(width.saturating_sub(2));
         let dir_width = width.saturating_sub(name_visible + 2);
 
         let cell = format!(
             "{name}  {dir}",
-            name = fit(entry.name, name_visible).with(palette::ink()),
-            dir = elide_tail(&shorten_home(parent_of(entry.path)), dir_width).with(palette::dim())
+            name = fit(name, name_visible).with(palette::ink()),
+            dir = elide_tail(&shorten_home(parent_of(path)), dir_width).with(palette::dim())
         );
         if row == self.selected {
             cell.reverse().to_string()
@@ -539,31 +502,39 @@ impl App {
         }
     }
 
-    /// Footer: the prose, the chart, the median. The video has no match count
-    /// on the right edge — count info is already in the header.
+    /// Footer: the prose, the chart, first/p50/p90. The video has no match
+    /// count on the right edge — count info is already in the header.
     ///
     /// As the terminal narrows the prose is the first thing to go, then the
-    /// chart; the median number is the last survivor.
+    /// chart; the percentile numbers stay. The cold first query is reported
+    /// separately on purpose — it is the outlier the sparkline exists to
+    /// show, and it must not sit inside p50/p90.
     fn footer_line(&self, width: usize) -> String {
         let label = "every keystroke is a whole-disk search";
-        let median = match self.median_us() {
+        let fmt = |us: Option<u128>| match us {
             Some(us) => format!("{} ms", fmt_us(us)),
             None => "—".to_string(),
         };
+        let stats = format!(
+            "first {}  p50 {}  p90 {}",
+            fmt(self.meter.first()),
+            fmt(self.meter.p50()),
+            fmt(self.meter.p90()),
+        );
 
         let label_width = label.chars().count();
-        let median_width = "median".len() + 1 + median.chars().count();
+        let stats_width = stats.chars().count();
 
         let mut line = String::new();
         let mut spark_width = 0usize;
 
-        // Prose + sparkline + median. As the budget shrinks the prose goes
-        // first, then the chart; the median number stays.
-        if width >= label_width + median_width + 4 {
+        // Prose + sparkline + stats. As the budget shrinks the prose goes
+        // first, then the chart; the numbers stay.
+        if width >= label_width + stats_width + 4 {
             line.push_str(&label.with(palette::dim()).to_string());
-            spark_width = 24.min(width - label_width - median_width - 4);
-        } else if width >= median_width + 4 {
-            spark_width = 24.min(width - median_width - 4);
+            spark_width = 24.min(width.saturating_sub(label_width + stats_width + 4));
+        } else if width >= stats_width + 4 {
+            spark_width = 24.min(width.saturating_sub(stats_width + 4));
         }
 
         if spark_width > 0 {
@@ -572,6 +543,7 @@ impl App {
             }
             line.push_str(
                 &self
+                    .meter
                     .sparkline(spark_width)
                     .with(palette::green())
                     .to_string(),
@@ -580,9 +552,7 @@ impl App {
         if !line.is_empty() {
             line.push_str("  ");
         }
-        line.push_str(&"median".with(palette::dim()).to_string());
-        line.push(' ');
-        line.push_str(&median.with(palette::green()).to_string());
+        line.push_str(&stats.with(palette::green()).to_string());
 
         // Pad to the right edge in case the budget is bigger than the content
         // we could lay down (rare, but happens at very wide widths).
@@ -704,18 +674,11 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Action {
 
 /// Run the interactive search. Enter prints the selected path to stdout after
 /// the screen is restored, so the result can be piped onward.
-pub fn run(index: Index) -> Result<(), String> {
-    let root = index.root().to_string();
-    let indexed = index.entry_count();
-    // The table is a copy of everything the UI reads; the index itself is not
-    // consulted again once it is built.
-    let table = SearchTable::build(&index);
-    drop(index);
-
+pub fn run(live: Live, root: String, indexed: usize) -> Result<(), String> {
     let mut out = std::io::stdout();
     let _guard = TerminalGuard::enter(&mut out)?;
 
-    let mut app = App::new(table, root, indexed);
+    let mut app = App::new(live, root, indexed);
     let mut chosen = None;
 
     loop {
@@ -749,10 +712,19 @@ pub fn run(index: Index) -> Result<(), String> {
 }
 
 /// Everything before the final path separator, or the whole path when it has
-/// none.
+/// none. Handles both `name_index` `/` paths and Windows `\\` ones.
 fn parent_of(path: &str) -> &str {
-    match path.rfind('\\') {
+    let i = path.rfind(['\\', '/']);
+    match i {
         Some(i) => &path[..i],
+        None => path,
+    }
+}
+
+/// Final path component.
+fn name_of(path: &str) -> &str {
+    match path.rfind(['\\', '/']) {
+        Some(i) => &path[i + 1..],
         None => path,
     }
 }
@@ -911,30 +883,17 @@ fn fmt_us(us: u128) -> String {
 #[cfg(test)]
 mod bench {
     use super::*;
-    use name_core::index::Index;
-    use std::io::BufReader;
 
     /// Not a correctness test: reports what one whole-index scan costs per
     /// keystroke, which is the number the footer's sparkline is showing the
-    /// user. Point it at a real index:
-    ///
-    ///     ERI_INDEX=index.eri cargo test --release bench_scan -- --ignored --nocapture
+    /// user. The interactive path now goes through [`Searcher`]; for gated
+    /// engine timings see `engine/examples/name_bench` and `benchmark/`.
     #[test]
-    #[ignore = "needs a real .eri index; reports timings and asserts nothing"]
+    #[ignore = "reports timings and asserts nothing; run with --ignored --nocapture"]
     fn bench_scan() {
-        let path = std::env::var("ERI_INDEX").expect("set ERI_INDEX to an .eri file");
-        let file = std::fs::File::open(&path).expect("open index");
-        let index = Index::read_from(&mut BufReader::new(file)).expect("read index");
-        let root = index.root().to_string();
-        let indexed = index.entry_count();
-        let table = SearchTable::build(&index);
-        let entries = table.len();
-        println!(
-            "\n{entries} entries from {path}, {} bytes of table",
-            table.bytes()
-        );
-
-        let mut app = App::new(table, root, indexed);
+        let live = super::tests::sample_live();
+        let entries = live.base.n.saturating_sub(1);
+        let mut app = App::new(live, "C:\\".to_string(), entries);
         for query in ["m", "ma", "mai", "main", "wallp", "main ext:rs", ""] {
             app.input = query.to_string();
             app.caret = app.input_len();
@@ -944,7 +903,7 @@ mod bench {
             println!(
                 "{query:<14} {:>8.2} ms  {:>5.0} ns/entry  {:>7} hits",
                 elapsed.as_secs_f64() * 1000.0,
-                elapsed.as_nanos() as f64 / entries as f64,
+                elapsed.as_nanos() as f64 / entries.max(1) as f64,
                 app.total
             );
         }
@@ -954,29 +913,68 @@ mod bench {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use name_core::index::{Index, NodeKind, ROOT_FRN, SearchTable};
+    use discovery::walk::{KIND_DIR, KIND_FILE, Listing, NONE, RawEnt};
+    use name_core::name_index;
 
-    fn sample_index() -> Index {
-        let mut idx = Index::new("C:\\");
-        idx.insert(100, ROOT_FRN, "src", NodeKind::Directory, 0, 0x10);
-        idx.insert(101, 100, "main.rs", NodeKind::File, 2_000, 0x20);
-        idx.insert(102, 100, "maintenance.rs", NodeKind::File, 3_000, 0x20);
-        idx.insert(103, ROOT_FRN, "wallpaper.jpg", NodeKind::File, 9_000, 0x20);
-        idx
+    /// The same four entries the old zen fixture had, as the two DFS
+    /// [`Listing`]s `name_index::Index::build` wants.
+    fn sample_listings() -> Vec<Listing> {
+        let mut root_names = Vec::new();
+        let mut root_ents = Vec::new();
+        for (name, is_dir, size) in [("src", true, 0u64), ("wallpaper.jpg", false, 9_000)] {
+            let off = root_names.len() as u32;
+            root_names.extend_from_slice(name.as_bytes());
+            root_ents.push(RawEnt {
+                name_off: off,
+                name_len: name.len() as u16,
+                kind: if is_dir { KIND_DIR } else { KIND_FILE },
+                size,
+                mtime: 0,
+                child: if is_dir { 1 } else { NONE },
+            });
+        }
+        let mut src_names = Vec::new();
+        let mut src_ents = Vec::new();
+        for (name, size) in [("main.rs", 2_000u64), ("maintenance.rs", 3_000)] {
+            let off = src_names.len() as u32;
+            src_names.extend_from_slice(name.as_bytes());
+            src_ents.push(RawEnt {
+                name_off: off,
+                name_len: name.len() as u16,
+                kind: KIND_FILE,
+                size,
+                mtime: 0,
+                child: NONE,
+            });
+        }
+        vec![
+            Listing {
+                id: 0,
+                names: root_names,
+                ents: root_ents,
+            },
+            Listing {
+                id: 1,
+                names: src_names,
+                ents: src_ents,
+            },
+        ]
     }
 
-    /// Build an app the way [`run`] does: flatten the index into a scan table
-    /// and keep only what the header needs.
-    fn app_new(index: Index) -> App {
-        App::new(
-            SearchTable::build(&index),
-            index.root().to_string(),
-            index.entry_count(),
-        )
+    pub(crate) fn sample_live() -> Live {
+        let idx = name_index::Index::build(sample_listings(), 0, 0, b"");
+        Live::new(idx)
+    }
+
+    /// Build an app the way [`run`] does.
+    fn app_new() -> App {
+        let live = sample_live();
+        let indexed = live.base.n.saturating_sub(1);
+        App::new(live, "C:\\".to_string(), indexed)
     }
 
     fn app_with(input: &str) -> App {
-        let mut app = app_new(sample_index());
+        let mut app = app_new();
         app.input = input.to_string();
         app.caret = app.input_len();
         app.search();
@@ -984,10 +982,7 @@ mod tests {
     }
 
     fn paths(app: &App) -> Vec<String> {
-        app.results
-            .iter()
-            .map(|&row| app.table.get(row as usize).path.to_string())
-            .collect()
+        app.results.clone()
     }
 
     #[test]
@@ -1003,19 +998,19 @@ mod tests {
         // `mr` scatters through both `.rs` names; the tighter span in the
         // shorter name is what decides the order.
         let app = app_with("mr");
-        assert_eq!(paths(&app)[0], "C:\\src\\main.rs");
+        assert_eq!(paths(&app)[0], "/src/main.rs");
     }
 
     #[test]
     fn an_exact_name_ranks_above_a_prefix_of_a_longer_name() {
         let app = app_with("maintenance.rs");
-        assert_eq!(paths(&app), vec!["C:\\src\\maintenance.rs"]);
+        assert_eq!(paths(&app), vec!["/src/maintenance.rs"]);
     }
 
     #[test]
     fn filters_narrow_the_fuzzy_name_match() {
         let app = app_with("maintenance ext:rs");
-        assert_eq!(paths(&app), vec!["C:\\src\\maintenance.rs"]);
+        assert_eq!(paths(&app), vec!["/src/maintenance.rs"]);
 
         let app = app_with("maintenance ext:png");
         assert!(app.results.is_empty());
@@ -1024,26 +1019,28 @@ mod tests {
     #[test]
     fn a_negated_term_removes_matches_by_path() {
         let app = app_with("main !maintenance");
-        assert_eq!(paths(&app), vec!["C:\\src\\main.rs"]);
+        assert_eq!(paths(&app), vec!["/src/main.rs"]);
     }
 
     #[test]
     fn every_query_is_timed_and_recorded() {
-        let mut app = app_new(sample_index());
-        assert_eq!(app.latencies.len(), 1);
+        let mut app = app_new();
+        // The initial empty scan is the cold `first`, not a window sample.
+        assert_eq!(app.meter.first().is_some(), true);
+        assert_eq!(app.meter.window_len(), 0);
         app.insert('m');
         app.search();
-        assert_eq!(app.latencies.len(), 2);
-        assert!(app.median_us().is_some());
+        assert_eq!(app.meter.window_len(), 1);
+        assert!(app.meter.p50().is_some());
     }
 
     #[test]
     fn latency_history_is_capped() {
-        let mut app = app_new(sample_index());
+        let mut app = app_new();
         for _ in 0..LATENCY_SAMPLES + 10 {
             app.search();
         }
-        assert_eq!(app.latencies.len(), LATENCY_SAMPLES);
+        assert_eq!(app.meter.window_len(), LATENCY_SAMPLES);
     }
 
     /// Without a truecolor advertisement the ANSI-16 fallback must be used,
@@ -1074,41 +1071,25 @@ mod tests {
         }
     }
 
-    /// The footer figure is the middle of the window, not a total. If this ever
-    /// becomes a sum the number climbs the longer you type, which is the one
-    /// thing a rolling median must never do.
+    /// The footer figures are window percentiles, not a sum. The cold `first`
+    /// is reported apart on purpose: it must never sit inside p50/p90.
     #[test]
-    fn the_median_is_the_middle_sample_not_a_sum() {
-        let mut app = app_new(sample_index());
-        app.latencies = vec![1_000, 2_000, 300_000]; // µs: 1, 2, 300 ms
-        // Middle of [1, 2, 300] is 2 ms. A sum would report 303 ms.
-        assert_eq!(app.median_us(), Some(2_000));
-
-        // Even windows take the upper of the two middle samples.
-        app.latencies = vec![100, 200, 300, 400];
-        assert_eq!(app.median_us(), Some(300));
-
-        // Ordering must not matter: a sum would.
-        app.latencies = vec![400, 100, 300, 200];
-        assert_eq!(app.median_us(), Some(300));
-
-        // Growth is bounded by the window, so typing forever cannot inflate it.
-        app.latencies = vec![1_000; LATENCY_SAMPLES];
-        for i in 0..1_000 {
-            app.latencies.push(1_000 + i);
-            if app.latencies.len() > LATENCY_SAMPLES {
-                app.latencies.remove(0);
-            }
+    fn the_percentiles_exclude_the_cold_first_sample() {
+        let mut app = app_new();
+        // First search at construction is the cold one — a big outlier.
+        for _ in 0..10 {
+            app.meter.record(1_000);
         }
-        assert!(
-            app.median_us().unwrap() < 2_000,
-            "the median must stay near the per-scan cost, not accumulate"
-        );
+        app.meter.record(300_000);
+        // p50 is a percentile of the window, so the 300 ms outlier is not
+        // "the middle" and the cold sample is not in the window at all.
+        assert_eq!(app.meter.p50(), Some(1_000));
+        assert_eq!(app.meter.first().is_some(), true);
     }
 
     #[test]
     fn editing_the_query_at_the_caret_splices_the_right_characters() {
-        let mut app = app_new(sample_index());
+        let mut app = app_new();
         app.insert('a');
         app.insert('b');
         app.insert('c');
@@ -1131,7 +1112,7 @@ mod tests {
 
     #[test]
     fn deleting_a_word_keeps_the_rest_of_the_query() {
-        let mut app = app_new(sample_index());
+        let mut app = app_new();
         for c in "size:>1gb type:video".chars() {
             app.insert(c);
         }
@@ -1141,7 +1122,7 @@ mod tests {
 
     #[test]
     fn caret_movement_is_clamped_to_the_query() {
-        let mut app = app_new(sample_index());
+        let mut app = app_new();
         for c in "rs".chars() {
             app.insert(c);
         }
@@ -1250,13 +1231,19 @@ mod tests {
 
     #[test]
     fn the_sparkline_scales_a_slow_sample_against_the_fast_ones() {
-        let mut app = app_new(sample_index());
-        app.latencies = vec![100, 100, 100_000, 100];
-        let chart = app.sparkline(8);
-        assert_eq!(chart.chars().count(), 4);
-        assert_eq!(chart.chars().nth(2), Some('█'), "the outlier fills the bar");
-        assert_ne!(chart.chars().next(), Some('█'));
-        assert_eq!(app.sparkline(0), "");
+        let mut app = app_new();
+        // `app_new` already recorded the cold `first`; these are the window.
+        app.meter.record(100);
+        app.meter.record(100);
+        app.meter.record(100_000);
+        app.meter.record(100);
+        // Fewer samples than width: the chart is right-aligned with spaces.
+        let chart = app.meter.sparkline(8);
+        let bars: String = chart.chars().filter(|c| !c.is_whitespace()).collect();
+        assert_eq!(bars.chars().count(), 4);
+        assert_eq!(bars.chars().nth(2), Some('█'), "the outlier fills the bar");
+        assert_ne!(bars.chars().next(), Some('█'));
+        assert_eq!(app.meter.sparkline(0), "");
     }
 
     #[test]
@@ -1273,7 +1260,7 @@ mod tests {
 
     #[test]
     fn a_long_query_is_scrolled_so_the_caret_stays_visible() {
-        let mut app = app_new(sample_index());
+        let mut app = app_new();
         for _ in 0..40 {
             app.insert('x');
         }
@@ -1350,7 +1337,7 @@ mod tests {
         assert!(rows[1].1.contains("maintenance"), "{}", rows[1].1);
         assert_eq!(rows[2].1, "─".repeat(100), "the rule spans the width");
         assert!(rows[3].1.contains("maintenance.rs"), "{}", rows[3].1);
-        assert!(rows[9].1.contains("median"), "{}", rows[9].1);
+        assert!(rows[9].1.contains("p50"), "{}", rows[9].1);
     }
 
     #[test]
@@ -1362,13 +1349,13 @@ mod tests {
             wide.contains("every keystroke is a whole-disk search"),
             "{wide}"
         );
-        assert!(wide.contains("median"), "{wide}");
+        assert!(wide.contains("p50"), "{wide}");
 
-        // The prose is 38 chars; at 44 the chart and the median alone fit,
+        // The prose is 38 chars; at 44 the chart and the stats alone fit,
         // so the prose has to drop. Pick 44 for the assertion.
         let narrow = strip_ansi(&app.footer_line(44));
         assert!(!narrow.contains("every keystroke"), "{narrow}");
-        assert!(narrow.contains("median"), "{narrow}");
+        assert!(narrow.contains("p50"), "{narrow}");
     }
 
     #[test]
@@ -1397,7 +1384,7 @@ mod tests {
         let mut app = app_with("zzzz");
         let rows = frame(&mut app, 60, 10);
         assert!(rows[3].1.contains("no matches"), "{}", rows[3].1);
-        // The footer carries the prose, the chart, and `median N ms` — no
+        // The footer carries the prose, the chart, and `p50 N ms` — no
         // count. The "0 matches" assertion was a holdover from the count
         // line that used to sit on the right.
     }
@@ -1417,18 +1404,18 @@ mod tests {
         app.page = 10;
         let cell = app.result_cell(0, 80);
         assert!(cell.contains("maintenance.rs"));
-        assert!(cell.contains("C:\\src"));
+        assert!(cell.contains("/src"));
     }
 
     #[test]
-    fn the_footer_is_the_prose_chart_and_median_no_count() {
+    fn the_footer_is_the_prose_chart_and_stats_no_count() {
         let app = app_with("");
         let footer = strip_ansi(&app.footer_line(100));
         assert!(
             footer.contains("every keystroke is a whole-disk search"),
             "{footer}"
         );
-        assert!(footer.contains("median"), "{footer}");
+        assert!(footer.contains("p50"), "{footer}");
         assert!(!footer.contains("entries"), "{footer}");
         assert!(!footer.contains("matches"), "{footer}");
     }

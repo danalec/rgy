@@ -11,10 +11,79 @@
 // compile against them unchanged" — behaviour unchanged, imports only).
 use discovery_windows::{indexer, ntfs, volume};
 use name_core::index;
+use name_core::live::Live;
 use search_ui as ui;
 
 use indexer::Indexer;
 use volume::Volume;
+
+/// Build the fsearch name index the UI's [`name_core::name_query::Searcher`]
+/// runs on, from the zen path index (the `.eri` / MFT view).
+///
+/// The name index is keyed by parent, not by NTFS FRN, so this assigns
+/// synthetic ids along the path tree and hands [`indexer::listings_from_rows`]
+/// a consistent parent map. The UI and `searchctl` then share one matcher.
+fn live_from_zen(index: &index::Index) -> Live {
+    use name_core::index::ROOT_FRN;
+    use name_core::name_index;
+    use std::collections::HashMap;
+
+    let mut id_of: HashMap<String, u64> = HashMap::new();
+    let mut next_id = ROOT_FRN + 1;
+    let mut rows: Vec<indexer::NameRow> = Vec::new();
+
+    let root_str = index.root().trim_end_matches(['\\', '/']).to_string();
+    id_of.insert(root_str.clone(), ROOT_FRN);
+
+    let mut entries: Vec<(String, bool, u64)> = index
+        .iter_all_paths()
+        .map(|(frn, path)| {
+            let meta = index.meta_of(frn);
+            (path.trim_end_matches(['\\', '/']).to_string(), meta.is_dir, meta.size)
+        })
+        .collect();
+    // Deterministic id assignment, so two runs of the same index agree.
+    entries.sort();
+
+    for (trimmed, is_dir, size) in entries {
+        let (parent_key, name) = match trimmed.rfind(['\\', '/']) {
+            Some(i) => {
+                let p = trimmed[..i].to_string();
+                (
+                    if p.is_empty() || p == root_str {
+                        root_str.clone()
+                    } else {
+                        p
+                    },
+                    trimmed[i + 1..].to_string(),
+                )
+            }
+            None => (root_str.clone(), trimmed.clone()),
+        };
+        let parent_frn = *id_of.entry(parent_key).or_insert_with(|| {
+            let id = next_id;
+            next_id += 1;
+            id
+        });
+        let frn = *id_of.entry(trimmed).or_insert_with(|| {
+            let id = next_id;
+            next_id += 1;
+            id
+        });
+        rows.push(indexer::NameRow {
+            frn,
+            parent_frn,
+            name: name.into_bytes(),
+            is_dir,
+            link: false,
+            size,
+            mtime: 0,
+        });
+    }
+
+    let listings = indexer::listings_from_rows(&rows, ROOT_FRN);
+    Live::new(name_index::Index::build(listings, 0, 0, b""))
+}
 
 fn usage() -> ! {
     eprintln!(
@@ -379,7 +448,10 @@ fn cmd_search_all(query_str: &str) -> Result<(), String> {
 /// Interactive full-screen search over an index.
 fn cmd_ui(source: &str) -> Result<(), String> {
     let index = load_or_scan(source)?;
-    ui::run(index)
+    let root = index.root().to_string();
+    let indexed = index.entry_count();
+    let live = live_from_zen(&index);
+    ui::run(live, root, indexed)
 }
 
 fn cmd_search(source: &str, query_str: &str) -> Result<(), String> {

@@ -6,6 +6,8 @@
 //! new name searcher + content grep. The sparkline stays; p50/p90 and
 //! candidates-skipped come later.
 
+pub mod latency;
+
 mod ui;
 
 pub use ui::*;

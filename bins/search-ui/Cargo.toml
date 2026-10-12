@@ -8,3 +8,7 @@ license = "Apache-2.0"
 [dependencies]
 name-core = { path = "../../crates/name-core" }
 crossterm = "0.28.1"
+
+[dev-dependencies]
+# Test fixtures build `discovery::walk::Listing`s for `name_index::Index::build`.
+discovery = { path = "../../crates/discovery" }

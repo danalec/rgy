@@ -79,6 +79,27 @@ Office hit rgx would return is invisible. Sentinels, `seq`/`tag`/`status`
 and the match-line shape are right; the silent flag subset is the trap.
 Widen it to the grammar, or make the end sentinel say what was dropped.
 
+## Interactive UI
+
+**The meter measures the typing loop, not a bench cell.** `search-ui` is
+per-keystroke whole-disk name search: every character is a full
+`name_query::Searcher` pass (fzf-v1 + typos + top-k + NameCache) over the
+live index. A smoothed mean hides exactly the shape the sparkline exists to
+show.
+
+**The cold first query is an outlier — keep it out of the rolling window.**
+Index page-in, first NameCache fill, and warm-up all land on sample 1. Fold
+it into the median and one open stains the next N keystrokes; drop it
+silently and the chart lies about the only sample a user actually waited
+on. Report it separately as `first`, keep it visible, keep it out of the
+percentiles.
+
+**p50/p90 are the honest numbers; "average latency" is not.** Nearest-rank
+percentiles over the warm samples: p50 for the feel, p90 for the tail the
+keystroke still pays. `candidates-skipped` and the rest of the diagnostics
+come later; the meter contract is `first` + p50 + p90 from day one — a UI
+that cannot state its own median cannot be tuned.
+
 ## Walk traps
 
 Three from `benchmark/findings.md`, all priced on the `crates/` row.

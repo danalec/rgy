@@ -200,8 +200,11 @@ regex pass at query time.
 
 - `searchctl` (name): fsearch one-shot ergonomics + zen-rs filters +
   rg-compatible exit codes where they don't conflict; `--json` from rgx.
-- `search-ui`: zen-rs terminal UI (sparkline stays; add p50/p90 and
-  candidates-skipped), backed by the new name searcher + content grep.
+- `search-ui`: zen-rs terminal UI (sparkline stays), name path **wired**
+  to `name_core::name_query::Searcher` (fzf-v1 + typos + top-k + NameCache)
+  + content grep — in flight, not verified. Latency meter reports `first`
+  (cold sample, kept out of the rolling window) + p50/p90 nearest-rank.
+  `candidates-skipped` comes later.
 - `searchd`: owns the indexes, keep-warm, follower takeover (fsearch
   `try_upgrade` + single-instance lock).
 
