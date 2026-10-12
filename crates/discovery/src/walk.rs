@@ -91,7 +91,14 @@ fn list_dir(path: &std::path::Path) -> Option<Listing> {
     for e in rd.flatten() {
         let name = e.file_name();
         let raw = name.to_string_lossy().as_bytes().to_vec();
-        let md = e.path().symlink_metadata().ok();
+        // `DirEntry::metadata`, not `e.path().symlink_metadata()`. They mean
+        // the same thing -- std documents that this "will not traverse
+        // symlinks if this entry points at a symlink" -- but the former does
+        // not rebuild the path and, where the platform's directory read
+        // already carries the attributes (Windows `FindNextFile`, Linux
+        // `getdents`+`d_type`), it uses them instead of a stat per entry.
+        // That stat was one syscall per file on the hot path of every scan.
+        let md = e.metadata().ok();
         let Some(md) = md else { continue };
         let name_off = names.len() as u32;
         names.extend_from_slice(&raw);
