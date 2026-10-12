@@ -52,6 +52,132 @@ mapping is chosen by access shape, not by size.
 the bytes return to the OS on drop (`BlobMut::anon`) — fsearch's big-block
 rule; the Vec fallback covers map refusal.
 
+## CLI and `--serve` contract
+
+**Exit codes are rg's: 0 match, 1 no match, 2 error.** No fourth state.
+Scripts and shims that invent one break drop-in use. searchd's `--serve`
+front already reports these three in its end sentinel (`status` 0/1/2).
+
+**`--serve` is a line protocol.** One JSON argv-array per line on stdin;
+stdout is framed by per-process sentinels: `{"rgx":"ready","tag":…,"pid":N}`
+once at start, then per query `{"rgx":"begin","seq":N,"tag":…}` / rg `--json`
+match lines / `{"rgx":"end","seq":N,"tag":…,"status":0|1|2,"matched":bool[,
+"error":…]}`. `tag` is per-process (rgx derives it from nanos ^ pid<<32),
+`seq` increments per query. The reader is the in-house `rgx_core::djson`, not
+`serde_json`. In rgx the **whole grammar is accepted per query**
+(`Args::try_parse_from`) and the adapter registry + page cache survive
+between queries — that is what makes a daemon worth running.
+
+**searchd's `--serve` shim keeps the shape and drops the argv.**
+`serve_pattern` recovers only `-F` and `-e`/the first positional; every
+other token is silently discarded (`a if a.starts_with('-') => {}`). So
+`-i`, `-n`, `-A/-B/-C`, `--sort`, `--glob`, type filters, path positionals
+(no per-query scoping — it always greps `--root`), `--files`, `-l`, `-c`
+and the rest do nothing, with no warning. It also answers content grep
+only (plain engine or TV store): no adapter registry, so a PDF/archive/
+Office hit rgx would return is invisible. Sentinels, `seq`/`tag`/`status`
+and the match-line shape are right; the silent flag subset is the trap.
+Widen it to the grammar, or make the end sentinel say what was dropped.
+
+## Walk traps
+
+Three from `benchmark/findings.md`, all priced on the `crates/` row.
+
+**Ignore cost is the rule-set COMPILE, not the match.** The walk is 85.7%
+of a 12.43 ms run; `--no-ignore` takes it to 3.54 ms, so 7.01 ms is
+`.gitignore` matching against 0.88 ms of read + engine. The mechanism is
+~58 µs per pattern, once per `.gitignore` — holding patterns at 65 and
+moving entries 1→1024 moves 4.55 → 7.86 ms, where a per-(entry × pattern)
+cost would move 16×. It is gated on `.git` presence: a tree without one
+has its `.gitignore` compiled and never consulted.
+
+**One unshaped line forfeits the whole file's fast path.** The fast-shape
+builder demanded *every* file glob look like `*.ext` or `pre*`; this
+repository's own ignore file is 17 of 35, and one anchored line cost all
+35 the fast path. Fixing the shape check took the `crates` walk 10.73 →
+6.09 ms. Gate the fast path per rule, not per file.
+
+**`--sort path` must order at the source.** It originally sorted `--files`
+while search hits stayed in walk order (caught by a flaky equivalence
+test); the first fix then buffered every matched file at the printer —
+unbounded on a pattern matching a whole tree. The shipped shape is
+`Builder::ordered` in the walker, `--sortr path` walks backwards, the
+printer streams one message at a time: peak working set flat across 16×
+the matched files (6432 / 6480 / 6716 KiB at 500 / 2000 / 8000). rgy's
+name-index rows are already path-ordered (`index.rs`), so the listing side
+never needs that buffer; the trap returns the moment an rg-compatible
+content walk sorts at a sink.
+
+## Vendoring
+
+**rgx never copies a file from any upstream.** Vendored trees are
+independent reimplementations: read the upstream source or spec for the API
+contract and the per-platform algorithm, then write fresh code. Every
+vendored file carries a `//!` provenance header naming the upstream and the
+commit it was based on. `scripts/check-vendoring.ps1` is a four-rule gate,
+exit 1 on violation: (1) no upstream reference in any non-comment line of
+`Cargo.toml` / `Cargo.lock` / `.cargo/config.toml`; (2) no `[patch]` in
+`.cargo/config.toml`; (3) a provenance header on every vendored tree's root
+module (`vendored from` or `independent reimplementation`); (4) no
+unlisted crates.io dependency.
+
+**`vendored-sources.tsv` pins are the sync point, not decoration.** A pin
+is the commit (or version) the file was *actually* taken from — the newest
+one whose content still matches, not "whatever HEAD is now" — which turns
+"has upstream moved?" into a question with an answer: every commit past the
+pin is a change the copy has not seen. **A row pinned `-` is a failure on
+purpose** — it says "no established sync point", and a manifest that
+quietly omits or dashes a file is worse than one that admits it has not
+been looked at, because the omission reads as "nothing to do here". Never
+hand-write a commit to make the gate green. rgy's `scripts/vendored-sources.tsv`
+carries the same rule in its header.
+
+## Gotchas
+
+- **`--tv-build` is a boolean — no value.** The tree comes from the first
+  positional (`rgx --tv-build .`, not `--tv-build .`); argv fixup re-binds
+  positionals as paths in `--files`/`--tv-build` modes for the same reason.
+- **`.rgxrc` is loaded before argv is parsed.** Search order:
+  `$RGX_CONFIG_PATH` → `./.rgxrc` → `~/.rgxrc` → `~/.config/rgx/rgxrc`.
+  Each non-empty non-comment line is prepended to argv (whitespace split,
+  shell-style quoting), so **CLI flags win over the file**. A missing file
+  is fine; an unreadable one warns. "Why does rgx ignore my flag" starts
+  with "is there a `.rgxrc`?".
+- **Open codec gap: RAR 7.x, PPMd *filters*, VM-program filters and
+  encryption do not decode.** PPMd var-H *blocks* do (`ppmd7.rs` +
+  `unpack3.rs`). An early adapter dropped a refused member with
+  `if let Ok(bytes) = archive.extract(e)` — and a silently absent entry
+  looks identical to a nonexistent one in a search result. The fix keeps
+  refusals and names them (note member beside real content, listing
+  fallback when nothing extracts); rgy's shared `rar.rs` already carries
+  it. Still no decode-against-known-good PPMd test: `rar-codec` encodes
+  store-only, so no PPMd-encoded RAR can be crafted here.
+- **`--file` is not accepted**, matching rg. Path flags take `-` for stdin.
+  Do not add it for symmetry.
+
+## Extraction cache pricing
+
+`benchmark/archive-extract-cache.md` (7950X3D, `RGXFIXTURE` over `crates/`,
+min-of-N; 4.3 ms spawn floor measured and reported separately):
+
+| cell | ms | note |
+|---|---:|---|
+| first run, no cache | 538 | the published `archive-extract` shape |
+| first run, `--cache` (fills 163 outputs) | 1057 | **2.0× to fill** |
+| cached run | 66 | **8.2×** vs no-cache; 16.1× vs filling |
+
+- **Break-even is the third query**: `1057 + 66·(N−1) < 538·N` holds for
+  N ≥ 3. Repeated sessions (`--serve`, gate loops) get a 66 ms query from
+  run 3 on; a one-shot search pays 2× for nothing.
+- **Counts are identical across cache cells (20/20/20).** The cache changes
+  what the answer costs, never the answer. A cache that changes a count is
+  a bug, not a trade.
+- **Off by default is correct, not an oversight**: a wrong default serves
+  stale bytes, and the fill is real. When rgy grows an extraction memo,
+  keep it opt-in — and any table that varies adapter behaviour must keep
+  `--cache` off on both sides or report both cells; mixing them compares
+  different work.
+
 ## Other rgx lessons already reflected here
 
 - One regex engine (`rgx-core`); the regex crate survives only for

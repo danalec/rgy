@@ -1,0 +1,17 @@
+[package]
+name = "rgy-e2e-tests"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "End-to-end tests for the user-facing bins (searchctl, searchd). Fixtures are built in temp dirs at runtime."
+
+# Integration-test-only crate: the two harnesses hang off [[test]] so
+# `cargo test --workspace` runs them like any other workspace test.
+[[test]]
+name = "cli"
+path = "cli.rs"
+
+[[test]]
+name = "serve"
+path = "serve.rs"

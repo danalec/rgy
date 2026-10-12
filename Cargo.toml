@@ -24,6 +24,9 @@ members = [
     "bins/searchctl",
     "bins/searchd",
     "bins/search-ui",
+    # e2e harnesses over the user-facing bins (tests/cli.rs, tests/serve.rs).
+    # The workspace root is virtual, so this lives as its own member crate.
+    "tests",
 ]
 
 # One workspace, thin bins, one protocol (IMPLEMENTATION_PLAN.md §3).

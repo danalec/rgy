@@ -576,6 +576,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "rgy-e2e-tests"
+version = "0.0.0"
+
+[[package]]
 name = "rsqlite-vfs"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
