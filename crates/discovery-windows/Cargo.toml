@@ -8,6 +8,14 @@ license = "Apache-2.0"
 [dependencies]
 discovery = { path = "../discovery" }
 name-core = { path = "../name-core" }
+
+# Gated to Windows, like the crate body in `src/lib.rs`. The `windows` family
+# does not cross-compile -- `windows-future` pulls internals `windows-core`
+# only defines for the Windows target -- and a declared dependency is built
+# for the target even when the crate that wants it is empty there. So the
+# gate has to be here too, or `cargo check --workspace` still dies in
+# `windows-future` on every other platform.
+[target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",
     "Win32_Security",

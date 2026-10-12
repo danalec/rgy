@@ -8,12 +8,19 @@
 
 // Old bin, new homes (docs/IMPLEMENTATION_PLAN.md first-PR sequence #3: "old bins
 // compile against them unchanged" — behaviour unchanged, imports only).
+// Windows only. This is the NTFS MFT/USN indexer and `discovery-windows` is
+// empty off-Windows (see its `lib.rs`: the `windows` crate family does not
+// cross-compile). Everything that reads a volume is gated; what is left
+// below is the index writing and its tests, which are platform-independent.
+#[cfg(windows)]
 use discovery_windows::{indexer, ntfs, volume};
 use name_core::index;
 use name_core::live::Live;
 use search_ui as ui;
 
+#[cfg(windows)]
 use indexer::Indexer;
+#[cfg(windows)]
 use volume::Volume;
 
 /// Build the fsearch name index the UI's [`name_core::name_query::Searcher`]
@@ -22,6 +29,7 @@ use volume::Volume;
 /// The name index is keyed by parent, not by NTFS FRN, so this assigns
 /// synthetic ids along the path tree and hands [`indexer::listings_from_rows`]
 /// a consistent parent map. The UI and `searchctl` then share one matcher.
+#[cfg(windows)]
 fn live_from_zen(index: &index::Index) -> Live {
     use name_core::index::ROOT_FRN;
     use name_core::name_index;
@@ -111,6 +119,17 @@ fn usage() -> ! {
     std::process::exit(2);
 }
 
+/// On any platform but Windows there is no NTFS MFT and no USN journal to
+/// read, so there is no indexer to run. Saying so is better than pretending:
+/// `searchctl` is the name/content search on those platforms, and this bin
+/// exists for the Windows fast path.
+#[cfg(not(windows))]
+fn main() {
+    eprintln!("zen-rs: the NTFS MFT/USN indexer is Windows-only; use searchctl on this platform");
+    std::process::exit(2);
+}
+
+#[cfg(windows)]
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
@@ -138,6 +157,7 @@ fn main() {
     }
 }
 
+#[cfg(windows)]
 fn scan(volume_path: &str) -> Result<(Volume, index::Index, indexer::IndexStats), String> {
     let volume = Volume::open(volume_path).map_err(|e| e.to_string())?;
     eprintln!("opened {}", volume.path);
@@ -169,6 +189,7 @@ fn scan(volume_path: &str) -> Result<(Volume, index::Index, indexer::IndexStats)
 /// Each volume gets its own ordinal so its file reference numbers cannot
 /// collide with another volume's — both volumes have root at FRN 5, and the
 /// same FRN names unrelated files on each.
+#[cfg(windows)]
 fn scan_all_volumes() -> Result<(index::Index, indexer::IndexStats), String> {
     let roots = volume::list_fixed_ntfs_roots();
     if roots.is_empty() {
@@ -217,6 +238,7 @@ fn scan_all_volumes() -> Result<(index::Index, indexer::IndexStats), String> {
 }
 
 /// Hexdump one raw MFT record and its parsed attributes.
+#[cfg(windows)]
 fn cmd_record(volume_path: &str, frn: u64) -> Result<(), String> {
     let volume = Volume::open(volume_path).map_err(|e| e.to_string())?;
     let Some(rec) = volume.read_file_record(frn).map_err(|e| e.to_string())? else {
@@ -263,6 +285,7 @@ fn cmd_record(volume_path: &str, frn: u64) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(windows)]
 fn load_or_scan(source: &str) -> Result<index::Index, String> {
     if source.ends_with(".eri") || std::path::Path::new(source).is_file() {
         let start = std::time::Instant::now();
@@ -318,6 +341,7 @@ fn write_index_atomically(index: &index::Index, file_path: &str) -> std::io::Res
     Ok(())
 }
 
+#[cfg(windows)]
 fn cmd_save(volume_path: &str, file_path: &str) -> Result<(), String> {
     let (_volume, index, _stats) = scan(volume_path)?;
     let start = std::time::Instant::now();
@@ -333,6 +357,7 @@ fn cmd_save(volume_path: &str, file_path: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(windows)]
 fn cmd_index(target: &str) -> Result<(), String> {
     if target.ends_with(".eri") || std::path::Path::new(target).is_file() {
         let index = load_or_scan(target)?;
@@ -369,6 +394,7 @@ fn cmd_index(target: &str) -> Result<(), String> {
 }
 
 /// List the fixed NTFS volumes a multi-volume scan would cover.
+#[cfg(windows)]
 fn cmd_volumes() -> Result<(), String> {
     let roots = volume::list_fixed_ntfs_roots();
     if roots.is_empty() {
@@ -400,6 +426,7 @@ fn cmd_volumes() -> Result<(), String> {
 }
 
 /// Scan every fixed NTFS volume and print the combined index statistics.
+#[cfg(windows)]
 fn cmd_index_all() -> Result<(), String> {
     let (index, stats) = scan_all_volumes()?;
 
@@ -436,6 +463,7 @@ fn warn_query_errors(query: &index::OrQuery) {
 }
 
 /// Search the combined index of every fixed NTFS volume.
+#[cfg(windows)]
 fn cmd_search_all(query_str: &str) -> Result<(), String> {
     let (index, _stats) = scan_all_volumes()?;
     let query = index::OrQuery::parse(query_str);
@@ -449,6 +477,7 @@ fn cmd_search_all(query_str: &str) -> Result<(), String> {
 }
 
 /// Interactive full-screen search over an index.
+#[cfg(windows)]
 fn cmd_ui(source: &str) -> Result<(), String> {
     let index = load_or_scan(source)?;
     let root = index.root().to_string();
@@ -457,6 +486,7 @@ fn cmd_ui(source: &str) -> Result<(), String> {
     ui::run(live, root, indexed)
 }
 
+#[cfg(windows)]
 fn cmd_search(source: &str, query_str: &str) -> Result<(), String> {
     let index = load_or_scan(source)?;
     let query = index::OrQuery::parse(query_str);
@@ -475,6 +505,7 @@ fn cmd_search(source: &str, query_str: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(windows)]
 fn cmd_list(source: &str, filter: Option<&str>) -> Result<(), String> {
     let index = load_or_scan(source)?;
 
@@ -498,6 +529,7 @@ fn cmd_list(source: &str, filter: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(windows)]
 fn cmd_tail(volume_path: &str) -> Result<(), String> {
     let (volume, mut index, _stats) = scan(volume_path)?;
 
