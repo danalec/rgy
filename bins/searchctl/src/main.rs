@@ -24,7 +24,7 @@ use discovery::{PortableSource, interrupt};
 use name_core::content::{self, Grep};
 use name_core::live::Live;
 use name_core::name_index::Index;
-use name_core::name_query::{Alternatives, Searcher};
+use name_core::name_query::{Alternatives, Hit, Searcher, merge_hits};
 use name_core::persist;
 
 #[global_allocator]
@@ -291,10 +291,11 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
     // try-and-bail, so a slow query and a fast one used to look identical.
     if opts.explain {
         let mut summary = Vec::new();
-        let mut total = 0usize;
+        let mut all: Vec<Hit> = Vec::new();
         for alt in &alts.alts {
-            let n = searcher.search_uncapped(alt).len();
-            total += n;
+            let hits = searcher.search_uncapped(alt);
+            let n = hits.len();
+            all.extend(hits);
             let label = if alt.tokens.is_empty() {
                 "(filters only)".to_string()
             } else {
@@ -324,6 +325,11 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
                 }
             ));
         }
+        // The union of the alternatives, not their sum: an entry two of them
+        // match is one result below, and a total that disagrees with what the
+        // command prints is worse than no total at all. `merge_hits` is the
+        // same merge the results go through.
+        let total = merge_hits(all, usize::MAX).len();
         eprintln!(
             "searchctl: {} entries indexed, {total} matches",
             searcher.live.base.n

@@ -362,6 +362,44 @@ fn count_of_alternates_does_not_double_count() {
     );
 }
 
+/// The `--explain` header reports how many entries matched. For a `|` query
+/// that has to be the union -- the number of results the command actually
+/// prints -- and not the sum of what each alternative matched, which counts
+/// an entry twice when two alternatives hit it.
+#[test]
+fn explain_total_agrees_with_the_count_it_prints() {
+    let dir = fixture_dir("explainalts");
+    text_tree(&dir);
+    let root = dir.to_str().unwrap();
+
+    // `alpha` is matched by both sides, so a summed total overshoots.
+    let (code, _, err) = run(&searchctl(), &["--root", root, "--explain", "alpha|alpha"]);
+    assert_eq!(code, 0, "must match; stderr={err}");
+    let header = err
+        .lines()
+        .find(|l| l.contains("entries indexed"))
+        .unwrap_or_else(|| panic!("no header in stderr; got {err}"));
+    // The header is "{n} entries indexed, {total} matches" -- the match count
+    // is the number before the word, not the first number in the line.
+    let total: usize = header
+        .split("matches")
+        .next()
+        .expect("the header names a match count")
+        .split_whitespace()
+        .last()
+        .and_then(|w| w.trim_end_matches(',').parse().ok())
+        .expect("a number of matches in the header");
+
+    // `--count` takes a different path to the same question; if the two
+    // disagree the header is reporting something other than the result set.
+    let (_, counted, _) = run(&searchctl(), &["--root", root, "--count", "alpha|alpha"]);
+    let want: usize = counted.trim().parse().expect("count is a number");
+    assert_eq!(
+        total, want,
+        "--explain said {total} matches but --count says {want}; header={header}"
+    );
+}
+
 #[test]
 fn count_with_no_match_exits_one() {
     let dir = fixture_dir("countmiss");
