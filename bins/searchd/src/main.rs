@@ -13,20 +13,29 @@
 //! window (the fsearch spinner) so typing stays at latency. Content
 //! `grep:` runs the trigram candidate scan + rgx-engine confirm; with
 //! `--tv-dir` it is answered by the TV pack store instead.
+//!
+//! `--index` reuses an index built by an earlier run (or `searchctl`) instead
+//! of walking the tree at every daemon start. As there, freshness is explicit:
+//! `--reindex` forces a rebuild, `--max-age` expires one, and a sidecar pins
+//! the root so another tree's index is refused rather than loaded.
 
 use std::io::{BufRead, Write};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use discovery::{PortableSource, Source};
+use discovery::{PortableSource, interrupt, walk::Cancelled};
 use engine::{keep_warm, warm_stop};
 use name_core::content::{self, Grep};
 use name_core::live::Live;
 use name_core::name_index::Index;
 use name_core::name_query::{Alternatives, Hit, Query, Searcher};
+use name_core::persist;
 use proto::{GrepFile, Hit as WireHit, Request, Response};
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+/// How often the startup walk reports what it has covered.
+const REPORT_EVERY: Duration = Duration::from_millis(500);
 
 struct Ctx {
     root: Vec<u8>,
@@ -37,7 +46,7 @@ struct Ctx {
 
 fn usage() -> ! {
     eprintln!(
-        "searchd [--root <dir>] [--tv-dir <store>] [--listen stdio|uds:<path>|pipe:<name>] [--serve]\n\n\
+        "searchd [--root <dir>] [--index <file>] [--reindex] [--max-age <dur>]\n         [--tv-dir <store>] [--listen stdio|uds:<path>|pipe:<name>] [--serve]\n\n\
          proto framing (default): one JSON request per line\n  \
            {{\"op\":\"search\",\"q\":\"...\",\"limit\":50}}\n  \
            {{\"op\":\"grep\",\"q\":\"...\"}}\n  \
@@ -48,18 +57,53 @@ fn usage() -> ! {
     std::process::exit(2);
 }
 
+/// Parse `30m` / `2h` / `7d` / `90s` / `1w` into a duration. Bare numbers are
+/// seconds, so `--max-age 0` means "expire anything a second old".
+fn parse_age(s: &str) -> Option<Duration> {
+    let s = s.trim();
+    let (digits, mult) = match s.as_bytes().last()? {
+        b's' | b'S' => (&s[..s.len() - 1], 1u64),
+        b'm' | b'M' => (&s[..s.len() - 1], 60),
+        b'h' | b'H' => (&s[..s.len() - 1], 3600),
+        b'd' | b'D' => (&s[..s.len() - 1], 86_400),
+        b'w' | b'W' => (&s[..s.len() - 1], 604_800),
+        _ => (s, 1),
+    };
+    digits
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .map(|n| Duration::from_secs(n.saturating_mul(mult)))
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut root = String::from(".");
     let mut tv_dir = None;
     let mut listen = String::from("stdio");
     let mut serve = false;
+    let mut index: Option<String> = None;
+    let mut reindex = false;
+    let mut max_age: Option<Duration> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--root" => {
                 i += 1;
                 root = args.get(i).cloned().unwrap_or_else(|| usage());
+            }
+            "--index" => {
+                i += 1;
+                index = Some(args.get(i).cloned().unwrap_or_else(|| usage()));
+            }
+            "--reindex" => reindex = true,
+            "--max-age" => {
+                i += 1;
+                max_age = Some(
+                    args.get(i)
+                        .and_then(|s| parse_age(s))
+                        .unwrap_or_else(|| usage()),
+                );
             }
             "--tv-dir" => {
                 i += 1;
@@ -81,17 +125,7 @@ fn main() {
         i += 1;
     }
 
-    let source = PortableSource {
-        root: root.as_bytes().to_vec(),
-    };
-    let listings = match source.enumerate() {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("searchd: {e}");
-            std::process::exit(2);
-        }
-    };
-    let idx = Index::build(listings, 0, now_secs(), root.as_bytes());
+    let idx = open_index(&root, index.as_deref(), reindex, max_age);
     let ctx = std::sync::Arc::new(Ctx {
         root: root.as_bytes().to_vec(),
         home: std::env::var("USERPROFILE")
@@ -111,6 +145,74 @@ fn main() {
         Some(("pipe", name)) => serve_pipe(name, &ctx, serve),
         _ => usage(),
     }
+}
+
+/// Load a usable index for this root, or walk and build one.
+///
+/// The startup path is where skipping the walk matters most: the daemon runs
+/// exactly once per boot, so a saved index turns a full tree walk into an
+/// mmap. A refusal (wrong root, expired, corrupt) always rebuilds and says so
+/// rather than starting on a suspect index.
+fn open_index(root: &str, index: Option<&str>, reindex: bool, max_age: Option<Duration>) -> Index {
+    let root_path = std::path::PathBuf::from(root);
+    let index_path = match index {
+        Some(p) => std::path::PathBuf::from(p),
+        None => persist::default_index_path(&root_path),
+    };
+
+    if !reindex {
+        match persist::load_for(&root_path, &index_path, max_age) {
+            Ok(idx) => {
+                eprintln!(
+                    "searchd: reusing index {} ({} entries)",
+                    index_path.display(),
+                    idx.n
+                );
+                idx.prefault();
+                return idx;
+            }
+            Err(why) => eprintln!("searchd: rebuilding — {why}"),
+        }
+    }
+
+    let source = PortableSource::new(root.as_bytes().to_vec(), PortableSource::DEFAULT_THREADS);
+    // The first thing a daemon does is walk a tree it was pointed at, and
+    // that is the longest silent stretch in the program. Report it, and let
+    // Ctrl-C stop it cleanly instead of killing the daemon mid-build.
+    let cancel = interrupt::cancel_on_interrupt();
+    let started = Instant::now();
+    let last_report = std::sync::atomic::AtomicU64::new(0);
+    let listings = match source.enumerate_cancellable(&cancel, &|p| {
+        let now = started.elapsed().as_millis() as u64;
+        if now
+            > last_report.load(std::sync::atomic::Ordering::Relaxed)
+                + REPORT_EVERY.as_millis() as u64
+        {
+            last_report.store(now, std::sync::atomic::Ordering::Relaxed);
+            eprintln!("searchd: scanning… {}", interrupt::line(p));
+        }
+    }) {
+        Ok(l) => l,
+        // A daemon with no index has nothing to answer with, and a partial
+        // one would answer wrongly. Exit rather than start.
+        Err(Cancelled) => {
+            eprintln!("searchd: scan cancelled — no index written, exiting");
+            std::process::exit(2);
+        }
+    };
+    let idx = Index::build(listings, 0, now_secs(), root.as_bytes());
+    match persist::save(&idx, &root_path, &index_path) {
+        Ok(saved) => eprintln!(
+            "searchd: indexed {} entries → {}",
+            idx.n,
+            saved.index.display()
+        ),
+        Err(e) => eprintln!(
+            "searchd: could not save index to {}: {e}",
+            index_path.display()
+        ),
+    }
+    idx
 }
 
 fn run_stream(input: impl BufRead, mut out: impl Write, ctx: &std::sync::Arc<Ctx>, serve: bool) {
@@ -138,6 +240,10 @@ fn run_stream(input: impl BufRead, mut out: impl Write, ctx: &std::sync::Arc<Ctx
 
 fn handle(req: Request, ctx: &Ctx) -> Vec<Response> {
     keep_warm(Duration::from_millis(250));
+    // `keep_warm` only sets two atomics and unparks the spinner, so starting
+    // the clock here measures the request and not the warm window. This used
+    // to be hardcoded 0, which made the wire latency field a lie.
+    let t0 = Instant::now();
     let mut responses = Vec::new();
     match req {
         Request::Status => responses.push(Response::Status {
@@ -185,9 +291,10 @@ fn handle(req: Request, ctx: &Ctx) -> Vec<Response> {
                     })
                     .collect();
                 let count = wire.len();
+                let took = t0.elapsed().as_micros() as u64;
                 responses.push(Response::Hits {
                     hits: wire,
-                    took_us: 0,
+                    took_us: took,
                 });
                 responses.push(Response::Done { count });
             }
@@ -199,6 +306,7 @@ fn handle(req: Request, ctx: &Ctx) -> Vec<Response> {
 }
 
 fn grep(q: &str, limit: usize, ctx: &Ctx) -> Vec<Response> {
+    let t0 = Instant::now();
     let mut files: Vec<GrepFile> = Vec::new();
     // TV pack store answers when the daemon was given one: the corpus
     // bytes are packed once and mmap'd (plan 4.3); the direct engine
@@ -224,8 +332,12 @@ fn grep(q: &str, limit: usize, ctx: &Ctx) -> Vec<Response> {
             Err(e) => return vec![Response::Error { message: e }],
         }
         let count = files.len();
+        let took = t0.elapsed().as_micros() as u64;
         return vec![
-            Response::GrepFiles { files, took_us: 0 },
+            Response::GrepFiles {
+                files,
+                took_us: took,
+            },
             Response::Done { count },
         ];
     }
@@ -262,7 +374,11 @@ fn grep(q: &str, limit: usize, ctx: &Ctx) -> Vec<Response> {
                 }
             }
             let count = files.len();
-            out.push(Response::GrepFiles { files, took_us: 0 });
+            let took = t0.elapsed().as_micros() as u64;
+            out.push(Response::GrepFiles {
+                files,
+                took_us: took,
+            });
             out.push(Response::Done { count });
             out
         }
@@ -495,20 +611,47 @@ fn serve_uds(_path: &str, _ctx: &std::sync::Arc<Ctx>, _serve: bool) {
 
 #[cfg(windows)]
 fn serve_pipe(name: &str, ctx: &std::sync::Arc<Ctx>, serve: bool) {
-    // Named pipe server: one connection at a time, proto framing.
+    // Named pipe server, proto framing.
+    //
+    // A pool of instances is created up front and each one replenishes itself
+    // the moment it takes a client, so there is always a listening slot. The
+    // previous shape created the next instance only after `run_stream`
+    // returned, which made the daemon answer exactly one client at a time —
+    // the bottleneck on Windows, the platform this front exists for.
+    //
+    // The pool matters for more than throughput: a single acceptor that only
+    // creates its replacement after connecting leaves a window where no
+    // instance is listening at all, and a client arriving in that window gets
+    // ERROR_PIPE_BUSY instead of waiting.
+    const ACCEPTORS: usize = 16;
     let path = format!(r"\\.\pipe\{name}");
-    loop {
-        let listener = match open_pipe_server(&path) {
-            Ok(f) => f,
-            Err(e) => {
-                eprintln!("searchd: pipe {path}: {e}");
-                std::process::exit(2);
-            }
-        };
-        let ctx = ctx.clone();
-        let (r, w) = (listener.try_clone().unwrap(), listener);
-        run_stream(std::io::BufReader::new(r), w, &ctx, serve);
+    for _ in 0..ACCEPTORS {
+        spawn_pipe_acceptor(&path, ctx.clone(), serve);
     }
+    // Acceptors are detached and keep themselves alive; the main thread just
+    // stays up so the process is not reaped.
+    loop {
+        std::thread::park();
+    }
+}
+
+/// Create one instance, wait for a client, and hand the connection to a
+/// thread — leaving a fresh acceptor listening as soon as the client lands.
+#[cfg(windows)]
+fn spawn_pipe_acceptor(path: &str, ctx: std::sync::Arc<Ctx>, serve: bool) {
+    let path = path.to_string();
+    std::thread::spawn(move || match open_pipe_server(&path) {
+        Ok(conn) => {
+            // Connected: replace this acceptor before serving, so the next
+            // client does not queue behind this one.
+            spawn_pipe_acceptor(&path, ctx.clone(), serve);
+            match conn.try_clone() {
+                Ok(r) => run_stream(std::io::BufReader::new(r), conn, &ctx, serve),
+                Err(e) => eprintln!("searchd: pipe {path}: {e}"),
+            }
+        }
+        Err(e) => eprintln!("searchd: pipe {path}: {e}"),
+    });
 }
 
 #[cfg(windows)]
@@ -534,13 +677,18 @@ fn open_pipe_server(path: &str) -> std::io::Result<std::fs::File> {
     }
     const PIPE_ACCESS_DUPLEX: u32 = 0x3;
     const PIPE_TYPE_BYTE: u32 = 0x0;
+    // Acceptors are created ahead of demand, so more than one instance of
+    // this pipe can exist at once. `PIPE_UNLIMITED_INSTANCES`: with the old
+    // value of 1 a second `CreateNamedPipeW` fails with ERROR_PIPE_BUSY,
+    // which is exactly the serialization this front no longer has.
+    const PIPE_UNLIMITED_INSTANCES: u32 = 255;
     let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
     let handle = unsafe {
         CreateNamedPipeW(
             wide.as_ptr(),
             PIPE_ACCESS_DUPLEX,
             PIPE_TYPE_BYTE,
-            1,
+            PIPE_UNLIMITED_INSTANCES,
             64 * 1024,
             64 * 1024,
             0,

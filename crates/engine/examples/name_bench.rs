@@ -7,7 +7,11 @@
 //! before timing (a fast wrong answer is a failure). A >20% regression on
 //! any row fails the PR.
 //!
-//! Run: `cargo run --release -p engine --example name_bench`
+//! Run: `cargo run --release -p engine --example name_bench [names] [--csv]`
+//!
+//! `--csv` puts a machine-readable table on stdout and the human summary on
+//! stderr, so a gate can diff a baseline without parsing prose:
+//! `cargo run --release -p engine --example name_bench 1000000 --csv > base.csv`.
 
 use std::time::Instant;
 
@@ -82,11 +86,77 @@ fn stats(samples: &mut [f64]) -> (f64, f64, f64) {
     (min, med, p90)
 }
 
+/// One measured row: `kind` discriminates so build/query/walk share a single
+/// header and stay valid CSV (a second header block would not be).
+struct Row {
+    kind: &'static str,
+    query: String,
+    hits: usize,
+    min: f64,
+    med: f64,
+    p90: f64,
+    entries: usize,
+    elapsed_s: f64,
+    corpus: usize,
+    dirs: usize,
+    build_ms: f64,
+    /// Which `Searcher` path answered. A row whose plan changes is a
+    /// regression even when the latency does not: the same query used to be
+    /// answered by `selective` and is now walking everything.
+    plan: String,
+}
+
+fn csv_field(s: &str) -> String {
+    if s.contains([',', '"', '\n']) {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+fn print_csv(rows: &[Row]) {
+    println!(
+        "kind,query,hits,min_us,med_us,p90_us,entries,elapsed_s,entries_per_s,corpus,dirs,build_ms,plan"
+    );
+    for r in rows {
+        // Entries/s is only meaningful for the walk; dividing a corpus size
+        // by a query's latency would print a large meaningless number.
+        let rate = if r.kind == "walk" && r.elapsed_s > 0.0 {
+            format!("{:.1}", r.entries as f64 / r.elapsed_s)
+        } else {
+            String::new()
+        };
+        println!(
+            "{},{},{},{:.3},{:.3},{:.3},{},{:.6},{rate},{},{},{:.3},{}",
+            r.kind,
+            csv_field(&r.query),
+            r.hits,
+            r.min,
+            r.med,
+            r.p90,
+            r.entries,
+            r.elapsed_s,
+            r.corpus,
+            r.dirs,
+            r.build_ms,
+            csv_field(&r.plan)
+        );
+    }
+}
+
 fn main() {
-    let n = std::env::args()
-        .nth(1)
-        .and_then(|a| a.parse().ok())
-        .unwrap_or(200_000usize);
+    let mut csv = false;
+    let mut n = 200_000usize;
+    for a in std::env::args().skip(1) {
+        match a.as_str() {
+            "--csv" => csv = true,
+            s => {
+                if let Ok(v) = s.parse() {
+                    n = v;
+                }
+            }
+        }
+    }
     let dirs = (n / 200).clamp(8, 2000);
     let rounds = 30;
 
@@ -109,10 +179,32 @@ fn main() {
         ("rep", 0),
         ("f1", 0),
     ];
+    // The true match count, taken at a limit high enough that nothing
+    // saturates. Timing uses the interactive default below, which would pin
+    // `hits` at the limit for every broad query — and then the "a fast wrong
+    // answer is a failure" rule would only ever be asserting limit == limit,
+    // letting a planner that silently dropped matches pass.
+    const COUNT_LIMIT: usize = 10_000_000;
+    let default_limit = Query::parse("x", "")
+        .map(|q| q.limit)
+        .expect("bench query parses");
     let mut hits_count = Vec::new();
     for (q, _) in queries {
-        let parsed = Query::parse(q, "").expect("bench query parses");
-        hits_count.push(searcher.search(&parsed).len());
+        let mut parsed = Query::parse(q, "").expect("bench query parses");
+        parsed.limit = COUNT_LIMIT;
+        let total = searcher.search(&parsed).len();
+        // The saturated count must be exactly what the timed path will see:
+        // this is the assertion that catches a planner dropping matches.
+        let mut capped = Query::parse(q, "").unwrap();
+        capped.limit = default_limit;
+        let shown = searcher.search(&capped).len();
+        assert_eq!(
+            shown,
+            total.min(default_limit),
+            "{q}: capped search returned {shown}, expected {}",
+            total.min(default_limit)
+        );
+        hits_count.push(total);
     }
     // Warmup.
     for _ in 0..3 {
@@ -122,22 +214,51 @@ fn main() {
         }
     }
 
-    println!("corpus: {n} names in {dirs} dirs; build {build_ms:.1} ms");
-    println!("query                          hits     min_us    med_us    p90_us");
+    let mut rows: Vec<Row> = Vec::new();
+    if !csv {
+        println!("corpus: {n} names in {dirs} dirs; build {build_ms:.1} ms");
+        println!("query                          hits     min_us    med_us    p90_us");
+    }
     for (qi, (q, _)) in queries.iter().enumerate() {
         let mut samples = Vec::with_capacity(rounds);
         for _ in 0..rounds {
             let parsed = Query::parse(q, "").unwrap();
             let t = Instant::now();
             let hits = searcher.search(&parsed);
-            assert_eq!(hits.len(), hits_count[qi], "count drift on {q}");
+            // Timed at the interactive limit; the durable match count is the
+            // unsaturated one above, and the two were proven consistent
+            // before timing started.
+            assert!(
+                hits.len() <= hits_count[qi],
+                "{q}: timed search returned more hits than the full count"
+            );
             samples.push(t.elapsed().as_secs_f64() * 1e6);
         }
         let (min, med, p90) = stats(&mut samples);
-        println!(
-            "{q:<30} {:>8} {min:>10.1} {med:>10.1} {p90:>10.1}",
-            hits_count[qi]
-        );
+        // Read after the last timed search: it recorded the plan that ran.
+        let plan = Searcher::last_plan()
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "none".into());
+        if !csv {
+            println!(
+                "{q:<30} {:>8} {min:>10.1} {med:>10.1} {p90:>10.1}  {plan}",
+                hits_count[qi]
+            );
+        }
+        rows.push(Row {
+            kind: "query",
+            query: (*q).to_string(),
+            hits: hits_count[qi],
+            min,
+            med,
+            p90,
+            entries: n,
+            elapsed_s: med / 1e6,
+            corpus: n,
+            dirs,
+            build_ms,
+            plan,
+        });
     }
 
     // --- walk: a generated temp tree, entries/s ---
@@ -154,11 +275,29 @@ fn main() {
     let ls = discovery::walk::scan(tmp.to_string_lossy().as_bytes(), 4);
     let elapsed = t.elapsed().as_secs_f64();
     let entries: usize = ls.iter().map(|l| l.ents.len()).sum();
-    println!(
+    eprintln!(
         "walk: {entries} entries in {elapsed:.3} s ({:.0} entries/s)",
         entries as f64 / elapsed
     );
+    rows.push(Row {
+        kind: "walk",
+        query: String::new(),
+        hits: 0,
+        min: 0.0,
+        med: 0.0,
+        p90: 0.0,
+        entries,
+        elapsed_s: elapsed,
+        corpus: n,
+        dirs,
+        build_ms,
+        plan: String::new(),
+    });
     let _ = std::fs::remove_dir_all(&tmp);
+
+    if csv {
+        print_csv(&rows);
+    }
 }
 
 fn per_files(n: usize, dirs: usize) -> usize {

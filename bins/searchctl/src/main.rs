@@ -1,24 +1,38 @@
 //! searchctl — the merged name-search CLI.
 //!
 //! fsearch one-shot ergonomics + zen-rs's filter vocabulary (see
-//! `name_core::name_query`), over the v2 name index. Today it enumerates a
+//! `name_core::name_query`), over the v2 name index. It enumerates a
 //! directory tree (`--root`, portable walk / no privileges); the Windows
 //! MFT fast path (`--volume`) and content `grep:` land with the engine and
 //! the content layer.
+//!
+//! With `--index`, a built index is reused across invocations: the walk and
+//! the build happen once, and later queries pay an mmap instead. The portable
+//! walk has no change feed, so freshness is explicit — `--reindex` forces a
+//! rebuild and `--max-age` expires one, and the root is pinned in a sidecar
+//! so an index built for another tree can never be loaded (see
+//! `name_core::persist`).
 //!
 //! rg-compatible exit codes: 0 = matches, 1 = no matches, 2 = error.
 //! `--json` prints one object per hit. Parse warnings (unknown `type:`,
 //! bad `re:`) go to stderr as `warning:` lines and the affected alternative
 //! matches nothing — fail closed, never silent.
 
-use discovery::{PortableSource, Source};
+use std::time::{Duration, Instant};
+
+use discovery::{PortableSource, interrupt};
 use name_core::content::{self, Grep};
 use name_core::live::Live;
 use name_core::name_index::Index;
 use name_core::name_query::{Alternatives, Hit, Query, Searcher};
+use name_core::persist;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+/// How often an index build reports what it has covered. Fast enough to look
+/// alive, slow enough that the lines stay readable.
+const REPORT_EVERY: Duration = Duration::from_millis(500);
 
 fn usage() -> ! {
     eprintln!(
@@ -26,12 +40,36 @@ fn usage() -> ! {
          options:\n  \
            --root <dir>       tree to index (default: .)\n  \
            --limit <n>        max hits (default: 50)\n  \
-           --json             one JSON object per hit\n\n\
+           --json             one JSON object per hit\n  \
+           --count            print the match count, not the ranked hits\n  \
+           --explain           report the query plan on stderr\n  \
+           --index <file>     reuse/persist an index (default: cache dir)\n  \
+           --reindex          rebuild even if a usable index exists\n  \
+           --max-age <dur>    rebuild an index older than 30m/2h/7d\n\n\
          query: fsearch tokens (bare=fuzzy, 'x exact, ^x prefix, x$ suffix,\n\
          !x negate) + zen-rs filters (ext: dir: type: size: re:),\n\
          | alternates, * and ? glob the whole path."
     );
     std::process::exit(2);
+}
+
+/// Parse `30m` / `2h` / `7d` / `90s` / `1w` into a duration. Bare numbers are
+/// seconds, so `--max-age 0` means "expire anything a second old".
+fn parse_age(s: &str) -> Option<std::time::Duration> {
+    let s = s.trim();
+    let (digits, mult) = match s.as_bytes().last()? {
+        b's' | b'S' => (&s[..s.len() - 1], 1u64),
+        b'm' | b'M' => (&s[..s.len() - 1], 60),
+        b'h' | b'H' => (&s[..s.len() - 1], 3600),
+        b'd' | b'D' => (&s[..s.len() - 1], 86_400),
+        b'w' | b'W' => (&s[..s.len() - 1], 604_800),
+        _ => (s, 1),
+    };
+    digits
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .map(|n| std::time::Duration::from_secs(n.saturating_mul(mult)))
 }
 
 fn main() {
@@ -40,6 +78,11 @@ fn main() {
     let mut limit = 50usize;
     let mut json = false;
     let mut query = String::new();
+    let mut index: Option<String> = None;
+    let mut reindex = false;
+    let mut count = false;
+    let mut explain = false;
+    let mut max_age: Option<std::time::Duration> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -54,6 +97,21 @@ fn main() {
                     .get(i)
                     .and_then(|s| s.parse().ok())
                     .unwrap_or_else(|| usage());
+            }
+            "--index" => {
+                i += 1;
+                index = Some(args.get(i).cloned().unwrap_or_else(|| usage()));
+            }
+            "--reindex" => reindex = true,
+            "--count" => count = true,
+            "--explain" => explain = true,
+            "--max-age" => {
+                i += 1;
+                max_age = Some(
+                    args.get(i)
+                        .and_then(|s| parse_age(s))
+                        .unwrap_or_else(|| usage()),
+                );
             }
             "--json" => json = true,
             "-h" | "--help" => usage(),
@@ -74,19 +132,115 @@ fn main() {
         usage();
     }
 
-    if let Err(e) = run(&root, &query, limit, json) {
+    let opts = Opts {
+        root,
+        limit,
+        json,
+        index,
+        reindex,
+        count,
+        explain,
+        max_age,
+    };
+    if let Err(e) = run(&opts, &query) {
         eprintln!("searchctl: {e}");
         std::process::exit(2);
     }
 }
 
-fn run(root: &str, query: &str, limit: usize, json: bool) -> Result<(), String> {
-    // Index the tree. Portable walk: no privileges, any platform.
-    let source = PortableSource {
-        root: root.as_bytes().to_vec(),
+struct Opts {
+    root: String,
+    limit: usize,
+    json: bool,
+    index: Option<String>,
+    reindex: bool,
+    /// Report the match count instead of the ranked hits.
+    count: bool,
+    /// Report which execution path answered, on stderr.
+    explain: bool,
+    max_age: Option<std::time::Duration>,
+}
+
+/// Load a usable index for this root, or build one and save it.
+///
+/// Always says which of the two happened, on stderr: a stale or foreign index
+/// is a silent-wrong-answer risk otherwise, and a one-shot CLI has nowhere
+/// else to report it.
+fn obtain_index(opts: &Opts) -> Result<Index, String> {
+    // Every process gets its own interrupt, so this is scoped to one build
+    // rather than installed for the lifetime of the binary: a Ctrl-C that
+    // lands while the query runs keeps terminating the process, as before.
+    let cancel = interrupt::cancel_on_interrupt();
+    let root_path = std::path::PathBuf::from(&opts.root);
+    let index_path = match &opts.index {
+        Some(p) => std::path::PathBuf::from(p),
+        None => persist::default_index_path(&root_path),
     };
-    let listings = source.enumerate()?;
-    let idx = Index::build(listings, 0, now_secs(), root.as_bytes());
+
+    if !opts.reindex {
+        match persist::load_for(&root_path, &index_path, opts.max_age) {
+            Ok(idx) => {
+                eprintln!(
+                    "searchctl: reusing index {} ({} entries)",
+                    index_path.display(),
+                    idx.n
+                );
+                return Ok(idx);
+            }
+            Err(why) => eprintln!("searchctl: rebuilding — {why}"),
+        }
+    }
+
+    // Portable walk: no privileges, any platform.
+    let source = PortableSource::new(
+        opts.root.as_bytes().to_vec(),
+        PortableSource::DEFAULT_THREADS,
+    );
+    // A scan of a large tree is seconds of silence otherwise, which reads as
+    // a hang. One line every `REPORT_EVERY`; the count is a real tally of
+    // directories listed and entries seen, never an estimate. The callback
+    // has to be `Fn` (the walk may call it from several threads at once), so
+    // the clock behind it is an atomic rather than a plain `Instant`.
+    let started = Instant::now();
+    let last_report = std::sync::atomic::AtomicU64::new(0);
+    let listings = source
+        .enumerate_cancellable(&cancel, &|p| {
+            let now = started.elapsed().as_millis() as u64;
+            // `>` not `>=`: a second call in the same millisecond must not
+            // reprint, and the ticker's own resolution is far coarser than
+            // this anyway.
+            if now
+                > last_report.load(std::sync::atomic::Ordering::Relaxed)
+                    + REPORT_EVERY.as_millis() as u64
+            {
+                last_report.store(now, std::sync::atomic::Ordering::Relaxed);
+                eprintln!("searchctl: scanning… {}", interrupt::line(p));
+            }
+        })
+        .map_err(|_| "scan cancelled — no index written".to_string())?;
+    let idx = Index::build(listings, 0, now_secs(), opts.root.as_bytes());
+    match persist::save(&idx, &root_path, &index_path) {
+        Ok(saved) => eprintln!(
+            "searchctl: indexed {} entries → {}",
+            idx.n,
+            saved.index.display()
+        ),
+        // A cache miss must not fail the query: the index is built and
+        // usable, it just will not be there next time.
+        Err(e) => eprintln!(
+            "searchctl: could not save index to {}: {e}",
+            index_path.display()
+        ),
+    }
+    Ok(idx)
+}
+
+fn run(opts: &Opts, query: &str) -> Result<(), String> {
+    let root = &opts.root;
+    let limit = opts.limit;
+    let json = opts.json;
+    let count = opts.count;
+    let idx = obtain_index(opts)?;
     let live = Live::new(idx);
     let searcher = Searcher { live: &live };
 
@@ -132,8 +286,80 @@ fn run(root: &str, query: &str, limit: usize, json: bool) -> Result<(), String> 
         return Ok(());
     }
 
+    // `--explain`: report which execution path answered, and on what evidence.
+    // This is the observation `search_base` lacked — the path is chosen by
+    // try-and-bail, so a slow query and a fast one used to look identical.
+    if opts.explain {
+        let mut summary = Vec::new();
+        let mut total = 0usize;
+        for alt in &alts.alts {
+            let n = searcher.search_uncapped(alt).len();
+            total += n;
+            let label = if alt.tokens.is_empty() {
+                "(filters only)".to_string()
+            } else {
+                alt.tokens
+                    .iter()
+                    .map(|t| {
+                        format!(
+                            "{}{}",
+                            if t.negate { "!" } else { "" },
+                            String::from_utf8_lossy(&t.text)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            let rejected = Searcher::rejected_attempts();
+            let plan = Searcher::last_plan()
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "none".into());
+            summary.push(format!(
+                "{label}\t{} matches\tplan={plan}{}",
+                n,
+                if rejected.is_empty() {
+                    String::new()
+                } else {
+                    format!("\trejected-after: {}", rejected.join(","))
+                }
+            ));
+        }
+        eprintln!(
+            "searchctl: {} entries indexed, {total} matches",
+            searcher.live.base.n
+        );
+        for line in &summary {
+            eprintln!("searchctl: {line}");
+        }
+    }
+
     // Score every alternative; a hit is the best score over them.
     let mut hits: Vec<Hit> = Vec::new();
+
+    // `--count`: same match logic, no ranking and no path reconstruction.
+    // Dedup is by `idx`, exactly as the search loop below does — summing the
+    // alternatives would double-count an entry that two of them match, and
+    // overlay entries all carry `u32::MAX` so they collapse the same way here
+    // as they do there.
+    if count {
+        let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        for alt in &alts.alts {
+            for h in searcher.search_uncapped(alt) {
+                seen.insert(h.idx);
+            }
+        }
+        let n = seen.len();
+        if n == 0 {
+            std::process::exit(1);
+        }
+        if json {
+            println!("{{\"count\":{n}}}");
+        } else {
+            println!("{n}");
+        }
+        return Ok(());
+    }
+
     for alt in &alts.alts {
         let mut q: Query = alt.clone();
         q.limit = limit;
