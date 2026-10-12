@@ -419,6 +419,46 @@ fn explain_total_agrees_with_the_count_it_prints() {
     );
 }
 
+/// `--count` on a content query must be the true count, not the preview.
+///
+/// Two ways it was not. The content path returns before the `--count` check
+/// further down `main`, so the flag was parsed and silently ignored -- it
+/// printed the matching lines instead of their number. And once honoured, the
+/// scan would still have been `Grep`'s display defaults: 5 lines a file and a
+/// 250 ms budget. That is right for showing results and wrong for counting
+/// them -- it reports what the preview happened to reach, and sounds sure.
+#[test]
+fn content_count_is_the_true_count_not_a_preview() {
+    let dir = fixture_dir("grepcount");
+    text_tree(&dir);
+    // One file with far more matching lines than the 5-per-file preview cap.
+    std::fs::write(dir.join("many.txt"), "needle\n".repeat(40)).unwrap();
+
+    let (code, out, err) = run(
+        &searchctl(),
+        &["--root", dir.to_str().unwrap(), "--count", "grep:needle"],
+    );
+    assert_eq!(code, 0, "must match; stderr={err}");
+    let n: usize = out
+        .trim()
+        .parse()
+        .expect("a number, not the matching lines");
+    // 40 in many.txt, one in hello.txt, one in text_tree's src/main.rs.
+    assert_eq!(n, 42, "--count must count every matching line; got {out}");
+
+    // The non-count path is still the preview it is meant to be: it shows a
+    // handful, and that is the point of it.
+    let (code, shown, _) = run(
+        &searchctl(),
+        &["--root", dir.to_str().unwrap(), "grep:needle"],
+    );
+    assert_eq!(code, 0);
+    assert!(
+        shown.lines().count() < n,
+        "the preview must stay a preview; it printed every match"
+    );
+}
+
 #[test]
 fn count_with_no_match_exits_one() {
     let dir = fixture_dir("countmiss");

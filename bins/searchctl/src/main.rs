@@ -260,6 +260,40 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
     // tokens and filters narrow WHICH files are read; the rgx engine
     // confirms each one). rg-style `path:line:text` output.
     if alts.alts.iter().any(|a| a.grep.is_some()) {
+        // `--count` counts matching lines, which is the unit the
+        // `path:line:text` output prints and the one rg's `-c` counts. It
+        // used to be ignored here outright: this path returns before the
+        // `--count` check further down, so the flag was documented, parsed,
+        // and silently discarded on half the query surface. Worse, the scan
+        // ran at `limit` (50), so a count taken here would have been a
+        // preview wearing a count's clothes.
+        if count {
+            let mut n = 0usize;
+            for alt in &alts.alts {
+                let Some(pat) = &alt.grep else { continue };
+                let mut g = Grep::new(pat, alt.grep_mode)?;
+                // No preview caps. `Grep` is built for *showing* results: it
+                // stops at 5 lines a file and gives up after 250 ms, which is
+                // right for a preview and wrong for a number. Counting what
+                // the preview happened to reach would report 44 where there
+                // are 352, and look confident about it.
+                g.max_per_file = usize::MAX;
+                g.budget = None;
+                let paths =
+                    content::scan_paths(root.as_bytes(), searcher.live, alt.clone_for_scan());
+                let res = content::verify(&g, &paths, usize::MAX);
+                n += res.files.iter().map(|f| f.lines.len()).sum::<usize>();
+            }
+            if n == 0 {
+                std::process::exit(1);
+            }
+            if json {
+                println!("{{\"count\":{n}}}");
+            } else {
+                println!("{n}");
+            }
+            return Ok(());
+        }
         let mut shown = 0usize;
         for alt in &alts.alts {
             let Some(pat) = &alt.grep else { continue };
