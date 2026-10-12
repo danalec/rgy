@@ -4,6 +4,14 @@
 //! did: `fse` should surface `fse.go` above a scattered `FSEvents.mm`. So a
 //! successful match is described by a [`Match`] and results are ordered by it
 //! rather than by arrival.
+//!
+//! **Not on the query path.** As of 2026-10-12 nothing outside this module's own
+//! tests calls [`fuzzy_match`] or [`score`]; `Searcher` scores names with the
+//! fzf-v1 scorer in `name_query::token_score`, which is a different
+//! implementation. This module is the zen-rs matcher carried across the merge,
+//! kept because it is public, tested, and the natural place to put a
+//! kind-ranked UI matcher. Deleting it is a deliberate call, not a cleanup —
+//! check with `grep -rn 'fuzzy::' --include=*.rs` before assuming it is dead.
 
 /// How tightly the needle matched the name. Lower ranks better.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

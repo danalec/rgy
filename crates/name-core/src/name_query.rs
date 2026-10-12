@@ -1078,6 +1078,205 @@ mod tests {
         Live::new(Index::build(vec![listing], 0, 1_700_000_000, b"/"))
     }
 
+    /// An index with more entries than the interactive limit, so a count that
+    /// quietly inherited `limit` would return the limit instead of the truth.
+    fn many_live(n: usize) -> Live {
+        let mut names = Vec::new();
+        let mut ents = Vec::new();
+        for i in 0..n {
+            let name = format!("entry_{i:06}.txt");
+            let off = names.len() as u32;
+            names.extend_from_slice(name.as_bytes());
+            ents.push(discovery::walk::RawEnt {
+                name_off: off,
+                name_len: name.len() as u16,
+                kind: KIND_FILE,
+                size: 10,
+                mtime: 1_700_000_000,
+                child: discovery::walk::NONE,
+            });
+        }
+        let listing = discovery::walk::Listing { id: 0, names, ents };
+        Live::new(Index::build(vec![listing], 0, 1_700_000_000, b"/"))
+    }
+
+    /// An index whose entries repeat one set of distinct names, the shape a
+    /// toolchain tree has: every installed release ships the same crate
+    /// sources, so entries outnumber distinct names several times over.
+    /// Names span the alphabet and the index sorts them into id order, so
+    /// ids come out clustered by first letter — the arrangement a fixed
+    /// stride samples worst.
+    fn dedup_live(dirs: usize, per_letter: usize) -> Live {
+        let mut names = Vec::new();
+        let mut ents = Vec::new();
+        for _ in 0..dirs {
+            for c in b'a'..=b'z' {
+                for i in 0..per_letter {
+                    let name = format!("{}{i:05}.rs", c as char);
+                    let off = names.len() as u32;
+                    names.extend_from_slice(name.as_bytes());
+                    ents.push(discovery::walk::RawEnt {
+                        name_off: off,
+                        name_len: name.len() as u16,
+                        kind: KIND_FILE,
+                        size: 10,
+                        mtime: 1_700_000_000,
+                        child: discovery::walk::NONE,
+                    });
+                }
+            }
+        }
+        let listing = discovery::walk::Listing { id: 0, names, ents };
+        Live::new(Index::build(vec![listing], 0, 1_700_000_000, b"/"))
+    }
+
+    /// `rankable` samples every 64th bitmap word and multiplies by 64 to
+    /// stand in for the whole table. The estimate is crude: on this fixture
+    /// it reads 4,032 where the truth is 1,000, and 0 where the truth is
+    /// also 1,000, because a token's names cluster by first letter and a
+    /// cluster can sit entirely between two stride points. What the sample
+    /// is actually for is the one comparison `rankable` makes — is this
+    /// query broad enough for `ranked` to be worth trying — so that is what
+    /// is pinned here, not agreement between the two numbers.
+    ///
+    /// Both ways to get that wrong are covered: a sample so coarse that
+    /// broad and narrow queries read alike (`ranked` is dead code), and one
+    /// so biased that a cluster decides it (`ranked` is skipped for the
+    /// queries it would have won). Neither is a wrong answer — `ranked`
+    /// answers `None` and the scan falls through — but both cost time, and
+    /// neither shows up without measuring the decision against the truth.
+    #[test]
+    fn the_sampled_estimate_drives_the_same_decision_as_an_exhaustive_count() {
+        let live = dedup_live(2, 1_000);
+        let idx = &live.base;
+        assert!(idx.words > 64, "need several stride points, got {} words", idx.words);
+
+        let (mut broad, mut narrow) = (0, 0);
+        for tok in ["a", "b", "r", "s", "_", "rs", "a_", "0", "5", "z", "aa", "rs"] {
+            let q = q(tok);
+            let tb = TokenBits::new(idx, &q.tokens[0]);
+            let exact: f64 = (0..idx.words).map(|w| tb.word(w).0.count_ones() as f64).sum();
+            let sampled = (0..idx.words).step_by(64).map(|w| tb.word(w).0.count_ones() as f64).sum::<f64>() * 64.0;
+            assert_eq!(
+                sampled >= RANKED_MIN,
+                exact >= RANKED_MIN,
+                "{tok:?}: sampled {sampled:.0} (takes ranked: {}) but exhaustive {exact:.0} \
+                 does not",
+                sampled >= RANKED_MIN
+            );
+            broad += usize::from(exact >= RANKED_MIN);
+            narrow += usize::from(exact < RANKED_MIN);
+        }
+        // Without both, the loop above is one-sided and would pass on an
+        // estimate that always says "narrow" (ranked never runs) just as
+        // happily as on a correct one.
+        assert!(broad > 0 && narrow > 0, "the fixture put every token on one side of RANKED_MIN");
+    }
+
+    /// A scan of a root that listed nothing — a path that does not exist, a
+    /// file where a directory was expected, a permission wall — produces no
+    /// listings, and `Index::build` has to describe the root anyway rather
+    /// than walk off the end of an empty block stream. The result must be a
+    /// usable index holding nothing but the root, and every query against it
+    /// must answer zero rather than panic.
+    #[test]
+    fn an_unlistable_root_builds_the_root_only_index() {
+        let idx = Index::build(Vec::new(), 0, 1_700_000_000, b"/");
+        assert_eq!(idx.n, 1, "only the root entry itself");
+        let live = Live::new(idx);
+        let s = Searcher { live: &live };
+        for tok in ["a", "main", "*.rs", "ext:rs", "type:file"] {
+            let parsed = Query::parse(tok, "").expect("parses");
+            assert_eq!(s.count(&parsed), 0, "{tok:?} matched in an empty tree");
+            assert!(s.search(&parsed).is_empty(), "{tok:?} returned a hit in an empty tree");
+        }
+        // And the root resolves to a path rather than reading out of bounds.
+        let mut buf = Vec::new();
+        live.base.path(0, &mut buf);
+        assert_eq!(buf, b"/");
+    }
+
+    /// `count` must agree with an uncapped `search` on every query shape,
+    /// and must ignore the caller's limit. A separate "count only" match
+    /// logic would be free to drift here; this is what stops it.
+    ///
+    /// `broad` queries must match more than the default limit — without that,
+    /// a count that inherited the limit would look correct.
+    #[test]
+    fn count_never_disagrees_with_uncapped_search() {
+        let live = many_live(300);
+        let s = Searcher { live: &live };
+        let cases: &[(&str, bool)] = &[
+            ("entry", true),
+            ("entry_000", true),
+            ("^entry", true),
+            ("txt$", true),
+            ("ext:txt", true),
+            ("entry !000010", true),
+            // Narrow by construction: still checked for agreement, but they
+            // cannot prove anything about the limit being ignored.
+            ("entry_000001.txt", false),
+            ("zzzznomatch", false),
+            ("type:file entry", true),
+        ];
+        for &(query, broad) in cases {
+            let mut full = Query::parse(query, "").expect("parses");
+            full.limit = usize::MAX / 2;
+            let want = s.search(&full).len();
+
+            // Same query at the default limit, counted.
+            let capped = Query::parse(query, "").expect("parses");
+            let got = s.count(&capped);
+            assert_eq!(got, want, "count disagrees for {query:?}");
+
+            // `search_uncapped` is what the CLI unions `|` alternatives over;
+            // it must also ignore the limit. This case caught a real bug —
+            // skipping only the outer `truncate` still returned `q.limit`
+            // hits, because `search_base` cuts internally.
+            assert_eq!(s.search_uncapped(&capped).len(), want, "search_uncapped disagrees for {query:?}");
+
+            if broad {
+                assert!(
+                    want > capped.limit,
+                    "{query:?} matched {want}, not above the limit {} — the fixture \
+                     cannot detect a count that inherited the limit",
+                    capped.limit
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn count_of_a_fail_closed_query_is_zero() {
+        let live = many_live(50);
+        let s = Searcher { live: &live };
+        let bad = Query::parse("type:banana", "").expect("parses");
+        assert!(bad.never);
+        assert_eq!(s.count(&bad), 0);
+    }
+
+    /// `--explain` is only worth anything if every arm is reachable. If a plan
+    /// could never be taken, reporting it would be decoration.
+    #[test]
+    fn the_reported_plan_is_the_path_that_actually_ran() {
+        let live = many_live(300);
+        let s = Searcher { live: &live };
+
+        // A filter that cannot match: recorded as failing closed, not as
+        // whatever scan path happened to be skipped.
+        let bad = Query::parse("type:banana", "").expect("parses");
+        s.search(&bad);
+        assert_eq!(Searcher::last_plan(), Some(Plan::FailClosed));
+
+        // A real query takes some concrete path, and it is one of ours.
+        for query in ["entry", "^entry", "entry txt", "entry !000010", "ext:txt"] {
+            let parsed = Query::parse(query, "").expect("parses");
+            s.search(&parsed);
+            let plan = Searcher::last_plan().unwrap_or_else(|| panic!("no plan recorded for {query:?}"));
+            assert!(matches!(plan, Plan::Ranked { .. } | Plan::Driven | Plan::Selective | Plan::Full), "{query:?} reported {plan}");
+        }
+    }
+
     fn searched(query: &str) -> Vec<u32> {
         let live = tiny_live();
         let parsed = Query::parse(query, "").expect("parses");
@@ -1552,6 +1751,90 @@ pub struct Searcher<'a> {
     pub live: &'a Live,
 }
 
+/// Which execution path a search actually took.
+///
+/// `search_base` picks between these by trying one and *bailing out* when a
+/// precondition does not hold — `ranked` guesses, `driven` tries, and failing
+/// both it falls through to `selective` or `full`. None of that is recorded, so
+/// a slow query and a fast one look identical from outside. This is the
+/// missing observation, not a new strategy: the paths are exactly the ones
+/// already there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Plan {
+    /// A filter failed closed (`type:banana`); nothing is searched.
+    FailClosed,
+    /// The query's scope selects no entries.
+    Empty,
+    /// fzf-v1 ranked scorer over class-bitmap candidates.
+    Ranked { tentative: bool },
+    /// Bitmap intersection for multi-token or negated queries.
+    Driven,
+    /// Few candidates: score only entries whose names matched.
+    Selective,
+    /// Many candidates: one pass over every entry.
+    Full,
+}
+
+impl std::fmt::Display for Plan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Plan::FailClosed => write!(f, "fail-closed"),
+            Plan::Empty => write!(f, "empty-scope"),
+            Plan::Ranked { tentative: false } => write!(f, "ranked"),
+            Plan::Ranked { tentative: true } => write!(f, "ranked (tentative)"),
+            Plan::Driven => write!(f, "driven"),
+            Plan::Selective => write!(f, "selective"),
+            Plan::Full => write!(f, "full"),
+        }
+    }
+}
+
+thread_local! {
+    /// The plan taken by the most recent search on this thread. Thread-local
+    /// rather than a field on `Searcher` so no call site has to change, and so
+    /// `search(&self)` keeps taking `&self` — every decision point is on the
+    /// calling thread even though the scan itself fans out.
+    static LAST_PLAN: std::cell::Cell<Option<Plan>> = const { std::cell::Cell::new(None) };
+    /// Strategies the query *reached for* and then declined, in order.
+    ///
+    /// Without this, a fast path that is guessed and rejected looks identical
+    /// to one that never applied — and "never applied" and "always rejected"
+    /// are very different findings about the code.
+    static ATTEMPTS: std::cell::RefCell<Vec<&'static str>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn note_plan(p: Plan) {
+    LAST_PLAN.with(|c| c.set(Some(p)));
+}
+
+fn note_attempt(name: &'static str) {
+    ATTEMPTS.with(|a| a.borrow_mut().push(name));
+}
+
+fn attempts_reset() {
+    ATTEMPTS.with(|a| a.borrow_mut().clear());
+}
+
+impl Searcher<'_> {
+    /// The plan the most recent search **on this thread** took.
+    ///
+    /// `None` before the first search. Reads the same thread-local the
+    /// decision points write, so it reports the path that actually returned —
+    /// a `ranked` that bailed out and fell through shows up as what ran, not
+    /// as what was tried.
+    pub fn last_plan() -> Option<Plan> {
+        LAST_PLAN.with(std::cell::Cell::get)
+    }
+
+    /// Strategies the last search tried and declined, in order.
+    ///
+    /// A non-empty entry for a path `last_plan` never reports is the tell:
+    /// the path is reached, its precondition holds, and it still declines.
+    pub fn rejected_attempts() -> Vec<&'static str> {
+        ATTEMPTS.with(|a| a.borrow().clone())
+    }
+}
+
 impl Searcher<'_> {
     /// Entry range to scan, from the `in:` scope.
     pub fn scope_range(&self, q: &Query) -> Option<(usize, usize)> {
@@ -1563,11 +1846,13 @@ impl Searcher<'_> {
     }
 
     pub fn search(&self, q: &Query) -> Vec<Hit> {
+        attempts_reset();
         // Fail closed at the door. Every fast path below must agree with
         // match_path's `never` answer; a unit test on match_path alone let
         // `walk type:banana` leak through `ranked` once (the CLI returned
         // hits and exit 0 where zen-rs promises nothing + a warning).
         if q.never {
+            note_plan(Plan::FailClosed);
             return Vec::new();
         }
         let mut hits = self.search_base(q);
@@ -1577,20 +1862,87 @@ impl Searcher<'_> {
         hits
     }
 
+    /// The query with its result cap lifted.
+    ///
+    /// `search_base` truncates *internally* through `TopK`, so raising the
+    /// limit is what actually makes a result complete. Skipping only the
+    /// outer `truncate` still returned exactly `q.limit` hits — this helper
+    /// exists so `count` and `search_uncapped` cannot drift on that detail.
+    fn uncapped(q: &Query) -> Query {
+        let mut c = q.clone();
+        // Room for the `(2 * k)` cut threshold's multiply.
+        c.limit = usize::MAX / 2;
+        c
+    }
+
+    /// Every match for the query, ranked, **ignoring `q.limit`**.
+    ///
+    /// The count path needs this: a caller that unions the results of several
+    /// `|` alternatives must see each alternative's full match set, or a hit
+    /// that both alternatives match would be undercounted.
+    pub fn search_uncapped(&self, q: &Query) -> Vec<Hit> {
+        attempts_reset();
+        if q.never {
+            note_plan(Plan::FailClosed);
+            return Vec::new();
+        }
+        let q = &Self::uncapped(q);
+        let mut hits = self.search_base(q);
+        hits.extend(self.search_overlay(q));
+        hits.sort_by(|a, b| b.score.cmp(&a.score).then(a.idx.cmp(&b.idx)));
+        hits
+    }
+
+    /// How many entries match, without ranking them.
+    ///
+    /// Deliberately *not* a parallel implementation. `search_base` and
+    /// `search_overlay` are reused verbatim, so the count can never disagree
+    /// with `search`; only the final sort and the caller's per-hit path
+    /// reconstruction are skipped. Writing a separate "count only" path
+    /// through `ranked`/`drive`/`selective`/`full` would have saved more, but
+    /// four match logics drifting apart is a silent-wrong-answer bug waiting
+    /// to happen — and that costs far more than the sort.
+    ///
+    /// This is the single-alternative count. A caller unioning several `|`
+    /// alternatives must dedup across them (an entry both match counts once),
+    /// which is what `search_uncapped` plus a set is for.
+    pub fn count(&self, q: &Query) -> usize {
+        // Fail closed exactly as `search` does.
+        if q.never {
+            return 0;
+        }
+        let q = &Self::uncapped(q);
+        self.search_base(q).len() + self.search_overlay(q).len()
+    }
+
     fn search_base(&self, q: &Query) -> Vec<Hit> {
-        let Some((lo, hi)) = self.scope_range(q) else { return Vec::new() };
+        // Every branch below records the plan it commits to. Only the path
+        // that actually *returns* notes it, so a `ranked` that bails out is
+        // not reported as the plan that ran — it is recorded as a rejection.
+        let Some((lo, hi)) = self.scope_range(q) else {
+            note_plan(Plan::Empty);
+            return Vec::new();
+        };
         if let Some((t, tentative)) = self.rankable(q, lo, hi) {
             let scope = (q.scope.is_some() && hi - lo <= self.live.base.u / 4).then(|| self.scope_names(lo, hi));
-            if let Some(hits) = self.ranked(q, t, lo, hi, scope.as_deref(), tentative) {
-                return hits;
+            match self.ranked(q, t, lo, hi, scope.as_deref(), tentative) {
+                Some(hits) => {
+                    note_plan(Plan::Ranked { tentative });
+                    return hits;
+                }
+                None => note_attempt("ranked"),
             }
         }
         let pos: Vec<&Token> = q.tokens.iter().filter(|t| !t.negate).collect();
         let neg: Vec<&Token> = q.tokens.iter().filter(|t| t.negate).collect();
-        if (pos.len() > 1 || !neg.is_empty())
-            && let Some(hits) = self.driven(q, &pos, &neg, lo, hi)
-        {
-            return hits;
+        if pos.len() > 1 || !neg.is_empty() {
+            match self.driven(q, &pos, &neg, lo, hi) {
+                Some(hits) => {
+                    note_plan(Plan::Driven);
+                    return hits;
+                }
+                None => note_attempt("driven"),
+            }
         }
         // Step 1: every name-only predicate, once per distinct name (~2M)
         // rather than once per entry (~7.5M); reused while you type.
@@ -1600,9 +1952,11 @@ impl Searcher<'_> {
         // matching name. Many: one sequential pass over every entry.
         let fast = !scored.names.all && !FULL_PASS.load(std::sync::atomic::Ordering::Relaxed);
         if fast && scored.names.ok_entries <= SELECTIVE {
+            note_plan(Plan::Selective);
             return s.selective(lo, hi);
         }
 
+        note_plan(Plan::Full);
         let memo = if s.need_dirs { Some(scored.memo.get_or_init(|| self.dir_tokens(&scored.names))) } else { None };
         s.full(lo, hi, memo.map(|m| m.as_slice()))
     }
@@ -1635,11 +1989,18 @@ impl Searcher<'_> {
             return Some((t, false));
         }
         if est < BORDERLINE || q.scope.is_some() || !t.text.iter().all(u8::is_ascii_alphabetic) {
+            // `rankable` never even guessed, which is a different finding from
+            // a guess that `ranked` rejected: this path is not being reached.
+            note_attempt("rankable");
             return None;
         }
         let tb = TokenBits::new(idx, t);
         let found = (0..idx.words).step_by(64).map(|w| tb.word(w).0.count_ones() as f64).sum::<f64>() * 64.0;
-        (found >= RANKED_MIN).then_some((t, true))
+        if found < RANKED_MIN {
+            note_attempt("rankable-sampled");
+            return None;
+        }
+        Some((t, true))
     }
 
     /// A broad one-token search ("a", "de"): its top `limit` comes from a few
