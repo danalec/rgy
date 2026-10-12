@@ -1885,9 +1885,42 @@ fn top_k(n: usize, k: usize, visits: usize, floor: u64, visit: impl Fn(std::ops:
     keys.into_iter().map(|x| Hit { score: ((x >> 32) as i64 + i32::MIN as i64) as i32, idx: !(x as u32), over: None }).collect()
 }
 
-/// Below this many entries carrying a matching name, a query visits just
-/// those entries (via the name -> entries list) instead of every entry.
+/// Below this many entries carrying a matching name, a `driven` attempt
+/// visits just those entries (via the name -> entries list) and gives up
+/// past it. A work budget, not a plan choice -- see
+/// [`SELECTIVE_VISIT_RATIO`] for the latter.
 const SELECTIVE: usize = 60_000;
+
+/// How much more one visit costs `selective` than `full`, which is what
+/// decides between them.
+///
+/// `selective` visits only the entries carrying a matching name and `full`
+/// visits every entry, so `selective` does less work -- and was measured
+/// losing anyway, because each of its visits costs far more. It walks a
+/// name -> entries list and takes a HashMap per candidate; `full` makes one
+/// linear pass over arrays. On the 200k-name bench corpus: about 18 ns a
+/// candidate against 0.3 ns an entry, so a 60x ratio.
+///
+/// The crossover follows from it. `selective` wins while
+/// `candidates * 60 < entries` -- about 3.3k of 200k there. The rule this
+/// replaces was an absolute `ok_entries <= 60_000`, which chose `selective`
+/// for every row the benchmark measures and lost 5-12x on all but the
+/// narrowest:
+///
+/// ```text
+/// report   29k candidates   575 us (selective) vs  60 us (full)   9.7x
+/// mod      57k candidates   873 us (selective) vs  74 us (full)  11.8x
+/// ```
+///
+/// while the one query it exists for still wins, and by a lot:
+///
+/// ```text
+/// 'report_00000.pdf   1 candidate   0.4 us vs 63 us   157x
+/// ```
+///
+/// So the plan is not wrong; the cut was. Narrow stays instant, broad stops
+/// paying for a list walk it does not need.
+const SELECTIVE_VISIT_RATIO: u64 = 60;
 /// Bitset words (64 name ids each) per chunk of a name table: the unit of
 /// parallel scoring and of hit storage (so a chunk's rank fits a u16).
 const CHUNK_WORDS: usize = 64;
@@ -2158,7 +2191,7 @@ impl Searcher<'_> {
         // Step 2: score entries. Few candidates: just the entries carrying a
         // matching name. Many: one sequential pass over every entry.
         let fast = !scored.names.all && !FULL_PASS.load(std::sync::atomic::Ordering::Relaxed);
-        if fast && scored.names.ok_entries <= SELECTIVE {
+        if fast && (scored.names.ok_entries as u64) * SELECTIVE_VISIT_RATIO <= (hi - lo) as u64 {
             note_plan(Plan::Selective);
             return s.selective(lo, hi);
         }
