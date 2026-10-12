@@ -84,6 +84,7 @@ pub trait Watch {
     fn next_batch(&mut self) -> Result<ChangeBatch, String>;
 }
 
+pub mod interrupt;
 pub mod walk;
 
 /// The portable [`Source`]: a std-based DFS walk (see [`walk::scan`]).
@@ -91,10 +92,36 @@ pub mod walk;
 /// Windows MFT walk return the same blocks from their own crates.
 pub struct PortableSource {
     pub root: Vec<u8>,
+    /// Directory-read fan-out handed to [`walk::scan`]. 0 or 1 walks inline;
+    /// higher values use a pool. Ignored by backends with their own walk.
+    pub threads: usize,
+}
+
+impl PortableSource {
+    /// Default fan-out for callers that just want a portable walk.
+    pub const DEFAULT_THREADS: usize = 4;
+
+    pub fn new(root: Vec<u8>, threads: usize) -> Self {
+        Self { root, threads }
+    }
+
+    /// [`Source::enumerate`], with a cancel token and a progress callback.
+    ///
+    /// `on_progress` fires once per level (parallel) or per directory
+    /// (sequential), which is often enough that the caller should throttle
+    /// its own output. It is called after the cancel check, so the last thing
+    /// a scan says is never a state it did not finish in.
+    pub fn enumerate_cancellable(
+        &self,
+        cancel: &walk::Cancel,
+        on_progress: &(dyn Fn(walk::Progress) + Sync),
+    ) -> Result<Vec<walk::Listing>, walk::Cancelled> {
+        walk::scan_with(&self.root, self.threads, cancel, on_progress)
+    }
 }
 
 impl Source for PortableSource {
     fn enumerate(&self) -> Result<Vec<walk::Listing>, String> {
-        Ok(walk::scan(&self.root, 4))
+        Ok(walk::scan(&self.root, self.threads))
     }
 }

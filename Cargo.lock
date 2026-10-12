@@ -104,6 +104,9 @@ dependencies = [
 [[package]]
 name = "discovery"
 version = "0.1.0"
+dependencies = [
+ "rayon",
+]
 
 [[package]]
 name = "discovery-linux"

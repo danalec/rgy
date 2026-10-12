@@ -6,3 +6,6 @@ description = "Platform discovery seam (Source/Watch) and the shared change voca
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+# The portable walk fans directory reads across a pool; `scan_sequential`
+# stays as the correctness oracle the differential test compares against.
+rayon = "1.12"

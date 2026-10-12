@@ -3341,7 +3341,7 @@ mod grep_pipeline_tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("alpha.rs"), b"fn alpha() { let x = 1; }\n").unwrap();
         std::fs::write(dir.join("beta.txt"), b"nothing here\n").unwrap();
-        let src = PortableSource { root: dir.to_string_lossy().into_owned().into_bytes() };
+        let src = PortableSource::new(dir.to_string_lossy().into_owned().into_bytes(), 2);
         let live = Live::new(Index::build(src.enumerate().unwrap(), 0, 1, b"/"));
         (live, dir)
     }
