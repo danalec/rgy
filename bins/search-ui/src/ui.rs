@@ -9,12 +9,12 @@
 //! last few dozen queries, so a scan that quietly got slower is visible while
 //! typing rather than after the fact.
 
+use crate::latency::LatencyMeter;
 use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::style::{Print, ResetColor, SetBackgroundColor, Stylize};
 use crossterm::terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen};
-use crate::latency::LatencyMeter;
 use name_core::live::Live;
 use name_core::name_query::{Alternatives, Hit, Searcher};
 use std::io::{Stdout, Write};
@@ -243,7 +243,8 @@ impl App {
                     break;
                 }
                 self.live.base.path(i, &mut out);
-                self.results.push(String::from_utf8_lossy(&out).into_owned());
+                self.results
+                    .push(String::from_utf8_lossy(&out).into_owned());
                 n += 1;
             }
             self.selected = 0;

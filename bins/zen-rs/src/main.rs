@@ -39,7 +39,11 @@ fn live_from_zen(index: &index::Index) -> Live {
         .iter_all_paths()
         .map(|(frn, path)| {
             let meta = index.meta_of(frn);
-            (path.trim_end_matches(['\\', '/']).to_string(), meta.is_dir, meta.size)
+            (
+                path.trim_end_matches(['\\', '/']).to_string(),
+                meta.is_dir,
+                meta.size,
+            )
         })
         .collect();
     // Deterministic id assignment, so two runs of the same index agree.
