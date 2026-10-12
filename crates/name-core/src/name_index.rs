@@ -408,15 +408,37 @@ impl Index {
         // The entries from i up: the walk goes folder to parent folder (one
         // dependent load a level); their entries and names load alongside.
         let (de, dp) = (self.dir_entry(), self.dir_parent());
-        let mut chain = [0u32; 256];
-        chain[0] = i as u32;
+        // Deep enough for any real tree without allocating. This used to be
+        // the only buffer, and the walk stopped when it filled: a path nested
+        // deeper than 256 came back missing its outermost components, with
+        // nothing saying it had been cut. Plausible, and wrong.
+        const SHALLOW: usize = 256;
+        let mut inline = [0u32; SHALLOW];
+        inline[0] = i as u32;
         let (mut k, mut d) = (1, self.parent()[i]);
-        while d != 0 && k < chain.len() {
-            chain[k] = de[d as usize];
+        while d != 0 && k < SHALLOW {
+            inline[k] = de[d as usize];
             k += 1;
             d = dp[d as usize];
         }
-        for &e in chain[..k].iter().rev() {
+        if d == 0 {
+            self.emit_chain(&inline[..k], out);
+            return;
+        }
+        // Past the inline buffer: finish in a Vec. A tree this deep is rare
+        // (generated build trees, nested package installs) and allocating for
+        // it costs far less than the truncation it replaces.
+        let mut chain = inline[..k].to_vec();
+        while d != 0 {
+            chain.push(de[d as usize]);
+            d = dp[d as usize];
+        }
+        self.emit_chain(&chain, out);
+    }
+
+    /// Write a root-to-leaf chain of entry indices as an absolute path.
+    fn emit_chain(&self, chain: &[u32], out: &mut Vec<u8>) {
+        for &e in chain.iter().rev() {
             out.push(b'/');
             out.extend_from_slice(self.name(e as usize));
         }
@@ -1065,5 +1087,73 @@ mod blob_tests {
         assert_eq!(loaded.u, idx.u);
         assert_eq!(Index::saved_event_id(&p), Some(42));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    /// A path nested deeper than the fixed 256-entry chain used to come back
+    /// missing its outermost components. Nothing said it had been cut, so the
+    /// result was a plausible-looking wrong path -- the worst shape a
+    /// reconstruction can fail in.
+    ///
+    /// Round-tripped through `lookup` rather than by hand-picking an entry
+    /// index: `lookup` walks the children by name and so survives either
+    /// implementation, which makes it the honest way to ask for the entry
+    /// whose path is in question.
+    #[test]
+    fn a_path_deeper_than_the_inline_chain_is_not_truncated() {
+        use discovery::walk::{KIND_DIR, KIND_FILE, Listing, NONE, RawEnt};
+
+        // More than the 256 the inline chain holds, so the walk has to spill.
+        const DEPTH: usize = 300;
+        let mut listings = Vec::with_capacity(DEPTH + 1);
+        let mut expected = String::new();
+        for level in 0..=DEPTH {
+            // The last listing holds the leaf; every one before it a folder
+            // named after its level, so the expected path is unambiguous.
+            let (name, kind, child) =
+                if level == DEPTH { ("leaf.txt".to_string(), KIND_FILE, NONE) } else { (format!("d{level}"), KIND_DIR, level as u32 + 1) };
+            if level < DEPTH {
+                expected.push_str(&format!("/{name}"));
+            } else {
+                expected.push_str("/leaf.txt");
+            }
+            listings.push(Listing {
+                id: level as u32,
+                names: name.as_bytes().to_vec(),
+                ents: vec![RawEnt { name_off: 0, name_len: name.len() as u16, kind, size: 3, mtime: 7, child }],
+            });
+        }
+        let idx = Index::build(listings, 0, 1, b"/");
+
+        let entry = idx.lookup(expected.as_bytes()).expect("the deep path resolves");
+        let mut out = Vec::new();
+        idx.path(entry as usize, &mut out);
+        assert_eq!(String::from_utf8_lossy(&out), expected, "a path deeper than the inline chain must come back whole");
+    }
+
+    /// The shallow case must stay on the allocation-free path and still be
+    /// right: the spill exists for the deep tail, not to change what a normal
+    /// tree produces.
+    #[test]
+    fn a_shallow_path_is_reconstructed_exactly() {
+        use discovery::walk::{KIND_DIR, KIND_FILE, Listing, NONE, RawEnt};
+
+        let listings = vec![
+            Listing { id: 0, names: b"docs".to_vec(), ents: vec![RawEnt { name_off: 0, name_len: 4, kind: KIND_DIR, size: 0, mtime: 7, child: 1 }] },
+            Listing {
+                id: 1,
+                names: b"notes.txt".to_vec(),
+                ents: vec![RawEnt { name_off: 0, name_len: 9, kind: KIND_FILE, size: 3, mtime: 7, child: NONE }],
+            },
+        ];
+        let idx = Index::build(listings, 0, 1, b"/");
+        let entry = idx.lookup(b"/docs/notes.txt").expect("resolves");
+        let mut out = Vec::new();
+        idx.path(entry as usize, &mut out);
+        assert_eq!(String::from_utf8_lossy(&out), "/docs/notes.txt");
     }
 }
