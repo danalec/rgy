@@ -1255,6 +1255,60 @@ mod tests {
         assert_eq!(s.count(&bad), 0);
     }
 
+    /// An overlay hit and a base hit differ only in which entry they name,
+    /// and the merge has to tell them apart by that. Every overlay entry
+    /// carries `idx == u32::MAX`, so a merge keyed on `idx` keeps one of them
+    /// and drops the rest -- a query matching several entries added since the
+    /// last compaction answered as if only one existed.
+    ///
+    /// This is the regression that made `searchctl` and the TUI silently lose
+    /// live entries, so it is written against `merge_hits` directly: the
+    /// defect was in the merge, not in the matcher.
+    #[test]
+    fn the_merge_keeps_every_distinct_overlay_entry() {
+        let overlay = |name: &str, score: i32| Hit { score, idx: u32::MAX, over: Some(format!("/new/{name}").into_bytes()) };
+        let merged = merge_hits(vec![overlay("one", 10), overlay("two", 20), overlay("three", 30)], 50);
+        assert_eq!(merged.len(), 3, "three distinct entries, not one");
+        let mut names: Vec<String> = merged.iter().map(|h| String::from_utf8(h.over.clone().expect("overlay")).unwrap()).collect();
+        names.sort();
+        assert_eq!(names, ["/new/one", "/new/three", "/new/two"]);
+    }
+
+    /// One entry matched by two alternatives appears once, with the better
+    /// of the two scores -- not twice, and not with the worse one.
+    #[test]
+    fn the_merge_takes_the_best_score_per_entry() {
+        let base = |idx: u32, score: i32| Hit { score, idx, over: None };
+        let merged = merge_hits(vec![base(7, 10), base(7, 99), base(8, 5)], 50);
+        assert_eq!(merged.len(), 2, "entry 7 matched twice but is one entry");
+        let seven = merged.iter().find(|h| h.idx == 7).expect("entry 7");
+        assert_eq!(seven.score, 99, "the better of the two scores wins");
+    }
+
+    /// Two overlay entries tying on score must come out in the same order
+    /// every run. A map's iteration order is not that, and both entries share
+    /// `idx`, so an order keyed on `idx` alone leaves them unordered -- which
+    /// is how a stable-looking result list turns into one that reshuffles.
+    #[test]
+    fn the_merge_order_is_total_not_map_iteration_order() {
+        let overlay = |name: &str| Hit { score: 5, idx: u32::MAX, over: Some(name.as_bytes().to_vec()) };
+        for _ in 0..20 {
+            let merged = merge_hits(vec![overlay("/zeta"), overlay("/alpha"), overlay("/mid")], 50);
+            let paths: Vec<&[u8]> = merged.iter().map(|h| h.over.as_ref().unwrap().as_slice()).collect();
+            assert_eq!(paths, [&b"/alpha"[..], &b"/mid"[..], &b"/zeta"[..]]);
+        }
+    }
+
+    /// Base entries sort before overlay entries on a score tie, which is what
+    /// `idx ascending` used to give (a real index is always below the
+    /// `u32::MAX` overlay sentinel).
+    #[test]
+    fn the_merge_puts_base_entries_first_on_a_tie() {
+        let merged = merge_hits(vec![Hit { score: 5, idx: u32::MAX, over: Some(b"/new/x".to_vec()) }, Hit { score: 5, idx: 3, over: None }], 50);
+        assert_eq!(merged[0].idx, 3);
+        assert!(merged[1].over.is_some());
+    }
+
     /// `--explain` is only worth anything if every arm is reachable. If a plan
     /// could never be taken, reporting it would be decoration.
     #[test]
@@ -1576,6 +1630,79 @@ pub struct Hit {
     /// Base entry, or u32::MAX for an overlay entry (then `over` is its path).
     pub idx: u32,
     pub over: Option<Vec<u8>>,
+}
+
+/// What makes a hit the entry it is, so a merge of `|` alternatives can tell
+/// "the same entry again" from "a different entry".
+///
+/// `Hit::idx` alone is not that. [`search_overlay`] stamps `idx == u32::MAX`
+/// on every entry it returns -- it is the sentinel for "not a base entry" --
+/// and keeps the real identity in `over`. A merge keyed on `idx` therefore
+/// treats every entry added since the last compaction as one entry and drops
+/// the rest, which is a silent wrong answer rather than a loud one.
+///
+/// Owned (not a borrow of the hit) so a merge can hold it while it moves and
+/// replaces hits.
+#[derive(PartialEq, Eq, Hash)]
+enum HitId {
+    /// A base entry, named by its index.
+    Base(u32),
+    /// An overlay entry, named by its path.
+    Over(Vec<u8>),
+}
+
+impl Hit {
+    fn id(&self) -> HitId {
+        match &self.over {
+            Some(p) => HitId::Over(p.clone()),
+            None => HitId::Base(self.idx),
+        }
+    }
+}
+
+/// Collapse hits from several alternatives into one ranked list: an entry
+/// matched twice keeps the better of the two scores and appears once.
+///
+/// The two ways to get this wrong are both silent. Key the merge on `idx` and
+/// distinct overlay entries disappear (see [`HitId`]); find the match by
+/// scanning the hits kept so far and the loop is O(n^2) over up to `limit`
+/// hits, which is hundreds of milliseconds on every keystroke of an
+/// interactive search. So: a map from identity to the winning hit, O(1) per
+/// hit.
+///
+/// The order is score descending, then base entries by index before overlay
+/// entries, then overlay entries by path. That is the same total order the
+/// callers used to get from `score desc, idx asc` plus a stable sort -- and
+/// it matters that it is *total*: a map iteration order is not, and overlay
+/// hits share `idx`, so two of them tying on score would otherwise come out
+/// in a different order on every run.
+pub fn merge_hits(all: Vec<Hit>, limit: usize) -> Vec<Hit> {
+    use std::collections::hash_map::Entry;
+
+    let mut best: std::collections::HashMap<HitId, Hit> = std::collections::HashMap::with_capacity(all.len());
+    for h in all {
+        match best.entry(h.id()) {
+            Entry::Occupied(mut e) => {
+                if e.get().score < h.score {
+                    e.insert(h);
+                }
+            }
+            Entry::Vacant(e) => {
+                e.insert(h);
+            }
+        }
+    }
+    let mut hits: Vec<Hit> = best.into_values().collect();
+    hits.sort_by(|a, b| {
+        b.score.cmp(&a.score).then_with(|| match (&a.over, &b.over) {
+            (None, None) => a.idx.cmp(&b.idx),
+            (Some(x), Some(y)) => x.cmp(y),
+            (None, Some(_)) => std::cmp::Ordering::Less,
+            (Some(_), None) => std::cmp::Ordering::Greater,
+        })
+    });
+    hits.truncate(limit);
+    hits
 }
 struct TopK {
     k: usize,
@@ -1913,6 +2040,42 @@ impl Searcher<'_> {
         }
         let q = &Self::uncapped(q);
         self.search_base(q).len() + self.search_overlay(q).len()
+    }
+
+    /// Score every `|` alternative and merge the results into one ranked
+    /// list: an entry matched by more than one of them appears once, keeping
+    /// the best score any of them gave it.
+    ///
+    /// Both `searchctl` and the TUI need exactly this, so it lives here
+    /// rather than being written twice -- it was written twice, and both
+    /// copies keyed the merge on `Hit::idx`. That is not an entry's identity:
+    /// `search_overlay` gives `idx == u32::MAX` to *every* entry it returns,
+    /// with the real identity in `over`, so the two copies collapsed all of
+    /// the entries added since the last compaction into one and silently
+    /// dropped the rest. The merge keys on [`Hit::id`] instead.
+    pub fn search_alternatives(&self, alts: &[Query], limit: usize) -> Vec<Hit> {
+        let mut all = Vec::new();
+        for alt in alts {
+            let mut q = alt.clone();
+            q.limit = limit;
+            all.extend(self.search(&q));
+        }
+        merge_hits(all, limit)
+    }
+
+    /// How many distinct entries the `|` alternatives match between them.
+    ///
+    /// Same identity as [`Self::search_alternatives`], so a count cannot
+    /// disagree with the list it counts. Keyed on `Hit::idx` this returns 1
+    /// for any query matching only entries added since the last compaction.
+    pub fn count_alternatives(&self, alts: &[Query]) -> usize {
+        let mut seen: std::collections::HashSet<HitId> = std::collections::HashSet::new();
+        for alt in alts {
+            for h in self.search_uncapped(alt) {
+                seen.insert(h.id());
+            }
+        }
+        seen.len()
     }
 
     fn search_base(&self, q: &Query) -> Vec<Hit> {
