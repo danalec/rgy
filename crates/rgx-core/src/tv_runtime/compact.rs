@@ -182,10 +182,13 @@ pub fn compact_store(store_dir: &Path, min_waste: f64) -> io::Result<Option<Comp
                 format!("file {} names missing pack {}", rec.rel_path, rec.pack_id),
             )
         })?;
-        if !open.contains_key(&rec.pack_id) {
-            open.insert(rec.pack_id, fs::File::open(src_path)?);
-        }
-        let f = open.get_mut(&rec.pack_id).expect("just inserted");
+        // `Entry`, but not `or_insert`: that would call `fs::File::open` on
+        // every record and throw the result away whenever the pack is already
+        // open. Opening happens in the vacant arm alone.
+        let f = match open.entry(rec.pack_id) {
+            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+            std::collections::hash_map::Entry::Vacant(e) => e.insert(fs::File::open(src_path)?),
+        };
         f.seek(SeekFrom::Start(PackHeader::SIZE as u64 + rec.offset))?;
         let mut payload = vec![0u8; rec.length as usize];
         f.read_exact(&mut payload)?;

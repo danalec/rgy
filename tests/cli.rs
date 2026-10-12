@@ -287,8 +287,7 @@ fn explain_reports_the_plan_that_ran() {
             "selective",
             "full"
         ]
-        .iter()
-        .any(|p| plan == *p),
+        .contains(&plan),
         "unknown plan name {plan:?} in {plan_line}"
     );
 }

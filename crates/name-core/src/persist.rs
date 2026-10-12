@@ -53,10 +53,8 @@ pub struct Saved {
 /// than nothing, so a failure between the two writes leaves the previous
 /// sidecar in place, whose root check then rejects the new blob.
 pub fn save(idx: &Index, root: &Path, index: &Path) -> std::io::Result<Saved> {
-    if let Some(dir) = index.parent() {
-        if !dir.as_os_str().is_empty() {
-            std::fs::create_dir_all(dir)?;
-        }
+    if let Some(dir) = index.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir)?;
     }
     idx.save(index)?;
     let meta = stamp_path(index);

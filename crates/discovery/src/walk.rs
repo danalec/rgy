@@ -279,8 +279,7 @@ pub fn scan_sequential_with(
     let mut seen = 0u64;
     // (path, parent_slot in out where the child id goes) — filled after the
     // child listing is built.
-    let mut stack: Vec<(std::path::PathBuf, Option<(usize, usize)>)> =
-        vec![(root_path.clone(), None)];
+    let mut stack: Vec<(std::path::PathBuf, Option<(usize, usize)>)> = vec![(root_path, None)];
     while let Some((path, fix)) = stack.pop() {
         if cancel.is_cancelled() {
             return Err(Cancelled);
@@ -489,11 +488,14 @@ mod tests {
         String::from_utf8_lossy(&l.names[start..end]).into_owned()
     }
 
+    /// A directory's rows: `(name, kind, size, mtime, child directory path)`.
+    type Rows = BTreeMap<String, Vec<(String, u8, u64, u32, Option<String>)>>;
+
     /// Reshape a block stream into `directory path -> rows`, so the
     /// comparison does not depend on the order `read_dir` happened to
     /// return entries in (which is not stable, and `Index::build` sorts it
     /// away anyway).
-    fn normalize(ls: &[Listing]) -> BTreeMap<String, Vec<(String, u8, u64, u32, Option<String>)>> {
+    fn normalize(ls: &[Listing]) -> Rows {
         let mut paths: Vec<Option<String>> = vec![None; ls.len()];
         if ls.is_empty() {
             return BTreeMap::new();
