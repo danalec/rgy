@@ -24,7 +24,7 @@ use discovery::{PortableSource, interrupt};
 use name_core::content::{self, Grep};
 use name_core::live::Live;
 use name_core::name_index::Index;
-use name_core::name_query::{Alternatives, Hit, Query, Searcher};
+use name_core::name_query::{Alternatives, Searcher};
 use name_core::persist;
 
 #[global_allocator]
@@ -333,22 +333,12 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
         }
     }
 
-    // Score every alternative; a hit is the best score over them.
-    let mut hits: Vec<Hit> = Vec::new();
-
     // `--count`: same match logic, no ranking and no path reconstruction.
-    // Dedup is by `idx`, exactly as the search loop below does — summing the
-    // alternatives would double-count an entry that two of them match, and
-    // overlay entries all carry `u32::MAX` so they collapse the same way here
-    // as they do there.
+    // `count_alternatives` dedups by an entry's real identity, so an entry two
+    // alternatives both match counts once and the entries added since the last
+    // compaction are not collapsed into one.
     if count {
-        let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
-        for alt in &alts.alts {
-            for h in searcher.search_uncapped(alt) {
-                seen.insert(h.idx);
-            }
-        }
-        let n = seen.len();
+        let n = searcher.count_alternatives(&alts.alts);
         if n == 0 {
             std::process::exit(1);
         }
@@ -360,19 +350,11 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
         return Ok(());
     }
 
-    for alt in &alts.alts {
-        let mut q: Query = alt.clone();
-        q.limit = limit;
-        for h in searcher.search(&q) {
-            match hits.iter_mut().find(|e| e.idx == h.idx) {
-                Some(e) if e.score < h.score => *e = h,
-                Some(_) => {}
-                None => hits.push(h),
-            }
-        }
-    }
-    hits.sort_by(|a, b| b.score.cmp(&a.score).then(a.idx.cmp(&b.idx)));
-    hits.truncate(limit);
+    // Score every alternative; a hit is the best score over them. The merge is
+    // `Searcher`'s, not a loop here: keying it on `Hit::idx` silently dropped
+    // live entries (they all share the `u32::MAX` sentinel) and finding each
+    // hit by scanning made it quadratic.
+    let hits = searcher.search_alternatives(&alts.alts, limit);
 
     if hits.is_empty() {
         // rg convention: 0 = matches, 1 = none, 2 = error.
@@ -381,8 +363,21 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
     let mut out = Vec::new();
     let root_disp = root.trim_end_matches(['/', '\\']);
     for h in &hits {
-        searcher.live.base.path(h.idx as usize, &mut out);
-        let rel = String::from_utf8_lossy(&out);
+        // An overlay hit already carries its own path. Reading it back from
+        // the index instead would index `parent[u32::MAX]` -- out of bounds --
+        // and panic.
+        let owned;
+        let rel: &str = match &h.over {
+            Some(p) => {
+                owned = String::from_utf8_lossy(p).into_owned();
+                &owned
+            }
+            None => {
+                searcher.live.base.path(h.idx as usize, &mut out);
+                owned = String::from_utf8_lossy(&out).into_owned();
+                &owned
+            }
+        };
         // `Index::path` reconstructs from the root's children; show the
         // searched tree so a hit is clickable.
         let path = if rel.is_empty() {
