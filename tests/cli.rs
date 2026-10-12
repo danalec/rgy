@@ -38,12 +38,18 @@ fn ext_filter_narrows_hits() {
     // `alpha` matches alpha.md and alpha.txt; ext:md keeps only one
     let (code, out, _) = run(&searchctl(), &["--root", root, "alpha"]);
     assert_eq!(code, 0, "alpha must match both stems; stdout={out}");
-    assert!(out.contains("alpha.md") && out.contains("alpha.txt"), "got {out}");
+    assert!(
+        out.contains("alpha.md") && out.contains("alpha.txt"),
+        "got {out}"
+    );
 
     let (code, out, _) = run(&searchctl(), &["--root", root, "alpha", "ext:md"]);
     assert_eq!(code, 0, "alpha ext:md must match; stdout={out}");
     assert!(out.contains("alpha.md"), "got {out}");
-    assert!(!out.contains("alpha.txt"), "ext:md must drop the .txt hit: {out}");
+    assert!(
+        !out.contains("alpha.txt"),
+        "ext:md must drop the .txt hit: {out}"
+    );
 }
 
 #[test]
@@ -54,7 +60,10 @@ fn no_match_exits_one() {
 
     let (code, out, err) = run(&searchctl(), &["--root", root, "qqqzzznotfoundanywhere"]);
     assert_eq!(code, 1, "no-match must exit 1; stdout={out} stderr={err}");
-    assert!(out.is_empty(), "no-match must print nothing on stdout: {out}");
+    assert!(
+        out.is_empty(),
+        "no-match must print nothing on stdout: {out}"
+    );
 }
 
 #[test]
@@ -67,6 +76,48 @@ fn empty_tree_exits_one() {
     assert_eq!(code, 1, "empty tree must exit 1; stdout={out}");
 }
 
+/// A root that lists nothing is a tree with no entries, not a crash. The
+/// walk yields no blocks for a path that does not exist, and `Index::build`
+/// used to walk off the end of the empty stream: `searchctl --root
+/// <nonexistent>` died with `index out of bounds: the len is 0 but the index
+/// is 4294967295` (`NONE` is `u32::MAX`) and exit 101.
+#[test]
+fn a_root_that_lists_nothing_answers_rather_than_crashing() {
+    let missing = fixture_dir("absent-root").join("no-such-dir");
+    let root = missing.to_str().unwrap();
+    assert!(!missing.exists(), "the fixture root must not exist");
+
+    // "no match" is exit 1, the same as any query against an empty tree —
+    // not 101, and not a panic on stderr.
+    let (code, _, err) = run(&searchctl(), &["--root", root, "hello"]);
+    assert_eq!(
+        code, 1,
+        "an unlistable root is an empty tree, not a failure; stderr={err}"
+    );
+    assert!(
+        !err.contains("panicked"),
+        "the CLI must not panic; stderr={err}"
+    );
+
+    // And an explicit rebuild says what it covered. The count is 1, not 0:
+    // the index always carries a synthetic root entry, and a report of zero
+    // would read as "the scan found nothing", which is a different claim from
+    // "the root itself is the only entry".
+    let (code, _, err) = run(
+        &searchctl(),
+        &["--root", root, "--reindex", "--explain", "hello"],
+    );
+    assert_eq!(code, 1, "stderr={err}");
+    assert!(
+        err.contains("indexed 1 entries"),
+        "expected the root-only index; stderr={err}"
+    );
+    assert!(
+        !err.contains("panicked"),
+        "the CLI must not panic; stderr={err}"
+    );
+}
+
 // --- fail-closed query parsing --------------------------------------------
 
 #[test]
@@ -77,7 +128,10 @@ fn unknown_type_fails_closed_with_warning() {
 
     // `hello` alone would match; `type:banana` must poison the alternative
     let (code, out, err) = run(&searchctl(), &["--root", root, "hello", "type:banana"]);
-    assert_eq!(code, 1, "unknown type must fail closed (exit 1); stdout={out}");
+    assert_eq!(
+        code, 1,
+        "unknown type must fail closed (exit 1); stdout={out}"
+    );
     assert!(out.is_empty(), "fail-closed must yield no hits: {out}");
     assert!(
         err.contains("warning:") && err.to_lowercase().contains("type"),
@@ -104,7 +158,10 @@ fn json_emits_one_object_per_hit_with_path_and_score() {
         "each hit is one JSON object: {line}"
     );
     assert!(line.contains("\"path\":"), "documented field path: {line}");
-    assert!(line.contains("\"score\":"), "documented field score: {line}");
+    assert!(
+        line.contains("\"score\":"),
+        "documented field score: {line}"
+    );
     assert!(line.contains("hello.txt"), "path must name the hit: {line}");
 }
 
@@ -116,12 +173,18 @@ fn limit_caps_hits() {
     }
     let root = dir.to_str().unwrap();
 
-    let (code, out, _) = run(&searchctl(), &["--root", root, "--limit", "2", "^limitprobe"]);
+    let (code, out, _) = run(
+        &searchctl(),
+        &["--root", root, "--limit", "2", "^limitprobe"],
+    );
     assert_eq!(code, 0, "must match; stdout={out}");
     let hits = out.lines().filter(|l| !l.trim().is_empty()).count();
     assert_eq!(hits, 2, "--limit 2 must cap the output; got {out}");
 
-    let (code, out, _) = run(&searchctl(), &["--root", root, "--limit", "50", "^limitprobe"]);
+    let (code, out, _) = run(
+        &searchctl(),
+        &["--root", root, "--limit", "50", "^limitprobe"],
+    );
     assert_eq!(code, 0);
     let hits = out.lines().filter(|l| !l.trim().is_empty()).count();
     assert_eq!(hits, 5, "no cap below the corpus; got {out}");
@@ -183,4 +246,217 @@ fn bad_limit_value_exits_two() {
 fn missing_root_value_exits_two() {
     let (code, _, _) = run(&searchctl(), &["--root"]);
     assert_eq!(code, 2, "--root without a value must exit 2");
+}
+
+// --- --explain -------------------------------------------------------------
+
+#[test]
+fn explain_reports_the_plan_that_ran() {
+    let dir = fixture_dir("explain");
+    text_tree(&dir);
+    let root = dir.to_str().unwrap();
+
+    let (code, out, err) = run(&searchctl(), &["--root", root, "--explain", "hello"]);
+    assert_eq!(code, 0, "must match; stdout={out}");
+    let plan_line = err
+        .lines()
+        .find(|l| l.contains("plan="))
+        .unwrap_or_else(|| panic!("no plan line in stderr; got {err}"));
+    // The plan is one field on a line that also carries the match count and,
+    // when a fast path declined the query, what it declined after. Split on
+    // the tab boundary rather than reading to end of line, so a richer line
+    // does not read as an unknown plan name.
+    let plan = plan_line
+        .split_once("plan=")
+        .expect("plan=")
+        .1
+        .split('\t')
+        .next()
+        .expect("plan field")
+        .trim();
+    assert!(
+        !plan.is_empty() && plan != "none",
+        "a real query must report a real plan; got {plan_line}"
+    );
+    // And the plan must name something the engine actually has.
+    assert!(
+        [
+            "ranked",
+            "ranked (tentative)",
+            "driven",
+            "selective",
+            "full"
+        ]
+        .iter()
+        .any(|p| plan == *p),
+        "unknown plan name {plan:?} in {plan_line}"
+    );
+}
+
+#[test]
+fn explain_reports_fail_closed_rather_than_a_scan_plan() {
+    let dir = fixture_dir("explained");
+    text_tree(&dir);
+    let root = dir.to_str().unwrap();
+
+    // `hello` alone would match; the bad type must be reported as what
+    // happened, not silently attributed to a scan path.
+    let (code, _, err) = run(
+        &searchctl(),
+        &["--root", root, "--explain", "hello", "type:banana"],
+    );
+    assert_eq!(code, 1, "fail-closed must exit 1; stderr={err}");
+    assert!(
+        err.contains("plan=fail-closed"),
+        "a poisoned alternative must report fail-closed; got {err}"
+    );
+}
+
+// --- --count ---------------------------------------------------------------
+
+#[test]
+fn count_reports_matches_beyond_the_hit_limit() {
+    let dir = fixture_dir("count");
+    text_tree(&dir);
+    // More files than the interactive hit limit, so a `--count` that
+    // inherited the limit would print the limit instead of the truth.
+    for i in 0..200 {
+        std::fs::write(dir.join(format!("cntprobe{i:04}.txt")), "x\n").unwrap();
+    }
+    let root = dir.to_str().unwrap();
+
+    let (code, out, err) = run(&searchctl(), &["--root", root, "--count", "cntprobe"]);
+    assert_eq!(code, 0, "must find matches; stderr={err}");
+    let n: usize = out.trim().parse().expect("count is a number");
+    assert_eq!(
+        n, 200,
+        "200 probes must be counted, not the 50-hit limit; got {out}"
+    );
+
+    // And it must agree with what a full search of the same query returns.
+    let (_, full, _) = run(
+        &searchctl(),
+        &["--root", root, "--limit", "5000", "cntprobe"],
+    );
+    assert_eq!(
+        full.lines().filter(|l| !l.trim().is_empty()).count(),
+        n,
+        "count and search disagree"
+    );
+}
+
+#[test]
+fn count_of_alternates_does_not_double_count() {
+    let dir = fixture_dir("countalts");
+    text_tree(&dir);
+    let root = dir.to_str().unwrap();
+
+    // `alpha` is matched by both alternatives; it must be counted once.
+    let (code, out, err) = run(&searchctl(), &["--root", root, "--count", "alpha|alpha"]);
+    assert_eq!(code, 0, "must match; stderr={err}");
+    let union: usize = out.trim().parse().expect("count is a number");
+    let (_, single, _) = run(&searchctl(), &["--root", root, "--count", "alpha"]);
+    let one: usize = single.trim().parse().expect("count is a number");
+    assert_eq!(
+        union, one,
+        "identical alternatives must not double count; {out} vs {single}"
+    );
+}
+
+#[test]
+fn count_with_no_match_exits_one() {
+    let dir = fixture_dir("countmiss");
+    text_tree(&dir);
+    let root = dir.to_str().unwrap();
+
+    let (code, out, err) = run(&searchctl(), &["--root", root, "--count", "zzzznomatch"]);
+    assert_eq!(code, 1, "no match must exit 1; stdout={out} stderr={err}");
+    assert!(out.trim().is_empty(), "no match prints nothing; got {out}");
+}
+
+// --- index reuse -----------------------------------------------------------
+
+#[test]
+fn a_second_run_reuses_the_saved_index() {
+    let dir = fixture_dir("reuse");
+    text_tree(&dir);
+    let root = dir.to_str().unwrap();
+    let idx_path = dir.join("saved.idx");
+    let idx = idx_path.to_str().unwrap();
+
+    let (code, out, err) = run(&searchctl(), &["--root", root, "--index", idx, "hello"]);
+    assert_eq!(code, 0, "first run must match; stdout={out} stderr={err}");
+    assert!(
+        err.contains("indexed"),
+        "first run must report building: {err}"
+    );
+    assert!(idx_path.exists(), "the index must be written to disk");
+
+    let (code, out, err) = run(&searchctl(), &["--root", root, "--index", idx, "hello"]);
+    assert_eq!(code, 0, "second run must match; stdout={out} stderr={err}");
+    assert!(
+        err.contains("reusing"),
+        "second run must report reuse: {err}"
+    );
+    assert!(out.contains("hello.txt"), "reuse must still answer: {out}");
+}
+
+#[test]
+fn reindex_forces_a_rebuild() {
+    let dir = fixture_dir("reindex");
+    text_tree(&dir);
+    let root = dir.to_str().unwrap();
+    let idx = dir.join("saved.idx");
+    let idx = idx.to_str().unwrap();
+
+    run(&searchctl(), &["--root", root, "--index", idx, "hello"]);
+    let (code, _, err) = run(
+        &searchctl(),
+        &["--root", root, "--index", idx, "--reindex", "hello"],
+    );
+    assert_eq!(
+        code, 0,
+        "must still match after a forced rebuild; stderr={err}"
+    );
+    assert!(err.contains("indexed"), "--reindex must rebuild: {err}");
+    assert!(!err.contains("reusing"), "--reindex must not reuse: {err}");
+}
+
+#[test]
+fn an_index_built_for_another_tree_is_refused() {
+    let a = fixture_dir("ownera");
+    let b = fixture_dir("ownerb");
+    text_tree(&a);
+    text_tree(&b);
+    let idx = a.join("shared.idx");
+    let idx_s = idx.to_str().unwrap();
+
+    let (code, _, err) = run(
+        &searchctl(),
+        &["--root", a.to_str().unwrap(), "--index", idx_s, "hello"],
+    );
+    assert_eq!(code, 0, "first tree must match; stderr={err}");
+
+    // Same index file, different tree: must rebuild rather than answer with
+    // paths from the other root.
+    let (code, out, err) = run(
+        &searchctl(),
+        &["--root", b.to_str().unwrap(), "--index", idx_s, "hello"],
+    );
+    assert_eq!(
+        code, 0,
+        "second tree must still match its own files; stderr={err}"
+    );
+    assert!(
+        err.contains("rebuilding") && err.contains("built for"),
+        "must say why it refused the other tree's index; stderr={err}"
+    );
+    assert!(
+        out.contains(b.to_str().unwrap()) || out.contains("hello.txt"),
+        "hits must come from the requested tree; got {out}"
+    );
+    assert!(
+        !out.contains(a.to_str().unwrap()),
+        "no path from the other tree may leak into results; got {out}"
+    );
 }

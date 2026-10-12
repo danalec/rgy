@@ -5,7 +5,7 @@
 #[path = "harness.rs"]
 mod harness;
 
-use harness::{bin, fixture_dir, run, run_stdin, text_tree};
+use harness::{bin, fixture_dir, run, run_stdin, shared_cache_dir, text_tree};
 
 fn searchd() -> std::path::PathBuf {
     bin("searchd")
@@ -50,7 +50,10 @@ fn grep_op_finds_content() {
         out.contains("\"op\":\"grep-files\"") && out.contains("hello.txt"),
         "grep-files frame must name the hit file; got {out}"
     );
-    assert!(out.contains("needle"), "line text must carry the match; got {out}");
+    assert!(
+        out.contains("needle"),
+        "line text must carry the match; got {out}"
+    );
     assert!(
         out.contains("\"op\":\"done\""),
         "done terminator required; got {out}"
@@ -104,7 +107,10 @@ fn unknown_type_search_warns_and_yields_no_hits() {
 #[test]
 fn bad_invocation_exits_two() {
     let (code, _, err) = run(&searchd(), &["--listen", "bogus"]);
-    assert_eq!(code, 2, "unknown listen transport is usage error; stderr={err}");
+    assert_eq!(
+        code, 2,
+        "unknown listen transport is usage error; stderr={err}"
+    );
 
     let (code, _, err) = run(&searchd(), &["--nonsense"]);
     assert_eq!(code, 2, "unknown argument must exit 2; stderr={err}");
@@ -169,5 +175,152 @@ fn serve_front_malformed_query_errors_not_hangs() {
     assert!(
         out.matches("\"rgx\":\"end\"").count() >= 2,
         "both bad lines must be answered; got {out}"
+    );
+}
+
+#[test]
+fn took_us_is_measured_not_hardcoded() {
+    let dir = fixture_dir("dtook");
+    text_tree(&dir);
+    // A 9-file tree answers in under a microsecond, and `took_us` is whole
+    // microseconds — so 0 would be a *correct* reading there and the test
+    // could not tell measurement from a hardcoded 0. Give it enough files
+    // that the query genuinely takes milliseconds.
+    for i in 0..4000 {
+        std::fs::write(dir.join(format!("probe{i:05}.txt")), "x\n").unwrap();
+    }
+    let root = dir.to_str().unwrap();
+
+    // `took_us` used to be a literal 0, so the wire latency was fiction.
+    // Over a workload that cannot finish in under a microsecond, every
+    // response must now carry a real measurement.
+    for req in [
+        r#"{"op":"search","q":"probe","limit":10}"#,
+        r#"{"op":"grep","q":"grep:needle","limit":10}"#,
+    ] {
+        let (_, out, err) = run_stdin(&searchd(), &["--root", root], &format!("{req}\n"));
+        let frame = out
+            .lines()
+            .find(|l| l.contains("\"took_us\""))
+            .unwrap_or_else(|| panic!("no took_us frame for {req}; got {out} stderr={err}"));
+        let digits: String = frame
+            .split("\"took_us\":")
+            .nth(1)
+            .map(|s| s.chars().take_while(char::is_ascii_digit).collect())
+            .unwrap_or_default();
+        let took: u64 = digits
+            .parse()
+            .unwrap_or_else(|_| panic!("took_us is not a number; frame={frame}"));
+        assert!(
+            took > 0,
+            "took_us must carry a real measurement, not 0; frame={frame}"
+        );
+    }
+}
+
+// --- named pipe concurrency ------------------------------------------------
+
+/// The Windows front used to answer one client at a time: it created the next
+/// pipe instance only after the previous client disconnected, so a second
+/// client blocked until the first hung up.
+#[cfg(windows)]
+#[test]
+fn the_pipe_front_serves_two_clients_at_once() {
+    let dir = fixture_dir("dpipe");
+    text_tree(&dir);
+    let root = dir.to_str().unwrap();
+    let pipe = format!("rgy-e2e-pipe-{}", std::process::id());
+
+    let child = harness::spawn_pipe(
+        &searchd(),
+        &["--root", root, "--listen", &format!("pipe:{pipe}")],
+    );
+    // The daemon indexes the tree before binding, so give it a moment to
+    // create its first instance rather than racing it.
+    let ready = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let mut first = None;
+    while std::time::Instant::now() < ready {
+        match harness::PipeClient::connect(&pipe) {
+            Ok(c) => {
+                first = Some(c);
+                break;
+            }
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
+        }
+    }
+    let mut first = first.expect("daemon never offered a pipe instance");
+
+    // The real assertion: this connect must succeed while the first client is
+    // still open. With one instance at a time it blocks until `first` drops.
+    let mut second = harness::PipeClient::connect(&pipe).expect(
+        "a second client must connect while the first is still open — the pipe front is serial",
+    );
+
+    let req = r#"{"op":"search","q":"hello","limit":10}"#;
+    for (who, c) in [("first", &mut first), ("second", &mut second)] {
+        let lines = c
+            .request(req)
+            .unwrap_or_else(|e| panic!("{who} client failed: {e}"));
+        assert!(
+            lines.iter().any(|l| l.contains("hello.txt")),
+            "{who} client got no hit; got {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("\"op\":\"done\"")),
+            "{who} client never got a terminator; got {lines:?}"
+        );
+    }
+
+    let _ = &child;
+}
+
+// --- index reuse across daemon starts --------------------------------------
+
+#[test]
+fn a_second_daemon_start_reuses_the_saved_index() {
+    let dir = fixture_dir("dreuse");
+    text_tree(&dir);
+    let root = dir.to_str().unwrap();
+    let cache = shared_cache_dir("dreuse");
+    let req = r#"{"op":"search","q":"hello","limit":10}"#;
+
+    let (code, out, err) = run_stdin(
+        &searchd(),
+        &[
+            "--root",
+            root,
+            "--index",
+            cache.join("d.idx").to_str().unwrap(),
+        ],
+        &format!("{req}\n"),
+    );
+    assert_eq!(code, 0, "first start must serve; stderr={err}");
+    assert!(
+        err.contains("indexed"),
+        "first start must report building: {err}"
+    );
+    assert!(
+        out.contains("hello.txt"),
+        "first start must answer; got {out}"
+    );
+
+    let (code, out, err) = run_stdin(
+        &searchd(),
+        &[
+            "--root",
+            root,
+            "--index",
+            cache.join("d.idx").to_str().unwrap(),
+        ],
+        &format!("{req}\n"),
+    );
+    assert_eq!(code, 0, "second start must serve; stderr={err}");
+    assert!(
+        err.contains("reusing"),
+        "second start must reuse the index it saved; stderr={err}"
+    );
+    assert!(
+        out.contains("hello.txt"),
+        "a reused index must still answer correctly; got {out}"
     );
 }
