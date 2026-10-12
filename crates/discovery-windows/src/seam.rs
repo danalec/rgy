@@ -5,7 +5,7 @@
 //! `MftSource` enumerates the volume as DFS directory blocks via the MFT
 //! walk (the trap suite in `indexer`); `UsnWatch` tails the USN journal as
 //! [`ChangeBatch`]es. Together they are the Windows half of
-//! `IMPLEMENTATION_PLAN.md` §4.2.
+//! `docs/IMPLEMENTATION_PLAN.md` §4.2.
 
 use discovery::walk::Listing;
 use discovery::{ChangeBatch, Source, Watch};

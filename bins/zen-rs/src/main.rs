@@ -6,7 +6,7 @@
 //! input and a 64 KiB output buffer, and tails journal deltas via overlapped
 //! reads -- the shape the Win32 USN journal interface documents.
 
-// Old bin, new homes (IMPLEMENTATION_PLAN.md first-PR sequence #3: "old bins
+// Old bin, new homes (docs/IMPLEMENTATION_PLAN.md first-PR sequence #3: "old bins
 // compile against them unchanged" — behaviour unchanged, imports only).
 use discovery_windows::{indexer, ntfs, volume};
 use name_core::index;

@@ -1,4 +1,4 @@
-//! macOS discovery backend (`IMPLEMENTATION_PLAN.md` §4.2): fsearch's
+//! macOS discovery backend (`docs/IMPLEMENTATION_PLAN.md` §4.2): fsearch's
 //! `getattrlistbulk` walk and FSEvents watch, transported verbatim.
 //!
 //! The whole backend is `cfg(target_os = "macos")`; on other hosts this

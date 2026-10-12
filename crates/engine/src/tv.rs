@@ -1,4 +1,4 @@
-//! TV pack store as the daemon's corpus store (`IMPLEMENTATION_PLAN.md`
+//! TV pack store as the daemon's corpus store (`docs/IMPLEMENTATION_PLAN.md`
 //! §4.3/§10): the pack searcher answers `grep:` when the query names a
 //! store built with `--tv-pre-extract` / `rgx-tv` — corpus bytes packed
 //! once, mmap'd, incremental. The direct engine (name-core `content`)

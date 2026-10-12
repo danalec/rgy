@@ -1,4 +1,4 @@
-//! searchd — the merged search daemon (`IMPLEMENTATION_PLAN.md` §5).
+//! searchd — the merged search daemon (`docs/IMPLEMENTATION_PLAN.md` §5).
 //!
 //! Indexes `--root` once at startup and answers JSON-lines requests. Three
 //! fronts, two framings:

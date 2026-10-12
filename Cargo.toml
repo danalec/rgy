@@ -29,7 +29,7 @@ members = [
     "tests",
 ]
 
-# One workspace, thin bins, one protocol (IMPLEMENTATION_PLAN.md §3).
+# One workspace, thin bins, one protocol (docs/IMPLEMENTATION_PLAN.md §3).
 # crates/rgx-* are transported verbatim from ../rgx; name-core and
 # discovery-windows hold the zen-rs code with the RE-audit fixes.
 #

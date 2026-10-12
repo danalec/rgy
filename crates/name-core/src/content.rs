@@ -22,7 +22,7 @@ use crate::name_index::{Blob, HDR, as_bytes, fields, header, layout, sec};
 use crate::name_query::{GrepMode, Query, fold};
 use discovery::walk::KIND_FILE;
 use rayon::prelude::*;
-// Per-file confirmation runs on the rgx engine (IMPLEMENTATION_PLAN.md
+// Per-file confirmation runs on the rgx engine (docs/IMPLEMENTATION_PLAN.md
 // 4.3: literal/hybrid/fixed/VM + SIMD prefilter replace memchr/regex
 // verify). regex_syntax stays for plan()'s HIR; the regex crate remains
 // only as the fallback for patterns rgx's parser refuses (4.4 keeps it

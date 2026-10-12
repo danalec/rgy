@@ -1,4 +1,4 @@
-//! Linux discovery backend (`IMPLEMENTATION_PLAN.md` §4.2): a `getdents64`
+//! Linux discovery backend (`docs/IMPLEMENTATION_PLAN.md` §4.2): a `getdents64`
 //! bulk walk producing the same DFS [`Listing`]s as every other `Source`,
 //! and a recursive inotify [`Watch`] whose overflow becomes `Rescan`.
 //!

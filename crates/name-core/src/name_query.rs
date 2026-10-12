@@ -4,7 +4,7 @@
 //! SIMD Searcher/NameCache/top-k half is PR #6 and lands later; this
 //! module carries everything Query::match_path needs.
 //!
-//! Merged query syntax (IMPLEMENTATION_PLAN.md 4.1): fsearch's token modes
+//! Merged query syntax (docs/IMPLEMENTATION_PLAN.md 4.1): fsearch's token modes
 //! on top of zen-rs's filter vocabulary.
 
 use crate::live::Live;

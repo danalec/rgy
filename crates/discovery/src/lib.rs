@@ -1,4 +1,4 @@
-//! The platform discovery seam (`IMPLEMENTATION_PLAN.md` §4.2).
+//! The platform discovery seam (`docs/IMPLEMENTATION_PLAN.md` §4.2).
 //!
 //! `Source` enumerates the filesystem as DFS directory blocks; `Watch`
 //! delivers change batches, or [`ChangeBatch::Rescan`] when the feed loses
