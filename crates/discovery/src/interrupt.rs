@@ -50,7 +50,9 @@ fn install() {
 
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| unsafe {
-        signal(SIGINT, on_sigint as usize);
+        // Through a pointer: casting a function straight to an integer is a
+        // lint (`function_casts_as_integer`) on its way to being an error.
+        signal(SIGINT, on_sigint as *const () as usize);
     });
 }
 

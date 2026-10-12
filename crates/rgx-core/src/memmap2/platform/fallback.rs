@@ -1,8 +1,15 @@
 //! Independent reimplementation of memmap2-rs fallback path.
+//!
+//! This is the only platform module that is not compiled on any OS rgy
+//! currently targets, so it had never been type-checked until someone tried
+//! a target that falls through to it. It was wrong in two ways: `Vec` is not
+//! in the prelude of this crate (`no_std + alloc`), and it re-implemented
+//! `Deref`/`DerefMut` that `platform::mod` already provides generically,
+//! which is a conflicting-impl error rather than a harmless duplicate.
 
+use alloc::vec::Vec;
 use std::fs::File;
 use std::io::{self, Read};
-use std::ops::{Deref, DerefMut};
 
 pub struct MmapInner {
     bytes: Vec<u8>,
@@ -119,17 +126,6 @@ impl MmapInner {
     }
 }
 
-impl Deref for MmapInner {
-    type Target = [u8];
-    #[inline]
-    fn deref(&self) -> &[u8] {
-        &self.bytes
-    }
-}
-
-impl DerefMut for MmapInner {
-    #[inline]
-    fn deref_mut(&mut self) -> &mut [u8] {
-        &mut self.bytes
-    }
-}
+// `Deref`/`DerefMut` come from `platform::mod`, which derives them from
+// `ptr()` and `len()` above. Implementing them here too is a conflict, not a
+// second chance to be right.
