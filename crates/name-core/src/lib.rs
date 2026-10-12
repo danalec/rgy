@@ -22,6 +22,10 @@ pub mod regex;
 /// `content-core` crate splits out with the Phase 4 glue to rgx's engine.
 pub mod content;
 
+/// Persisting a built name index so a repeat query pays an mmap instead of
+/// a full tree walk, plus the root check that makes loading one safe.
+pub mod persist;
+
 /// fsearch's `engine::no_materialize`: on macOS it marks files so a scan
 /// does not materialize cloud placeholders. Portable no-op — the platform
 /// backends can set their own policy.
