@@ -11,6 +11,7 @@
 //! this module's items through `rgx_core::tv_runtime::*`.
 
 pub mod builder;
+pub mod compact;
 pub mod format;
 pub mod inspect;
 pub mod searcher;
@@ -21,6 +22,7 @@ pub use builder::{
     build_or_update_store_with_extractor, build_store, build_store_with_extractor, walk_root,
     BuildConfig, BuildStats, PreExtractor, StoreAction,
 };
+pub use compact::{compact_store, compact_store_if_worth_it, CompactStats};
 pub use format::{
     load_manifest, load_raw_manifest, now_secs, publish_atomic, read_pack_header, FileLoc,
     FileRecord, Manifest, ManifestHead, PackHeader, PackRecord, RawManifest, DEFAULT_PACK_SIZE,

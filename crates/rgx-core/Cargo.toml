@@ -30,9 +30,15 @@ std = ["dep:libc"]
 tv = []
 # The std-bound half of `crates/rgx-tv`: filesystem wrappers for the
 # format tables, the inspector, the builder, the searcher and the store.
-# On by default so existing callers link through unchanged; turn off
-# with `--no-default-features` when the binary is the no_std engine
-# alone (the AVX2/SWAR + regex core, no pack store).
+# NOT in `default` -- that is `["std"]` alone. It reaches a workspace build
+# anyway because `engine` asks for it explicitly and Cargo unifies features
+# across everything compiled in one invocation, so every crate linked
+# alongside `engine` sees `tv-runtime` on. A crate depending on rgx-core by
+# itself, outside that build, does not get it: that is deliberate, matching
+# the `tv` note above -- do not link pack-store format tables into a binary
+# that never reads a pack store. Turn it off explicitly with
+# `--no-default-features --features std` for the no_std engine alone
+# (AVX2/SWAR + regex core, no pack store).
 tv-runtime = ["tv", "std", "dep:ignore"]
 # SHA-256 hardware acceleration. Off by default. Two backends are wired:
 # SHA-NI on x86_64 (detected at runtime via `is_x86_feature_detected!`)

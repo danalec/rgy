@@ -225,6 +225,7 @@ fn run_build(args: &[String]) {
         follow_symlinks: follow,
         max_depth,
         globs,
+        compact_after_update: false,
     };
 
     println!(
@@ -672,6 +673,7 @@ fn print_stages(config: &SearchConfig, stats: &rgx_core::tv_runtime::SearchStats
 fn run_update(args: &[String]) {
     let mut root: Option<PathBuf> = None;
     let mut store: Option<PathBuf> = None;
+    let mut compact = false;
     let (hidden, follow, no_ignore, max_depth, globs) = walk_filters(args);
 
     let mut i = 0;
@@ -686,6 +688,12 @@ fn run_update(args: &[String]) {
             "--hidden" => i += 1,
             "-L" | "--follow" => i += 1,
             "--no-ignore" => i += 1,
+            // Updates are append-only, so a store that is updated often
+            // grows without bound. This reclaims the superseded payloads.
+            "--compact" => {
+                compact = true;
+                i += 1;
+            }
             arg if !arg.starts_with('-') && root.is_none() => {
                 root = Some(PathBuf::from(arg));
                 i += 1;
@@ -719,6 +727,7 @@ fn run_update(args: &[String]) {
         follow_symlinks: follow,
         max_depth,
         globs,
+        compact_after_update: compact,
         ..Default::default()
     };
     println!(

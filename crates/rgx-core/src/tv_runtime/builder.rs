@@ -41,6 +41,15 @@ pub struct BuildConfig {
     /// `-g` globs, gitignore-style: a pattern that does not start with `!`
     /// excludes, and one that does is a whitelist.
     pub globs: Vec<String>,
+    /// Compact the store after a successful update, reclaiming the payloads
+    /// that append-only updates supersede.
+    ///
+    /// Off by default: compaction rewrites every live payload, which is real
+    /// work, and a store that is updated rarely does not need it on every pass.
+    /// Like `target_pack_size` this is maintenance policy, not a statement
+    /// about which files belong to the corpus, so it is deliberately **not**
+    /// part of [`fingerprint`](Self::fingerprint).
+    pub compact_after_update: bool,
 }
 
 impl Default for BuildConfig {
@@ -53,6 +62,7 @@ impl Default for BuildConfig {
             parents: true,
             max_depth: None,
             globs: Vec::new(),
+            compact_after_update: false,
         }
     }
 }

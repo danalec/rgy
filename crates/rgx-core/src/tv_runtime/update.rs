@@ -266,6 +266,14 @@ pub fn update_store(
     // Atomically publish updated generation
     super::format::publish_atomic(&manifest, store_dir)?;
 
+    // Reclaim what this append-only pass superseded. Opt-in, and only after
+    // the new generation is published: compaction deletes the pack files the
+    // old manifest named, and a crash before this point must leave a working
+    // store rather than a truncated one.
+    if config.compact_after_update {
+        let _ = super::compact::compact_store_if_worth_it(store_dir);
+    }
+
     let elapsed = t0.elapsed().as_secs_f64() * 1000.0;
 
     Ok(UpdateStats {
