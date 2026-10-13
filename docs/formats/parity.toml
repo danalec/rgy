@@ -10,9 +10,364 @@
 #
 # The `notes` field carries the per-OS caveat or the trap to watch. A `G` cell
 # fails CI until it is P/N or flipped to D with a linked issue and a README
-# note (§6.7).
+# note (§6.7). Rows mirror §6.1-§6.4 of the plan.
+
+# --- 6.1 Discovery & metadata ---
+[[feature]]
+id = "1.1"
+name = "Full-tree enumeration"
+windows = "N"
+linux = "G"
+macos = "N"
+notes = "MFT scan (extent streaming) | getdents64 bulk walk | getattrlistbulk."
+
+[[feature]]
+id = "1.2"
+name = "Live change feed"
+windows = "N"
+linux = "G"
+macos = "N"
+notes = "USN journal | inotify (recursive) | FSEvents. Granularity differs: USN/FSEvents are directory-level, inotify per-entry."
+
+[[feature]]
+id = "1.3"
+name = "Restart replay (catch up while off)"
+windows = "N"
+linux = "G"
+macos = "N"
+notes = "resume from saved USN | none - no journal | FSEvents by event id. Linux has no journal to replay."
+
+[[feature]]
+id = "1.4"
+name = "Feed-loss detection"
+windows = "N"
+linux = "N"
+macos = "N"
+notes = "journal wrap / stale usn | IN_Q_OVERFLOW | MUST_SCAN_SUBDIRS, USER_DROPPED, KERNEL_DROPPED -> Rescan."
+
+[[feature]]
+id = "1.5"
+name = "Partial rescan (scope, not whole disk)"
+windows = "N"
+linux = "P"
+macos = "N"
+notes = "per-record rescan | subtree walk on Rescan | reliable replay by id."
+
+[[feature]]
+id = "1.6"
+name = "Permission-denied handling"
+windows = "P"
+linux = "P"
+macos = "P"
+notes = "skip + skipped list (ACL) | EACCES skip + list | TCC/gated skip. Never prompt from the daemon."
+
+[[feature]]
+id = "1.7"
+name = "Lazy/placeholder files"
+windows = "G"
+linux = "D"
+macos = "N"
+notes = "OneDrive/Cloud Files (do not hydrate) | sparse/fscrypt visible as normal | no_materialize (iCloud dataless fails fast). Windows needs the same never-hydrate guard fsearch has for iCloud."
+
+[[feature]]
+id = "1.8"
+name = "Multi-volume / multi-root"
+windows = "N"
+linux = "P"
+macos = "P"
+notes = "volume ordinal in FRN key | mount table + root set | mounts + firmlinks."
+
+[[feature]]
+id = "1.9"
+name = "Hard links & aliases"
+windows = "N"
+linux = "P"
+macos = "P"
+notes = "hardlinks + 8.3 short names | hardlinks | hardlinks + firmlinks + symlinks."
+
+[[feature]]
+id = "1.10"
+name = "Symlinks"
+windows = "N"
+linux = "G"
+macos = "P"
+notes = "reparse points (type:link) | O_NOFOLLOW walk + link entries | KIND_LINK, not crossed. Classify, do not unify blindly (Windows reparse vs POSIX symlink)."
+
+[[feature]]
+id = "1.11"
+name = "Case sensitivity of the FS"
+windows = "D"
+linux = "G"
+macos = "D"
+notes = "case-insensitive (NTFS default) | case-sensitive (ext4/btrfs) | case-insensitive (APFS default). The biggest semantic parity trap - see 6.6."
+
+[[feature]]
+id = "1.12"
+name = "Path encoding"
+windows = "P"
+linux = "P"
+macos = "G"
+notes = "UTF-16 native -> UTF-8 at the boundary | byte paths (locale/UTF-8) | Unicode NFD filenames. macOS stores NFD; queries typed in NFC must match (needs a folding layer, 6.6)."
+
+[[feature]]
+id = "1.13"
+name = "Path separator"
+windows = "D"
+linux = "P"
+macos = "P"
+notes = "backslash | slash | slash. Internal storage normalizes to / (live::normalize / openable / rel_of); only the Win32 boundary converts."
+
+[[feature]]
+id = "1.14"
+name = "Long paths"
+windows = "P"
+linux = "N"
+macos = "D"
+notes = "\\\\?\\ prefix | 4096-byte paths | 1024-byte PATH_MAX. macOS limit is real; deep trees need relative-open walking (openat-style) there too."
+
+[[feature]]
+id = "1.15"
+name = "mtime/size/kind metadata"
+windows = "G"
+linux = "G"
+macos = "N"
+notes = "parse $STANDARD_INFORMATION | statx | getattrlistbulk already returns it."
+
+[[feature]]
+id = "1.16"
+name = "Sparse/extent awareness"
+windows = "N"
+linux = "D"
+macos = "D"
+notes = "MFT runlists (scan) | FIEMAP optional | SEEK_HOLE optional."
+
+# --- 6.2 Name search ---
+[[feature]]
+id = "2.1"
+name = "Interned names + DFS ranges"
+windows = "P"
+linux = "P"
+macos = "N"
+notes = "Pure; works once discovery emits DFS blocks."
+
+[[feature]]
+id = "2.2"
+name = "name_mask + class bitmaps"
+windows = "P"
+linux = "P"
+macos = "N"
+notes = "Pure. Case classes must fold the way 6.6 dictates."
+
+[[feature]]
+id = "2.3"
+name = "fzf-v1 scoring + caps"
+windows = "P"
+linux = "P"
+macos = "N"
+notes = "Pure."
+
+[[feature]]
+id = "2.4"
+name = "Typo tolerance (<=5 letters)"
+windows = "P"
+linux = "P"
+macos = "N"
+notes = "Pure."
+
+[[feature]]
+id = "2.5"
+name = "SIMD wide scorer"
+windows = "G"
+linux = "G"
+macos = "N"
+notes = "SSE2 path | SSE2 / NEON (aarch64) | NEON. fsearch ships NEON only; x86 SIMD is the gap."
+
+[[feature]]
+id = "2.6"
+name = "Top-k + score floor + NameCache"
+windows = "P"
+linux = "P"
+macos = "N"
+notes = "Pure."
+
+[[feature]]
+id = "2.7"
+name = "Parallel scan, interactive priority"
+windows = "P"
+linux = "G"
+macos = "N"
+notes = "MMCSS + thread priority | sched_setaffinity + nice (no QoS class) | QOS_CLASS_USER_INTERACTIVE. Linux has no QoS analogue - document the approximation; pin to perf cores when available."
+
+[[feature]]
+id = "2.8"
+name = "Query modes (' ^ $ !)"
+windows = "P"
+linux = "P"
+macos = "N"
+notes = "Pure."
+
+[[feature]]
+id = "2.9"
+name = "Filters ext/type/kind/in/size/mtime/limit"
+windows = "P"
+linux = "P"
+macos = "N"
+notes = "type:link maps per row 1.10; type:app is macOS-shaped (map per-OS, 6.5)."
+
+[[feature]]
+id = "2.10"
+name = "re: path regex"
+windows = "P"
+linux = "P"
+macos = "P"
+notes = "One engine everywhere (rgx-core); the vendored copies die in the merge."
+
+[[feature]]
+id = "2.11"
+name = "Globs */? + | alternation"
+windows = "P"
+linux = "P"
+macos = "N"
+notes = "Zen-rs syntax, pure."
+
+[[feature]]
+id = "2.12"
+name = "sym: (definitions)"
+windows = "P"
+linux = "P"
+macos = "N"
+notes = "Content-layer index (6.3); same bytes on all OSes."
+
+# --- 6.3 Content search ---
+[[feature]]
+id = "3.1"
+name = "Trigram + per-file bloom index"
+windows = "P"
+linux = "P"
+macos = "N"
+notes = "Pure. Path eligibility lists get per-OS hooks."
+
+[[feature]]
+id = "3.2"
+name = "Content-hash dedup"
+windows = "P"
+linux = "P"
+macos = "N"
+notes = "Pure (sha256; HW accel parked on nightly - same everywhere)."
+
+[[feature]]
+id = "3.3"
+name = "TV pack store + MappedStore pool"
+windows = "P"
+linux = "N"
+macos = "P"
+notes = "Already cross-platform in rgx."
+
+[[feature]]
+id = "3.4"
+name = "rgx engine confirm (VM, SIMD prefilter, literal/hybrid/fixed)"
+windows = "P"
+linux = "N"
+macos = "P"
+notes = "Byte-mode engine is OS-neutral."
+
+[[feature]]
+id = "3.5"
+name = "Adapters (archive/office/pdf/media/...)"
+windows = "P"
+linux = "N"
+macos = "P"
+notes = "Pure in-process; PATH-gated ones (tesseract, soffice) behave the same - probed once, skip when absent."
+
+[[feature]]
+id = "3.6"
+name = "grep:/regex: smart-case"
+windows = "P"
+linux = "G"
+macos = "P"
+notes = "Case policy is the only OS-sensitive part; smart-case must respect 6.6."
+
+[[feature]]
+id = "3.7"
+name = "Verify-on-disk best-first batches"
+windows = "P"
+linux = "P"
+macos = "N"
+notes = "Pure scheduling; file handles via CreateFileW / open O_NONBLOCK|O_NOFOLLOW."
+
+[[feature]]
+id = "3.8"
+name = "Incremental content sync"
+windows = "P"
+linux = "G"
+macos = "N"
+notes = "USN-driven | inotify-driven | FSEvents-driven. Same worker; different feed. Linux inherits row 1.3's replay limit."
+
+[[feature]]
+id = "3.9"
+name = "Text/encoding detection"
+windows = "P"
+linux = "N"
+macos = "P"
+notes = "OS-neutral (rgx encoding.rs)."
 
 # --- 6.4 Daemon, UI, platform services ---
+[[feature]]
+id = "4.1"
+name = "Daemon transport"
+windows = "P"
+linux = "P"
+macos = "P"
+notes = "named pipe | UDS | UDS. proto JSON-lines identical on all three."
+
+[[feature]]
+id = "4.2"
+name = "Single-instance ownership"
+windows = "P"
+linux = "P"
+macos = "P"
+notes = "lock file + LockFileEx | flock | flock. Follower attach + handoff."
+
+[[feature]]
+id = "4.3"
+name = "stdio mode"
+windows = "P"
+linux = "P"
+macos = "P"
+notes = "Pure."
+
+[[feature]]
+id = "4.4"
+name = "rgx --serve compat front"
+windows = "P"
+linux = "N"
+macos = "P"
+notes = "Pure protocol shim."
+
+[[feature]]
+id = "4.5"
+name = "Terminal UI"
+windows = "P"
+linux = "G"
+macos = "P"
+notes = "VT + ReadConsoleInputW | termios + ANSI | termios + ANSI. Win32 console path is the platform hook."
+
+[[feature]]
+id = "4.6"
+name = "UTF-16 argv fidelity"
+windows = "N"
+linux = "-"
+macos = "-"
+notes = "GetCommandLineW on Windows; UTF-8 argv elsewhere. Fixes the known zen-rs gap on Windows."
+
+[[feature]]
+id = "4.7"
+name = "Console output encoding"
+windows = "G"
+linux = "N"
+macos = "N"
+notes = "UTF-8 codepage / WriteConsoleW | UTF-8 | UTF-8. Windows-only fix."
+
 [[feature]]
 id = "4.8"
 name = "keep-warm spinner (250 ms)"
