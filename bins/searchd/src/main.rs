@@ -50,7 +50,9 @@ struct Ctx {
     /// The `Watch` thread is the remaining wiring (item 2). Its shape, so the
     /// next hand does not re-derive it:
     /// - A platform `discovery::Watch` (InotifyWatch / UsnWatch / fsevents)
-    ///   is constructed on a background thread and polled with `next_batch`.
+    ///   is constructed on a background thread and polled with `next_batch`;
+    ///   `Live::run_watch_feed` is the loop body (already tested), so this is
+    ///   just the factory + `spawn`.
     /// - Each `UsnRecord` names the changed path in `name` (the Watch impls
     ///   put `dir.join(name)` there; `parent_reference` is 0, "overlay row" --
     ///   there is no FRN to resolve). So the folder to re-list is just the
@@ -63,6 +65,12 @@ struct Ctx {
     ///   keys land in a different spelling than `wanted`'s `dir_prefix` and
     ///   the change is silently missed -- the same class of path-space bug
     ///   `wanted`/`wants` already crossed once.
+    /// - The Windows factory is the heavy one: `UsnWatch::new(Indexer)` and
+    ///   `Indexer::new(&Volume, ordinal)` borrow up a chain (Volume ->
+    ///   Indexer<'a> -> UsnWatch<'a>), so a `'static` thread either holds all
+    ///   three or `Box::leak`s the Volume/Indexer for the daemon's life. The
+    ///   Volume open + USN journal setup is OS-specific and hard to test here;
+    ///   `discovery-linux`'s `InotifyWatch::new(&root)` is the simple case.
     live: std::sync::RwLock<Live>,
 }
 
