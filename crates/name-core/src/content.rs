@@ -3787,4 +3787,49 @@ mod grep_pipeline_tests {
         assert_eq!(content.search(&after, &q).files.len(), 1, "the edit is indexed after the sync (sync rebuilt {rebuilt} docs)");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// The other half of the loop: a deleted file must not leak its content
+    /// through a query after `apply_dir` + `sync`.
+    ///
+    /// `Live::apply` cannot kill the name index's base entry for an on-disk
+    /// path (the base holds root-relative paths, the overlay on-disk ones), so
+    /// a deleted file can linger as a live base doc. `Content::covers` catches
+    /// it: `lstat` finds nothing, the file is not covered by the index, and it
+    /// goes to the scan, which reads it as absent. The query path (`answer`)
+    /// therefore returns nothing; this pins that so the raw index's stale doc
+    /// can never become a wrong answer.
+    #[test]
+    fn apply_dir_and_sync_drop_a_deleted_file_from_the_query_path() {
+        let dir = std::env::temp_dir().join(format!("rgy_del_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("gone.rs"), b"fn vanish() {}\n").unwrap();
+        let root = dir.to_string_lossy().into_owned().into_bytes();
+        let src = PortableSource::new(root.clone(), 2);
+        let mut live = Live::new(Index::build(src.enumerate().unwrap(), 0, 1, b"/"));
+        let idx = dir.join("index");
+        let mut content = Content::open(idx.clone());
+        let docs = wanted(&live, b"", b"/", true, &root);
+        assert!(!docs.is_empty());
+        let id = content.alloc_id();
+        if let Some(seg) = build_segment(&idx, id, &docs, 0..docs.len()) {
+            content.push(seg);
+        }
+
+        let g = Grep::new("vanish", GrepMode::Literal).expect("grep compiles");
+        let q = Query::default();
+        assert_eq!(answer(&g, &q, &root, &live, b"", Some(&content), 10).files.len(), 1, "the file is there and matching before the delete");
+
+        // Delete the file; the query must stop reporting it.
+        std::fs::remove_file(dir.join("gone.rs")).unwrap();
+        live.apply_dir(&root, true);
+        content.sync(&live, b"", &[], &[root.clone()], &root);
+
+        assert_eq!(
+            answer(&g, &q, &root, &live, b"", Some(&content), 10).files.len(),
+            0,
+            "a deleted file must not surface its content after the sync"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
