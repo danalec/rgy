@@ -1517,6 +1517,32 @@ impl Content {
         self.save_manifest();
     }
 
+    /// Reindex what changed under `dirs` (direct children) and `trees`
+    /// (whole subtrees) -- both on-disk paths, as [`Self::changed_dirs`]
+    /// and `Live::trees` produce -- from `live`'s current view. `root` is
+    /// the tree the name index was built from and `home` scopes this index,
+    /// the same two the queries pass to [`scan_paths`]. Returns how many
+    /// docs were rebuilt (0 = already up to date).
+    ///
+    /// This is the live-update half of a query's freshness: [`wants`]
+    /// gathers what should be indexed there, [`Self::diff`] kills what is
+    /// gone or stale and lists the rest, and one segment is built from the
+    /// list and pushed. Querying right after sees the edits; querying
+    /// without it only misses what changed since the last sync.
+    pub fn sync(&mut self, live: &Live, home: &[u8], dirs: &[Vec<u8>], trees: &[Vec<u8>], root: &[u8]) -> usize {
+        let wants = wants(live, home, dirs, trees, root);
+        let todo = self.diff(wants);
+        let n = todo.len();
+        if n == 0 {
+            return 0;
+        }
+        let id = self.alloc_id();
+        if let Some(seg) = build_segment(&self.dir, id, &todo, 0..n) {
+            self.push(seg);
+        }
+        n
+    }
+
     /// Tiered merging: 8 segments of the same size tier become one, so
     /// incremental updates never pile up thousands of tiny segments. Returns
     /// the group to merge (ids), capped so a merge's postings stay small.
@@ -2270,6 +2296,45 @@ fn openable(root: &[u8], rel: &[u8]) -> Vec<u8> {
     full
 }
 
+/// The name-index path of the file [`openable`] names: `openable` read
+/// backwards. `None` when `full` is not under `root` at all -- an overlay
+/// entry outside the tree is no name index's business.
+fn rel_of(root: &[u8], full: &[u8]) -> Option<Vec<u8>> {
+    let rest = full.strip_prefix(root)?;
+    if rest.is_empty() {
+        // `full` is `root` itself: the tree's own rel is `/`.
+        return Some(b"/".to_vec());
+    }
+    let rel = match rest.split_first() {
+        // `openable` puts exactly one separator between root and rel.
+        Some((b'/', tail)) if !root.ends_with(b"/") => tail,
+        Some(_) if root.ends_with(b"/") => rest,
+        // A sibling spelling (`/a/b2` under `/a`): not under `root`.
+        _ => return None,
+    };
+    let mut p = Vec::with_capacity(rel.len() + 1);
+    p.push(b'/');
+    p.extend_from_slice(rel);
+    Some(p)
+}
+
+/// The prefix whose `/`-children are `dir`'s: `dir` with a trailing
+/// separator. Segment doc paths are [`openable`] names (`root`, `/`, rel),
+/// so matching one by prefix needs that separator spelled the same way on
+/// both sides -- `join(dir, b"")` adds one even where `dir` already ends in
+/// one, and the doubled separator matches no doc at all (every such doc is
+/// then re-indexed on each sync while the old one is never killed).
+fn dir_prefix(dir: &[u8]) -> Vec<u8> {
+    if dir.is_empty() || dir.ends_with(b"/") {
+        dir.to_vec()
+    } else {
+        let mut p = Vec::with_capacity(dir.len() + 1);
+        p.extend_from_slice(dir);
+        p.push(b'/');
+        p
+    }
+}
+
 /// What the name index says should be indexed under `dir` (direct
 /// children only unless `recursive`), as docs [`build_segment`] can open.
 ///
@@ -2300,9 +2365,22 @@ pub fn wanted(live: &Live, home: &[u8], dir: &[u8], recursive: bool, root: &[u8]
             }
         }
     }
-    let lo = join(dir, b"");
+    // The overlay holds on-disk paths (the same distinction `scan_paths`
+    // makes), so its range is taken in that space -- `dir` is the name
+    // index's, and a prefix matched across the two finds nothing (every
+    // overlay entry is then missed, or on a `/` root every real path is
+    // taken for one). `rel_of` judges each key back in the name index's
+    // space, the same test the base half applies to `idx.path` output.
+    let lo = dir_prefix(&openable(root, dir));
     for (k, o) in live.over.range(lo.clone()..).take_while(|(k, _)| k.starts_with(&lo)) {
-        if o.kind & 3 == KIND_FILE && (recursive || !k[lo.len()..].contains(&b'/')) && eligible(k, o.size, home) {
+        if o.kind & 3 != KIND_FILE || (!recursive && k[lo.len()..].contains(&b'/')) {
+            continue;
+        }
+        // Outside `root` the name index has no opinion, and neither does
+        // this index: those are `scan_paths`'s files to read.
+        if let Some(rel) = rel_of(root, k)
+            && eligible(&rel, o.size, home)
+        {
             want.push(k, o.size, o.mtime);
         }
     }
@@ -2311,21 +2389,34 @@ pub fn wanted(live: &Live, home: &[u8], dir: &[u8], recursive: bool, root: &[u8]
 
 /// The dirs/trees from one batch of changes, each with what should be
 /// indexed there. Done under the name-index read lock only.
+///
+/// `dirs` and `trees` are on-disk paths -- what [`Self::diff`]'s doc
+/// prefixes, [`Self::changed_dirs`] and `Live::trees` all speak -- while
+/// [`wanted`] asks the name index in its own root-relative paths and
+/// answers with on-disk docs. [`rel_of`] is the one crossing: a dir looked
+/// up in the name index untranslated finds nothing, and the whole subtree
+/// is then "indexed" on every batch (the old doc is never killed, because
+/// `diff` matches its prefixes in the other space).
 pub fn wants(live: &Live, home: &[u8], dirs: &[Vec<u8>], trees: &[Vec<u8>], root: &[u8]) -> Vec<(Vec<u8>, bool, Docs)> {
     let mut out: Vec<(Vec<u8>, bool)> = Vec::new();
     for (d, r) in dirs.iter().map(|d| (d, false)).chain(trees.iter().map(|d| (d, true))) {
-        if in_scope(d, home) {
+        let Some(rel) = rel_of(root, d) else {
+            // Not under `root`: nothing of it is this index's to hold.
+            continue;
+        };
+        if in_scope(&rel, home) {
             out.push((d.clone(), r));
-        } else if r && home.starts_with(d) {
+        } else if r && home.starts_with(&rel) {
             // A subtree containing home (e.g. "/" rescanned): sync all of home.
-            out.push((home.to_vec(), true));
+            out.push((openable(root, home), true));
         }
     }
     out.sort();
     out.dedup();
     out.into_iter()
         .map(|(d, r)| {
-            let mut w = wanted(live, home, &d, r, root);
+            let rel = rel_of(root, &d).unwrap_or_else(|| b"/".to_vec());
+            let mut w = wanted(live, home, &rel, r, root);
             w.sort();
             (d, r, w)
         })
