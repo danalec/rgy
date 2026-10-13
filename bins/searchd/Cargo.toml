@@ -19,3 +19,15 @@ rgx-core = { path = "../../crates/rgx-core" }
 # One allocator story (plan 4.4): mimalloc for the general heap —
 # MSVCRT's HeapAlloc serialises the parallel content readers on Windows.
 mimalloc = { version = "0.1", default-features = false }
+
+# Platform live-change feeds (the Watch): each crate implements
+# `discovery::Watch` for its OS. Pulled in per-platform so `open_watch` can
+# build the right one.
+[target.'cfg(windows)'.dependencies]
+discovery-windows = { path = "../../crates/discovery-windows" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+discovery-linux = { path = "../../crates/discovery-linux" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+discovery-macos = { path = "../../crates/discovery-macos" }

@@ -664,6 +664,9 @@ name = "searchd"
 version = "0.1.0"
 dependencies = [
  "discovery",
+ "discovery-linux",
+ "discovery-macos",
+ "discovery-windows",
  "engine",
  "mimalloc",
  "name-core",

@@ -167,6 +167,10 @@ fn main() {
         live: std::sync::RwLock::new(Live::new(idx)),
     });
 
+    // Keep the index fresh as the tree changes (the Watch thread); queries
+    // keep answering on the last state while an apply is in flight.
+    spawn_watch(&ctx);
+
     match listen.split_once(':') {
         None if listen == "stdio" => {
             let stdin = std::io::stdin();
@@ -614,6 +618,66 @@ fn serve_end(
 }
 
 // --- transports -----------------------------------------------------------
+
+/// The platform live-change feed for the tree at `root`, or `None` where none
+/// is available (unsupported OS, or the volume/journal could not be opened).
+/// See the note on `Ctx::live` for the Windows chain and its lifetime.
+#[cfg(windows)]
+fn open_watch(root: &[u8]) -> Option<Box<dyn discovery::Watch>> {
+    let path = std::str::from_utf8(root).ok()?;
+    let vol_root = std::path::Path::new(path).ancestors().last()?.to_str()?;
+    // The volume lives for the process; leak it so the UsnWatch owns a
+    // 'static borrow and can move into the update thread.
+    let volume: &'static discovery_windows::volume::Volume = Box::leak(Box::new(
+        discovery_windows::volume::Volume::open(vol_root).ok()?,
+    ));
+    let indexer = discovery_windows::indexer::Indexer::new(volume, 0);
+    Some(Box::new(discovery_windows::UsnWatch::new(indexer)))
+}
+
+#[cfg(target_os = "linux")]
+fn open_watch(root: &[u8]) -> Option<Box<dyn discovery::Watch>> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(root));
+    Some(Box::new(discovery_linux::InotifyWatch::new(&path).ok()?))
+}
+
+#[cfg(target_os = "macos")]
+fn open_watch(_root: &[u8]) -> Option<Box<dyn discovery::Watch>> {
+    // fsevents is callback-based (a Stream pushing events to a channel), not a
+    // `next_batch` pull, so wiring it into `discovery::Watch` needs a channel
+    // adapter. Not wired yet: the daemon answers on its snapshot without live
+    // updates rather than failing to start.
+    None
+}
+
+/// Spawn the live-update thread: build the platform `Watch` for `ctx.root` and
+/// apply its change batches to `ctx.live`, taking the write lock *per batch*
+/// so queries interleave (holding it across the feed would block them all).
+/// If no feed opens, the thread just stops -- the daemon answers on its
+/// snapshot rather than refusing to start.
+fn spawn_watch(ctx: &std::sync::Arc<Ctx>) {
+    let ctx = ctx.clone();
+    let root = ctx.root.clone();
+    let _ = std::thread::Builder::new()
+        .name("searchd-watch".into())
+        .spawn(move || {
+            let Some(mut watch) = open_watch(&root) else {
+                return;
+            };
+            loop {
+                match watch.next_batch() {
+                    Ok(discovery::ChangeBatch::Events(events)) => {
+                        ctx.live.write().unwrap().apply_events(&events);
+                    }
+                    Ok(discovery::ChangeBatch::Rescan) => {
+                        ctx.live.write().unwrap().apply_dir(&root, true);
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+}
 
 #[cfg(unix)]
 fn serve_uds(path: &str, ctx: &std::sync::Arc<Ctx>, serve: bool) {
