@@ -2248,7 +2248,36 @@ fn take_best(per: &mut Vec<Cands>) -> Vec<Ranked> {
 /// and the indexed search answers nothing -- a query that finds a match
 /// through `verify` will find none through [`Content::search`] and say so
 /// with the same confidence.
-pub fn wanted(live: &Live, home: &[u8], dir: &[u8], recursive: bool) -> Docs {
+/// The path a doc is opened by: `root` joined onto the name index's
+/// root-relative path.
+///
+/// One place for this, because the name index and the content index are two
+/// halves of one thing and `build_segment` opens whatever it is handed. A
+/// relative path there reads as absent, the segment is built holding no
+/// grams, and the indexed search answers nothing -- while `verify` over the
+/// same corpus finds the match. Two answers to one question, both sure.
+///
+/// `scan_paths` joins the same way for the other direction, so the paths
+/// [`Content::search`] returns and the ones `verify` reads are the same
+/// strings.
+fn openable(root: &[u8], rel: &[u8]) -> Vec<u8> {
+    let rel = rel.strip_prefix(b"/").unwrap_or(rel);
+    let mut full = root.to_vec();
+    if !full.is_empty() && !full.ends_with(b"/") && !rel.is_empty() {
+        full.push(b'/');
+    }
+    full.extend_from_slice(rel);
+    full
+}
+
+/// What the name index says should be indexed under `dir` (direct
+/// children only unless `recursive`), as docs [`build_segment`] can open.
+///
+/// The paths the name index holds are relative to its root; `root` is the
+/// on-disk tree they hang off, and the docs carry `root` joined on. Overlay
+/// entries are already real paths and are pushed as they are -- the same
+/// distinction [`scan_paths`] makes.
+pub fn wanted(live: &Live, home: &[u8], dir: &[u8], recursive: bool, root: &[u8]) -> Docs {
     let mut want = Docs::default();
     if !in_scope(dir, home) {
         return want;
@@ -2267,7 +2296,7 @@ pub fn wanted(live: &Live, home: &[u8], dir: &[u8], recursive: bool) -> Docs {
                 p = join(dir, idx.name(i));
             }
             if in_scope(&p, home) {
-                want.push(&p, idx.size_of(i), idx.mtime()[i]);
+                want.push(&openable(root, &p), idx.size_of(i), idx.mtime()[i]);
             }
         }
     }
@@ -2282,7 +2311,7 @@ pub fn wanted(live: &Live, home: &[u8], dir: &[u8], recursive: bool) -> Docs {
 
 /// The dirs/trees from one batch of changes, each with what should be
 /// indexed there. Done under the name-index read lock only.
-pub fn wants(live: &Live, home: &[u8], dirs: &[Vec<u8>], trees: &[Vec<u8>]) -> Vec<(Vec<u8>, bool, Docs)> {
+pub fn wants(live: &Live, home: &[u8], dirs: &[Vec<u8>], trees: &[Vec<u8>], root: &[u8]) -> Vec<(Vec<u8>, bool, Docs)> {
     let mut out: Vec<(Vec<u8>, bool)> = Vec::new();
     for (d, r) in dirs.iter().map(|d| (d, false)).chain(trees.iter().map(|d| (d, true))) {
         if in_scope(d, home) {
@@ -2296,7 +2325,7 @@ pub fn wants(live: &Live, home: &[u8], dirs: &[Vec<u8>], trees: &[Vec<u8>]) -> V
     out.dedup();
     out.into_iter()
         .map(|(d, r)| {
-            let mut w = wanted(live, home, &d, r);
+            let mut w = wanted(live, home, &d, r, root);
             w.sort();
             (d, r, w)
         })
@@ -3234,13 +3263,7 @@ pub fn scan_paths(root: &[u8], live: &Live, mut q: Query) -> Vec<Vec<u8>> {
             None => {
                 let mut p = Vec::new();
                 live.base.path(h.idx as usize, &mut p);
-                let rel = p.strip_prefix(b"/").unwrap_or(&p);
-                let mut full = root.to_vec();
-                if !full.is_empty() && !full.ends_with(b"/") && !rel.is_empty() {
-                    full.push(b'/');
-                }
-                full.extend_from_slice(rel);
-                (full, live.base.mtime()[h.idx as usize])
+                (openable(root, &p), live.base.mtime()[h.idx as usize])
             }
         })
         .collect();
@@ -3471,25 +3494,17 @@ mod grep_pipeline_tests {
         // The same question through the trigram index.
         let idx = dir.join("index");
         let mut content = Content::open(idx.clone());
-        // `wanted` works in the *name index*, whose paths are relative to its
-        // root; `build_segment` opens what it is given, so the docs carry the
-        // same paths `scan_paths` does -- `root` joined on. Without that join
-        // every open fails and the segment comes out holding no grams at all.
-        // (`home` is an empty prefix, not `b"/"`: `in_scope` strips it and
-        // then requires the rest to start with `/`, so a `"/"` prefix strips
-        // the leading separator off every path and rejects them all.)
-        let docs = {
-            let mut d = Docs::default();
-            for p in scan_paths(&root, &live, q.clone_for_scan()) {
-                let m = std::fs::metadata(std::path::PathBuf::from(String::from_utf8_lossy(&p).into_owned()));
-                if let Ok(m) = m {
-                    let mtime = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|t| t.as_secs() as u32).unwrap_or(0);
-                    d.push(&p, m.len(), mtime);
-                }
-            }
-            d
-        };
-        assert!(!docs.is_empty(), "the fixture must put something in the index");
+        // `wanted` produces docs `build_segment` can open: `root` joined onto
+        // the name index's root-relative paths. (`home` is an empty prefix,
+        // not `b"/"`: `in_scope` strips it and then requires the rest to start
+        // with `/`, so a `"/"` prefix strips the leading separator off every
+        // path and rejects them all.)
+        let docs = wanted(&live, b"", b"/", true, &root);
+        assert!(
+            !docs.is_empty(),
+            "the fixture must put something in the index -- if this is empty \
+             the paths are not openable and the segment will hold no grams"
+        );
         let id = content.alloc_id();
         let seg = build_segment(&idx, id, &docs, 0..docs.len()).expect("a segment must build from this fixture");
         content.push(seg);
