@@ -46,6 +46,23 @@ struct Ctx {
     /// take `read()`, the updater `write()`. Searchers hold a read guard for
     /// the length of one query, so an apply waits for in-flight answers and
     /// never lands mid-query.
+    ///
+    /// The `Watch` thread is the remaining wiring (item 2). Its shape, so the
+    /// next hand does not re-derive it:
+    /// - A platform `discovery::Watch` (InotifyWatch / UsnWatch / fsevents)
+    ///   is constructed on a background thread and polled with `next_batch`.
+    /// - Each `UsnRecord` names the changed path in `name` (the Watch impls
+    ///   put `dir.join(name)` there; `parent_reference` is 0, "overlay row" --
+    ///   there is no FRN to resolve). So the folder to re-list is just the
+    ///   parent of `name`, applied via `Live::apply_dir(parent, false)`;
+    ///   `ChangeBatch::Rescan` becomes `apply_dir(root, true)`.
+    /// - Caveat before wiring: `UsnRecord::name` arrives in the platform's
+    ///   separator (`\` on Windows, from `PathBuf::join`) while this index
+    ///   stores `/`-separated paths (`openable`/`join`/`dir_prefix` all push
+    ///   `/`). Normalize the separators before `apply_dir`, or the overlay
+    ///   keys land in a different spelling than `wanted`'s `dir_prefix` and
+    ///   the change is silently missed -- the same class of path-space bug
+    ///   `wanted`/`wants` already crossed once.
     live: std::sync::RwLock<Live>,
 }
 
