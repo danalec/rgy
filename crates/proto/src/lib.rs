@@ -304,6 +304,78 @@ fn skip_ws(b: &[char], mut i: usize) -> usize {
 mod tests {
     use super::*;
 
+    /// Golden wire format: the exact bytes each variant emits. If one of these
+    /// fails, the on-the-wire JSON changed -- update it deliberately (and any
+    /// client), never by regenerating the expectation.
+    #[test]
+    fn wire_format_is_pinned() {
+        assert_eq!(
+            Request::Search {
+                q: "a".into(),
+                limit: 1
+            }
+            .to_json(),
+            r#"{"op":"search","q":"a","limit":1}"#
+        );
+        assert_eq!(
+            Request::Grep {
+                q: "g".into(),
+                limit: 2
+            }
+            .to_json(),
+            r#"{"op":"grep","q":"g","limit":2}"#
+        );
+        assert_eq!(Request::Status.to_json(), r#"{"op":"status"}"#);
+        assert_eq!(
+            Response::Hits {
+                hits: vec![Hit {
+                    path: "p".into(),
+                    score: 5
+                }],
+                took_us: 6,
+            }
+            .to_json(),
+            r#"{"op":"hits","hits":[{"path":"p","score":5}],"took_us":6}"#
+        );
+        assert_eq!(
+            Response::Done { count: 7 }.to_json(),
+            r#"{"op":"done","count":7}"#
+        );
+        assert_eq!(
+            Response::Status {
+                docs: 3,
+                event_id: 9
+            }
+            .to_json(),
+            r#"{"op":"status","docs":3,"event_id":9}"#
+        );
+        assert_eq!(
+            Response::GrepFiles {
+                files: vec![GrepFile {
+                    path: "f".into(),
+                    lines: vec![(1, "t".into())]
+                }],
+                took_us: 8,
+            }
+            .to_json(),
+            r#"{"op":"grep-files","files":[{"path":"f","lines":[[1,"t"]]}],"took_us":8}"#
+        );
+        assert_eq!(
+            Response::Error {
+                message: "e".into()
+            }
+            .to_json(),
+            r#"{"op":"error","message":"e"}"#
+        );
+        assert_eq!(
+            Response::Warning {
+                message: "w".into()
+            }
+            .to_json(),
+            r#"{"op":"warning","message":"w"}"#
+        );
+    }
+
     #[test]
     fn request_round_trips() {
         let r = Request::Search {
