@@ -41,7 +41,12 @@ struct Ctx {
     root: Vec<u8>,
     home: String,
     tv_dir: Option<std::path::PathBuf>,
-    live: Live,
+    /// The live name index. `RwLock` because a live-update feed (the `Watch`
+    /// thread) applies changes to it while query threads read it: readers
+    /// take `read()`, the updater `write()`. Searchers hold a read guard for
+    /// the length of one query, so an apply waits for in-flight answers and
+    /// never lands mid-query.
+    live: std::sync::RwLock<Live>,
 }
 
 /// Print usage and leave. `code` is the exit status: 0 when the user asked
@@ -134,7 +139,7 @@ fn main() {
             .or_else(|_| std::env::var("HOME"))
             .unwrap_or_default(),
         tv_dir,
-        live: Live::new(idx),
+        live: std::sync::RwLock::new(Live::new(idx)),
     });
 
     match listen.split_once(':') {
@@ -258,7 +263,8 @@ fn handle(req: Request, ctx: &Ctx) -> Vec<Response> {
                 for w in &alts.warnings {
                     responses.push(Response::Warning { message: w.clone() });
                 }
-                let searcher = Searcher { live: &ctx.live };
+                let live_guard = ctx.live.read().unwrap();
+                let searcher = Searcher { live: &live_guard };
                 let mut hits: Vec<Hit> = Vec::new();
                 for alt in &alts.alts {
                     let mut a: Query = alt.clone();
@@ -277,7 +283,7 @@ fn handle(req: Request, ctx: &Ctx) -> Vec<Response> {
                 let wire: Vec<WireHit> = hits
                     .iter()
                     .map(|h| {
-                        ctx.live.base.path(h.idx as usize, &mut buf);
+                        live_guard.base.path(h.idx as usize, &mut buf);
                         let rel = String::from_utf8_lossy(&buf).into_owned();
                         buf.clear();
                         let mut full = String::from_utf8_lossy(&ctx.root).into_owned();
@@ -350,7 +356,8 @@ fn grep(q: &str, limit: usize, ctx: &Ctx) -> Vec<Response> {
             for w in &alts.warnings {
                 out.push(Response::Warning { message: w.clone() });
             }
-            let searcher = Searcher { live: &ctx.live };
+            let live_guard = ctx.live.read().unwrap();
+            let searcher = Searcher { live: &live_guard };
             let mut jobs: Vec<(String, name_core::name_query::GrepMode, Query)> = Vec::new();
             for alt in &alts.alts {
                 match &alt.grep {
@@ -493,7 +500,8 @@ fn serve_stream(mut input: impl BufRead, mut out: impl Write, ctx: &Ctx) {
                     continue;
                 }
             };
-            let searcher = Searcher { live: &ctx.live };
+            let live_guard = ctx.live.read().unwrap();
+            let searcher = Searcher { live: &live_guard };
             let paths = content::scan_paths(&ctx.root, searcher.live, Query::default());
             let res = content::verify(&g, &paths, 100);
             for f in &res.files {
