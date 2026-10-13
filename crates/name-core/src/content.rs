@@ -2390,7 +2390,18 @@ pub fn wanted(live: &Live, home: &[u8], dir: &[u8], recursive: bool, root: &[u8]
                 p = join(dir, idx.name(i));
             }
             if in_scope(&p, home) {
-                want.push(&openable(root, &p), idx.size_of(i), idx.mtime()[i]);
+                let dp = openable(root, &p);
+                // The overlay supersedes the base for a path it holds (a file
+                // changed since the snapshot): its size/mtime are current and
+                // the base's are stale. Skipping here, and letting the overlay
+                // half below add it, keeps `want` from naming the same file
+                // twice -- once stale, once fresh -- which `diff` then reads as
+                // two docs: it kills the fresh one as "stale" and rebuilds the
+                // stale one, so an edit never reaches a query.
+                if live.over.contains_key(&dp) {
+                    continue;
+                }
+                want.push(&dp, idx.size_of(i), idx.mtime()[i]);
             }
         }
     }
@@ -3734,6 +3745,46 @@ mod grep_pipeline_tests {
         // The union closes the hole: same answer as the scan.
         let got = names(&answer(&g, &q, &root, &live, b"", Some(&content), 10).files);
         assert_eq!(got, want, "the union must equal the scan, skip-dir match included");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The live-update half of a query's freshness: an edit reaches a query
+    /// only after `Live::apply_dir` records it (killing the stale base entry,
+    /// overlaying the new size/mtime) and `Content::sync` reindexes what that
+    /// changed. This is the loop a `Watch` drives in the daemon; here it is
+    /// pinned by hand, without one, so the pipeline the watcher will call is
+    /// proven before the OS-specific half lands.
+    #[test]
+    fn apply_dir_and_sync_reflect_an_edit() {
+        let dir = std::env::temp_dir().join(format!("rgy_live_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("edit.rs"), b"fn before() {}\n").unwrap();
+        let root = dir.to_string_lossy().into_owned().into_bytes();
+        let src = PortableSource::new(root.clone(), 2);
+        let mut live = Live::new(Index::build(src.enumerate().unwrap(), 0, 1, b"/"));
+        let idx = dir.join("index");
+        let mut content = Content::open(idx.clone());
+        let docs = wanted(&live, b"", b"/", true, &root);
+        assert!(!docs.is_empty());
+        let id = content.alloc_id();
+        if let Some(seg) = build_segment(&idx, id, &docs, 0..docs.len()) {
+            content.push(seg);
+        }
+
+        let before = Grep::new("before", GrepMode::Literal).expect("grep compiles");
+        let after = Grep::new("after", GrepMode::Literal).expect("grep compiles");
+        let q = Query::default();
+        assert_eq!(content.search(&before, &q).files.len(), 1, "the original text is indexed");
+        assert_eq!(content.search(&after, &q).files.len(), 0, "the new text is not there yet");
+
+        // Edit the file; the Live and the content index must both catch up.
+        std::fs::write(dir.join("edit.rs"), b"fn after() {}\n").unwrap();
+        live.apply_dir(&root, true);
+        let rebuilt = content.sync(&live, b"", &[], &[root.clone()], &root);
+
+        assert_eq!(content.search(&before, &q).files.len(), 0, "the old text is gone after the sync");
+        assert_eq!(content.search(&after, &q).files.len(), 1, "the edit is indexed after the sync (sync rebuilt {rebuilt} docs)");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
