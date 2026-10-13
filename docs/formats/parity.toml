@@ -1,0 +1,86 @@
+# Parity matrix source of truth (IMPLEMENTATION_PLAN.md §6.7).
+#
+# One row per feature, one column per OS. The README matrix is auto-generated
+# from this file so it cannot rot. Legend:
+#   N = native (that OS's own mechanism)
+#   P = ported (shared code, platform hook)
+#   D = degraded (documented limit)
+#   G = gap (work required)
+#   - = N/A
+#
+# The `notes` field carries the per-OS caveat or the trap to watch. A `G` cell
+# fails CI until it is P/N or flipped to D with a linked issue and a README
+# note (§6.7).
+
+# --- 6.4 Daemon, UI, platform services ---
+[[feature]]
+id = "4.8"
+name = "keep-warm spinner (250 ms)"
+windows = "P"
+linux = "P"
+macos = "P"
+notes = "SetThreadPriority + timeBeginPeriod | spinner thread | spinner + QoS. Cap + headless-off on all."
+
+[[feature]]
+id = "4.9"
+name = "big-block allocator (>=1 MiB -> mmap, free returns)"
+windows = "P"
+linux = "P"
+macos = "P"
+notes = "fsearch rule: VirtualAlloc | mmap | mmap, one `platform` module."
+
+[[feature]]
+id = "4.10"
+name = "mimalloc default heap"
+windows = "N"
+linux = "P"
+macos = "P"
+notes = "rgx measured 5-12% on 32-worker walks. searchctl/searchd/zen-rs wired; search-ui is a lib (its binary sets the allocator)."
+
+[[feature]]
+id = "4.11"
+name = "release_memory after big phases"
+windows = "P"
+linux = "P"
+macos = "D"
+notes = "VirtualFree path | malloc_trim | no trim (drop caches manually). macOS malloc does not return aggressively -- document RSS behaviour."
+
+[[feature]]
+id = "4.12"
+name = "PGO release builds"
+windows = "P"
+linux = "P"
+macos = "P"
+notes = "MSVC /GENPROFILE or gcc | -fprofile-generate/use | -fprofile-instr-generate. pgo.ps1 / pgo.sh at the repo root."
+
+[[feature]]
+id = "4.13"
+name = "login-item autostart"
+windows = "G"
+linux = "G"
+macos = "N"
+notes = "Startup task / HKCU Run | systemd user unit | launchd. fsearch has the macOS path only; the other two are new."
+
+[[feature]]
+id = "4.14"
+name = "elevated-privilege model"
+windows = "D"
+linux = "N"
+macos = "D"
+notes = "Admin for MFT raw reads | none (walk as user) | Full Disk Access for gated folders. Per-OS consent flow in the README; never prompt from the daemon."
+
+[[feature]]
+id = "4.15"
+name = "packaging / install"
+windows = "G"
+linux = "N"
+macos = "G"
+notes = "winget (rgx has manifests) | tarballs (rgx) | brew or .pkg. rgx release machinery is the template."
+
+[[feature]]
+id = "4.16"
+name = "CI matrix"
+windows = "P"
+linux = "P"
+macos = "P"
+notes = "windows-latest | ubuntu-latest | macos-latest. Parity tests (6.7) run on all three."
