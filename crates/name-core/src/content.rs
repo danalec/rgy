@@ -2239,6 +2239,15 @@ fn take_best(per: &mut Vec<Cands>) -> Vec<Ranked> {
 
 /// What the name index says should be indexed under `dir` (direct
 /// children only unless `recursive`).
+///
+/// The paths come from the name index and are **relative to its root**;
+/// `build_segment` opens what it is given, so they are not openable as they
+/// stand. Join the scan root onto them before building, the way
+/// [`scan_paths`] does for the other way in. Handed straight to
+/// `build_segment` they read as absent, the segment ends up with no grams,
+/// and the indexed search answers nothing -- a query that finds a match
+/// through `verify` will find none through [`Content::search`] and say so
+/// with the same confidence.
 pub fn wanted(live: &Live, home: &[u8], dir: &[u8], recursive: bool) -> Docs {
     let mut want = Docs::default();
     if !in_scope(dir, home) {
@@ -3391,6 +3400,108 @@ mod grep_pipeline_tests {
         let paths = scan_paths(&dir.to_string_lossy().into_owned().into_bytes(), &live, q.clone_for_scan());
         let res = verify(&g, &paths, 10);
         assert_eq!(res.files.len(), 1, "rgx confirm finds alpha.rs");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The two gram extractors must produce the same trigrams.
+    ///
+    /// `index_grams` writes the index's key table and `trigrams_small` builds
+    /// the query's plan from the same string. If they disagree the query's
+    /// keys are not in the table, `Segment::list` finds no posting list, and
+    /// `eval` answers `Some(vec![])` -- the indexed search silently returns
+    /// nothing. That is exactly what the test above saw: zero candidates for
+    /// a pattern the scan found.
+    #[test]
+    fn the_index_and_the_query_agree_on_trigrams() {
+        let buf = b"fn alpha() { let x = 1; }";
+        let mut seen = vec![0u64; 3 << 18];
+        let (mut tri, mut short, mut long) = (Vec::new(), Vec::new(), Vec::new());
+        index_grams(buf, &mut seen, &mut tri, &mut short, &mut long);
+        tri.sort_unstable();
+        tri.dedup();
+
+        let want = trigrams_small(buf);
+        for &t in &want {
+            assert!(
+                tri.contains(&t),
+                "the query looks up trigram {t:#x} which the index never wrote; \
+                 the index wrote {tri:#x?}"
+            );
+        }
+
+        // And the built segment's key table has to hold them too: `Segment::list`
+        // binary-searches `tri_key`, so a missing key reads as "no postings" and
+        // the query quietly returns nothing.
+        let tmp = std::env::temp_dir().join(format!("rgy_tri_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        // `build_segment` opens the path it is given, so the docs have to
+        // carry openable paths -- the name index's are relative to its root.
+        std::fs::write(tmp.join("alpha.rs"), buf).unwrap();
+        let mut docs = Docs::default();
+        let abs = tmp.join("alpha.rs").to_string_lossy().into_owned().into_bytes();
+        docs.push(&abs, buf.len() as u64, 1);
+        let seg = build_segment(&tmp, 1, &docs, 0..1).expect("segment builds");
+        let keys = seg.tri_key();
+        for &t in &want {
+            assert!(keys.binary_search(&t).is_ok(), "the segment's key table is missing trigram {t:#x}; it holds {} keys", keys.len());
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The indexed search and the scan must find the same things.
+    ///
+    /// These are the two ways to answer a `grep:` query and a caller has to
+    /// choose between them. Until now the index had no caller and no test:
+    /// `build_segment`, `Content::open` and `Content::search` were written
+    /// and left. Wiring a CLI onto an untested path is how a fast wrong
+    /// answer ships, so the agreement comes first.
+    #[test]
+    fn the_indexed_search_agrees_with_the_scan() {
+        let (live, dir) = tiny_live("indexed");
+        let root = dir.to_string_lossy().into_owned().into_bytes();
+        let g = Grep::new("alpha", GrepMode::Literal).expect("grep compiles");
+        let q = Query { grep: Some("alpha".into()), grep_mode: GrepMode::Literal, ..Default::default() };
+
+        // What the scan path finds, reading every candidate from disk.
+        let paths = scan_paths(&root, &live, q.clone_for_scan());
+        let scanned = verify(&g, &paths, 10);
+        assert_eq!(scanned.files.len(), 1, "the fixture holds one alpha.rs");
+
+        // The same question through the trigram index.
+        let idx = dir.join("index");
+        let mut content = Content::open(idx.clone());
+        // `wanted` works in the *name index*, whose paths are relative to its
+        // root; `build_segment` opens what it is given, so the docs carry the
+        // same paths `scan_paths` does -- `root` joined on. Without that join
+        // every open fails and the segment comes out holding no grams at all.
+        // (`home` is an empty prefix, not `b"/"`: `in_scope` strips it and
+        // then requires the rest to start with `/`, so a `"/"` prefix strips
+        // the leading separator off every path and rejects them all.)
+        let docs = {
+            let mut d = Docs::default();
+            for p in scan_paths(&root, &live, q.clone_for_scan()) {
+                let m = std::fs::metadata(std::path::PathBuf::from(String::from_utf8_lossy(&p).into_owned()));
+                if let Ok(m) = m {
+                    let mtime = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|t| t.as_secs() as u32).unwrap_or(0);
+                    d.push(&p, m.len(), mtime);
+                }
+            }
+            d
+        };
+        assert!(!docs.is_empty(), "the fixture must put something in the index");
+        let id = content.alloc_id();
+        let seg = build_segment(&idx, id, &docs, 0..docs.len()).expect("a segment must build from this fixture");
+        content.push(seg);
+        let found = content.search(&g, &q);
+
+        let names = |files: &Vec<FileMatches>| -> Vec<String> {
+            let mut v: Vec<String> = files.iter().map(|f| String::from_utf8_lossy(&f.path).into_owned()).collect();
+            v.sort();
+            v.dedup();
+            v
+        };
+        assert_eq!(names(&found.files), names(&scanned.files), "the indexed search and the scan must not disagree about what matched");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
