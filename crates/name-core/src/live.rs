@@ -350,9 +350,15 @@ impl Live {
     /// Apply one batch of live-change events, as a [`discovery::Watch`] feed
     /// produces: each `UsnRecord` names the changed path in `name` (the impls
     /// put `dir.join(name)` there; `parent_reference` is 0, "overlay row"), so
-    /// the folder holding it is re-listed and the entry catches up (created,
+    /// one folder per event is re-listed and the entry catches up (created,
     /// deleted, or edited). This handles `ChangeBatch::Events`; `Rescan` is
     /// the caller's cue for a full [`Self::apply_dir`]`(root, true)`.
+    ///
+    /// A *file*-granular feed (the USN journal) names the file that changed:
+    /// its folder is re-listed. A *directory*-granular feed (macOS fsevents)
+    /// marks `FILE_ATTRIBUTE_DIRECTORY` and names the folder whose contents
+    /// changed: that folder is re-listed directly. Splitting on the bit is the
+    /// one bit of reconciliation the two granularities need.
     ///
     /// `name` is a platform `PathBuf` join (`\` between parts on Windows),
     /// while this index splits and joins on `/`; the folder is taken at the
@@ -361,9 +367,20 @@ impl Live {
     pub fn apply_events(&mut self, events: &[discovery::UsnRecord]) {
         let mut dirs: Vec<Vec<u8>> = Vec::new();
         for e in events {
-            let p = e.name.as_bytes();
-            let cut = p.iter().rposition(|&b| b == b'/' || b == b'\\').unwrap_or(0);
-            dirs.push(p[..cut.max(1)].to_vec());
+            // Normalize separators to `/` (the form `openable` stores and the
+            // overlay keys use): `name` is a platform `PathBuf` join (`\` on
+            // Windows), and the dir/file split plus `apply_dir` must land on
+            // the same spelling the index compares.
+            let p: Vec<u8> = e.name.as_bytes().iter().map(|&b| if b == b'\\' { b'/' } else { b }).collect();
+            if e.file_attributes & discovery::FILE_ATTRIBUTE_DIRECTORY != 0 {
+                // Directory granularity: `name` is the folder whose contents
+                // changed; re-list it as-is.
+                dirs.push(p);
+            } else {
+                // File granularity: `name` is the file; re-list its folder.
+                let cut = p.iter().rposition(|&b| b == b'/').unwrap_or(0);
+                dirs.push(p[..cut.max(1)].to_vec());
+            }
         }
         dirs.sort();
         dirs.dedup();

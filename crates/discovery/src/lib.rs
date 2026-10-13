@@ -60,6 +60,12 @@ pub const USN_REASON_PATH_RELEVANT: u32 = USN_REASON_FILE_CREATE
 /// as the journal's `file_attributes`.
 pub const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 
+/// Directory bit (`FILE_ATTRIBUTE_DIRECTORY`) in the same vocabulary. A feed
+/// that reports at directory granularity (macOS fsevents) marks the folder
+/// whose contents changed; a file-granular feed (the USN journal) leaves it
+/// clear and names the file itself.
+pub const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+
 /// One batch of live changes from a [`Watch`] feed.
 pub enum ChangeBatch {
     /// Journal/OS events to apply in order.

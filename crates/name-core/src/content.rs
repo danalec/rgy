@@ -2317,7 +2317,11 @@ fn take_best(per: &mut Vec<Cands>) -> Vec<Ranked> {
 /// strings.
 fn openable(root: &[u8], rel: &[u8]) -> Vec<u8> {
     let rel = rel.strip_prefix(b"/").unwrap_or(rel);
-    let mut full = root.to_vec();
+    // Normalize the separators: the root arrives as the caller spelled it (`\`
+    // on Windows, from `to_string_lossy`), and the rel is `/`-separated. Every
+    // path this index stores or compares is the `/` form, so a feed that hands
+    // back a `\` path (the overlay keys from `apply_dir`) matches here too.
+    let mut full: Vec<u8> = root.iter().map(|&b| if b == b'\\' { b'/' } else { b }).collect();
     if !full.is_empty() && !full.ends_with(b"/") && !rel.is_empty() {
         full.push(b'/');
     }
@@ -2329,15 +2333,21 @@ fn openable(root: &[u8], rel: &[u8]) -> Vec<u8> {
 /// backwards. `None` when `full` is not under `root` at all -- an overlay
 /// entry outside the tree is no name index's business.
 fn rel_of(root: &[u8], full: &[u8]) -> Option<Vec<u8>> {
-    let rest = full.strip_prefix(root)?;
+    // Normalize separators to `/` on both sides before the prefix compare:
+    // `root` is spelled by the caller (`\` on Windows) while `full` may come
+    // back from a feed already normalized, and `openable` stores the `/` form.
+    // A byte-wise `strip_prefix` across the two spellings finds nothing.
+    let norm = |s: &[u8]| s.iter().map(|&b| if b == b'\\' { b'/' } else { b }).collect::<Vec<u8>>();
+    let (nroot, nfull) = (norm(root), norm(full));
+    let rest = nfull.strip_prefix(&nroot[..])?;
     if rest.is_empty() {
         // `full` is `root` itself: the tree's own rel is `/`.
         return Some(b"/".to_vec());
     }
     let rel = match rest.split_first() {
         // `openable` puts exactly one separator between root and rel.
-        Some((b'/', tail)) if !root.ends_with(b"/") => tail,
-        Some(_) if root.ends_with(b"/") => rest,
+        Some((b'/', tail)) if !nroot.ends_with(b"/") => tail,
+        Some(_) if nroot.ends_with(b"/") => rest,
         // A sibling spelling (`/a/b2` under `/a`): not under `root`.
         _ => return None,
     };
@@ -3928,6 +3938,52 @@ mod grep_pipeline_tests {
 
         assert_eq!(content.search(&before, &q).files.len(), 0, "the old text is gone");
         assert_eq!(content.search(&after, &q).files.len(), 1, "the feed's edit reached the query");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The dir-vs-file split: a directory-granular event (fsevents) names the
+    /// folder whose *contents* changed and must re-list that folder, not its
+    /// parent -- re-listing the parent would see only the folder's own mtime
+    /// and miss the edit inside it.
+    #[test]
+    fn apply_events_relists_a_directory_event_on_the_directory() {
+        let dir = std::env::temp_dir().join(format!("rgy_direvt_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("sub/edit.rs"), b"fn before() {}\n").unwrap();
+        let root = dir.to_string_lossy().into_owned().into_bytes();
+        let src = PortableSource::new(root.clone(), 2);
+        let mut live = Live::new(Index::build(src.enumerate().unwrap(), 0, 1, b"/"));
+        let idx = dir.join("index");
+        let mut content = Content::open(idx.clone());
+        let docs = wanted(&live, b"", b"/", true, &root);
+        assert!(!docs.is_empty());
+        let id = content.alloc_id();
+        if let Some(seg) = build_segment(&idx, id, &docs, 0..docs.len()) {
+            content.push(seg);
+        }
+
+        let before = Grep::new("before", GrepMode::Literal).expect("grep compiles");
+        let after = Grep::new("after", GrepMode::Literal).expect("grep compiles");
+        let q = Query::default();
+        assert_eq!(content.search(&before, &q).files.len(), 1);
+
+        // Edit a file inside sub/; a directory event names sub/ (its contents
+        // changed). Only re-listing sub/ (the dir branch) reaches the edit.
+        std::fs::write(dir.join("sub/edit.rs"), b"fn after() {}\n").unwrap();
+        let rec = discovery::UsnRecord {
+            file_reference: 0,
+            parent_reference: 0,
+            usn: 0,
+            reason: 0,
+            file_attributes: discovery::FILE_ATTRIBUTE_DIRECTORY,
+            name: dir.join("sub").to_string_lossy().into_owned(),
+        };
+        live.apply_events(&[rec]);
+        content.sync(&live, b"", &[], &[root.clone()], &root);
+
+        assert_eq!(content.search(&before, &q).files.len(), 0, "the old text is gone");
+        assert_eq!(content.search(&after, &q).files.len(), 1, "a directory event must re-list the directory, reaching the edit inside it");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
