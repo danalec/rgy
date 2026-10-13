@@ -3174,6 +3174,17 @@ impl Scan<'_> {
                     continue;
                 }
                 for i in a..end {
+                    // `dense[ent_name[i]]` is entry -> name -> Short: two
+                    // dependent loads per entry in this sequential pass.
+                    // Killing the indirection is item 3 (plan row "name search
+                    // @ 5M"), but measure before choosing: `score(i, ...)` does
+                    // far more work per entry than this load, so the win may be
+                    // small, and the obvious fix (a per-entry `Short` view,
+                    // dense[i]) costs ~+11 MB resident at 5 M entries vs the
+                    // per-name `dense` -- which item 4's <=64 MB goal has to
+                    // absorb. The alternative (walk names, not entries, loading
+                    // each name's Short once) is memory-neutral but changes
+                    // top-k tie order. Decide with item 4's numbers, not blind.
                     let s = dense[ent_name[i] as usize];
                     if s.flags & NF_OK == 0 {
                         continue;
