@@ -644,10 +644,17 @@ fn open_watch(root: &[u8]) -> Option<Box<dyn discovery::Watch>> {
 
 #[cfg(target_os = "macos")]
 fn open_watch(_root: &[u8]) -> Option<Box<dyn discovery::Watch>> {
-    // fsevents is callback-based (a Stream pushing events to a channel), not a
-    // `next_batch` pull, so wiring it into `discovery::Watch` needs a channel
-    // adapter. Not wired yet: the daemon answers on its snapshot without live
-    // updates rather than failing to start.
+    // fsevents is not wired yet; two things stand in the way, not one:
+    //   1. It is callback-based (`watch` pushes `Vec<Event>` to a `Sender`,
+    //      returning a `Stream` to keep alive), so a `next_batch` pull needs a
+    //      channel adapter (rx.recv behind the trait).
+    //   2. It is *directory* granularity (`Event.path` is the folder that
+    //      changed), while `Live::apply_events` re-lists the *parent* of the
+    //      changed path (the USN/file model). So the adapter must map a dir
+    //      event to `apply_dir(dir)` directly, not feed it through
+    //      `apply_events` -- or `apply_events` must grow a dir-vs-file branch.
+    // Until then the daemon answers on its snapshot rather than failing to
+    // start. Linux (inotify) and Windows (USN) are wired above.
     None
 }
 
