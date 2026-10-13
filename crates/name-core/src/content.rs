@@ -3832,4 +3832,50 @@ mod grep_pipeline_tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// The Watch thread's core: a batch of change events (each naming the
+    /// changed path) drives the same freshness as a hand `apply_dir`. This is
+    /// what a `discovery::Watch` feed calls, pinned without an OS watch.
+    #[test]
+    fn apply_events_and_sync_reflect_an_edit() {
+        let dir = std::env::temp_dir().join(format!("rgy_evt_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("edit.rs"), b"fn before() {}\n").unwrap();
+        let root = dir.to_string_lossy().into_owned().into_bytes();
+        let src = PortableSource::new(root.clone(), 2);
+        let mut live = Live::new(Index::build(src.enumerate().unwrap(), 0, 1, b"/"));
+        let idx = dir.join("index");
+        let mut content = Content::open(idx.clone());
+        let docs = wanted(&live, b"", b"/", true, &root);
+        assert!(!docs.is_empty());
+        let id = content.alloc_id();
+        if let Some(seg) = build_segment(&idx, id, &docs, 0..docs.len()) {
+            content.push(seg);
+        }
+
+        let before = Grep::new("before", GrepMode::Literal).expect("grep compiles");
+        let after = Grep::new("after", GrepMode::Literal).expect("grep compiles");
+        let q = Query::default();
+        assert_eq!(content.search(&before, &q).files.len(), 1);
+        assert_eq!(content.search(&after, &q).files.len(), 0);
+
+        // Edit the file; a Watch event names the changed path, and applying it
+        // (then syncing) must reach the query.
+        std::fs::write(dir.join("edit.rs"), b"fn after() {}\n").unwrap();
+        let rec = discovery::UsnRecord {
+            file_reference: 0,
+            parent_reference: 0,
+            usn: 0,
+            reason: 0,
+            file_attributes: 0,
+            name: dir.join("edit.rs").to_string_lossy().into_owned(),
+        };
+        live.apply_events(&[rec]);
+        content.sync(&live, b"", &[], &[root.clone()], &root);
+
+        assert_eq!(content.search(&before, &q).files.len(), 0, "the old text is gone");
+        assert_eq!(content.search(&after, &q).files.len(), 1, "the edit is indexed after the Watch event");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

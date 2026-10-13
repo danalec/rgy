@@ -347,6 +347,31 @@ impl Live {
         Applied::Done
     }
 
+    /// Apply one batch of live-change events, as a [`discovery::Watch`] feed
+    /// produces: each `UsnRecord` names the changed path in `name` (the impls
+    /// put `dir.join(name)` there; `parent_reference` is 0, "overlay row"), so
+    /// the folder holding it is re-listed and the entry catches up (created,
+    /// deleted, or edited). This handles `ChangeBatch::Events`; `Rescan` is
+    /// the caller's cue for a full [`Self::apply_dir`]`(root, true)`.
+    ///
+    /// `name` is a platform `PathBuf` join (`\` between parts on Windows),
+    /// while this index splits and joins on `/`; the folder is taken at the
+    /// last separator of either kind so a Windows path finds its parent too.
+    /// `apply_dir` then re-lists it and the overlay records the change.
+    pub fn apply_events(&mut self, events: &[discovery::UsnRecord]) {
+        let mut dirs: Vec<Vec<u8>> = Vec::new();
+        for e in events {
+            let p = e.name.as_bytes();
+            let cut = p.iter().rposition(|&b| b == b'/' || b == b'\\').unwrap_or(0);
+            dirs.push(p[..cut.max(1)].to_vec());
+        }
+        dirs.sort();
+        dirs.dedup();
+        for d in dirs {
+            self.apply_dir(&d, false);
+        }
+    }
+
     /// Add an entry and, if it is a directory, its subtree (`scan`, read
     /// ahead by `fetch`; scanned here if missing).
     fn add_new(&mut self, path: Vec<u8>, e: OEnt, scan: Option<Vec<Listing>>) {
