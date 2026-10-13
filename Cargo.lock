@@ -1092,6 +1092,7 @@ name = "zen-rs"
 version = "0.1.0"
 dependencies = [
  "discovery-windows",
+ "mimalloc",
  "name-core",
  "search-ui",
 ]

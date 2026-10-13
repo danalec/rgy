@@ -13,3 +13,7 @@ path = "src/main.rs"
 name-core = { path = "../../crates/name-core" }
 discovery-windows = { path = "../../crates/discovery-windows" }
 search-ui = { path = "../search-ui" }
+# One allocator story (plan 4.4/4.10): mimalloc for the general heap, the
+# same as searchctl/searchd. Transparent -- identical results, just a faster
+# heap for the parallel MFT/USN walks.
+mimalloc = { version = "0.1", default-features = false }

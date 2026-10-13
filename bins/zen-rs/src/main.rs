@@ -18,6 +18,11 @@ use name_core::index;
 use name_core::live::Live;
 use search_ui as ui;
 
+// One allocator story (plan 4.4/4.10): mimalloc for the general heap, matching
+// searchctl/searchd -- it measured 5-12% on parallel walks on Windows.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[cfg(windows)]
 use indexer::Indexer;
 #[cfg(windows)]
