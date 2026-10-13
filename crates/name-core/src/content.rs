@@ -1937,6 +1937,35 @@ impl Content {
         r.candidates = total;
         r
     }
+
+    /// Does this index vouch for `path`, so a scan need not read it? True
+    /// only when it holds a live doc for `path` whose recorded size and
+    /// mtime still match disk (so its grams are current) and the name query
+    /// lets that doc through (so [`Self::search`] evaluates it and either
+    /// returns it or rules it out). Everything else -- a file under a
+    /// skip-dir or past the curation [`eligible`] applies, one edited since
+    /// it was indexed, one no doc names -- returns false and is read from
+    /// disk instead. `root` must be spelled as the index was built with, so
+    /// a doc's stored path and `path` compare equal.
+    pub fn covers(&self, root: &[u8], path: &[u8], home: &[u8], q: &Query) -> bool {
+        let _ = (root, home);
+        let Some(st) = crate::live::lstat(path) else {
+            return false;
+        };
+        // A name that would not reach `search` is not vouched for either:
+        // `search` would drop it, and the scan must then read it here.
+        if q.match_path(path, KIND_FILE, st.size, st.mtime).is_none() {
+            return false;
+        }
+        self.segs.iter().any(|s| {
+            let bp = s.by_path();
+            let i = bp.partition_point(|&d| s.path(d) < path);
+            i < bp.len() && s.path(bp[i]) == path && {
+                let d = bp[i];
+                !s.is_dead(d) && s.size()[d as usize] == st.size && s.mtime()[d as usize] == st.mtime
+            }
+        })
+    }
 }
 
 /// Part of an owner's selection to find the docs of: the owner, the
@@ -3362,6 +3391,44 @@ pub fn scan_paths(root: &[u8], live: &Live, mut q: Query) -> Vec<Vec<u8>> {
     files.into_iter().map(|(p, _)| p).collect()
 }
 
+/// Grep `g` over the files `q` selects under `root`, the same answer as
+/// [`verify`] on [`scan_paths`], but reading only the candidates the content
+/// index cannot vouch for. With no `index` that is exactly the scan. With
+/// one, [`Content::covers`] splits the scan's universe in two: the index
+/// answers for the files it holds a fresh, name-passing doc for (returning
+/// their matches and ruling the rest out by grams, without opening them),
+/// and every other candidate -- under a skip-dir, past the curation, edited
+/// since it was indexed, or never named -- is read here. The two sets
+/// partition the universe, so the reads never overlap and their union is
+/// the scan's exact answer; the index is only a way to read less to get it.
+pub fn answer(g: &Grep, q: &Query, root: &[u8], live: &Live, home: &[u8], index: Option<&Content>, limit: usize) -> GrepResult {
+    let paths = scan_paths(root, live, q.clone_for_scan());
+    let Some(index) = index else {
+        return verify(g, &paths, limit);
+    };
+    let mut covered = Vec::new();
+    let mut bare = Vec::new();
+    for p in &paths {
+        if index.covers(root, p, home, q) {
+            covered.push(p.clone());
+        } else {
+            bare.push(p.clone());
+        }
+    }
+    let covered: std::collections::HashSet<Vec<u8>> = covered.into_iter().collect();
+    // `search`'s files are the covered ones that matched (its grams ruled
+    // out the others); keep only those this scan's universe named, so an
+    // index doc outside it never leaks in. Then read the rest.
+    let mut r = index.search(g, q);
+    r.files.retain(|f| covered.contains(&f.path));
+    let rest = verify(g, &bare, limit.saturating_sub(r.files.len()));
+    r.files.extend(rest.files);
+    r.read += rest.read;
+    r.candidates = paths.len();
+    r.complete = r.files.len() < limit && rest.complete;
+    r
+}
+
 /// Open a path for reading only if it is a regular file, never blocking:
 /// O_NONBLOCK keeps a FIFO from hanging open(), and the read threads'
 /// "don't materialize dataless files" policy keeps iCloud placeholders from
@@ -3608,6 +3675,65 @@ mod grep_pipeline_tests {
             v
         };
         assert_eq!(names(&found.files), names(&scanned.files), "the indexed search and the scan must not disagree about what matched");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The union (`answer`) must be the scan's exact answer, even where the
+    /// content index deliberately reaches less far than the scan.
+    ///
+    /// `wanted`/`eligible` hold only curated text (no skip-dirs like
+    /// `node_modules`, no past-1 MiB or odd-extension files), but `scan_paths`
+    /// reads whatever the name index lists. So a match under `node_modules`
+    /// is one the content index never holds and `Content::search` alone can
+    /// never report -- the exact hole the union closes by reading the
+    /// candidates the index cannot vouch for. This pins `answer` == the scan
+    /// on a fixture that has such a file, while showing the index alone (the
+    /// fast path's raw output) misses it.
+    #[test]
+    fn the_union_agrees_with_the_scan_where_the_index_reaches_less() {
+        let dir = std::env::temp_dir().join(format!("rgy_union_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("node_modules")).unwrap();
+        std::fs::write(dir.join("alpha.rs"), b"fn alpha() { let x = 1; }\n").unwrap();
+        std::fs::write(dir.join("beta.txt"), b"nothing here\n").unwrap();
+        // Under a skip-dir: in the name index (and so in scan_paths), but
+        // never in the content index.
+        std::fs::write(dir.join("node_modules/dep.rs"), b"fn alpha() {}\n").unwrap();
+        let root = dir.to_string_lossy().into_owned().into_bytes();
+        let src = PortableSource::new(root.clone(), 2);
+        let live = Live::new(Index::build(src.enumerate().unwrap(), 0, 1, b"/"));
+        let g = Grep::new("alpha", GrepMode::Literal).expect("grep compiles");
+        let q = Query { grep: Some("alpha".into()), grep_mode: GrepMode::Literal, ..Default::default() };
+
+        // What the scan finds: alpha.rs and node_modules/dep.rs.
+        let scanned = verify(&g, &scan_paths(&root, &live, q.clone_for_scan()), 10);
+        let names = |files: &Vec<FileMatches>| -> Vec<String> {
+            let mut v: Vec<String> = files.iter().map(|f| String::from_utf8_lossy(&f.path).into_owned()).collect();
+            v.sort();
+            v.dedup();
+            v
+        };
+        let want = names(&scanned.files);
+        assert_eq!(want.len(), 2, "the scan must find both the plain file and the skip-dir one: {want:?}");
+
+        // The content index (built through `wanted`, so no skip-dirs).
+        let idx = dir.join("index");
+        let mut content = Content::open(idx.clone());
+        let docs = wanted(&live, b"", b"/", true, &root);
+        assert!(!docs.is_empty());
+        let id = content.alloc_id();
+        if let Some(seg) = build_segment(&idx, id, &docs, 0..docs.len()) {
+            content.push(seg);
+        }
+
+        // The index alone misses the skip-dir file: the fast path's raw
+        // output is not the answer on its own.
+        let indexed_only = names(&content.search(&g, &q).files);
+        assert_eq!(indexed_only.len(), 1, "the index holds only the curated file: {indexed_only:?}");
+
+        // The union closes the hole: same answer as the scan.
+        let got = names(&answer(&g, &q, &root, &live, b"", Some(&content), 10).files);
+        assert_eq!(got, want, "the union must equal the scan, skip-dir match included");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

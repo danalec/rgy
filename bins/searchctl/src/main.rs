@@ -256,6 +256,26 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
         eprintln!("warning: {w}");
     }
 
+    // Content index, when one is already built alongside this root's name
+    // index (the daemon keeps it fresh). Auto-select: use it to skip reads
+    // the grams rule out; without one, `answer` falls back to the scan. The
+    // union stays the scan's exact answer either way -- `Content::covers`
+    // only vouches for files whose recorded stats still match disk, so a
+    // stale or foreign index loses coverage and is read from disk instead
+    // of silently answering wrong.
+    let content_index = {
+        let root_path = std::path::PathBuf::from(&opts.root);
+        let base = opts
+            .index
+            .as_ref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| persist::default_index_path(&root_path));
+        let dir = base.with_extension("content");
+        dir.is_dir()
+            .then(|| content::Content::open_shared(dir))
+            .filter(|c| !c.segs.is_empty())
+    };
+
     // `grep:`/`regex:`/`sym:` content search (fsearch model: the name
     // tokens and filters narrow WHICH files are read; the rgx engine
     // confirms each one). rg-style `path:line:text` output.
@@ -279,9 +299,15 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
                 // are 352, and look confident about it.
                 g.max_per_file = usize::MAX;
                 g.budget = None;
-                let paths =
-                    content::scan_paths(root.as_bytes(), searcher.live, alt.clone_for_scan());
-                let res = content::verify(&g, &paths, usize::MAX);
+                let res = content::answer(
+                    &g,
+                    alt,
+                    root.as_bytes(),
+                    searcher.live,
+                    home.as_bytes(),
+                    content_index.as_ref(),
+                    usize::MAX,
+                );
                 n += res.files.iter().map(|f| f.lines.len()).sum::<usize>();
             }
             if n == 0 {
@@ -298,8 +324,15 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
         for alt in &alts.alts {
             let Some(pat) = &alt.grep else { continue };
             let g = Grep::new(pat, alt.grep_mode)?;
-            let paths = content::scan_paths(root.as_bytes(), searcher.live, alt.clone_for_scan());
-            let res = content::verify(&g, &paths, limit);
+            let res = content::answer(
+                &g,
+                alt,
+                root.as_bytes(),
+                searcher.live,
+                home.as_bytes(),
+                content_index.as_ref(),
+                limit,
+            );
             for f in &res.files {
                 let path = String::from_utf8_lossy(&f.path);
                 for (ln, text) in &f.lines {
