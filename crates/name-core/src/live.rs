@@ -374,10 +374,15 @@ impl Live {
 
     /// Drive a live-update feed to its end: consume `watch`'s batches and
     /// keep `self` in step with the disk. Events go through
-    /// [`Self::apply_events`]; a `Rescan` re-lists `root` wholly. This is the
-    /// `searchd` Watch thread's body -- the platform [`discovery::Watch`] is
-    /// built and owned by the caller, so OS-specific setup stays out of here.
-    /// Returns the feed's error when it ends (the thread then stops).
+    /// [`Self::apply_events`]; a `Rescan` re-lists `root` wholly. Returns the
+    /// feed's error when it ends (the thread then stops).
+    ///
+    /// This holds `&mut self` for the whole feed, so it suits a caller that
+    /// owns the `Live` outright. The `searchd` daemon shares its `Live` behind
+    /// an `RwLock` and must instead take the write lock *per batch* (lock,
+    /// apply one batch, unlock) so queries interleave -- holding the write
+    /// across this whole loop would block every query for the feed's life.
+    /// The per-batch shape is the same `apply_events`/`apply_dir` calls.
     pub fn run_watch_feed(&mut self, watch: &mut dyn discovery::Watch, root: &[u8]) -> Result<(), String> {
         loop {
             match watch.next_batch()? {
