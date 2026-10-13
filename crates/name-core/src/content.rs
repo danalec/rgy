@@ -3878,4 +3878,56 @@ mod grep_pipeline_tests {
         assert_eq!(content.search(&after, &q).files.len(), 1, "the edit is indexed after the Watch event");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// The thread body: `run_watch_feed` consumes a feed and keeps the Live
+    /// in step. A one-shot mock feed (one batch, then end) stands in for the
+    /// OS watch, so the loop is pinned without an OS-specific watcher.
+    #[test]
+    fn run_watch_feed_applies_what_the_feed_reports() {
+        struct OneShot(Option<discovery::ChangeBatch>);
+        impl discovery::Watch for OneShot {
+            fn next_batch(&mut self) -> Result<discovery::ChangeBatch, String> {
+                self.0.take().ok_or_else(|| "feed exhausted".to_string())
+            }
+        }
+
+        let dir = std::env::temp_dir().join(format!("rgy_feed_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("edit.rs"), b"fn before() {}\n").unwrap();
+        let root = dir.to_string_lossy().into_owned().into_bytes();
+        let src = PortableSource::new(root.clone(), 2);
+        let mut live = Live::new(Index::build(src.enumerate().unwrap(), 0, 1, b"/"));
+        let idx = dir.join("index");
+        let mut content = Content::open(idx.clone());
+        let docs = wanted(&live, b"", b"/", true, &root);
+        assert!(!docs.is_empty());
+        let id = content.alloc_id();
+        if let Some(seg) = build_segment(&idx, id, &docs, 0..docs.len()) {
+            content.push(seg);
+        }
+
+        let before = Grep::new("before", GrepMode::Literal).expect("grep compiles");
+        let after = Grep::new("after", GrepMode::Literal).expect("grep compiles");
+        let q = Query::default();
+        assert_eq!(content.search(&before, &q).files.len(), 1);
+
+        // The feed reports the edit; running it must reflect it.
+        std::fs::write(dir.join("edit.rs"), b"fn after() {}\n").unwrap();
+        let rec = discovery::UsnRecord {
+            file_reference: 0,
+            parent_reference: 0,
+            usn: 0,
+            reason: 0,
+            file_attributes: 0,
+            name: dir.join("edit.rs").to_string_lossy().into_owned(),
+        };
+        let mut feed = OneShot(Some(discovery::ChangeBatch::Events(vec![rec])));
+        assert!(live.run_watch_feed(&mut feed, &root).is_err(), "the feed ends with its error");
+        content.sync(&live, b"", &[], &[root.clone()], &root);
+
+        assert_eq!(content.search(&before, &q).files.len(), 0, "the old text is gone");
+        assert_eq!(content.search(&after, &q).files.len(), 1, "the feed's edit reached the query");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

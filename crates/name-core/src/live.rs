@@ -372,6 +372,23 @@ impl Live {
         }
     }
 
+    /// Drive a live-update feed to its end: consume `watch`'s batches and
+    /// keep `self` in step with the disk. Events go through
+    /// [`Self::apply_events`]; a `Rescan` re-lists `root` wholly. This is the
+    /// `searchd` Watch thread's body -- the platform [`discovery::Watch`] is
+    /// built and owned by the caller, so OS-specific setup stays out of here.
+    /// Returns the feed's error when it ends (the thread then stops).
+    pub fn run_watch_feed(&mut self, watch: &mut dyn discovery::Watch, root: &[u8]) -> Result<(), String> {
+        loop {
+            match watch.next_batch()? {
+                discovery::ChangeBatch::Events(events) => self.apply_events(&events),
+                discovery::ChangeBatch::Rescan => {
+                    self.apply_dir(root, true);
+                }
+            }
+        }
+    }
+
     /// Add an entry and, if it is a directory, its subtree (`scan`, read
     /// ahead by `fetch`; scanned here if missing).
     fn add_new(&mut self, path: Vec<u8>, e: OEnt, scan: Option<Vec<Listing>>) {
