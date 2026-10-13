@@ -1,9 +1,12 @@
 # FreeBSD support
 
 Scope: `rgy` (the workspace) on `x86_64-unknown-freebsd` and
-`aarch64-unknown-freebsd`. Everything below is grounded in what the code does
+`aarch64-unknown-freebsd`, on the **newest stable release** — 15.1-RELEASE as
+of 2026-10, retargeted on every FreeBSD release (15.2 is scheduled for
+2026-12). `O_SEARCH` (13+) and the current `dirent` layouts are fair game;
+there is no 12.x floor. Everything below is grounded in what the code does
 today, measured rather than assumed; the numbers and file references are the
-evidence.
+evidence. The decisions that close this plan are the specs in §5.
 
 ---
 
@@ -35,11 +38,12 @@ today costs RSS proportional to the pages actually touched, and on FreeBSD it
 costs the whole blob up front. For the 310k-entry tree measured earlier
 (8.3 MiB) that is irrelevant; for an order of magnitude more it is not.
 
-**`open_flags` silently disables itself.** `name-core/src/content.rs`
-(`mod open_flags`, line 3262) picks `O_NONBLOCK` / `O_NOFOLLOW` per
-OS and, for anything that is not Linux/Android/macOS/iOS, sets **both to 0**.
-The comment already names the consequence: "a FIFO could block open() here".
-FreeBSD lands in that arm today.
+**`open_flags` covers FreeBSD.** `name-core/src/content.rs` (`mod open_flags`)
+carries the FreeBSD arm (`O_NONBLOCK 0x4`, `O_NOFOLLOW 0x100`, read off
+`sys/sys/fcntl.h`); the zero arm holds only OpenBSD, NetBSD and DragonFly,
+on purpose, until their values are checked off a real kernel. The FIFO
+acceptance test behind it is `cfg`-scoped to FreeBSD and runs in the phase-4
+suite.
 
 ---
 
@@ -79,28 +83,31 @@ smaller.
 
 ### P0 — wrong behaviour (not just slow)
 
-**P0.1 `open_flags` is zero on FreeBSD.**
-A FIFO anywhere under the scan root can block `open()` indefinitely during
-content search, and a symlink's target is opened rather than refused.
-
-*Fix*: add a `freebsd` / BSD arm with `O_NONBLOCK = 0x0004`,
-`O_NOFOLLOW = 0x0100`, sharing the Darwin constants.
+**P0.1 `open_flags` on FreeBSD.** ✅ landed (`8fd0c30`).
+The risk: a FIFO anywhere under the scan root can block `open()` indefinitely
+during content search, and a symlink's target is opened rather than refused.
+The `freebsd` arm carries `O_NONBLOCK = 0x0004`, `O_NOFOLLOW = 0x0100` — the
+Darwin constants — scoped to FreeBSD, so OpenBSD, NetBSD and DragonFly stay
+in the zero arm until their values are checked off a real kernel.
 
 *Acceptance*: a test creates a FIFO in a fixture tree and asserts
 `open_sized` returns without hanging (with `O_NONBLOCK` an open of a FIFO
-with no writer fails `ENXIO` instead of blocking). Today that test hangs.
+with no writer fails `ENXIO` instead of blocking). The test is `cfg`-scoped
+to FreeBSD and runs in the phase-4 suite (P2.3).
 
-**P0.2 `zen-rs` does not compile.**
-`bins/zen-rs` depends on `discovery-windows`, which is Windows-only.
+**P0.2 `zen-rs` on FreeBSD.**
+`bins/zen-rs` is Windows-only by construction (MFT + USN). Off-Windows every
+volume-reading path is `#[cfg(windows)]`; what remains — index writing and
+its tests — is platform-independent and compiles (`869481c` gates
+`discovery-windows` and its `windows` dependency to the Windows target).
 
-*Fix*: decide one of
-(a) gate the dependency and the binary out of the FreeBSD build;
-(b) make `zen-rs` use the portable walk on non-Windows and keep MFT on Windows.
+*Decision* (§5, 2): whether `zen-rs` should *run* on FreeBSD is deferred —
+it stays out of this port's "done", and a `zen-rs` over the portable walk is
+a separate project.
 
-(a) is the smaller change; (b) is the honest one if `zen-rs` is meant to be
-cross-platform.
-
-*Acceptance*: `cargo build --workspace` succeeds on the FreeBSD target.
+*Acceptance*: `cargo build --workspace` succeeds on the FreeBSD target —
+`cargo check --workspace` is green as of 2026-10-13; the link step needs a
+FreeBSD ELF linker/sysroot and joins the phase-4 run.
 
 ### P1 — performance
 
@@ -164,23 +171,20 @@ need a real socket path and the FIFO test needs a real FIFO.
 | 3 | P2.1 dispatch, then P1.2 getdents reader | differential test passes against the sequential oracle |
 | 4 | P2.2 CI + P2.3 real-kernel suite | full suite green on FreeBSD, not just checked |
 
-Phases 0–2 are small and independent; 3 is the only one that needs a design
-decision first (P2.1). 4 is what turns "it compiles" into "it works".
+Phases 0–2 are small and independent; 3 follows the dispatch decision in §5
+(wire the seam), now made. 4 is what turns "it compiles" into "it works".
 
 ---
 
-## 5. Open questions for you
+## 5. Specs (decided 2026-10-13)
 
-1. **FreeBSD version floor?** It decides whether `O_SEARCH` (13+) and some
-   `dirent` layouts are available. Targeting 12.x keeps `getdents` and drops
-   `O_SEARCH`.
-2. **Is `zen-rs` supposed to run on FreeBSD?** It is the one binary that is
-   Windows-only by construction (MFT + USN). Gating it out is honest;
-   porting it is a separate project.
-3. **Is the native backend seam worth wiring?** Without it, P1.2 has nowhere
-   to live. With it, `discovery-linux` and `discovery-macos` stop being dead
-   code and become selectable — which is a change to how those two crates are
-   understood.
+| # | Question | Decision | What it locks in |
+|---|---|---|---|
+| 1 | FreeBSD version floor | **Always the newest stable** — 15.1-RELEASE as of 2026-10 | `O_SEARCH` (13+) and the current `dirent` layouts are available; the CI/VM image pins the newest release and re-pins on each one (15.2 lands 2026-12) |
+| 2 | Does `zen-rs` run on FreeBSD? | **Deferred** — out of this port's "done" until tested | P0.2 stays option (a); a `zen-rs` over the portable walk is a separate project |
+| 3 | Is the native backend seam worth wiring? | **Yes — parity with the other OSes** | `source_for(root, threads)` selects windows/linux/macos/freebsd/portable by `cfg`; `discovery-freebsd` (getdents + `d_type`) is in scope, and P1.2 has a home |
+| 4 | v1 acceptance bar | **The same bar as the other OSes** — suite green on a real kernel | Phases 0–4 all in scope: mmap (P1.1), dispatch + getdents (P2.1/P1.2), CI (P2.2), real-kernel suite (P2.3). "It compiles" is not v1 |
+| 5 | Where verification runs, and what performance means | **Correctness in a VM, performance on bare metal** | The suite may run in a VM (`vmactions/freebsd-vm`, a Gitea runner, or a local one); the latency/RSS bars in `docs/IMPLEMENTATION_PLAN.md` §2 are the FreeBSD bar, and a VM timing is not evidence for them |
 
 ---
 
