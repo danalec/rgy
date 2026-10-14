@@ -1,0 +1,56 @@
+# The FreeBSD gate (docs/freebsd-support.md §4, phase 4 / P2.2).
+#
+# Two layers, matching the plan: the floor is a cross-check that needs no
+# VM (catches cfg and dependency breakage for the FreeBSD target on every
+# push), and the bar is the full suite on a real FreeBSD kernel. Decision 5
+# in §5 names the vehicles for the bar - vmactions/freebsd-vm, a Gitea
+# runner, or a local one - and this workflow covers the first two wherever a
+# Docker-capable runner exists. The recorded local-VM run (15.1-RELEASE,
+# 2026-10-14) is filed in §4; this keeps it from being a one-off.
+#
+# The e2e harness resolves bins by path, so every job builds first
+# (tests/harness.rs: `cargo test --workspace` alone is not a build-first).
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  freebsd-check:
+    name: floor: cargo check for FreeBSD
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-freebsd
+      - run: cargo check --workspace --target x86_64-unknown-freebsd
+
+  freebsd-suite:
+    name: bar: full suite on a FreeBSD kernel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          release: "15.1"
+          prepare: pkg install -y rust git
+          run: |
+            cargo build --workspace
+            cargo test --workspace --no-fail-fast
+
+  suite:
+    name: suite on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --workspace
+      - run: cargo test --workspace --no-fail-fast
