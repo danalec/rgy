@@ -111,3 +111,25 @@ counting `type:file size:>10000` against `Get-ChildItem | Where Length -gt
 The previous table recorded `file` at 5,960 µs and the walk at ~46k entries/s,
 on a build where `ranked` and `selective` were both chosen for the rows they
 lost on.
+
+## Memory at the scale the plan targets: 5M
+
+Peak resident set of `name_bench 5000000` (the in-memory 5M name index
+build), measured with `scripts/mem-peak.py` on Windows x64:
+
+| Metric | Goal | Measured | Verdict |
+|---|---|---|---|
+| peak RSS (build) | <= 1.2 GB | **658 MiB** (689,930,240 B) | under goal |
+| disk / corpus | <= 2.5x | 2.5x (table above) | at goal |
+| resident (daemon, mmap) | <= 64 MB | not yet measured | TODO |
+
+The peak is the high-water mark of the synthetic 5M name-index build -- the
+transient the plan's `peak <= 1.2 GB` guards. It is well under. `disk` is the
+on-disk index/corpus ratio from the table above. `resident` is the daemon's
+steady-state RSS with the index mmap'd (only touched pages resident); that
+needs a running daemon measured, not a build -- the next measurement.
+
+Command:
+
+    python scripts/mem-peak.py -- target/release/examples/name_bench.exe 5000000
+    # peak_rss_bytes=689930240 peak_rss_mib=658.0 exit=0
