@@ -12,6 +12,21 @@
 //! `--csv` puts a machine-readable table on stdout and the human summary on
 //! stderr, so a gate can diff a baseline without parsing prose:
 //! `cargo run --release -p engine --example name_bench 1000000 --csv > base.csv`.
+//!
+//! `--save-index <file> --root <dir>` turns the run into the artifact the
+//! daemon's resident measurement needs (`benchmark/baseline-names.md`): the
+//! synthetic index is persisted through `name_core::persist` -- sidecar
+//! included, so `searchd` will trust it -- and the run stops there, before
+//! the query rows and the walk fixture. The fixture writes one file per
+//! corpus entry, and a resident run must not put a corpus on disk. The
+//! stamp says the index was built for `--root` (default `.`); hand `searchd`
+//! the same `--root` and `--index <file>` and it mmaps the blob back
+//! instead of rebuilding.
+//!
+//! `--no-walk` drops the walk row, and with it the fixture tree the walk
+//! measures (one file per corpus entry -- 5M files at plan scale). Query
+//! rows are in-memory and unaffected, so a query-only comparison runs
+//! without materializing a corpus.
 
 use std::time::Instant;
 
@@ -19,6 +34,7 @@ use discovery::walk::Listing;
 use name_core::live::Live;
 use name_core::name_index::Index;
 use name_core::name_query::{Query, Searcher};
+use name_core::persist;
 
 /// Deterministic corpus: `n` files spread over `dirs` directories, plus a
 /// few directories-of-directories so the DFS layout is not flat. Names mix
@@ -147,15 +163,34 @@ fn print_csv(rows: &[Row]) {
 fn main() {
     let mut csv = false;
     let mut n = 200_000usize;
-    for a in std::env::args().skip(1) {
-        match a.as_str() {
+    let mut save_index: Option<std::path::PathBuf> = None;
+    let mut root = std::path::PathBuf::from(".");
+    let mut no_walk = false;
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
             "--csv" => csv = true,
+            "--no-walk" => no_walk = true,
+            "--save-index" | "--root" => {
+                let flag = args[i].clone();
+                i += 1;
+                let Some(v) = args.get(i) else {
+                    eprintln!("name_bench: {flag} needs a value");
+                    std::process::exit(2);
+                };
+                match flag.as_str() {
+                    "--save-index" => save_index = Some(std::path::PathBuf::from(v)),
+                    _ => root = std::path::PathBuf::from(v),
+                }
+            }
             s => {
                 if let Ok(v) = s.parse() {
                     n = v;
                 }
             }
         }
+        i += 1;
     }
     let dirs = (n / 200).clamp(8, 2000);
     let rounds = 30;
@@ -165,6 +200,25 @@ fn main() {
     let t0 = Instant::now();
     let idx = Index::build(listings, 0, 1_700_000_000, b"/");
     let build_ms = t0.elapsed().as_secs_f64() * 1e3;
+    if let Some(path) = &save_index {
+        // Persist before `Live::new(idx)` below consumes the index: `save`
+        // borrows it, `Live::new` takes it by value. The borrow ends this
+        // branch either way -- generator mode stops here, because the rest of
+        // the run would write the walk fixture's n files (see the header).
+        match persist::save(&idx, &root, path) {
+            Ok(saved) => eprintln!(
+                "name_bench: saved {} ({} entries) for root {}",
+                saved.index.display(),
+                idx.n,
+                root.display()
+            ),
+            Err(e) => {
+                eprintln!("name_bench: cannot save {}: {e}", path.display());
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     let live = Live::new(idx);
     let searcher = Searcher { live: &live };
 
@@ -262,38 +316,40 @@ fn main() {
     }
 
     // --- walk: a generated temp tree, entries/s ---
-    let tmp = std::env::temp_dir().join("rgy_bench_walk");
-    let _ = std::fs::remove_dir_all(&tmp);
-    for d in 0..dirs {
-        let dir = tmp.join(format!("d{d:04}"));
-        std::fs::create_dir_all(&dir).unwrap();
-        for i in 0..per_files(n, dirs) {
-            std::fs::write(dir.join(format!("f{i:05}.dat")), b"x").unwrap();
+    if !no_walk {
+        let tmp = std::env::temp_dir().join("rgy_bench_walk");
+        let _ = std::fs::remove_dir_all(&tmp);
+        for d in 0..dirs {
+            let dir = tmp.join(format!("d{d:04}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            for i in 0..per_files(n, dirs) {
+                std::fs::write(dir.join(format!("f{i:05}.dat")), b"x").unwrap();
+            }
         }
+        let t = Instant::now();
+        let ls = discovery::walk::scan(tmp.to_string_lossy().as_bytes(), 4);
+        let elapsed = t.elapsed().as_secs_f64();
+        let entries: usize = ls.iter().map(|l| l.ents.len()).sum();
+        eprintln!(
+            "walk: {entries} entries in {elapsed:.3} s ({:.0} entries/s)",
+            entries as f64 / elapsed
+        );
+        rows.push(Row {
+            kind: "walk",
+            query: String::new(),
+            hits: 0,
+            min: 0.0,
+            med: 0.0,
+            p90: 0.0,
+            entries,
+            elapsed_s: elapsed,
+            corpus: n,
+            dirs,
+            build_ms,
+            plan: String::new(),
+        });
+        let _ = std::fs::remove_dir_all(&tmp);
     }
-    let t = Instant::now();
-    let ls = discovery::walk::scan(tmp.to_string_lossy().as_bytes(), 4);
-    let elapsed = t.elapsed().as_secs_f64();
-    let entries: usize = ls.iter().map(|l| l.ents.len()).sum();
-    eprintln!(
-        "walk: {entries} entries in {elapsed:.3} s ({:.0} entries/s)",
-        entries as f64 / elapsed
-    );
-    rows.push(Row {
-        kind: "walk",
-        query: String::new(),
-        hits: 0,
-        min: 0.0,
-        med: 0.0,
-        p90: 0.0,
-        entries,
-        elapsed_s: elapsed,
-        corpus: n,
-        dirs,
-        build_ms,
-        plan: String::new(),
-    });
-    let _ = std::fs::remove_dir_all(&tmp);
 
     if csv {
         print_csv(&rows);
