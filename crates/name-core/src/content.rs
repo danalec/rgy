@@ -3523,6 +3523,48 @@ fn open_sized(path: &[u8]) -> Option<(std::fs::File, u64)> {
     m.is_file().then_some((f, m.len()))
 }
 
+/// P0.1 acceptance (`docs/freebsd-support.md`): a FIFO under the scan root
+/// must not hang `open()`. `O_NONBLOCK` turns the hang into `ENXIO` when no
+/// writer exists, so `open_sized` answers `None` — promptly. A regression to
+/// the zero-flags arm turns this test into a hang instead of a failure.
+///
+/// Runs wherever the flag arm is active (linux/macos/freebsd); on the
+/// unverified BSDs the arm is deliberately zero, so the test stays out.
+#[cfg(test)]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
+mod open_flags_tests {
+    use super::open_sized;
+    use std::os::unix::ffi::OsStrExt;
+
+    // mkfifo(3), declared rather than pulled from libc — name-core carries
+    // no libc dependency. mode_t is u32 on Linux and u16 on FreeBSD, so the
+    // declaration follows the platform instead of one shape for all.
+    #[cfg(not(target_os = "freebsd"))]
+    unsafe extern "C" {
+        fn mkfifo(path: *const std::ffi::c_char, mode: u32) -> i32;
+    }
+    #[cfg(target_os = "freebsd")]
+    unsafe extern "C" {
+        fn mkfifo(path: *const std::ffi::c_char, mode: u16) -> i32;
+    }
+
+    #[test]
+    fn a_fifo_does_not_hang_open() {
+        let dir = std::env::temp_dir().join(format!("rgy_fifo_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let p = dir.join("pipe");
+        let c = std::ffi::CString::new(p.as_os_str().as_bytes()).unwrap();
+        let r = unsafe { mkfifo(c.as_ptr(), 0o600) };
+        assert_eq!(r, 0, "mkfifo must succeed");
+        // No writer exists: ENXIO — not a block — is the pass condition.
+        assert!(
+            open_sized(c.as_bytes()).is_none(),
+            "a writerless FIFO must answer None, not hang or claim a size"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 /// `open_regular` for a file about to be indexed, telling the kernel to
 /// start reading it now (as much as indexing reads).
 fn open_ahead(path: &[u8]) -> Option<std::fs::File> {
