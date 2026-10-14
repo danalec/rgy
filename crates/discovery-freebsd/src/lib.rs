@@ -98,9 +98,9 @@ mod tests {
         let want = normalize(&scan_sequential(&root));
         assert!(!want.is_empty(), "fixture produced no blocks");
         assert_eq!(
-            want.keys().filter(|k| !k.is_empty()).count(),
+            want.len(),
             4,
-            "fixture must exercise four subdirectories"
+            "fixture must exercise the root plus three subdirectories"
         );
         let got = normalize(&scan(&dir));
         assert_eq!(want, got, "the getdirentries reader diverged from the oracle");
