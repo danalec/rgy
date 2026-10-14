@@ -128,11 +128,11 @@ there is nothing to select it.
 (`parallel_walk_matches_sequential_oracle`) runs against the FreeBSD reader
 and matches `scan_sequential` output.
 
-*Status*: ✅ landed — `crates/discovery-freebsd` (`getdirentries`, row
-offsets from `offset_of!(libc::dirent, …)`, names NUL-scanned inside the
-`d_reclen` stride), selected by `source_for`. The differential ships with
-it (`freebsd_reader_matches_sequential_oracle`); the run is the phase-4
-kernel.
+*Status*: ✅ landed and verified — `crates/discovery-freebsd`
+(`getdirentries`, row offsets from `offset_of!(libc::dirent, …)`, names
+NUL-scanned inside the `d_reclen` stride), selected by `source_for`. The
+differential ships with it (`freebsd_reader_matches_sequential_oracle`) and
+is green on the phase-4 kernel — see the verification record in §4.
 
 ### P2 — process and hygiene
 
@@ -150,7 +150,7 @@ This gates P1.2. It is cheap: one `pub fn source_for(root, threads)` and a
 threads)` with the per-platform `cfg` chain and the portable fallback,
 wired into `searchctl` and `searchd`. Its differential test asserts which
 backend answered before comparing against `scan_sequential` (green on
-Windows and Linux).
+Windows, Linux and FreeBSD).
 
 **P2.2 CI.** There is no `.github/workflows` at all, so this is greenfield.
 FreeBSD options, in the order I would try them:
@@ -162,6 +162,13 @@ FreeBSD options, in the order I would try them:
    The precedent matters here: the Linux run is recorded in the history as
    "two silent failures found", which a cross-check alone would not have
    caught.
+
+*Status*: ✅ landed — `.github/workflows/ci.yml` carries both layers: the
+floor (`cargo check --target x86_64-unknown-freebsd`, no VM needed) on
+every push, and the bar (full suite in a `vmactions/freebsd-vm` 15.1 VM)
+wherever a Docker-capable runner exists — a forgejo `act_runner` or a
+mirror. The recorded local-VM run below is the evidence that the bar is
+reachable; the workflow keeps it from being a one-off.
 
 **P2.3 Real-kernel run.** Plan a full `cargo test --workspace` on actual
 FreeBSD before calling this done — `cargo build --workspace` first: the e2e
@@ -184,6 +191,16 @@ need a real socket path and the FIFO test needs a real FIFO.
 
 Phases 0–2 are small and independent; 3 follows the dispatch decision in §5
 (wire the seam), now made. 4 is what turns "it compiles" into "it works".
+
+**Verification record (2026-10-14).** FreeBSD 15.1-RELEASE
+(`releng/15.1-n283562-96841ea08dcf`, GENERIC amd64) in a local QEMU/WHPX
+VM: `cargo build --workspace`, then `cargo test --workspace
+--no-fail-fast` — **56 suites green, 0 failed**. `discovery-freebsd` 3/3
+including `freebsd_reader_matches_sequential_oracle` (the `getdirentries`
+reader matches `scan_sequential` on the real kernel); `discovery-dispatch`
+2/2 with `source_for` picking the FreeBSD backend; `name-core` 107/107
+(`a_fifo_does_not_hang_open`, `blob_from_file_maps_a_non_empty_file`);
+e2e 25/25; `serve` 9/9; `rgx-core` 638/638; `zen-rs` 4/4.
 
 ---
 

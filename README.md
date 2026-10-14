@@ -113,7 +113,7 @@ verification on machines this host does not have.
 | Windows backend (MFT + USN, RE-audit fixes) | `crates/discovery-windows` | ✅ `MftSource` / `UsnWatch` |
 | Linux backend (getdents64 + inotify) | `crates/discovery-linux` | ✅ suite green on a real kernel |
 | macOS backend (getattrlistbulk + FSEvents) | `crates/discovery-macos` | ⬜ transported, unverified — needs a real Mac |
-| FreeBSD backend (getdirentries + `d_type`) | `crates/discovery-freebsd` | ⬜ reader's differential needs a real FreeBSD kernel (plan phase 4) |
+| FreeBSD backend (getdirentries + `d_type`) | `crates/discovery-freebsd` | ✅ suite green on a FreeBSD 15.1 kernel (2026-10-14) |
 
 > **The platform walks are selected, not stranded.** `source_for(root,
 > threads)` picks the native backend per platform — the MFT walk when the
@@ -122,8 +122,8 @@ verification on machines this host does not have.
 > everywhere else and whenever a native backend refuses. The pick is a speed
 > decision, never a semantics one: each backend is held against
 > `scan_sequential` by the dispatch's differential test. What remains
-> unverified is per-backend — macOS (needs a real Mac) and the FreeBSD
-> reader (needs a real FreeBSD kernel: `docs/freebsd-support.md` phase 4).
+> unverified is macOS (needs a real Mac); the FreeBSD reader is verified
+> against a FreeBSD 15.1 kernel (2026-10-14, `docs/freebsd-support.md` §4).
 
 ### Content
 
