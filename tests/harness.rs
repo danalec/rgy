@@ -56,8 +56,10 @@ fn assert_up_to_date(name: &str, exe: &Path) {
             built >= newest,
             "{name} at {} is older than its sources (newest source modified {:?}). \
              The e2e harness resolves bins by path, so `cargo test -p rgy-e2e-tests` \
-             does not rebuild them — build first (`cargo build -p {name}` or \
-             `cargo test --workspace`), or this run would test stale code.",
+             does not rebuild them - build first (`cargo build --workspace`), or \
+             this run would test stale code. (`cargo test --workspace` alone is \
+             not a build-first: on a clean tree the e2e tests race the rest of \
+             the workspace and spawn nothing.)",
             exe.display(),
             newest
         );

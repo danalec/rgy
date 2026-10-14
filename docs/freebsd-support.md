@@ -155,8 +155,10 @@ FreeBSD options, in the order I would try them:
    caught.
 
 **P2.3 Real-kernel run.** Plan a full `cargo test --workspace` on actual
-FreeBSD before calling this done. The e2e harness resolves bins by path and
-has a staleness guard; that machinery is portable, but the pipe/UDS tests
+FreeBSD before calling this done — `cargo build --workspace` first: the e2e
+harness resolves bins by path, so on a clean tree the e2e tests race the
+rest of the workspace build and spawn nothing (they fail loudly, at
+`tests/harness.rs`). That machinery is portable, but the pipe/UDS tests
 need a real socket path and the FIFO test needs a real FIFO.
 
 ---
