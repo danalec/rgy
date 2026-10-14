@@ -121,7 +121,7 @@ build), measured with `scripts/mem-peak.py` on Windows x64:
 |---|---|---|---|
 | peak RSS (build) | <= 1.2 GB | **658 MiB** (689,930,240 B) | under goal |
 | disk / corpus | <= 2.5x | 2.5x (table above) | at goal |
-| resident (daemon, mmap) | <= 64 MB | baseline 11.4 MiB (4 entries); @5M TODO | approach validated |
+| resident (daemon, mmap) | <= 64 MB | 11.6 MiB @ 698 entries (crates/, existing files) = daemon baseline | approach validated |
 
 The peak is the high-water mark of the synthetic 5M name-index build -- the
 transient the plan's `peak <= 1.2 GB` guards. It is well under. `disk` is the
