@@ -67,21 +67,36 @@ def peak_rss_bytes(pid: int) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--quiet", action="store_true", help="only print the peak line")
+    ap.add_argument(
+        "--hold-seconds",
+        type=float,
+        default=0.0,
+        help="daemon mode: run for N seconds, then kill it and report the last "
+        "RSS (the steady state) as well as the peak. 0 = run to completion.",
+    )
     ap.add_argument("cmd", nargs=argparse.REMAINDER, help="command to run")
     args = ap.parse_args()
     cmd = args.cmd[1:] if args.cmd[:1] == ["--"] else args.cmd
     if not cmd:
         ap.error("no command given (use: mem-peak.py -- <command...>)")
 
+    import time
+
     proc = subprocess.Popen(cmd)
     peak = 0
+    last = 0
+    start = time.monotonic()
     # Sample while it runs: the process may exit before we can query it once.
     try:
         while proc.poll() is None:
-            peak = max(peak, peak_rss_bytes(proc.pid))
+            now = peak_rss_bytes(proc.pid)
+            peak = max(peak, now)
+            last = now or last
+            if args.hold_seconds > 0 and time.monotonic() - start >= args.hold_seconds:
+                proc.kill()
+                break
             # Windows peak working set is monotone; Linux VmHWM too. Sleep
             # just enough to not spin; 50 ms is well under a build's phases.
-            import time
             time.sleep(0.05)
     except KeyboardInterrupt:
         proc.kill()
@@ -96,7 +111,8 @@ def main() -> int:
         except (ImportError, ValueError):
             pass
 
-    print(f"peak_rss_bytes={peak} peak_rss_mib={peak / (1 << 20):.1f} exit={code}")
+    steady = f" resident_rss_mib={last / (1 << 20):.1f}" if args.hold_seconds > 0 else ""
+    print(f"peak_rss_bytes={peak} peak_rss_mib={peak / (1 << 20):.1f}{steady} exit={code}")
     return code
 
 
