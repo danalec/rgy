@@ -656,11 +656,16 @@ mod tests {
         // A path inside a directory that does not exist: the create of the temp
         // file fails, so nothing should be left behind and the error must
         // surface rather than panic.
-        let path = format!(
-            "{}\\no-such-dir-{}\\out.eri",
-            std::env::temp_dir().display(),
-            std::process::id()
-        );
+        //
+        // Built with real separators. The Windows spelling (`\` joins) made
+        // this one file *name* at the temp root on Unix, where the test only
+        // passed because an unprivileged user cannot create files at `/` —
+        // run as root (a VM suite) the write succeeds and the assertion is
+        // about permissions the test never meant to use.
+        let path = std::env::temp_dir()
+            .join(format!("no-such-dir-{}", std::process::id()))
+            .join("out.eri");
+        let path = path.to_str().expect("temp path is utf8").to_owned();
 
         let err = write_index_atomically(&sample_index(), &path)
             .expect_err("writing into a missing directory must fail");
