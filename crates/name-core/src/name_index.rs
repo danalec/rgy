@@ -1068,6 +1068,27 @@ mod blob_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// P1.1 acceptance (`docs/freebsd-support.md`): a non-empty file must
+    /// arrive as `Blob::Mapped`, so a regression to the owned fallback is
+    /// visible here instead of silently costing the whole blob in RSS. On
+    /// FreeBSD this exercises `memmap2/platform/freebsd.rs`; on Linux and
+    /// macOS it holds the same promise over their own arms.
+    #[test]
+    #[cfg(unix)]
+    fn blob_from_file_maps_a_non_empty_file() {
+        let dir = std::env::temp_dir().join(format!("rgy_blobmap_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let p = dir.join("m.bin");
+        std::fs::write(&p, vec![7u8; 4096]).unwrap();
+        let f = std::fs::File::open(&p).unwrap();
+        let b = Blob::from_file(&f).unwrap();
+        assert!(
+            matches!(b, Blob::Mapped(_)),
+            "a non-empty file must map on unix; got Owned — the fallback won"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn index_save_load_round_trips_through_blob() {
         // Build -> freeze -> save -> load exercises both Blob arms: the

@@ -2,7 +2,7 @@
 
 use std::fs::File;
 use std::io;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
 use std::mem;
 use std::ops::{Deref, DerefMut};
 use std::slice;
@@ -17,18 +17,23 @@ mod macos;
 #[cfg(target_os = "macos")]
 pub(crate) use self::macos::MmapInner;
 
+#[cfg(target_os = "freebsd")]
+mod freebsd;
+#[cfg(target_os = "freebsd")]
+pub(crate) use self::freebsd::MmapInner;
+
 #[cfg(target_os = "windows")]
 mod windows;
 #[cfg(target_os = "windows")]
 pub(crate) use self::windows::MmapInner;
 
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd", target_os = "windows")))]
 mod fallback;
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd", target_os = "windows")))]
 pub(crate) use self::fallback::MmapInner;
 
 pub(crate) fn page_size() -> usize {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
     {
         let p = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
         if p > 0 {
@@ -65,7 +70,7 @@ pub(crate) fn page_size() -> usize {
             info.dw_page_size as usize
         })
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd", target_os = "windows")))]
     {
         4096
     }
@@ -76,7 +81,7 @@ pub(crate) fn file_len(file: &File) -> io::Result<u64> {
 }
 
 pub(crate) fn file_len_for_desc(desc: &MmapRawDescriptor) -> io::Result<u64> {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
     {
         let mut stat: libc::stat = unsafe { mem::zeroed() };
         let r = unsafe { libc::fstat(desc.0, &mut stat) };
@@ -97,7 +102,7 @@ pub(crate) fn file_len_for_desc(desc: &MmapRawDescriptor) -> io::Result<u64> {
             Ok(size as u64)
         }
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd", target_os = "windows")))]
     {
         let _ = desc;
         Err(io::Error::new(
@@ -118,7 +123,7 @@ pub(crate) fn map(
     offset: u64,
     populate: bool,
 ) -> io::Result<MmapInner> {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
     {
         MmapInner::map(len, desc.0, offset, populate)
     }
@@ -126,7 +131,7 @@ pub(crate) fn map(
     {
         MmapInner::map(len, desc.0, offset, populate)
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd", target_os = "windows")))]
     {
         let _ = (desc, len, offset, populate);
         Err(io::Error::new(
@@ -142,7 +147,7 @@ pub(crate) fn map_exec(
     offset: u64,
     populate: bool,
 ) -> io::Result<MmapInner> {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
     {
         MmapInner::map_exec(len, desc.0, offset, populate)
     }
@@ -150,7 +155,7 @@ pub(crate) fn map_exec(
     {
         MmapInner::map_exec(len, desc.0, offset, populate)
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd", target_os = "windows")))]
     {
         let _ = (desc, len, offset, populate);
         Err(io::Error::new(
@@ -166,7 +171,7 @@ pub(crate) fn map_mut(
     offset: u64,
     populate: bool,
 ) -> io::Result<MmapInner> {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
     {
         MmapInner::map_mut(len, desc.0, offset, populate)
     }
@@ -174,7 +179,7 @@ pub(crate) fn map_mut(
     {
         MmapInner::map_mut(len, desc.0, offset, populate)
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd", target_os = "windows")))]
     {
         let _ = (desc, len, offset, populate);
         Err(io::Error::new(
@@ -190,7 +195,7 @@ pub(crate) fn map_copy(
     offset: u64,
     populate: bool,
 ) -> io::Result<MmapInner> {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
     {
         MmapInner::map_copy(len, desc.0, offset, populate)
     }
@@ -198,7 +203,7 @@ pub(crate) fn map_copy(
     {
         MmapInner::map_copy(len, desc.0, offset, populate)
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd", target_os = "windows")))]
     {
         let _ = (desc, len, offset, populate);
         Err(io::Error::new(
@@ -214,7 +219,7 @@ pub(crate) fn map_copy_read_only(
     offset: u64,
     populate: bool,
 ) -> io::Result<MmapInner> {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
     {
         MmapInner::map_copy_read_only(len, desc.0, offset, populate)
     }
@@ -222,7 +227,7 @@ pub(crate) fn map_copy_read_only(
     {
         MmapInner::map_copy_read_only(len, desc.0, offset, populate)
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd", target_os = "windows")))]
     {
         let _ = (desc, len, offset, populate);
         Err(io::Error::new(
@@ -236,44 +241,25 @@ pub(crate) fn map_anon(len: usize, stack: bool, populate: bool) -> io::Result<Mm
     MmapInner::map_anon(len, stack, populate)
 }
 
-#[cfg(target_os = "linux")]
-pub struct MmapRawDescriptor(pub std::os::unix::io::RawFd);
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
 pub struct MmapRawDescriptor(pub std::os::unix::io::RawFd);
 #[cfg(target_os = "windows")]
 pub struct MmapRawDescriptor(pub std::os::windows::io::RawHandle);
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd", target_os = "windows")))]
 pub struct MmapRawDescriptor<'a>(pub &'a File);
 
 pub trait MmapAsRawDesc {
     fn as_raw_desc(&self) -> MmapRawDescriptor;
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
 impl MmapAsRawDesc for std::os::unix::io::RawFd {
     fn as_raw_desc(&self) -> MmapRawDescriptor {
         MmapRawDescriptor(*self)
     }
 }
 
-#[cfg(target_os = "linux")]
-impl<'a, T> MmapAsRawDesc for &'a T
-where
-    T: std::os::unix::io::AsRawFd,
-{
-    fn as_raw_desc(&self) -> MmapRawDescriptor {
-        MmapRawDescriptor(self.as_raw_fd())
-    }
-}
-
-#[cfg(target_os = "macos")]
-impl MmapAsRawDesc for std::os::unix::io::RawFd {
-    fn as_raw_desc(&self) -> MmapRawDescriptor {
-        MmapRawDescriptor(*self)
-    }
-}
-
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
 impl<'a, T> MmapAsRawDesc for &'a T
 where
     T: std::os::unix::io::AsRawFd,
@@ -300,7 +286,7 @@ where
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd", target_os = "windows")))]
 impl<'a> MmapAsRawDesc for &'a File {
     fn as_raw_desc(&self) -> MmapRawDescriptor {
         MmapRawDescriptor(self)
