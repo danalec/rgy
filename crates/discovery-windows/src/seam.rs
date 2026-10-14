@@ -24,7 +24,7 @@ impl MftSource<'_> {
     pub fn new<'a>(indexer: Indexer<'a>) -> MftSource<'a> {
         MftSource {
             indexer,
-            root_frn: name_core::index::ROOT_FRN,
+            root_frn: crate::ntfs::ROOT_FRN,
         }
     }
 }

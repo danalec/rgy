@@ -126,7 +126,7 @@ the sibling C port do not break while the dust settles.
   `type:` + warning, `re:` path regex via rgx-core (not the vendored copy —
   see §4.4).
 - Persistence: ERI evolves to **v3** (names blob + rows + masks + bitmaps +
-  meta + event_id, mmap-loadable in ≤ 50 ms @ 5M). Keep the ERI2 reader.
+  meta + event_id, mmap-loadable in ≤ 50 ms @ 5M) -- the one on-disk index.
   zen-rs's atomic-replace save trap (`MoveFileExA`) and fsearch's
   single-owner lock discipline both survive.
 
@@ -448,7 +448,7 @@ degraded (documented limit) · **G** gap (work required, see §6.5) · **—** N
   zen-rs + RE-AUDIT fixes).
 - **Merge-specific:** query-semantic diff table (old zen-rs query →
   new unified query → same result sets on a fixture volume image);
-  name-cache extension property tests; ERI v2→v3 migration round-trips;
+  name-cache extension property tests;
   protocol golden files (`proto` request → reply) for daemon/stdio/`--serve`.
 - **Privileged/integration (opt-in):** real-volume A/B (`ERS_USE_RECORDS`),
   USN/FSEvents/inotify replay, two-process daemon handoff, keep-warm

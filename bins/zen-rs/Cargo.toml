@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 name-core = { path = "../../crates/name-core" }
+discovery = { path = "../../crates/discovery" }
 discovery-windows = { path = "../../crates/discovery-windows" }
 search-ui = { path = "../search-ui" }
 # One allocator story (plan 4.4/4.10): mimalloc for the general heap, the

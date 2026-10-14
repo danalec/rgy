@@ -12,7 +12,6 @@ under the Apache License 2.0 only:
     bins/zen-rs/                        the zen CLI (NTFS indexer)
     bins/search-ui/                     the terminal UI
     crates/discovery-windows/           MFT + USN discovery (ntfs, volume, indexer, seam)
-    crates/name-core/src/index.rs       the ERI2 on-disk index and its query layer
 
 Every source file in those trees carries `SPDX-License-Identifier: Apache-2.0`,
 and the three crate manifests state `license = "Apache-2.0"`.
@@ -52,7 +51,7 @@ Consequence for the distributed binaries
 distributing either binary is governed by Apache-2.0. `searchd` links the
 Tesla Valve pack store by default (`--tv-dir`), so distributing it likewise
 distributes Apache-2.0 code and Apache-2.0 governs that distribution. The
-same applies to any binary that includes `discovery-windows` or
-`name_core::index`. A binary built from only the dual-licensed remainder
+same applies to any binary that includes `discovery-windows`. A binary
+built from only the dual-licensed remainder
 (for example `searchctl` without the TV store) is available under MIT or
 Apache-2.0 as above.

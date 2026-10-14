@@ -3,8 +3,8 @@
 //! MFT walk and USN tailing: the two ways this indexer learns about files.
 
 use crate::ntfs;
+use crate::ntfs::ROOT_FRN;
 use crate::volume::{Volume, VolumeError};
-use name_core::index::{Index, NodeKind, PathResolver, ROOT_FRN, volume_key};
 
 /// Maximum number of $MFT records to read. Real volumes sit far below this;
 /// the bound exists only so a corrupt volume cannot spin forever.
@@ -132,9 +132,6 @@ pub struct IndexStats {
     pub names_seen: u64,
     pub files: u64,
     pub directories: u64,
-    pub resolved_paths: usize,
-    pub orphan_edges: usize,
-    pub cycle_edges: usize,
     /// Records (or sibling overflow records) the volume refused to return.
     /// Counted rather than fatal: the volume is live and records move.
     pub read_errors: u64,
@@ -149,113 +146,39 @@ pub struct Indexer<'a> {
     ordinal: u16,
 }
 
-/// What one `tail_usn` pass learned.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct TailOutcome {
-    pub applied: usize,
-    pub next_start_usn: i64,
-    /// Identity and window of the journal the read went against, as reported
-    /// by `FSCTL_QUERY_USN_JOURNAL`. Surfaced so a resume point that refuses to
-    /// advance can be told apart from a query that returned nothing.
-    pub journal_id: u64,
-    pub journal_lowest_valid_usn: i64,
-    pub journal_next_usn: i64,
-    /// The journal's identity changed since the caller last looked: it was
-    /// deleted and recreated, so the old USN describes a different journal.
-    pub journal_id_changed: bool,
-    /// A record carried `USN_REASON_JOURNAL_DELETE`, meaning the journal
-    /// wrapped past the reader's position and history in between is gone.
-    pub journal_wrapped: bool,
-    /// The requested USN sat outside the journal's live window and was moved
-    /// to `lowest_valid_usn` rather than read from a recycled hole.
-    pub start_usn_was_stale: bool,
-}
-
 impl<'a> Indexer<'a> {
     pub fn new(volume: &'a Volume, ordinal: u16) -> Self {
         Indexer { volume, ordinal }
     }
 
-    /// Walk the MFT and build a complete path index.
-    ///
-    /// Attempts fast extent streaming by reading MFT cluster runs directly.
-    /// If direct streaming is unavailable or yields no entries, falls back to
-    /// sequential record-by-record `FSCTL_GET_NTFS_FILE_RECORD` calls.
-    ///
-    /// Writes into the caller's `index` rather than building its own, so a
-    /// multi-volume scan can accumulate several volumes into one index. Each
-    /// volume seeds its own root with its ordinal, which is what keeps the
-    /// second volume's records from resolving against the first volume's prefix.
-    pub fn scan_all(
-        &self,
-        index: &mut Index,
-        progress: &mut dyn FnMut(u64, u64, u64),
-    ) -> Result<IndexStats, VolumeError> {
-        let mut stats = IndexStats::default();
-        let mut resolver = PathResolver::new();
-        let mut rows = Vec::new();
-
-        index.add_root(self.ordinal, &self.volume.root);
-        let limit = self.volume.record_count.clamp(1, MAX_RECORDS);
-
-        // The extent-streaming path is the default: it derives each record's
-        // FRN from its offset in the `$MFT` data stream (`stream_offset /
-        // record_size`) and reads whole extents instead of one FSCTL per
-        // record. On E:\ the two paths were verified to agree exactly —
-        // 1,008,640 records read, 326,162 in use, 322,421 resolved, 0 orphans,
-        // 0 read errors on both — so the faster one carries the default. The
-        // per-record path remains the reference and fallback: it asks for
-        // record N by number, so its FRN cannot drift even on a volume whose
-        // run list cannot be decoded. `ERS_USE_RECORDS=1` forces it.
-        let streamed = std::env::var_os("ERS_USE_RECORDS").is_none()
-            && match self.volume.read_mft_data_runs() {
-                Ok(runs) => self
-                    .scan_via_runs(&runs, limit, &mut resolver, &mut stats, progress, &mut rows)
-                    .is_ok(),
-                Err(_) => false,
-            };
-
-        // Fallback to sequential record-by-record scan if streaming didn't succeed
-        if !streamed {
-            stats = IndexStats::default();
-            resolver = PathResolver::new();
-            rows.clear();
-            self.scan_via_records(limit, &mut resolver, &mut stats, progress, &mut rows)?;
-        }
-
-        let resolve_stats = resolver.resolve_into(index);
-        stats.resolved_paths = resolve_stats.resolved;
-        stats.orphan_edges = resolve_stats.orphans;
-        stats.cycle_edges = resolve_stats.cycles;
-
-        Ok(stats)
-    }
-
     /// Walk the MFT and collect every indexed name as a [`NameRow`] — the
-    /// `discovery::Source` feed for the name index v2 (grouped into DFS
-    /// [`discovery::walk::Listing`]s by [`listings_from_rows`]). Same traps
-    /// and both scan paths as [`Self::scan_all`]; the rows come out beside
-    /// the PathResolver writes the old index still consumes.
+    /// `discovery::Source` feed for the name index (grouped into DFS
+    /// [`discovery::walk::Listing`]s by [`listings_from_rows`]).
+    ///
+    /// Attempts fast extent streaming by reading MFT cluster runs directly
+    /// and falls back to sequential record-by-record
+    /// `FSCTL_GET_NTFS_FILE_RECORD` calls (`ERS_USE_RECORDS=1` forces the
+    /// fallback). Both paths and the name rules are documented on
+    /// [`Self::scan_via_runs`] and [`Self::ingest_record`].
     pub fn scan_rows(
         &self,
         progress: &mut dyn FnMut(u64, u64, u64),
     ) -> Result<(Vec<NameRow>, IndexStats), VolumeError> {
         let mut stats = IndexStats::default();
-        let mut resolver = PathResolver::new();
         let mut rows = Vec::new();
         let limit = self.volume.record_count.clamp(1, MAX_RECORDS);
 
         let streamed = std::env::var_os("ERS_USE_RECORDS").is_none()
             && match self.volume.read_mft_data_runs() {
                 Ok(runs) => self
-                    .scan_via_runs(&runs, limit, &mut resolver, &mut stats, progress, &mut rows)
+                    .scan_via_runs(&runs, limit, &mut stats, progress, &mut rows)
                     .is_ok(),
                 Err(_) => false,
             };
         if !streamed {
             stats = IndexStats::default();
             rows.clear();
-            self.scan_via_records(limit, &mut resolver, &mut stats, progress, &mut rows)?;
+            self.scan_via_records(limit, &mut stats, progress, &mut rows)?;
         }
         Ok((rows, stats))
     }
@@ -267,8 +190,8 @@ impl<'a> Indexer<'a> {
     /// stream — `stream_offset / record_size` — not its position in the list of
     /// physical extents. Extents can be sparse, and record 0 only ever holds
     /// part of the run list, so counting records by walking the physical runs
-    /// assigns a wrong FRN to almost every record: `volume_key(ordinal, counter)`
-    /// then fails to match `volume_key(ordinal, parent_frn)` and every
+    /// assigns a wrong FRN to almost every record: the record's number then
+    /// fails to match its parent's and every
     /// non-top-level path resolves as an orphan. Sparse extents are skipped as
     /// unallocated stream space (records there are free), and a record that
     /// straddles a chunk or extent boundary is reassembled before its FRN is
@@ -277,7 +200,6 @@ impl<'a> Indexer<'a> {
         &self,
         runs: &[ntfs::MftRun],
         limit: u64,
-        resolver: &mut PathResolver,
         stats: &mut IndexStats,
         progress: &mut dyn FnMut(u64, u64, u64),
         rows: &mut Vec<NameRow>,
@@ -386,7 +308,7 @@ impl<'a> Indexer<'a> {
                         return Ok(());
                     }
                     if frn.is_multiple_of(10_000) {
-                        progress(frn, resolver.edge_count() as u64, limit);
+                        progress(frn, rows.len() as u64, limit);
                     }
                     stats.records_read += 1;
 
@@ -399,7 +321,7 @@ impl<'a> Indexer<'a> {
                         // here — same as the Zen bulk walk ("bad US
                         // %x != %x", FUN_1400d0820).
                         if ntfs::apply_fixups(&mut fixed) {
-                            self.ingest_record(&fixed, frn, resolver, stats, rows);
+                            self.ingest_record(&fixed, frn, stats, rows);
                         }
                     }
                     carry.clear();
@@ -426,7 +348,6 @@ impl<'a> Indexer<'a> {
     fn scan_via_records(
         &self,
         limit: u64,
-        resolver: &mut PathResolver,
         stats: &mut IndexStats,
         progress: &mut dyn FnMut(u64, u64, u64),
         rows: &mut Vec<NameRow>,
@@ -442,7 +363,7 @@ impl<'a> Indexer<'a> {
         // unscanned tail.
         while frn < limit {
             if frn.is_multiple_of(10_000) {
-                progress(frn, resolver.edge_count() as u64, limit);
+                progress(frn, rows.len() as u64, limit);
             }
             stats.records_read += 1;
 
@@ -450,7 +371,7 @@ impl<'a> Indexer<'a> {
             // and move on. The volume is live and a record can be freed between
             // the MFT size query and this read.
             match self.volume.read_file_record(frn) {
-                Ok(Some(record)) => self.ingest_record(&record, frn, resolver, stats, rows),
+                Ok(Some(record)) => self.ingest_record(&record, frn, stats, rows),
                 Ok(None) => {}
                 Err(_) => stats.read_errors += 1,
             }
@@ -472,7 +393,6 @@ impl<'a> Indexer<'a> {
         &self,
         record: &[u8],
         frn: u64,
-        resolver: &mut PathResolver,
         stats: &mut IndexStats,
         rows: &mut Vec<NameRow>,
     ) {
@@ -498,13 +418,11 @@ impl<'a> Indexer<'a> {
         // same (base, parent, name) alias, same resolved path.
         let base_raw = ntfs::frn_number(hdr.base_frn);
         if base_raw != 0 && base_raw != ntfs::frn_number(frn) {
-            let base_key = volume_key(self.ordinal, base_raw);
             for n in ntfs::parse_file_names(record, frn) {
                 if !name_is_indexable(&n) {
                     continue;
                 }
                 stats.names_seen += 1;
-                resolver.add_alias(base_key, volume_key(self.ordinal, n.parent_frn), &n.name);
                 let link = n.is_reparse_point();
                 rows.push(NameRow {
                     frn: base_raw,
@@ -534,11 +452,6 @@ impl<'a> Indexer<'a> {
             return;
         }
 
-        let kind = if is_dir {
-            NodeKind::Directory
-        } else {
-            NodeKind::File
-        };
         if is_dir {
             stats.directories += 1;
         } else {
@@ -552,18 +465,6 @@ impl<'a> Indexer<'a> {
             stats.reparse_points += 1;
         }
 
-        // FRNs are only unique within a volume, so fold this volume's ordinal
-        // into the key before the index ever sees it.
-        let key = volume_key(self.ordinal, frn);
-        let parent_key = volume_key(self.ordinal, best.parent_frn);
-        resolver.add(
-            key,
-            parent_key,
-            &best.name,
-            kind,
-            best.file_size,
-            best.file_attributes,
-        );
         rows.push(NameRow {
             frn,
             parent_frn: ntfs::frn_number(best.parent_frn),
@@ -578,7 +479,6 @@ impl<'a> Indexer<'a> {
             if n.name == best.name && n.parent_frn == best.parent_frn {
                 continue;
             }
-            resolver.add_alias(key, volume_key(self.ordinal, n.parent_frn), &n.name);
             rows.push(NameRow {
                 frn,
                 parent_frn: ntfs::frn_number(n.parent_frn),
@@ -646,9 +546,8 @@ impl<'a> Indexer<'a> {
     /// one. `start_usn` is passed through as-is; the caller clamps it to the
     /// journal window first.
     /// Read whatever USN records are pending, without applying them — the
-    /// `discovery::Watch` feed (`UsnWatch`). Same request as
-    /// [`Self::tail_usn`] (all-ones ReasonMask, V4 max version) and the same
-    /// resume rule: the returned `next_usn` is the resume point even when no
+    /// `discovery::Watch` feed (`UsnWatch`). All-ones ReasonMask, V4 max
+    /// version. The returned `next_usn` is the resume point even when no
     /// records matched.
     pub fn read_usn_batch(
         &self,
@@ -695,74 +594,6 @@ impl<'a> Indexer<'a> {
         }
         *start_usn = next_start;
         Ok((records, wrapped))
-    }
-
-    pub fn tail_usn(
-        &self,
-        index: &mut Index,
-        start_usn: &mut i64,
-        known_journal_id: &mut u64,
-        max_records: usize,
-    ) -> Result<TailOutcome, VolumeError> {
-        let journal = self.volume.query_usn_journal()?;
-        let mut outcome = TailOutcome {
-            next_start_usn: *start_usn,
-            journal_id: journal.usn_journal_id,
-            journal_lowest_valid_usn: journal.lowest_valid_usn,
-            journal_next_usn: journal.next_usn,
-            ..TailOutcome::default()
-        };
-
-        if *known_journal_id != 0 && *known_journal_id != journal.usn_journal_id {
-            outcome.journal_id_changed = true;
-            // The old checkpoint names a journal that no longer exists. Resume
-            // from the oldest record this one still has, not from a dead USN.
-            *start_usn = journal.first_usn;
-        }
-        *known_journal_id = journal.usn_journal_id;
-
-        if !journal.covers(*start_usn) {
-            outcome.start_usn_was_stale = true;
-            *start_usn = journal.lowest_valid_usn;
-        }
-
-        let request = ntfs::ReadUsnJournalData {
-            start_usn: *start_usn,
-            // Zen's journal reader (FUN_1400cfe80) asks for every
-            // reason with an all-ones mask. Filtering happens per record in
-            // `Index::apply_usn` (create/delete/rename bits) — narrowing the
-            // *request* to PATH_RELEVANT | JOURNAL_DELETE hid non-path activity
-            // that still advanced the journal and made zero-record reads look
-            // like "nothing pending".
-            reason_mask: u32::MAX,
-            return_only_on_close: 0,
-            timeout: 0,
-            bytes_to_wait_for: 0,
-            usn_journal_id: journal.usn_journal_id,
-            min_major_version: 2,
-            // 4, not 3: modern Windows writes USN_RECORD_V4 and a request that
-            // caps at 3 gets no records back on a journal that only has V4s.
-            max_major_version: 4,
-        };
-
-        let (records, next_start) = self.volume.read_usn(&request)?;
-
-        for rec in records.iter().take(max_records) {
-            if rec.reason & ntfs::USN_REASON_JOURNAL_DELETE != 0 {
-                outcome.journal_wrapped = true;
-            }
-            if index.apply_usn(rec, self.ordinal) {
-                outcome.applied += 1;
-            }
-        }
-
-        // Unconditional: the output buffer's leading USN is the resume point
-        // even when no records matched — the journal still advanced. Deriving
-        // "stay put unless records arrived" re-reads the same window forever
-        // once the journal has moved past the filter.
-        *start_usn = next_start;
-        outcome.next_start_usn = *start_usn;
-        Ok(outcome)
     }
 }
 
@@ -833,25 +664,25 @@ mod tests {
         rec
     }
 
-    fn ingest_and_resolve(records: &[(u64, Vec<u8>)]) -> (Index, IndexStats) {
+    fn ingest_rows(records: &[(u64, Vec<u8>)]) -> (Vec<NameRow>, IndexStats) {
         let volume = crate::volume::Volume::dummy_for_tests();
         let indexer = Indexer::new(&volume, 0);
-        let mut resolver = PathResolver::new();
         let mut stats = IndexStats::default();
+        let mut rows = Vec::new();
         for (frn, rec) in records {
-            indexer.ingest_record(rec, *frn, &mut resolver, &mut stats, &mut Vec::new());
+            indexer.ingest_record(rec, *frn, &mut stats, &mut rows);
         }
-        let mut index = Index::new("C:\\");
-        resolver.resolve_into(&mut index);
-        (index, stats)
+        (rows, stats)
     }
 
     #[test]
     fn ingest_indexes_the_base_record() {
         let rec = build_record(0, ROOT_FRN, ntfs::NAMESPACE_WIN32, "hello.txt");
-        let (index, stats) = ingest_and_resolve(&[(42, rec)]);
-        assert!(index.contains(volume_key(0, 42)));
-        assert_eq!(index.path_of(volume_key(0, 42)), Some("C:\\hello.txt"));
+        let (rows, stats) = ingest_rows(&[(42, rec)]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].frn, 42);
+        assert_eq!(rows[0].parent_frn, ROOT_FRN);
+        assert_eq!(rows[0].name, b"hello.txt");
         assert_eq!(stats.files, 1);
         assert_eq!(stats.records_in_use, 1);
     }
@@ -865,14 +696,20 @@ mod tests {
         let base = build_record(0, ROOT_FRN, ntfs::NAMESPACE_WIN32, "long-name.dat");
         // Extension of FRN 42, holding an extra hard-link name.
         let ext = build_record(42, ROOT_FRN, ntfs::NAMESPACE_WIN32, "other-link.dat");
-        let (index, stats) = ingest_and_resolve(&[(42, base), (77, ext)]);
-        assert!(index.contains(volume_key(0, 42)));
+        let (rows, stats) = ingest_rows(&[(42, base), (77, ext)]);
         assert!(
-            !index.contains(volume_key(0, 77)),
-            "phantom extension entry"
+            rows.iter().all(|r| r.frn == 42),
+            "phantom extension entry: {rows:?}"
         );
-        assert_eq!(index.path_of(volume_key(0, 42)), Some("C:\\long-name.dat"));
-        assert_eq!(index.alias_count(), 1);
+        assert_eq!(
+            rows.len(),
+            2,
+            "the extension name is a second name of the base"
+        );
+        let mut names: Vec<_> = rows.iter().map(|r| r.name.clone()).collect();
+        names.sort();
+        assert_eq!(names[0], b"long-name.dat".to_vec());
+        assert_eq!(names[1], b"other-link.dat".to_vec());
         assert_eq!(stats.files, 1, "the extension is not a second file");
     }
 
@@ -882,8 +719,8 @@ mod tests {
         // parent is an internal NTFS folder (0..15 except root 5) — "ignore
         // name attr for internal ntfs folder".
         let rec = build_record(0, ROOT_FRN, ntfs::NAMESPACE_DOS, "HELLO~1.TXT");
-        let (index, stats) = ingest_and_resolve(&[(42, rec)]);
-        assert!(!index.contains(volume_key(0, 42)));
+        let (rows, stats) = ingest_rows(&[(42, rec)]);
+        assert!(rows.is_empty());
         assert_eq!(stats.files, 0);
         // The record itself was still read and its name counted.
         assert_eq!(stats.records_in_use, 1);
@@ -891,8 +728,8 @@ mod tests {
 
         // Parent FRN 8 ($Extend) is an internal NTFS folder.
         let rec = build_record(0, 8, ntfs::NAMESPACE_WIN32, "ObjId");
-        let (index, _) = ingest_and_resolve(&[(42, rec)]);
-        assert!(!index.contains(volume_key(0, 42)));
+        let (rows, _) = ingest_rows(&[(42, rec)]);
+        assert!(rows.is_empty());
     }
 
     #[test]
@@ -900,8 +737,9 @@ mod tests {
         // Namespace 3 is the combined Win32+DOS name (e.g. "hello.txt" that is
         // also its own 8.3 form) — that one is a real user-visible name.
         let rec = build_record(0, ROOT_FRN, ntfs::NAMESPACE_WIN32_AND_DOS, "readme.txt");
-        let (index, _) = ingest_and_resolve(&[(42, rec)]);
-        assert_eq!(index.path_of(volume_key(0, 42)), Some("C:\\readme.txt"));
+        let (rows, _) = ingest_rows(&[(42, rec)]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, b"readme.txt");
     }
 }
 

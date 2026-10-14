@@ -999,7 +999,7 @@ fn split_alternatives(input: &str) -> Vec<&str> {
 }
 
 /// The merged query language's top level: `|`-separated alternatives
-/// (zen-rs `OrQuery` semantics over fsearch alternatives). Each
+/// (zen `|` semantics merged over fsearch alternatives). Each
 /// alternative is an AND of tokens and filters; a hit is any alternative
 /// matching. An empty parse matches everything.
 #[derive(Default)]

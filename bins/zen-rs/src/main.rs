@@ -5,17 +5,21 @@
 //! The monitor drives `FSCTL_READ_USN_JOURNAL` (0x900bb) with a 40-byte
 //! input and a 64 KiB output buffer, and tails journal deltas via overlapped
 //! reads -- the shape the Win32 USN journal interface documents.
+//!
+//! One on-disk index format: the name index blob (`docs/formats/README.md`,
+//! FSIDX011). A scan builds it from MFT rows; `save` persists it with the
+//! root stamp beside it; `load`, `ui`, `search` and `list` reopen it.
 
-// Old bin, new homes (docs/IMPLEMENTATION_PLAN.md first-PR sequence #3: "old bins
-// compile against them unchanged" — behaviour unchanged, imports only).
 // Windows only. This is the NTFS MFT/USN indexer and `discovery-windows` is
 // empty off-Windows (see its `lib.rs`: the `windows` crate family does not
 // cross-compile). Everything that reads a volume is gated; what is left
 // below is the index writing and its tests, which are platform-independent.
 #[cfg(windows)]
-use discovery_windows::{indexer, ntfs, volume};
-use name_core::index;
+use discovery_windows::{indexer, ntfs, seam, volume};
 use name_core::live::Live;
+use name_core::name_index::Index;
+use name_core::name_query::{Alternatives, Hit, Searcher};
+use name_core::persist;
 use search_ui as ui;
 
 // One allocator story (plan 4.4/4.10): mimalloc for the general heap, matching
@@ -28,88 +32,100 @@ use indexer::Indexer;
 #[cfg(windows)]
 use volume::Volume;
 
-/// Build the fsearch name index the UI's [`name_core::name_query::Searcher`]
-/// runs on, from the zen path index (the `.eri` / MFT view).
-///
-/// The name index is keyed by parent, not by NTFS FRN, so this assigns
-/// synthetic ids along the path tree and hands [`indexer::listings_from_rows`]
-/// a consistent parent map. The UI and `searchctl` then share one matcher.
-#[cfg(windows)]
-fn live_from_zen(index: &index::Index) -> Live {
-    use name_core::index::ROOT_FRN;
-    use name_core::name_index;
-    use std::collections::HashMap;
+/// Seconds since the epoch -- the index's timestamp base, same as searchd.
+fn now_secs() -> u32 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as u32)
+        .unwrap_or(0)
+}
 
-    let mut id_of: HashMap<String, u64> = HashMap::new();
-    let mut next_id = ROOT_FRN + 1;
-    let mut rows: Vec<indexer::NameRow> = Vec::new();
+/// The display path for one hit: the root plus the index-relative path, the
+/// same composition `searchd` puts on the wire.
+fn full_path(root: &str, rel: &str) -> String {
+    format!("{root}{}", rel.trim_start_matches(['/', '\\']))
+}
 
-    let root_str = index.root().trim_end_matches(['\\', '/']).to_string();
-    id_of.insert(root_str.clone(), ROOT_FRN);
+/// The home directory `name_query` resolves `~` against.
+fn query_home() -> String {
+    std::env::var("USERPROFILE").unwrap_or_default()
+}
 
-    let mut entries: Vec<(String, bool, u64)> = index
-        .iter_all_paths()
-        .map(|(frn, path)| {
-            let meta = index.meta_of(frn);
-            (
-                path.trim_end_matches(['\\', '/']).to_string(),
-                meta.is_dir,
-                meta.size,
-            )
-        })
-        .collect();
-    // Deterministic id assignment, so two runs of the same index agree.
-    entries.sort();
-
-    for (trimmed, is_dir, size) in entries {
-        let (parent_key, name) = match trimmed.rfind(['\\', '/']) {
-            Some(i) => {
-                let p = trimmed[..i].to_string();
-                (
-                    if p.is_empty() || p == root_str {
-                        root_str.clone()
-                    } else {
-                        p
-                    },
-                    trimmed[i + 1..].to_string(),
-                )
-            }
-            None => (root_str.clone(), trimmed.clone()),
-        };
-        let parent_frn = *id_of.entry(parent_key).or_insert_with(|| {
-            let id = next_id;
-            next_id += 1;
-            id
-        });
-        let frn = *id_of.entry(trimmed).or_insert_with(|| {
-            let id = next_id;
-            next_id += 1;
-            id
-        });
-        rows.push(indexer::NameRow {
-            frn,
-            parent_frn,
-            name: name.into_bytes(),
-            is_dir,
-            link: false,
-            size,
-            mtime: 0,
-        });
+/// Sorted display paths matching `query_str`, deduped across `|` alternatives.
+fn search_paths(live: &Live, root: &str, query_str: &str) -> Result<Vec<String>, String> {
+    let home = query_home();
+    let alts = Alternatives::parse(query_str, &home)?;
+    for w in &alts.warnings {
+        eprintln!("warning: {w}");
     }
 
-    let listings = indexer::listings_from_rows(&rows, ROOT_FRN);
-    Live::new(name_index::Index::build(listings, 0, 0, b""))
+    let searcher = Searcher { live };
+    let mut hits: Vec<Hit> = Vec::new();
+    for alt in &alts.alts {
+        for h in searcher.search(alt) {
+            match hits.iter_mut().find(|e| e.idx == h.idx) {
+                Some(e) if e.score < h.score => *e = h,
+                Some(_) => {}
+                None => hits.push(h),
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    let mut buf = Vec::new();
+    for h in &hits {
+        live.base.path(h.idx as usize, &mut buf);
+        out.push(full_path(root, &String::from_utf8_lossy(&buf)));
+        buf.clear();
+    }
+    out.sort_unstable();
+    Ok(out)
+}
+
+/// Build the name index for one open volume: MFT rows grouped into the DFS
+/// listings the index consumes. Paths inside are root-relative; the caller
+/// rejoins the root for display (the UI does it too).
+#[cfg(windows)]
+fn build_index(volume: &Volume) -> Result<(Index, indexer::IndexStats), String> {
+    let indexer = Indexer::new(volume, 0);
+    let mut last = std::time::Instant::now();
+    let (rows, stats) = indexer
+        .scan_rows(&mut |done, total, _limit| {
+            if last.elapsed().as_secs() >= 2 {
+                last = std::time::Instant::now();
+                eprint!("\rrecords {done} / {total}");
+                let _ = std::io::Write::flush(&mut std::io::stderr());
+            }
+        })
+        .map_err(|e| format!("failed to scan {}: {e:?}", volume.root))?;
+    eprintln!();
+    let listings = indexer::listings_from_rows(&rows, ntfs::ROOT_FRN);
+    Ok((Index::build(listings, 0, now_secs(), b""), stats))
+}
+
+/// A saved name index or a volume to scan: what `ui`/`search`/`list`/`index`
+/// run against. A saved blob's root comes from its sidecar, so a file named
+/// by the user still serves the paths it was built with.
+#[cfg(windows)]
+fn load_or_build(source: &str) -> Result<(Index, String), String> {
+    if std::path::Path::new(source).is_file() {
+        persist::load_saved(std::path::Path::new(source)).map_err(|e| format!("{source}: {e}"))
+    } else {
+        let volume = Volume::open(source).map_err(|e| e.to_string())?;
+        let (idx, _) = build_index(&volume)?;
+        Ok((idx, volume.root.clone()))
+    }
 }
 
 fn usage() -> ! {
     eprintln!(
         "zen-rs <command> [args]\n\n\
          commands:\n  \
-           index <volume|file>      inspect volume or .eri file statistics\n  \
-           index-all               index every fixed NTFS volume into one index\n  \
+           index <volume|file>      inspect volume or saved index statistics\n  \
+           index-all               index every fixed NTFS volume\n  \
            volumes                 list the fixed NTFS volumes index-all covers\n  \
-           save <volume> <file>     scan volume and save index to .eri file\n  \
-           load <file>              load an .eri file and print statistics\n  \
+           save <volume> <file>     scan volume and save the name index\n  \
+           load <file>              load a saved name index and print statistics\n  \
            ui <volume|file>         interactive search UI (enter opens the result)\n  \
            list <volume|file>       list indexed paths\n  \
            search <volume|file> <q> search paths using query filters\n  \
@@ -162,86 +178,6 @@ fn main() {
     }
 }
 
-#[cfg(windows)]
-fn scan(volume_path: &str) -> Result<(Volume, index::Index, indexer::IndexStats), String> {
-    let volume = Volume::open(volume_path).map_err(|e| e.to_string())?;
-    eprintln!("opened {}", volume.path);
-
-    let indexer = Indexer::new(&volume, 0);
-    let mut index = index::Index::new(&volume.root);
-    let start = std::time::Instant::now();
-
-    let stats = indexer
-        .scan_all(&mut index, &mut |frn, edges, limit| {
-            eprint!("\rscanning MFT... record {frn}/{limit}, {edges} named entries   ");
-        })
-        .map_err(|e| e.to_string())?;
-
-    eprintln!(
-        "\rscanned {} records in {:.1?} — {} files, {} directories, {} live records        ",
-        stats.records_read,
-        start.elapsed(),
-        stats.files,
-        stats.directories,
-        stats.records_in_use
-    );
-
-    Ok((volume, index, stats))
-}
-
-/// Scan every fixed NTFS volume into one combined index.
-///
-/// Each volume gets its own ordinal so its file reference numbers cannot
-/// collide with another volume's — both volumes have root at FRN 5, and the
-/// same FRN names unrelated files on each.
-#[cfg(windows)]
-fn scan_all_volumes() -> Result<(index::Index, indexer::IndexStats), String> {
-    let roots = volume::list_fixed_ntfs_roots();
-    if roots.is_empty() {
-        return Err("no fixed NTFS volume found".to_string());
-    }
-
-    let mut index = index::Index::new(&roots[0]);
-    let mut totals = indexer::IndexStats::default();
-
-    for (ordinal, root) in roots.iter().enumerate() {
-        let ordinal = ordinal as u16;
-        let volume = Volume::open(root).map_err(|e| format!("{root}: {e}"))?;
-        eprintln!(
-            "[{ordinal}] opened {} (record size {})",
-            volume.root, volume.record_size
-        );
-
-        let indexer = Indexer::new(&volume, ordinal);
-        let start = std::time::Instant::now();
-        let stats = indexer
-            .scan_all(&mut index, &mut |frn, edges, limit| {
-                eprint!("\r[{ordinal}] record {frn}/{limit}, {edges} entries   ");
-            })
-            .map_err(|e| format!("{root}: {e}"))?;
-        eprintln!(
-            "\r[{ordinal}] scanned {} records in {:.1?} — {} files, {} directories        ",
-            stats.records_read,
-            start.elapsed(),
-            stats.files,
-            stats.directories
-        );
-
-        totals.records_read += stats.records_read;
-        totals.records_in_use += stats.records_in_use;
-        totals.names_seen += stats.names_seen;
-        totals.files += stats.files;
-        totals.directories += stats.directories;
-        totals.resolved_paths += stats.resolved_paths;
-        totals.orphan_edges += stats.orphan_edges;
-        totals.cycle_edges += stats.cycle_edges;
-        totals.read_errors += stats.read_errors;
-        totals.reparse_points += stats.reparse_points;
-    }
-
-    Ok((index, totals))
-}
-
 /// Hexdump one raw MFT record and its parsed attributes.
 #[cfg(windows)]
 fn cmd_record(volume_path: &str, frn: u64) -> Result<(), String> {
@@ -290,111 +226,76 @@ fn cmd_record(volume_path: &str, frn: u64) -> Result<(), String> {
     Ok(())
 }
 
+/// Scan a volume and save its name index, with the root stamp beside it.
 #[cfg(windows)]
-fn load_or_scan(source: &str) -> Result<index::Index, String> {
-    if source.ends_with(".eri") || std::path::Path::new(source).is_file() {
-        let start = std::time::Instant::now();
-        let file = std::fs::File::open(source)
-            .map_err(|e| format!("cannot open index file {source}: {e}"))?;
-        let mut reader = std::io::BufReader::new(file);
-        let idx = index::Index::read_from(&mut reader)
-            .map_err(|e| format!("failed to read index {source}: {e}"))?;
-        eprintln!(
-            "loaded index from {source} in {:.2?} ({} entries)",
-            start.elapsed(),
-            idx.len()
-        );
-        Ok(idx)
-    } else {
-        let (_volume, idx, _stats) = scan(source)?;
-        Ok(idx)
-    }
-}
-
-/// Write `index` to `file_path` so that a crash mid-write can never leave a
-/// partial `.eri` where a complete one used to be.
-///
-/// The stream goes to a sibling `.tmp` file, is flushed all the way to disk, and
-/// only then replaces the target. `rename` within a volume is atomic, so a reader
-/// sees either the previous complete index or the new complete one — never a
-/// half-written one. An interrupted scan leaves a stray `.tmp`, which is ignored
-/// by `load_or_scan` and overwritten by the next `save`.
-fn write_index_atomically(index: &index::Index, file_path: &str) -> std::io::Result<()> {
-    let tmp_path = format!("{file_path}.tmp");
-
-    let result = (|| -> std::io::Result<()> {
-        let file = std::fs::File::create(&tmp_path)?;
-        let mut writer = std::io::BufWriter::new(file);
-        index.write_to(&mut writer)?;
-        let file = writer.into_inner().map_err(|e| e.into_error())?;
-        // Durability before the rename: otherwise a crash could leave the rename
-        // durable but the contents not, which is the same broken state.
-        file.sync_all()?;
-        Ok(())
-    })();
-
-    if let Err(e) = result {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(e);
-    }
-
-    if let Err(e) = std::fs::rename(&tmp_path, file_path) {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(e);
-    }
-
-    Ok(())
-}
-
-#[cfg(windows)]
-fn cmd_save(volume_path: &str, file_path: &str) -> Result<(), String> {
-    let (_volume, index, _stats) = scan(volume_path)?;
-    let start = std::time::Instant::now();
-
-    write_index_atomically(&index, file_path)
-        .map_err(|e| format!("failed to write index {file_path}: {e}"))?;
-
-    eprintln!(
-        "saved {} paths to {file_path} in {:.2?}",
-        index.len(),
-        start.elapsed()
+fn cmd_save(volume_path: &str, file: &str) -> Result<(), String> {
+    let volume = Volume::open(volume_path).map_err(|e| e.to_string())?;
+    let (idx, _stats) = build_index(&volume)?;
+    let saved = persist::save(
+        &idx,
+        std::path::Path::new(&volume.root),
+        std::path::Path::new(file),
+    )
+    .map_err(|e| format!("failed to save {file}: {e}"))?;
+    println!(
+        "saved {} ({} entries) for root {}",
+        saved.index.display(),
+        idx.n,
+        volume.root
     );
     Ok(())
 }
 
+/// Statistics for a volume scan or a saved index.
 #[cfg(windows)]
 fn cmd_index(target: &str) -> Result<(), String> {
-    if target.ends_with(".eri") || std::path::Path::new(target).is_file() {
-        let index = load_or_scan(target)?;
-        println!("index file        : {}", target);
-        println!("root              : {}", index.root());
-        println!("indexed paths     : {}", index.len());
-        println!("directories       : {}", index.directory_count());
-        println!(
-            "indexed files     : {}",
-            index.len().saturating_sub(index.directory_count())
-        );
-        println!("total file bytes  : {}", index.total_bytes());
+    if std::path::Path::new(target).is_file() {
+        let (idx, root) = load_or_build(target)?;
+        println!("root            : {root}");
+        println!("index           : {target}");
+        println!("entries         : {}", idx.n);
+        println!("directories     : {}", idx.d);
+        println!("names           : {}", idx.u);
+        println!("index bytes     : {}", idx.bytes());
         return Ok(());
     }
+    let volume = Volume::open(target).map_err(|e| e.to_string())?;
+    let (idx, stats) = build_index(&volume)?;
+    println!("root            : {}", volume.root);
+    println!("records read    : {}", stats.records_read);
+    println!("records in use  : {}", stats.records_in_use);
+    println!("$FILE_NAME vals : {}", stats.names_seen);
+    println!("files           : {}", stats.files);
+    println!("directories     : {}", stats.directories);
+    println!("reparse points  : {}", stats.reparse_points);
+    println!("read errors     : {}", stats.read_errors);
+    println!("entries         : {}", idx.n);
+    println!("names           : {}", idx.u);
+    Ok(())
+}
 
-    let (_volume, index, stats) = scan(target)?;
-
-    println!("volume            : {}", target);
-    println!("records read      : {}", stats.records_read);
-    println!("records in use    : {}", stats.records_in_use);
-    println!("$FILE_NAME values : {}", stats.names_seen);
-    println!("files             : {}", stats.files);
-    println!("directories       : {}", stats.directories);
-    println!("reparse points    : {}", stats.reparse_points);
-    // `entry_count` excludes the synthetic root; `len` includes it.
-    println!("canonical paths   : {}", index.entry_count());
-    println!("alias paths       : {}", index.alias_count());
-    println!("  resolved        : {}", stats.resolved_paths);
-    println!("  orphan edges    : {}", stats.orphan_edges);
-    println!("  cycle edges     : {}", stats.cycle_edges);
-    println!("read errors       : {}", stats.read_errors);
-    println!("total file bytes  : {}", index.total_bytes());
+/// Scan every fixed NTFS volume -- one name index per volume, the blob's
+/// single root being the volume root.
+#[cfg(windows)]
+fn cmd_index_all() -> Result<(), String> {
+    let roots = volume::list_fixed_ntfs_roots();
+    if roots.is_empty() {
+        return Err("no fixed NTFS volume found".into());
+    }
+    for root in roots {
+        let volume = Volume::open(&root).map_err(|e| e.to_string())?;
+        let (idx, stats) = build_index(&volume)?;
+        println!("\n{root}");
+        println!("  records read    : {}", stats.records_read);
+        println!("  records in use  : {}", stats.records_in_use);
+        println!("  $FILE_NAME vals : {}", stats.names_seen);
+        println!("  files           : {}", stats.files);
+        println!("  directories     : {}", stats.directories);
+        println!("  reparse points  : {}", stats.reparse_points);
+        println!("  read errors     : {}", stats.read_errors);
+        println!("  entries         : {}", idx.n);
+        println!("  names           : {}", idx.u);
+    }
     Ok(())
 }
 
@@ -430,80 +331,22 @@ fn cmd_volumes() -> Result<(), String> {
     Ok(())
 }
 
-/// Scan every fixed NTFS volume and print the combined index statistics.
-#[cfg(windows)]
-fn cmd_index_all() -> Result<(), String> {
-    let (index, stats) = scan_all_volumes()?;
-
-    println!("volumes           : all fixed NTFS");
-    println!("records read      : {}", stats.records_read);
-    println!("records in use    : {}", stats.records_in_use);
-    println!("$FILE_NAME values : {}", stats.names_seen);
-    println!("files             : {}", stats.files);
-    println!("directories       : {}", stats.directories);
-    println!("reparse points    : {}", stats.reparse_points);
-    println!("canonical paths   : {}", index.entry_count());
-    println!("alias paths       : {}", index.alias_count());
-    println!("  resolved        : {}", stats.resolved_paths);
-    println!("  orphan edges    : {}", stats.orphan_edges);
-    println!("  cycle edges     : {}", stats.cycle_edges);
-    println!("read errors       : {}", stats.read_errors);
-    println!("total file bytes  : {}", index.total_bytes());
-    Ok(())
-}
-
-/// Print one warning per query token the parser could not honour: a `re:`
-/// pattern that failed to compile, or a `type:` naming no known kind. Either
-/// way the alternative matches nothing, so without this the user just sees
-/// silent zero (or, for `type:`, a silently wrong result set).
-fn warn_query_errors(query: &index::OrQuery) {
-    for alt in &query.alternatives {
-        for e in &alt.regex_errors {
-            eprintln!("warning: {e}");
-        }
-        for e in &alt.type_errors {
-            eprintln!("warning: {e}");
-        }
-    }
-}
-
-/// Search the combined index of every fixed NTFS volume.
-#[cfg(windows)]
-fn cmd_search_all(query_str: &str) -> Result<(), String> {
-    let (index, _stats) = scan_all_volumes()?;
-    let query = index::OrQuery::parse(query_str);
-    warn_query_errors(&query);
-    let results = index.search(&query);
-    for (_, path) in &results {
-        println!("{path}");
-    }
-    eprintln!("\n{} path(s) matched", results.len());
-    Ok(())
-}
-
-/// Interactive full-screen search over an index.
+/// Interactive full-screen search over a volume or a saved index.
 #[cfg(windows)]
 fn cmd_ui(source: &str) -> Result<(), String> {
-    let index = load_or_scan(source)?;
-    let root = index.root().to_string();
-    let indexed = index.entry_count();
-    let live = live_from_zen(&index);
-    ui::run(live, root, indexed)
+    let (idx, root) = load_or_build(source)?;
+    let indexed = idx.n;
+    ui::run(Live::new(idx), root, indexed)
 }
 
 #[cfg(windows)]
 fn cmd_search(source: &str, query_str: &str) -> Result<(), String> {
-    let index = load_or_scan(source)?;
-    let query = index::OrQuery::parse(query_str);
-    warn_query_errors(&query);
-
+    let (idx, root) = load_or_build(source)?;
     let start = std::time::Instant::now();
-    let mut matches = index.search(&query);
+    let matches = search_paths(&Live::new(idx), &root, query_str)?;
     let elapsed = start.elapsed();
 
-    matches.sort_by(|a, b| a.1.cmp(b.1));
-
-    for (_frn, path) in &matches {
+    for path in &matches {
         println!("{path}");
     }
     eprintln!("\n{} path(s) matched in {:.2?}", matches.len(), elapsed);
@@ -511,12 +354,34 @@ fn cmd_search(source: &str, query_str: &str) -> Result<(), String> {
 }
 
 #[cfg(windows)]
+fn cmd_search_all(query_str: &str) -> Result<(), String> {
+    let roots = volume::list_fixed_ntfs_roots();
+    if roots.is_empty() {
+        return Err("no fixed NTFS volume found".into());
+    }
+    for root in roots {
+        eprintln!("\n# {root}");
+        let (idx, r) = load_or_build(&root)?;
+        for path in search_paths(&Live::new(idx), &r, query_str)? {
+            println!("{path}");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
 fn cmd_list(source: &str, filter: Option<&str>) -> Result<(), String> {
-    let index = load_or_scan(source)?;
+    let (idx, root) = load_or_build(source)?;
 
     let needle = filter.map(|f| f.to_lowercase());
-    // Canonical paths and aliases, so a hard link is listed under both names.
-    let mut rows: Vec<&str> = index.iter_all_paths().map(|(_, p)| p).collect();
+    // Every entry, so a hard link is listed under both names.
+    let mut rows: Vec<String> = Vec::with_capacity(idx.n.saturating_sub(1));
+    let mut buf = Vec::new();
+    for i in 1..idx.n {
+        idx.path(i, &mut buf);
+        rows.push(full_path(&root, &String::from_utf8_lossy(&buf)));
+        buf.clear();
+    }
     rows.sort_unstable();
 
     let mut shown = 0usize;
@@ -534,73 +399,89 @@ fn cmd_list(source: &str, filter: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
+/// Walk the MFT, then feed pending USN journal records to the live index --
+/// the same feed `searchd` holds open, run to its end here as a demo.
 #[cfg(windows)]
 fn cmd_tail(volume_path: &str) -> Result<(), String> {
-    let (volume, mut index, _stats) = scan(volume_path)?;
+    use discovery::Watch;
 
-    let indexer = Indexer::new(&volume, 0);
-    // Start below the journal's live window; `tail_usn` clamps it to
-    // `lowest_valid_usn` and reports `start_usn_was_stale`, which is how "from
-    // the oldest record still available" is expressed. `StartUsn` is i64 in
-    // READ_USN_JOURNAL_DATA, not a 32-bit field.
-    let mut start_usn: i64 = 0;
-    let before = index.len();
+    let volume = Volume::open(volume_path).map_err(|e| e.to_string())?;
+    let (idx, _stats) = build_index(&volume)?;
+    let before = idx.n;
+    let mut live = Live::new(idx);
+    let mut watch = seam::UsnWatch::new(Indexer::new(&volume, 0));
 
     let mut rounds = 0u32;
-    let mut known_journal_id: u64 = 0;
-    loop {
-        let outcome = indexer
-            .tail_usn(&mut index, &mut start_usn, &mut known_journal_id, 100_000)
-            .map_err(|e| e.to_string())?;
+    let mut total = 0usize;
+    while rounds < 10 {
         rounds += 1;
-
-        eprintln!(
-            "round {rounds}: applied {} change(s), index now {} entries, next USN 0x{:X}",
-            outcome.applied,
-            index.len(),
-            outcome.next_start_usn
-        );
-        eprintln!(
-            "  journal id=0x{:X} lowest=0x{:X} next=0x{:X}",
-            outcome.journal_id, outcome.journal_lowest_valid_usn, outcome.journal_next_usn
-        );
-        if outcome.journal_id_changed {
-            eprintln!("  journal recreated: restarted from the new journal's first USN");
-        }
-        if outcome.start_usn_was_stale {
-            eprintln!("  resume point was outside the live window; moved to lowest_valid_usn");
-        }
-        if outcome.journal_wrapped {
-            eprintln!("  journal wrapped: history between the resume point and here is gone");
-        }
-
-        if outcome.applied == 0 || rounds >= 10 {
-            break;
+        match watch.next_batch().map_err(|e| e)? {
+            discovery::ChangeBatch::Events(events) => {
+                let n = events.len();
+                if n == 0 {
+                    break;
+                }
+                live.apply_events(&events);
+                total += n;
+                eprintln!("round {rounds}: applied {n} change(s)");
+            }
+            discovery::ChangeBatch::Rescan => {
+                eprintln!("round {rounds}: history lost at the root - a full rescan is due");
+                break;
+            }
         }
     }
 
-    println!("paths before tail : {before}");
-    println!("paths after tail  : {}", index.len());
-    println!("net change        : {}", index.len() as i64 - before as i64);
+    println!("entries before tail : {before}");
+    println!("changes applied     : {total}");
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use index::{Index, NodeKind};
-    use std::io::Read;
+    use discovery::walk::{KIND_DIR, KIND_FILE, Listing, NONE, RawEnt};
 
+    /// root (listing 0) has "projects" (dir, listing 1) with "notes.txt".
+    /// Built from `discovery::walk` listings rather than an MFT scan, so the
+    /// save/load round trip tests run off Windows too.
     fn sample_index() -> Index {
-        let mut idx = Index::new("D:\\");
-        idx.insert(100, 5, "projects", NodeKind::Directory, 0, 0x10);
-        idx.insert(101, 100, "notes.txt", NodeKind::File, 17, 0x20);
-        idx
+        let mut root_names = Vec::new();
+        let off = root_names.len() as u32;
+        root_names.extend_from_slice(b"projects");
+        let root = Listing {
+            id: 0,
+            names: root_names,
+            ents: vec![RawEnt {
+                name_off: off,
+                name_len: 8,
+                kind: KIND_DIR,
+                size: 0,
+                mtime: 1,
+                child: 1,
+            }],
+        };
+        let mut dir_names = Vec::new();
+        let off = dir_names.len() as u32;
+        dir_names.extend_from_slice(b"notes.txt");
+        let dir = Listing {
+            id: 1,
+            names: dir_names,
+            ents: vec![RawEnt {
+                name_off: off,
+                name_len: 9,
+                kind: KIND_FILE,
+                size: 17,
+                mtime: 2,
+                child: NONE,
+            }],
+        };
+        Index::build(vec![root, dir], 0, 0, b"")
     }
 
     fn temp_path(label: &str) -> String {
         let p = std::env::temp_dir().join(format!(
-            "zen-rs-{label}-{}-{:?}.eri",
+            "zen-rs-{label}-{}-{:?}.idx",
             std::process::id(),
             std::thread::current().id()
         ));
@@ -609,97 +490,77 @@ mod tests {
     }
 
     #[test]
-    fn atomic_write_produces_a_readable_index_and_leaves_no_tmp() {
-        let path = temp_path("atomic");
-        let idx = sample_index();
+    fn a_saved_index_round_trips_with_its_root() {
+        let dir = std::env::temp_dir().join(format!("zen-rs-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("root dir");
+        let root = std::fs::canonicalize(&dir).expect("canonical root");
 
-        write_index_atomically(&idx, &path).expect("write");
+        let path = temp_path("roundtrip");
+        let idx = sample_index();
+        persist::save(&idx, &root, std::path::Path::new(&path)).expect("save");
 
         assert!(std::path::Path::new(&path).exists(), "target must exist");
         assert!(
-            !std::path::Path::new(&format!("{path}.tmp")).exists(),
+            !std::path::Path::new(&path).with_extension("tmp").exists(),
             "no temp file may survive a successful write"
         );
 
-        let mut f = std::fs::File::open(&path).expect("reopen");
-        let loaded = Index::read_from(&mut f).expect("read back");
-
-        assert_eq!(loaded.root(), "D:\\");
-        assert_eq!(loaded.len(), idx.len());
-        assert_eq!(loaded.path_of(101), Some("D:\\projects\\notes.txt"));
+        let (loaded, saved_root) =
+            persist::load_saved(std::path::Path::new(&path)).expect("read back");
+        assert_eq!(saved_root, root.to_string_lossy().into_owned());
+        assert_eq!(loaded.n, idx.n);
 
         let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{path}.meta"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn atomic_write_replaces_an_existing_index() {
-        let path = temp_path("replace");
-
-        let mut first = Index::new("D:\\");
-        first.insert(100, 5, "old", NodeKind::File, 1, 0x20);
-        write_index_atomically(&first, &path).expect("first write");
-
-        let second = sample_index();
-        write_index_atomically(&second, &path).expect("second write");
-
-        let mut f = std::fs::File::open(&path).expect("reopen");
-        let loaded = Index::read_from(&mut f).expect("read back");
-
-        assert_eq!(loaded.len(), second.len());
-        assert_eq!(loaded.path_of(101), Some("D:\\projects\\notes.txt"));
-
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn atomic_write_failure_leaves_no_partial_target() {
-        // A path inside a directory that does not exist: the create of the temp
-        // file fails, so nothing should be left behind and the error must
-        // surface rather than panic.
-        //
-        // Built with real separators. The Windows spelling (`\` joins) made
-        // this one file *name* at the temp root on Unix, where the test only
-        // passed because an unprivileged user cannot create files at `/` —
-        // run as root (a VM suite) the write succeeds and the assertion is
-        // about permissions the test never meant to use.
-        let path = std::env::temp_dir()
-            .join(format!("no-such-dir-{}", std::process::id()))
-            .join("out.eri");
-        let path = path.to_str().expect("temp path is utf8").to_owned();
-
-        let err = write_index_atomically(&sample_index(), &path)
-            .expect_err("writing into a missing directory must fail");
-        assert!(
-            !std::path::Path::new(&path).exists(),
-            "no target may appear on failure"
-        );
-        assert!(!err.to_string().is_empty());
-    }
-
-    #[test]
-    fn a_truncated_eri_reads_back_as_an_error_not_a_partial_index() {
+    fn a_truncated_index_fails_to_load() {
         // The property that makes atomic writing worth doing: a half-written
-        // stream must be rejected outright rather than decoded into a partial
+        // blob must be rejected outright rather than decoded into a partial
         // index that looks plausible.
         let path = temp_path("truncated");
         let idx = sample_index();
-        write_index_atomically(&idx, &path).expect("write");
+        persist::save(
+            &idx,
+            std::env::temp_dir().as_path(),
+            std::path::Path::new(&path),
+        )
+        .expect("save");
 
         let full = std::fs::read(&path).expect("read bytes");
-        let cut = &full[..full.len() / 2];
-        std::fs::write(&path, cut).expect("truncate");
+        std::fs::write(&path, &full[..full.len() / 2]).expect("truncate");
 
-        let mut f = std::fs::File::open(&path).expect("reopen");
-        let mut cursor = std::io::BufReader::new(&mut f);
-        let mut sink = Vec::new();
-        let _ = cursor.read_to_end(&mut sink);
-        let err = Index::read_from(&mut cursor).expect_err("truncated stream must fail");
         assert!(
-            err.to_string().to_lowercase().contains("buffer")
-                || err.to_string().to_lowercase().contains("read"),
-            "unexpected error: {err}"
+            persist::load_saved(std::path::Path::new(&path)).is_err(),
+            "a truncated blob must not load"
         );
 
         let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{path}.meta"));
+    }
+
+    #[test]
+    fn a_failed_save_leaves_no_partial_target() {
+        // The temp file's parent is a plain file, so the write must fail and
+        // leave nothing behind. Built with real separators: the Windows
+        // spelling (`\` joins) once made this one file *name* at the temp
+        // root on Unix, where the test only passed because an unprivileged
+        // user cannot create files at `/` -- run as root (a VM suite) the
+        // write succeeded and the assertion was about permissions the test
+        // never meant to use.
+        let dir = std::env::temp_dir().join(format!("zen-rs-not-a-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::write(&dir, b"file, not a directory").expect("make the blocker");
+        let path = dir.join("out.idx");
+
+        let err = persist::save(&sample_index(), std::path::Path::new("C:\\"), &path)
+            .expect_err("saving under a plain file must fail");
+        assert!(!path.exists(), "no target may appear on failure");
+        assert!(!err.to_string().is_empty());
+
+        let _ = std::fs::remove_file(&dir);
     }
 }

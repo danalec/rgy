@@ -3,11 +3,10 @@
 //! `COPYING` splits this workspace by what the code does: the Zen components
 //! and the Tesla Valve pack store are Apache-2.0 only, everything else is
 //! MIT OR Apache-2.0. Where a whole crate is Apache-only — `zen-rs`,
-//! `search-ui`, `discovery-windows` — its manifest says so. Where the
-//! Apache-only code is a single module or a subsystem inside a dual-licensed
-//! crate — `name_core::index`, and every file under `rgx-core`'s `tv`,
-//! `tv_runtime` and `bin/rgx-tv.rs` — the per-file header is the whole
-//! signal, because `name-core` and `rgx-core` have to publish
+//! `search-ui`, `discovery-windows` - its manifest says so. Where the
+//! Apache-only code is a subsystem inside a dual-licensed crate - every file
+//! under `rgx-core`'s `tv`, `tv_runtime` and `bin/rgx-tv.rs` - the per-file
+//! header is the whole signal, because `rgx-core` has to publish
 //! `MIT OR Apache-2.0` for the remainder sitting beside it.
 //!
 //! One file without the header makes `COPYING` false and nothing else
@@ -23,7 +22,6 @@ const APACHE_ONLY: &[&str] = &[
     "bins/zen-rs/",
     "bins/search-ui/",
     "crates/discovery-windows/",
-    "crates/name-core/src/index.rs",
     "crates/rgx-core/src/tv/",
     "crates/rgx-core/src/tv_runtime/",
     "crates/rgx-core/src/bin/rgx-tv.rs",

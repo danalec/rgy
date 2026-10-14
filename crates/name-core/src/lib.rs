@@ -6,14 +6,12 @@
 //! globs, `|`, `re:`) is the one that stays.
 
 pub mod fuzzy;
+/// fsearch's live overlay (dead bits + overrides).
+pub mod live;
 /// fsearch's name index v2 (interned names, DFS layout, class bitmaps).
 pub mod name_index;
 /// fsearch's query parser/scorer with the zen-rs filter vocabulary merged.
 pub mod name_query;
-
-pub mod index;
-/// fsearch's live overlay (dead bits + overrides).
-pub mod live;
 pub mod regex;
 
 /// fsearch's content index (trigram postings + per-file 5/7-gram bloom).

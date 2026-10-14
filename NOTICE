@@ -8,10 +8,9 @@ rgy merges three prior projects into one workspace:
 - `fsearch` (Rust) — name indexing, fuzzy ranking, and the query engine in
   `crates/name-core` (name_index, name_query, fuzzy, live, content). MIT
   licensed; its license text and copyright remain in force for that code.
-- the `zen` project (this workspace's `zen-rs`, `search-ui`,
-  `discovery-windows`, and `name_core::index`) — Windows NTFS discovery,
-  the ERI2 index format, and the terminal UI. Apache-2.0 only here; see
-  COPYING.
+- the `zen` project (this workspace's `zen-rs`, `search-ui`, and
+  `discovery-windows`) - Windows NTFS discovery and the terminal UI.
+  Apache-2.0 only here; see COPYING.
 - `rgx` — the content-search engine, adapters, and Tesla Valve pack store
   in `crates/rgx-*`. Dual MIT OR Apache-2.0 except the TV pack store,
   which is Apache-2.0 only (as upstream marks it).

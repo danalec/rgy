@@ -252,7 +252,7 @@ fails CI until it is ported or documented as degraded.
 Split-licensed — the full map is in `COPYING`:
 
 - **Apache-2.0 only**: the Zen components (`bins/zen-rs`, `bins/search-ui`,
-  `crates/discovery-windows`, `name_core::index`) and the Tesla Valve pack
+  `crates/discovery-windows`) and the Tesla Valve pack
   store (`rgx-core` `tv`/`tv_runtime`). Each file carries its
   `SPDX-License-Identifier: Apache-2.0` header.
 - **MIT OR Apache-2.0**: everything else. Commercial use is intended

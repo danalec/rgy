@@ -7,7 +7,6 @@ license = "Apache-2.0"
 
 [dependencies]
 discovery = { path = "../discovery" }
-name-core = { path = "../name-core" }
 
 # Gated to Windows, like the crate body in `src/lib.rs`. The `windows` family
 # does not cross-compile -- `windows-future` pulls internals `windows-core`

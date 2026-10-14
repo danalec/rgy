@@ -14,7 +14,7 @@
 /// offsets: `FileAttributes`@52, `FileNameLength`@56, `FileNameOffset`@58).
 ///
 /// Moved out of `ntfs.rs` at the workspace merge: this is what a `Watch`
-/// feed produces and what `name_core::index::Index::apply_usn` consumes, so
+/// feed produces and what the live overlay (`name_core::live::Live`) consumes, so
 /// it cannot live in the Windows backend crate without a dependency cycle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsnRecord {
@@ -46,7 +46,7 @@ pub const USN_REASON_JOURNAL_DELETE: u32 = 0x0001_0000;
 /// Reasons that change which paths exist. Anything else (size/metadata writes)
 /// does not affect the path index. Deliberately excluded from the journal
 /// *request*: the reader asks for every reason (all-ones mask, like
-/// Zen) and `Index::apply_usn` filters per record against the bits
+/// Zen) and the live overlay filters per record against the bits
 /// above. Kept as the documented grouping and for tests.
 #[allow(dead_code)]
 pub const USN_REASON_PATH_RELEVANT: u32 = USN_REASON_FILE_CREATE

@@ -425,6 +425,9 @@ pub fn best_name(names: &[FileNameEntry]) -> Option<FileNameEntry> {
         .cloned()
 }
 
+/// Root of the volume; file reference 5 is the NTFS root directory.
+pub const ROOT_FRN: u64 = 5;
+
 /// Strip the 16-bit sequence number NTFS stores in the high bits of file references.
 #[inline]
 pub fn frn_number(frn: u64) -> u64 {

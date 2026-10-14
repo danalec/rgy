@@ -39,6 +39,7 @@ fn stamp_path(index: &Path) -> PathBuf {
 }
 
 /// What a save wrote, for reporting.
+#[derive(Debug)]
 pub struct Saved {
     /// The blob.
     pub index: PathBuf,
@@ -148,6 +149,29 @@ pub fn load_for(root: &Path, index: &Path, max_age: Option<Duration>) -> Result<
     Index::load(index).ok_or(Miss::BadIndex)
 }
 
+/// Load a saved index trusting the root its sidecar names -- for tools that
+/// open a file the user pointed at (`zen-rs load <file>`), where there is no
+/// "want" to check the stamp against. The stamped root comes back so the
+/// caller can serve the paths the index was built with.
+pub fn load_saved(index: &Path) -> Result<(Index, String), Miss> {
+    let meta = match std::fs::read_to_string(stamp_path(index)) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(if index.exists() { Miss::NoStamp } else { Miss::Absent });
+        }
+        Err(_) => return Err(Miss::NoStamp),
+    };
+    let mut saved_root = None;
+    for line in meta.lines() {
+        if let Some(("root", value)) = line.split_once(' ') {
+            saved_root = Some(value.to_string());
+        }
+    }
+    let saved = saved_root.ok_or(Miss::NoStamp)?;
+    let idx = Index::load(index).ok_or(Miss::BadIndex)?;
+    Ok((idx, saved))
+}
+
 /// Default index location for a root: `<cache_dir>/rgy/<digest>.idx`, so two
 /// roots never collide and no root has to be spelled into the filename.
 pub fn default_index_path(root: &Path) -> PathBuf {
@@ -253,6 +277,19 @@ mod tests {
         let idx_path = dir.join("cache.idx");
         build(&dir).save(&idx_path).expect("raw save");
         assert_eq!(outcome(&dir, &idx_path, None).unwrap_err(), Miss::NoStamp);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_saved_index_returns_its_stamped_root() {
+        let dir = tree("saved-root");
+        let idx_path = dir.join("cache.idx");
+        let built = build(&dir);
+        save(&built, &dir, &idx_path).expect("save");
+
+        let (loaded, root) = load_saved(&idx_path).expect("load");
+        assert_eq!(loaded.n, built.n);
+        assert_eq!(root, canon(&dir).to_string_lossy().into_owned());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
