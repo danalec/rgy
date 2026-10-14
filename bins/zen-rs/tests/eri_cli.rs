@@ -8,6 +8,13 @@
 //! writer. A round-trip test passes even when both sides share the same
 //! misreading of the format; this one does not.
 
+// The CLI these tests drive is Windows-only (MFT + USN; off-Windows the
+// binary is a stub), so the tests gate with their CLI — a non-Windows zen-rs
+// is a separate project (`docs/freebsd-support.md` §5, decision 2). The
+// ERI2 layout itself stays pinned cross-platform by name-core's `eri`
+// tests, which read the same bytes without the CLI.
+#![cfg(windows)]
+
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
