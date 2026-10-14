@@ -3176,15 +3176,17 @@ impl Scan<'_> {
                 for i in a..end {
                     // `dense[ent_name[i]]` is entry -> name -> Short: two
                     // dependent loads per entry in this sequential pass.
-                    // Killing the indirection is item 3 (plan row "name search
-                    // @ 5M"), but measure before choosing: `score(i, ...)` does
-                    // far more work per entry than this load, so the win may be
-                    // small, and the obvious fix (a per-entry `Short` view,
-                    // dense[i]) costs ~+11 MB resident at 5 M entries vs the
-                    // per-name `dense` -- which item 4's <=64 MB goal has to
-                    // absorb. The alternative (walk names, not entries, loading
-                    // each name's Short once) is memory-neutral but changes
-                    // top-k tie order. Decide with item 4's numbers, not blind.
+                    // Item 3 measured killing this indirection and it loses
+                    // both ways (benchmark/baseline-names.md, "item 3"): the
+                    // per-entry `Short` view -- `dense[ent_name[i]]` composed
+                    // once per query -- ran the 5M rows 2.8-5.9x SLOWER,
+                    // because the gather is hidden under `score()`'s work in
+                    // this stream while a separate composition pass pays each
+                    // gather at full latency; it also wants ~20 MB more
+                    // resident at 5M (a `Short` is 4 bytes). Walking names
+                    // instead removes the gather but replaces it with
+                    // name -> entries list walks. The indirection stays: the
+                    // 5M rows are bound by match volume, not by this load.
                     let s = dense[ent_name[i] as usize];
                     if s.flags & NF_OK == 0 {
                         continue;

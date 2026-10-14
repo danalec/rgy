@@ -114,30 +114,104 @@ lost on.
 
 ## Memory at the scale the plan targets: 5M
 
-Peak resident set of `name_bench 5000000` (the in-memory 5M name index
-build), measured with `scripts/mem-peak.py` on Windows x64:
+Measured with `scripts/mem-peak.py` on Windows x64 (release builds): the
+synthetic 5M corpus of `name_bench`, and the existing `crates/` tree (698
+entries, nothing generated) as the daemon's fixed cost.
 
 | Metric | Goal | Measured | Verdict |
 |---|---|---|---|
-| peak RSS (build) | <= 1.2 GB | **658 MiB** (689,930,240 B) | under goal |
+| peak RSS (build + persist) | <= 1.2 GB | **593.6 MiB** (622,473,216 B) | under goal |
+| peak RSS (full harness run) | <= 1.2 GB | 658 MiB (689,930,240 B) | under goal |
 | disk / corpus | <= 2.5x | 2.5x (table above) | at goal |
-| resident (daemon, mmap) | <= 64 MB | 11.6 MiB @ 698 entries (crates/, existing files) = daemon baseline | approach validated |
+| resident, daemon @ 5M (mmap) | <= 64 MB | **147.5 MiB** (154,636,288 B) | **over goal, 2.3x** |
+| resident, daemon fixed cost (release) | — | 10.2 MiB (10,682,368 B) @ 698 entries | — |
 
-The peak is the high-water mark of the synthetic 5M name-index build -- the
-transient the plan's `peak <= 1.2 GB` guards. It is well under. `disk` is the
-on-disk index/corpus ratio from the table above. `resident` is the daemon's
-steady-state RSS with the index mmap'd (only touched pages resident); that
-needs a running daemon measured, not a build -- the next measurement.
+The resident row is the daemon's steady-state RSS with the 5M index mmap'd
+(`searchd` printing `reusing index`, no rebuild), held idle and sampled
+twice: 154,636,288 B and 154,652,672 B. "Loaded" here already includes the
+working set a first query needs: `Live::new` calls `Index::prefault`, which
+faults the arrays every query scans (name bitmaps, name offsets, names,
+entry->name, kind, parent) and builds the memo tables the scorer consults.
+Idle beyond that touches nothing. The earlier debug-build baseline of the
+same recipe read 11.4-11.6 MiB; release is 10.2 MiB.
+
+**The goal is not met.** The cost scales with the corpus at ~29 B/entry
+(10.2 MiB fixed + 137 MiB over 5,002,001 entries; the same recipe on a
+201,001-entry index reads 16.2 MiB, consistent to ~10%). The goal is
+12.8 B/entry all-in at 5M. Two notes on what the number is and is not:
+
+- The synthetic corpus gives every entry a distinct name, so the per-name
+  half of the index (names, name offsets, name info, name bitmaps) sits at
+  its worst case. The index interns names -- its design note is "7.5M
+  entries share ~2M distinct names" -- so a real corpus measures lower.
+  Direction only: no real-corpus number is claimed here.
+- The per-entry half (entry->name, kind, parent, name->entries) does not
+  shrink with interning. Getting under 64 MB at 5M is layout work -- a more
+  compact per-entry table -- not a policy tweak. Not prefaulting moves the
+  same pages into the first broad query and trades this row for the
+  typing-latency row instead of paying less.
+
+The persisted blob itself is 355,225,344 B (71 B/entry on disk) for
+5,002,001 entries.
 
 Commands:
 
-    # peak (the build)
-    python scripts/mem-peak.py -- target/release/examples/name_bench.exe 5000000
-    # peak_rss_bytes=689930240 peak_rss_mib=658.0 exit=0
+    # the artifact: build + persist the synthetic 5M index (no corpus on disk)
+    python scripts/mem-peak.py -- target/release/examples/name_bench.exe 5000000 \
+        --save-index %TEMP%/rgy-5m.idx --root %TEMP%/rgy-5m-root
+    # name_bench: saved ...\rgy-5m.idx (5002001 entries) for root ...\rgy-5m-root
+    # peak_rss_bytes=622473216 peak_rss_mib=593.6 exit=0
 
-    # resident (the daemon, index mmap-ed): build the index, then hold + sample
-    searchctl --root <tree> --reindex <any query>     # build + persist the index
-    python scripts/mem-peak.py --hold-seconds 4 -- target/debug/searchd.exe --root <tree> --listen pipe:memtest
-    # on a 4-entry tree: peak_rss_mib=11.4 resident_rss_mib=11.4 (daemon baseline)
-    # @5M the resident is the daemon baseline + the touched pages of the mmap-ed
-    # index; run the same two commands on the 5M corpus to close it.
+    # the daemon's fixed cost, over the existing crates/ tree
+    python scripts/mem-peak.py --hold-seconds 4 -- target/release/searchd.exe \
+        --root crates --listen pipe:memtest
+    # searchd: reusing index ...\rgy\6c8fe7269d389acd.idx (698 entries)
+    # peak_rss_bytes=10682368 peak_rss_mib=10.2 resident_rss_mib=10.2 exit=1
+
+    # resident @ 5M: the daemon mmap-ing the synthetic index
+    python scripts/mem-peak.py --hold-seconds 4 -- target/release/searchd.exe \
+        --root %TEMP%/rgy-5m-root --index %TEMP%/rgy-5m.idx --listen pipe:memtest
+    # searchd: reusing index ...\rgy-5m.idx (5002001 entries)
+    # peak_rss_bytes=154652672 peak_rss_mib=147.5 resident_rss_mib=147.5 exit=1
+
+`name_bench --save-index <file> --root <dir>` exists for this recipe: the
+index is persisted through `name_core::persist` (root sidecar included, so
+`searchd` will trust it) and the run stops before the walk fixture, which
+writes one file per corpus entry. `exit=1` in hold mode is mem-peak killing
+the daemon on schedule.
+
+### Item 3, measured: the indirection is not the lever
+
+The full scan loads `dense[ent_name[i]]` per entry -- two dependent loads --
+and item 3 asked which way to kill it: a per-entry `Short` array (~+11 MB
+resident at 5M, which the row above cannot absorb) or walking names instead
+of entries. Before restructuring anything, the per-entry array was built
+and measured: compose `dense[ent_name[i]]` once per query, then scan that
+view sequentially. Same session, release, `--no-walk`, medians in µs:
+
+| query | fused gather (today) | per-entry array | |
+|---|---|---|---|
+| `rep` | 578 | 3,386 | 5.9x slower |
+| `report` | 581 | 3,000 | 5.2x slower |
+| `mod` | 817 | 3,823 | 4.7x slower |
+| `^src` | 852 | 3,246 | 3.8x slower |
+| `f1` | 950 | 3,709 | 3.9x slower |
+| `dat$` | 1,338 | 3,729 | 2.8x slower |
+| `file` | 1,353 | 3,744 | 2.8x slower |
+
+(A parallel build was running during these rows, so all of them sit above
+the checked-in table above; the comparison is back-to-back within one
+session, and the gaps hold on `min_us` too. Hit counts match exactly.)
+
+The gather is not slow because it is dependent -- it is nearly free because
+the `score()` work between two gathers hides its latency. Paying it in a
+separate pass instead costs that whole pass (~2.5 ms of gathers at 5M,
+against 0.6-1.4 ms rows). So the array buys no latency and asks for ~20 MB
+more resident (a `Short` is 4 bytes, not 2). Walking names removes the
+gather but replaces it with name -> entries list walks -- the shape
+`selective`'s measured 5-12x loss was made of. The indirection stays; the
+5M rows are bound by match volume (14-57% of the corpus matches), and the
+lever is fewer scored entries, not a different per-entry shape. On the tie
+order the old trade-off note worried about: it cannot move -- `top_k` keys
+are `(score, !idx)` and `search()` re-sorts by `(score, idx)`, so both
+traversals answer identically.
