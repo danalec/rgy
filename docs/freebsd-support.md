@@ -12,31 +12,24 @@ evidence. The decisions that close this plan are the specs in §5.
 
 ## 1. What runs today
 
-**The portable walk is what actually executes.** `discovery::walk::scan`
-(std `read_dir` fanned out over a rayon pool) is the only enumerator any
-consumer reaches. `discovery-linux` and `discovery-macos` are workspace
-members with **zero consumers** — no crate depends on them, and nothing
-selects between them and the portable path. They expose `LinuxSource` /
-`InotifyWatch` and the macOS equivalent, and no one calls them.
+**The walk is dispatched per platform.** `discovery-dispatch::source_for`
+picks the native enumerator by `cfg` — the `getdirentries` reader here
+(P1.2), `getdents64` on Linux, `getattrlistbulk` on macOS, the MFT walk
+when the root is a volume root on Windows — and the portable
+`discovery::walk::scan` answers everywhere else and whenever a native
+backend refuses. The selector's differential test holds each backend
+against `scan_sequential` and asserts which backend answered before
+comparing; on this target that is
+`freebsd_reader_matches_sequential_oracle` (phase 4 runs it).
 
-That is the single most important fact for this plan: there is a *seam* but
-no *dispatch*. Writing `discovery-freebsd` today would join them as dead
-code.
-
-**mmap is absent, and the code degrades rather than fails.**
-`rgx-core/src/memmap2/platform/mod.rs` dispatches on linux / macos / windows
-and falls through to `fallback.rs` otherwise. On FreeBSD:
-
-| call | today | effect |
-|---|---|---|
-| `MmapInner::map` | `Err(Unsupported)` | `Blob::from_file` (`name_index.rs:56`) falls back to `Blob::Owned` — reads the whole index into memory |
-| `MmapInner::map_anon` | allocates a `Vec<u8>` | index build works, but not as a real anonymous map |
-| `map_file` / `flush` / `advise` | read-into-memory / no-ops | correct, unoptimised |
-
-So nothing breaks. What is lost is demand paging: an index that is mmap'd
-today costs RSS proportional to the pages actually touched, and on FreeBSD it
-costs the whole blob up front. For the 310k-entry tree measured earlier
-(8.3 MiB) that is irrelevant; for an order of magnitude more it is not.
+**mmap is native here.** `rgx-core/src/memmap2/platform/freebsd.rs` is the
+`macos.rs` shape — `mmap(2)` with `MAP_SHARED` / `MAP_PRIVATE` / `MAP_ANON`
+— and `page_size()` answers `sysconf(_SC_PAGESIZE)`. The fallback path
+keeps the cases it already handled (empty or unmappable files), and
+`blob_from_file_maps_a_non_empty_file` asserts the `Blob::Mapped` variant,
+so a regression to the owned fallback is a test failure rather than silent
+RSS. Demand paging — RSS following the pages touched — is the reason the
+mapping is first and the owned buffer is the fallback, never the reverse.
 
 **`open_flags` covers FreeBSD.** `name-core/src/content.rs` (`mod open_flags`)
 carries the FreeBSD arm (`O_NONBLOCK 0x4`, `O_NOFOLLOW 0x100`, read off
@@ -122,6 +115,10 @@ non-empty file, and returns `Blob::Owned` only for the empty/failed cases it
 already handles. Add a test that asserts the variant, so a regression to the
 fallback is visible.
 
+*Status*: ✅ landed — `platform/freebsd.rs`, the `page_size()` arm, and
+`blob_from_file_maps_a_non_empty_file` (cfg unix; green on Linux). The
+mapped-on-FreeBSD proof is part of the phase-4 run.
+
 **P1.2 Directory enumeration.**
 A `getdents`-based reader, taking `d_type` from the dirent so kind does not
 cost a `stat`. Scope this only after P2.1 (below), because without dispatch
@@ -130,6 +127,12 @@ there is nothing to select it.
 *Acceptance*: the differential test already used for the parallel walk
 (`parallel_walk_matches_sequential_oracle`) runs against the FreeBSD reader
 and matches `scan_sequential` output.
+
+*Status*: ✅ landed — `crates/discovery-freebsd` (`getdirentries`, row
+offsets from `offset_of!(libc::dirent, …)`, names NUL-scanned inside the
+`d_reclen` stride), selected by `source_for`. The differential ships with
+it (`freebsd_reader_matches_sequential_oracle`); the run is the phase-4
+kernel.
 
 ### P2 — process and hygiene
 
@@ -142,6 +145,12 @@ nothing selects — is the worst of the two, because it reads as supported.
 
 This gates P1.2. It is cheap: one `pub fn source_for(root, threads)` and a
 `cfg` chain.
+
+*Status*: ✅ landed — `crates/discovery-dispatch`: `source_for(root,
+threads)` with the per-platform `cfg` chain and the portable fallback,
+wired into `searchctl` and `searchd`. Its differential test asserts which
+backend answered before comparing against `scan_sequential` (green on
+Windows and Linux).
 
 **P2.2 CI.** There is no `.github/workflows` at all, so this is greenfield.
 FreeBSD options, in the order I would try them:

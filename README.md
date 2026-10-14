@@ -109,14 +109,21 @@ verification on machines this host does not have.
 | Piece | Where | State |
 |---|---|---|
 | Seam (`Source`/`Watch`, DFS `Listing` blocks) | `crates/discovery` | ✅ portable walk |
+| Walk selector (`source_for`, per-platform by `cfg`) | `crates/discovery-dispatch` | ✅ differential vs `scan_sequential`, green on Windows + Linux |
 | Windows backend (MFT + USN, RE-audit fixes) | `crates/discovery-windows` | ✅ `MftSource` / `UsnWatch` |
-| Linux backend (getdents64 + inotify) | `crates/discovery-linux` | ✅ suite green under WSL (real kernel) |
+| Linux backend (getdents64 + inotify) | `crates/discovery-linux` | ✅ suite green on a real kernel |
 | macOS backend (getattrlistbulk + FSEvents) | `crates/discovery-macos` | ⬜ transported, unverified — needs a real Mac |
+| FreeBSD backend (getdirentries + `d_type`) | `crates/discovery-freebsd` | ⬜ reader's differential needs a real FreeBSD kernel (plan phase 4) |
 
-> **The platform crates are not wired to a dispatch yet.** Nothing selects
-> between `discovery-windows` / `-linux` / `-macos` and the portable walk, so
-> the portable one runs everywhere. See `docs/freebsd-support.md` §3 (P2.1);
-> it is the same question a FreeBSD backend would have to answer first.
+> **The platform walks are selected, not stranded.** `source_for(root,
+> threads)` picks the native backend per platform — the MFT walk when the
+> root is a volume root on Windows, `getdents64` on Linux, `getattrlistbulk`
+> on macOS, `getdirentries` on FreeBSD — and the portable walk answers
+> everywhere else and whenever a native backend refuses. The pick is a speed
+> decision, never a semantics one: each backend is held against
+> `scan_sequential` by the dispatch's differential test. What remains
+> unverified is per-backend — macOS (needs a real Mac) and the FreeBSD
+> reader (needs a real FreeBSD kernel: `docs/freebsd-support.md` phase 4).
 
 ### Content
 
