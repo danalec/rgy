@@ -109,6 +109,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "discovery-dispatch"
+version = "0.1.0"
+dependencies = [
+ "discovery",
+ "discovery-freebsd",
+ "discovery-linux",
+ "discovery-macos",
+ "discovery-windows",
+]
+
+[[package]]
+name = "discovery-freebsd"
+version = "0.1.0"
+dependencies = [
+ "discovery",
+ "libc",
+]
+
+[[package]]
 name = "discovery-linux"
 version = "0.1.0"
 dependencies = [
@@ -655,6 +674,7 @@ name = "searchctl"
 version = "0.1.0"
 dependencies = [
  "discovery",
+ "discovery-dispatch",
  "mimalloc",
  "name-core",
 ]
@@ -664,6 +684,7 @@ name = "searchd"
 version = "0.1.0"
 dependencies = [
  "discovery",
+ "discovery-dispatch",
  "discovery-linux",
  "discovery-macos",
  "discovery-windows",

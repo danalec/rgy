@@ -11,6 +11,8 @@ path = "src/main.rs"
 
 [dependencies]
 discovery = { path = "../../crates/discovery" }
+# The platform walk selector (docs/freebsd-support.md P2.1).
+discovery-dispatch = { path = "../../crates/discovery-dispatch" }
 name-core = { path = "../../crates/name-core" }
 # One allocator story (plan 4.4).
 mimalloc = { version = "0.1", default-features = false }

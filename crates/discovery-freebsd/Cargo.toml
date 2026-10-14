@@ -1,0 +1,12 @@
+[package]
+name = "discovery-freebsd"
+version = "0.1.0"
+edition = "2024"
+description = "FreeBSD discovery backend: getdirentries bulk walk with d_type from the dirent"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+discovery = { path = "../discovery" }
+
+[target.'cfg(target_os = "freebsd")'.dependencies]
+libc = "0.2"

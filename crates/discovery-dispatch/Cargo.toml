@@ -1,0 +1,23 @@
+[package]
+name = "discovery-dispatch"
+version = "0.1.0"
+edition = "2024"
+description = "The Source selector (docs/freebsd-support.md P2.1): the native walk per platform by cfg, the portable walk elsewhere"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+discovery = { path = "../discovery" }
+
+# The platform walks, pulled in per-target so `source_for` can build the
+# native one on its own OS. Every crate is empty off-target.
+[target.'cfg(windows)'.dependencies]
+discovery-windows = { path = "../discovery-windows" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+discovery-linux = { path = "../discovery-linux" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+discovery-macos = { path = "../discovery-macos" }
+
+[target.'cfg(target_os = "freebsd")'.dependencies]
+discovery-freebsd = { path = "../discovery-freebsd" }

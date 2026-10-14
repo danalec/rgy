@@ -20,7 +20,8 @@
 
 use std::time::{Duration, Instant};
 
-use discovery::{PortableSource, interrupt};
+use discovery::interrupt;
+use discovery_dispatch::source_for;
 use name_core::content::{self, Grep};
 use name_core::live::Live;
 use name_core::name_index::Index;
@@ -194,10 +195,12 @@ fn obtain_index(opts: &Opts) -> Result<Index, String> {
         }
     }
 
-    // Portable walk: no privileges, any platform.
-    let source = PortableSource::new(
+    // The platform walk where one exists (docs/freebsd-support.md P2.1),
+    // the portable walk where none does or where the native one refuses —
+    // no privileges needed either way, the selector falls back on its own.
+    let source = source_for(
         opts.root.as_bytes().to_vec(),
-        PortableSource::DEFAULT_THREADS,
+        discovery::PortableSource::DEFAULT_THREADS,
     );
     // A scan of a large tree is seconds of silence otherwise, which reads as
     // a hang. One line every `REPORT_EVERY`; the count is a real tally of

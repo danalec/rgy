@@ -6,6 +6,8 @@ members = [
     "crates/discovery-windows",
     "crates/discovery-linux",
     "crates/discovery-macos",
+    "crates/discovery-freebsd",
+    "crates/discovery-dispatch",
     "crates/engine",
     "crates/proto",
     "crates/rgx-core",

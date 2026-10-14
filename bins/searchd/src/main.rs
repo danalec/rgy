@@ -211,7 +211,12 @@ fn open_index(root: &str, index: Option<&str>, reindex: bool, max_age: Option<Du
         }
     }
 
-    let source = PortableSource::new(root.as_bytes().to_vec(), PortableSource::DEFAULT_THREADS);
+    // The platform walk where one exists (docs/freebsd-support.md P2.1),
+    // the portable walk where none does or where the native one refuses.
+    let source = discovery_dispatch::source_for(
+        root.as_bytes().to_vec(),
+        PortableSource::DEFAULT_THREADS,
+    );
     // The first thing a daemon does is walk a tree it was pointed at, and
     // that is the longest silent stretch in the program. Report it, and let
     // Ctrl-C stop it cleanly instead of killing the daemon mid-build.
@@ -655,6 +660,16 @@ fn open_watch(_root: &[u8]) -> Option<Box<dyn discovery::Watch>> {
     //      `apply_events` -- or `apply_events` must grow a dir-vs-file branch.
     // Until then the daemon answers on its snapshot rather than failing to
     // start. Linux (inotify) and Windows (USN) are wired above.
+    None
+}
+
+/// Every remaining target (FreeBSD and the long tail): no wired feed.
+/// kqueue would be per-directory fd registration against a file-granular
+/// batch vocabulary — the same granularity gap the macOS note above names —
+/// so FreeBSD joins it until the seam grows a directory-level event. The
+/// daemon answers on its snapshot rather than failing to start.
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+fn open_watch(_root: &[u8]) -> Option<Box<dyn discovery::Watch>> {
     None
 }
 
