@@ -14,7 +14,8 @@ under the Apache License 2.0 only:
     crates/discovery-windows/           MFT + USN discovery (ntfs, volume, indexer, seam)
     crates/name-core/src/index.rs       the ERI2 on-disk index and its query layer
 
-Every file in those trees carries `SPDX-License-Identifier: Apache-2.0`.
+Every source file in those trees carries `SPDX-License-Identifier: Apache-2.0`,
+and the three crate manifests state `license = "Apache-2.0"`.
 This portion is not available under the MIT license. Apache-2.0 was chosen
 for it because it carries an express patent grant and an explicit limitation
 of liability, which a distinctive, independently valuable subsystem should

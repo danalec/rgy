@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Store compaction: reclaim the bytes that edit churn leaves behind.
 //!
 //! `update_store` is append-only. A modified file gets a *tombstone* on its
