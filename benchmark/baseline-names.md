@@ -121,7 +121,7 @@ build), measured with `scripts/mem-peak.py` on Windows x64:
 |---|---|---|---|
 | peak RSS (build) | <= 1.2 GB | **658 MiB** (689,930,240 B) | under goal |
 | disk / corpus | <= 2.5x | 2.5x (table above) | at goal |
-| resident (daemon, mmap) | <= 64 MB | not yet measured | TODO |
+| resident (daemon, mmap) | <= 64 MB | baseline 11.4 MiB (4 entries); @5M TODO | approach validated |
 
 The peak is the high-water mark of the synthetic 5M name-index build -- the
 transient the plan's `peak <= 1.2 GB` guards. It is well under. `disk` is the
@@ -129,7 +129,15 @@ on-disk index/corpus ratio from the table above. `resident` is the daemon's
 steady-state RSS with the index mmap'd (only touched pages resident); that
 needs a running daemon measured, not a build -- the next measurement.
 
-Command:
+Commands:
 
+    # peak (the build)
     python scripts/mem-peak.py -- target/release/examples/name_bench.exe 5000000
     # peak_rss_bytes=689930240 peak_rss_mib=658.0 exit=0
+
+    # resident (the daemon, index mmap-ed): build the index, then hold + sample
+    searchctl --root <tree> --reindex <any query>     # build + persist the index
+    python scripts/mem-peak.py --hold-seconds 4 -- target/debug/searchd.exe --root <tree> --listen pipe:memtest
+    # on a 4-entry tree: peak_rss_mib=11.4 resident_rss_mib=11.4 (daemon baseline)
+    # @5M the resident is the daemon baseline + the touched pages of the mmap-ed
+    # index; run the same two commands on the 5M corpus to close it.
