@@ -1,9 +1,10 @@
 //! Name index, query filters, and fuzzy ranking.
 //!
-//! Zen-rs's layer, transported intact (RE-audit fixes included).
-//! Per `docs/IMPLEMENTATION_PLAN.md` §4.1 fsearch's index/scoring engine merges
-//! in here later and the filter vocabulary below (`ext/dir/type/size`,
-//! globs, `|`, `re:`) is the one that stays.
+//! fsearch's index/scoring engine with the zen-rs filter vocabulary merged
+//! (`ext/dir/type/size`, globs, `|`, `re:`), plus the persistence glue that
+//! saves a built index across processes. Dual-licensed (MIT OR Apache-2.0)
+//! throughout -- see COPYING; the Apache-2.0-only zen code lives in
+//! `zen-rs`, `search-ui` and `discovery-windows`.
 
 pub mod fuzzy;
 /// fsearch's live overlay (dead bits + overrides).

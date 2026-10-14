@@ -2,7 +2,7 @@
 name = "name-core"
 version = "0.1.0"
 edition = "2024"
-description = "Name index, query filters, fuzzy ranking (zen-rs layer; fsearch engine merges here)"
+description = "Name index, query filters, fuzzy ranking (fsearch engine + zen query vocabulary)"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
