@@ -28,7 +28,11 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$scales = @($Scales.Split(',') | ForEach-Object { [int]$_.Trim() })
+# Split on commas and whitespace alike: an outer PowerShell marshals a
+# `-Scales 200000,5000000` argument as an array and the native command
+# line may deliver it joined by spaces instead of commas.
+$scales = @([regex]::Split($Scales, '[,\s]+') |
+    Where-Object { $_ } | ForEach-Object { [int]$_ })
 $bin = Join-Path $Repo 'target\release\examples\name_proto.exe'
 if (!(Test-Path $bin)) {
     cargo build --release --manifest-path (Join-Path $Repo 'Cargo.toml') `
