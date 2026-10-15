@@ -33,6 +33,8 @@ $ErrorActionPreference = 'Stop'
 # line may deliver it joined by spaces instead of commas.
 $scales = @([regex]::Split($Scales, '[,\s]+') |
     Where-Object { $_ } | ForEach-Object { [int]$_ })
+if ($scales.Count -eq 0) { throw "no scales parsed from '$Scales'" }
+Write-Host "name-tier protocol: scales=$($scales -join ', ') rounds=$Rounds threads=$Threads"
 $bin = Join-Path $Repo 'target\release\examples\name_proto.exe'
 if (!(Test-Path $bin)) {
     cargo build --release --manifest-path (Join-Path $Repo 'Cargo.toml') `
