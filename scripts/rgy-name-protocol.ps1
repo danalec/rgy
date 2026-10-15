@@ -32,13 +32,16 @@ $ErrorActionPreference = 'Stop'
 # the argument marshalling of nested shells, which has been observed to
 # deliver a comma-joined list as one space-joined token.
 if ($env:RGY_NAME_SCALES) { $Scales = $env:RGY_NAME_SCALES }
+# The parsed list goes in its own variable: assigning back to the
+# [string]-typed parameter would coerce the array to a space-joined
+# string, and the loop would then see one corpus named "200000 5000000".
 # Split on commas and whitespace alike: an outer PowerShell marshals a
 # `-Scales 200000,5000000` argument as an array and the native command
 # line may deliver it joined by spaces instead of commas.
-$scales = @([regex]::Split($Scales, '[,\s]+') |
+$scaleList = @([regex]::Split($Scales, '[,\s]+') |
     Where-Object { $_ } | ForEach-Object { [int]$_ })
-if ($scales.Count -eq 0) { throw "no scales parsed from '$Scales'" }
-Write-Host "name-tier protocol: scales=$($scales -join ', ') rounds=$Rounds threads=$Threads"
+if ($scaleList.Count -eq 0) { throw "no scales parsed from '$Scales'" }
+Write-Host "name-tier protocol: scales=$($scaleList -join ', ') rounds=$Rounds threads=$Threads"
 $bin = Join-Path $Repo 'target\release\examples\name_proto.exe'
 if (!(Test-Path $bin)) {
     cargo build --release --manifest-path (Join-Path $Repo 'Cargo.toml') `
@@ -101,7 +104,7 @@ $md += "suppressed, not timed. Warm cache: the untimed pass and the first"
 $md += "round populate it. Floor: measured below, in this session."
 $md += ""
 
-foreach ($n in $Scales) {
+foreach ($n in $scaleList) {
     $root = Join-Path $env:TEMP "rgy_name_proto_$n"
     $index = Join-Path $env:TEMP "rgy_name_proto_$n.idx"
     if (!(Test-Path -LiteralPath $root)) {
