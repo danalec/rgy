@@ -957,6 +957,241 @@ pub fn byte_bits_many(needles: &[u8], hay: &[u8], out: &mut BitMap) {
     }
 }
 
+/// One pass, two maps: terminator bits and high-byte (`>= 0x80`) bits.
+///
+/// The two fills over the same haystack used to be two passes -- the term
+/// scan and [`high_bits`] -- and the second one cost the composed settle
+/// its whole lead over the window rule on the flagship row. Fused: one
+/// load per chunk feeds both masks (`pcmpeqb`+`pmovmskb` for the
+/// terminator, bare `pmovmskb` for the high bytes).
+pub fn term_high_bits(term: u8, hay: &[u8], terms: &mut BitMap, high: &mut BitMap) {
+    #[cfg(all(feature = "std", target_arch = "x86_64"))]
+    {
+        if std::arch::is_x86_feature_detected!("avx512bw") {
+            unsafe { avx512_term_high_bits(term, hay, terms, high) };
+            return;
+        }
+        if std::arch::is_x86_feature_detected!("avx2") {
+            unsafe { avx2_term_high_bits(term, hay, terms, high) };
+            return;
+        }
+    }
+    // Two SIMD passes beat one scalar pass everywhere the fused kernel is
+    // not written (a NEON kernel would fuse the same way). `high_bits`
+    // clears on entry, so the order is free.
+    term_bits(term, hay, terms);
+    high_bits(hay, high);
+}
+
+/// AVX-512BW fused fill. The masks come back as `__mmask64` -- bit j is
+/// byte j -- which is the map word layout already, so there is no
+/// `pmovmsask` extraction and no merge: one load, two stores per 64 bytes.
+/// This is the kernel the two-pass baseline was already running twice.
+#[cfg(all(feature = "std", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512bw")]
+unsafe fn avx512_term_high_bits(term: u8, hay: &[u8], terms: &mut BitMap, high: &mut BitMap) {
+    use core::arch::x86_64::*;
+    terms.clear(hay.len());
+    high.clear(hay.len());
+    let mut i = 0usize;
+    let t_words = terms.words_mut();
+    let h_words = high.words_mut();
+    let mut word_idx = 0usize;
+    let n0 = _mm512_set1_epi8(term as i8);
+    while i + 64 <= hay.len() {
+        let v = _mm512_loadu_si512(hay.as_ptr().add(i) as *const _);
+        let tm = _mm512_cmpeq_epi8_mask(v, n0) as u64;
+        let hm = _mm512_movepi8_mask(v) as u64;
+        // UNCONDITIONAL assignment: `clear` zeroed the words and this walk
+        // owns the map, so a zero mask is a correct (if redundant) write --
+        // and branchless is the point. The high-byte mask is true for about
+        // half the words on real source, which made the conditional store a
+        // mispredict per iteration.
+        t_words[word_idx] = tm;
+        h_words[word_idx] = hm;
+        i += 64;
+        word_idx += 1;
+    }
+    for (k, &b) in hay[i..].iter().enumerate() {
+        if b == term {
+            terms.set(i + k);
+        }
+        if b >= 0x80 {
+            high.set(i + k);
+        }
+    }
+}
+
+/// AVX-2 fallback fused fill: `pmovmskb` of the raw register IS the
+/// high-byte mask, and the term mask is one compare more. The broadcast is
+/// hoisted and the word stores are unconditional -- the mask pairs are
+/// what the iteration is for, and branches there cost more than the writes.
+#[cfg(all(feature = "std", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn avx2_term_high_bits(term: u8, hay: &[u8], terms: &mut BitMap, high: &mut BitMap) {
+    use core::arch::x86_64::*;
+    terms.clear(hay.len());
+    high.clear(hay.len());
+    if hay.is_empty() {
+        return;
+    }
+    let t = _mm256_set1_epi8(term as i8);
+    let t_words = terms.words_mut();
+    let h_words = high.words_mut();
+    let mut i = 0usize;
+    let mut word_idx = 0usize;
+    while i + 64 <= hay.len() {
+        let v0 = _mm256_loadu_si256(hay.as_ptr().add(i) as *const __m256i);
+        let v1 = _mm256_loadu_si256(hay.as_ptr().add(i + 32) as *const __m256i);
+        let t0 = _mm256_movemask_epi8(_mm256_cmpeq_epi8(v0, t)) as u32;
+        let t1 = _mm256_movemask_epi8(_mm256_cmpeq_epi8(v1, t)) as u32;
+        let h0 = _mm256_movemask_epi8(v0) as u32;
+        let h1 = _mm256_movemask_epi8(v1) as u32;
+        t_words[word_idx] |= (t0 as u64) | ((t1 as u64) << 32);
+        h_words[word_idx] |= (h0 as u64) | ((h1 as u64) << 32);
+        i += 64;
+        word_idx += 1;
+    }
+    if i + LANES <= hay.len() {
+        let v = _mm256_loadu_si256(hay.as_ptr().add(i) as *const __m256i);
+        let tb = _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, t)) as u32;
+        let hb = _mm256_movemask_epi8(v) as u32;
+        if tb != 0 {
+            terms.push32(i, tb);
+        }
+        if hb != 0 {
+            high.push32(i, hb);
+        }
+        i += LANES;
+    }
+    for (k, &b) in hay[i..].iter().enumerate() {
+        if b == term {
+            terms.set(i + k);
+        }
+        if b >= 0x80 {
+            high.set(i + k);
+        }
+    }
+}
+/// Fill `out` with a bit at every offset of `hay` holding a byte `>= 0x80`.
+///
+/// The complement of `hybrid::is_ascii` as a map: the searcher's line loop
+/// asks "is this line's range free of high bytes" once per line, and a
+/// per-line `is_ascii` rescan costs 66 ms on the flagship row (see
+/// `benchmark/findings.md` §13). `pmovmskb` of a raw chunk IS this
+/// predicate -- no compare -- so the SIMD fill is one load and one
+/// instruction per 32 bytes. `out` is cleared first, for the reason
+/// [`byte_bits_many`] clears.
+pub fn high_bits(hay: &[u8], out: &mut BitMap) {
+    out.clear(hay.len());
+    #[cfg(all(feature = "std", target_arch = "x86_64"))]
+    {
+        if std::arch::is_x86_feature_detected!("avx512bw") {
+            unsafe { avx512_high_bits(hay, out) };
+            return;
+        }
+        if std::arch::is_x86_feature_detected!("avx2") {
+            unsafe { avx2_high_bits(hay, out) };
+            return;
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe { neon_high_bits(hay, out) };
+        return;
+    }
+    scalar_high_bits(hay, 0, out);
+}
+
+/// AVX-2 fill of [`high_bits`]: `_mm256_movemask_epi8` of the raw register
+/// is the `>= 0x80` mask, so the compare the other kernels need is absent.
+#[cfg(all(feature = "std", target_arch = "x86_64"))]
+unsafe fn avx2_high_bits(hay: &[u8], out: &mut BitMap) {
+    use core::arch::x86_64::*;
+    if hay.is_empty() {
+        return;
+    }
+    let mut i = 0usize;
+    let out_words = out.words_mut();
+    let mut word_idx = 0usize;
+    while i + 64 <= hay.len() {
+        let v0 = _mm256_loadu_si256(hay.as_ptr().add(i) as *const __m256i);
+        let v1 = _mm256_loadu_si256(hay.as_ptr().add(i + 32) as *const __m256i);
+        let b0 = _mm256_movemask_epi8(v0) as u32;
+        let b1 = _mm256_movemask_epi8(v1) as u32;
+        let word = (b0 as u64) | ((b1 as u64) << 32);
+        if word != 0 {
+            out_words[word_idx] |= word;
+        }
+        i += 64;
+        word_idx += 1;
+    }
+    if i + LANES <= hay.len() {
+        let v = _mm256_loadu_si256(hay.as_ptr().add(i) as *const __m256i);
+        let bits = _mm256_movemask_epi8(v) as u32;
+        if bits != 0 {
+            out.push32(i, bits);
+        }
+        i += LANES;
+    }
+    scalar_high_bits(&hay[i..], i, out);
+}
+
+/// AVX-512BW fill of [`high_bits`]: `vpmovb2m` is the mask itself, one
+/// 64-byte chunk to one map word with no compare and no merge.
+#[cfg(all(feature = "std", target_arch = "x86_64"))]
+unsafe fn avx512_high_bits(hay: &[u8], out: &mut BitMap) {
+    use core::arch::x86_64::*;
+    if hay.is_empty() {
+        return;
+    }
+    let mut i = 0usize;
+    let out_words = out.words_mut();
+    let mut word_idx = 0usize;
+    while i + 64 <= hay.len() {
+        let v = _mm512_loadu_si512(hay.as_ptr().add(i) as *const _);
+        let bits = _mm512_movepi8_mask(v) as u64;
+        if bits != 0 {
+            out_words[word_idx] |= bits;
+        }
+        i += 64;
+        word_idx += 1;
+    }
+    scalar_high_bits(&hay[i..], i, out);
+}
+
+/// NEON fill of [`high_bits`]: the chunk's maximum has its high bit set
+/// exactly when some byte does, which is the whole predicate.
+#[cfg(target_arch = "aarch64")]
+unsafe fn neon_high_bits(hay: &[u8], out: &mut BitMap) {
+    use core::arch::aarch64::*;
+    if hay.is_empty() {
+        return;
+    }
+    let mut i = 0usize;
+    while i + 16 <= hay.len() {
+        let v = vld1q_u8(hay.as_ptr().add(i));
+        if vmaxvq_u8(v) >= 0x80 {
+            for j in 0..16 {
+                if hay[i + j] >= 0x80 {
+                    out.set(i + j);
+                }
+            }
+        }
+        i += 16;
+    }
+    scalar_high_bits(&hay[i..], i, out);
+}
+
+/// Portable fill of [`high_bits`], and the tail every kernel above falls to.
+/// Bits land at `base + at`, so a kernel's tail keeps absolute offsets.
+fn scalar_high_bits(hay: &[u8], base: usize, out: &mut BitMap) {
+    for (at, &b) in hay.iter().enumerate() {
+        if b >= 0x80 {
+            out.set(base + at);
+        }
+    }
+}
 /// Count occurrences of a single byte in `data`.
 ///
 /// Uses AVX-512 (64 bytes/cycle) or AVX2 (32 bytes/cycle) on x86_64,
@@ -3078,6 +3313,73 @@ mod mask_tests {
     /// The mask `benchmark/status.md` §4 item 1 spells out, term for term.
     fn pub_fn_mask() -> MatchMask {
         MatchMask::new(pub_fn_branches(), true).expect("builds")
+    }
+    /// The high-byte fill must set exactly the bits the byte definition sets,
+    /// at every length with a high byte at every position: the chunk
+    /// boundaries and the word merges are where a bit goes missing or lands
+    /// on the wrong offset, and a lost bit hands a non-ASCII line to the
+    /// settle that the delegate owns.
+    #[test]
+    fn the_high_byte_fill_agrees_with_a_byte_test_at_every_length() {
+        let mut lens: Vec<usize> = (0..130).collect();
+        lens.extend([255, 256, 257, 511, 512, 513, 1023, 1024, 1025]);
+        for len in lens {
+            let mut hay = alloc::vec![b'a'; len];
+            let mut out = BitMap::new();
+            super::high_bits(&hay, &mut out);
+            assert_eq!(out.count_set(0, len), 0, "clean len {len}");
+            for at in 0..len {
+                hay[at] = 0xC3;
+                super::high_bits(&hay, &mut out);
+                assert_eq!(out.count_set(0, len), 1, "one high byte at {at}/{len}");
+                assert!(out.any_set(at, at + 1), "bit at {at}/{len}");
+                assert!(!out.any_set(0, at), "no bit before {at}/{len}");
+                hay[at] = b'a';
+            }
+        }
+        // A dense fill of only high bytes, to exercise every merge.
+        let hay: Vec<u8> = alloc::vec![0xFF; 300];
+        let mut out = BitMap::new();
+        super::high_bits(&hay, &mut out);
+        assert_eq!(out.count_set(0, 300), 300, "dense high bytes");
+    }
+    /// The fused fill must set exactly the bits the two separate fills set,
+    /// at every length with the term and a high byte at every position: it
+    /// writes two maps from one load, and a mirrored or shifted bit there
+    /// sends every line down the window walk (measured: +80 ms on `e.`).
+    #[test]
+    fn the_fused_fill_agrees_with_the_two_separate_fills() {
+        let mut lens: Vec<usize> = (0..130).collect();
+        lens.extend([255, 256, 257, 511, 512, 513, 1023, 1024, 1025]);
+        for len in lens {
+            for &term in b"a\nz" {
+                let mut hay = alloc::vec![b'a'; len];
+                // Term bytes and high bytes sprinkled at the edges of the
+                // word and lane boundaries the kernels special-case.
+                for at in [0usize, 1, 31, 32, 63, 64, 95, 96] {
+                    if at < len {
+                        hay[at] = 0xC3;
+                    }
+                }
+                let (mut t1, mut h1) = (BitMap::new(), BitMap::new());
+                let (mut t2, mut h2) = (BitMap::new(), BitMap::new());
+                super::term_high_bits(term, &hay, &mut t1, &mut h1);
+                super::term_bits(term, &hay, &mut t2);
+                super::high_bits(&hay, &mut h2);
+                for at in 0..len {
+                    assert_eq!(
+                        t1.any_set(at, at + 1),
+                        t2.any_set(at, at + 1),
+                        "term bit at {at}/{len} differs (term {term:#x})"
+                    );
+                    assert_eq!(
+                        h1.any_set(at, at + 1),
+                        h2.any_set(at, at + 1),
+                        "high bit at {at}/{len} differs"
+                    );
+                }
+            }
+        }
     }
 
     /// The vector fill must set exactly the bits the definition sets, at every

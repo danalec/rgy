@@ -117,6 +117,7 @@ pub mod memchr;
 #[cfg(feature = "std")]
 pub mod memmap2;
 
+pub mod casefold_table;
 pub mod djson;
 pub mod fuzzkit;
 pub mod hybrid;
@@ -126,6 +127,7 @@ pub mod literal;
 pub mod maskstats;
 pub mod matcher;
 pub mod nfa;
+pub mod ngram;
 pub mod numparse;
 pub mod prefilter;
 pub mod regex;
@@ -134,6 +136,11 @@ pub mod scan;
 pub mod searcher;
 pub mod sha256;
 pub mod sha256_hw;
+// The independent scalar implementation exists only so the split-input and
+// block-by-block tests have something that is not the code under test. It
+// was unconditional, which put ~200 lines of test-only code in the shipped
+// `rgx` binary and in `--no-default-features`.
+#[cfg(any(test, doc))]
 pub mod sha256_ref;
 pub mod syntax;
 pub mod tokenize;
@@ -142,6 +149,7 @@ pub mod tokenize;
 pub mod tv;
 #[cfg(feature = "tv-runtime")]
 pub mod tv_runtime;
+pub mod unicode_case;
 pub mod vm;
 pub mod zip;
 
@@ -384,6 +392,11 @@ pub enum Policy {
 // 0 means "not resolved yet"; the enum values are stored as 1..=3.
 static POLICY: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
 
+// The `ablate_mask` override, raised only by [`set_ablate_mask`]. The
+// environment is still read when it is down, so an unset override leaves
+// `RGX_ABLATE_MASK` in charge.
+static ABLATE_MASK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
 const POLICY_SOURCE: u8 = 1;
 const POLICY_RENDER: u8 = 2;
 const POLICY_BOTH: u8 = 3;
@@ -445,6 +458,55 @@ fn policy_from_env() -> Policy {
 /// policies in one process.
 pub fn set_policy(p: Policy) {
     POLICY.store(policy_code(p), core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Ablation instrumentation: the compiled-mask tier switched off at
+/// pattern-compile time (`RGX_ABLATE_MASK`).
+///
+/// Set, the mask builder declines to produce a mask anchor and the
+/// builder falls back to its next anchor, or to confirming every line when
+/// there is none. It exists so the paper's end-to-end tier comparison can
+/// run the same query with the tier present and absent.
+///
+/// **Contract: changing this may change cost, never answers.** The fallback
+/// is a slower search over the same superset of candidates, so a result that
+/// differs between settings is a bug in the fallback, not in the switch. It
+/// is inert without `std`, where there is no environment to read.
+#[cfg(feature = "std")]
+pub fn ablate_mask() -> bool {
+    ABLATE_MASK.load(core::sync::atomic::Ordering::Relaxed)
+        || std::env::var_os("RGX_ABLATE_MASK").is_some()
+}
+
+#[cfg(not(feature = "std"))]
+pub fn ablate_mask() -> bool {
+    ABLATE_MASK.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Force [`ablate_mask`] on or off, overriding the environment.
+///
+/// For tests and in-process harnesses, which need the switch inside one
+/// process the way [`set_policy`] needs the policy. Overriding off is the
+/// reason this is not just a set-to-true: a test must be able to leave the
+/// state it found.
+pub fn set_ablate_mask(on: bool) {
+    ABLATE_MASK.store(on, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Ablation instrumentation: the per-file n-gram signature switched off at
+/// query-build time (`RGX_ABLATE_NGRAM`).
+///
+/// Set, the query signature is `None`, which is the filter's own stand-down
+/// state: every file is searched. Same contract as [`ablate_mask`]: cost
+/// may change, answers never do, and without `std` the switch is inert.
+#[cfg(feature = "std")]
+pub fn ablate_ngram() -> bool {
+    std::env::var_os("RGX_ABLATE_NGRAM").is_some()
+}
+
+#[cfg(not(feature = "std"))]
+pub fn ablate_ngram() -> bool {
+    false
 }
 
 /// A content adapter. Implementations must be cheap to construct; tool

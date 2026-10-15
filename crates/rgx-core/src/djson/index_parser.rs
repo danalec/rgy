@@ -346,7 +346,7 @@ impl<'a, 'b> Parser<'a, 'b> {
 /// check. A string with no backslashes and no control characters is
 /// the common case and falls through to a single `from_utf8` +
 /// `String::from` -- the only allocation is the destination.
-fn decode_string(
+pub(super) fn decode_string(
     content: &[u8],
     content_start: usize,
     full: &[u8],
@@ -499,7 +499,7 @@ fn decode_string(
 /// identified as a single number token. The slice is ASCII by
 /// construction (JSON numbers only use `-`, `0..=9`, `.`, `e`, `E`,
 /// `+`); the `from_utf8` is for the borrow, not a validation step.
-fn parse_number_text(text: &[u8]) -> Result<Value, String> {
+pub(super) fn parse_number_text(text: &[u8]) -> Result<Value, String> {
     // The caller passes a sub-slice of an already-validated UTF-8 document,
     // so the bytes are themselves valid and the `str::from_utf8` round-trip
     // only re-checks work the scanner already paid for. Branch on the first
@@ -600,7 +600,7 @@ fn parse_number_text(text: &[u8]) -> Result<Value, String> {
 /// dominates nothing. The alternative is to thread line/col
 /// through every parser state, which the legacy parser paid for
 /// because it had no index to anchor on.
-fn error_at(bytes: &[u8], pos: usize, msg: impl Into<String>) -> JsonParseError {
+pub(super) fn error_at(bytes: &[u8], pos: usize, msg: impl Into<String>) -> JsonParseError {
     JsonParseError {
         message: msg.into(),
         line: line_of(bytes, pos),

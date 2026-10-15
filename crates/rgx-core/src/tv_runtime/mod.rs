@@ -30,8 +30,8 @@ pub use format::{
 };
 pub use inspect::{inspect_store, StoreReport};
 pub use searcher::{
-    default_threads, search_store, search_store_pooled, smt_level, stale_files, threads_for,
-    Engine, SearchStats, StageTimes,
+    default_threads, search_store, search_store_pooled, smt_level, stale_files, stale_in,
+    threads_for, Engine, SearchStats, StageTimes,
 };
 pub use store::{
     MappedStore, PoolCounters, PoolLimits, PoolStats, StoreSnapshot, DEFAULT_MAX_MAPPED_BYTES,

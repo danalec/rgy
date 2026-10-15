@@ -615,13 +615,7 @@ fn the_predicate_on_a_small_document_is_what_it_looks_like() {
     assert!(!got.end_in_string);
     assert_eq!(scan(input), got);
     assert_eq!(scan_swar(input), got);
-    // Only where the CPU has AVX2: without the feature the wrapper answers
-    // `None` by design (the dispatch property pinned at line 138), which is
-    // not a disagreement. The scalar and SWAR scanners are asserted
-    // unconditionally because every target runs them.
-    if let Some(avx2) = avx2_scan(input) {
-        assert_eq!(avx2, got);
-    }
+    assert_eq!(avx2_scan(input), Some(got.clone()));
 }
 
 #[test]

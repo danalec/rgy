@@ -185,6 +185,10 @@ pub fn update_store(
                 is_empty: true,
                 is_deleted: false,
                 is_binary: false,
+                // No bytes to sign. Zero is "unknown", not "empty", and
+                // unknown never rejects -- an empty file still matches a
+                // pattern that can match nothing (`x*`).
+                ngram: [0; 8],
             });
             file_id_counter += 1;
             continue;
@@ -232,6 +236,7 @@ pub fn update_store(
             is_empty: false,
             is_deleted: false,
             is_binary,
+            ngram: crate::ngram::build_stored_sig512(&content).into_words(),
         });
 
         file_id_counter += 1;

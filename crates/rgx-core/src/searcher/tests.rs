@@ -2472,7 +2472,7 @@ impl CandidateSource for DeafMatcher {
     fn map_candidates(&self, hay: &[u8], out: &mut crate::scan::BitMap) -> Option<Origin> {
         self.0.map_candidates(hay, out)
     }
-    fn map_is_match_mask(&self, hay: &[u8]) -> Option<usize> {
+    fn map_is_match_mask(&self, hay: &[u8]) -> Option<(usize, usize)> {
         self.0.map_is_match_mask(hay)
     }
 }
@@ -2487,8 +2487,9 @@ fn a_match_mask_settles_a_line_from_its_bits_with_no_confirm() {
     // answer from the bits rather than from the confirm.
     assert_eq!(
         m.map_is_match_mask(hay),
-        Some(4),
-        "the source has to offer the cut for this test to mean anything"
+        Some((4, 5)),
+        "the source has to offer the cut (4, the `fn ` branch) and the span \
+         (5, the `pub ` branch) for this test to mean anything"
     );
     // The READER path, which is the one that fills the two maps. The slice
     // path takes the candidate LIST and never asks.
@@ -2521,7 +2522,7 @@ fn a_line_shorter_than_the_mask_offers_nothing_and_one_exactly_its_width_offers_
     crate::scan::byte_bits(b"xxx", 1, hay, &mut bits);
     assert!(bits.any_set(0, 4), "the map is a bit set at every `x`");
 
-    let mut c = Candidates::of_mask(&bits, 4);
+    let mut c = Candidates::of_mask(&bits, 4, 4);
     assert!(c.decides(), "a cuttable mask settles its lines");
     assert_eq!(c.mask_width(), 4);
     // A line exactly the mask's width: the bits in its last three bytes could
@@ -2659,4 +2660,180 @@ fn no_core_drops_the_whole_buffer_rather_than_retaining_it() {
             "max_context={ctx} must not change the no-Core answer"
         );
     }
+}
+
+/// Codepoint length from a lead byte. A stray byte counts as one codepoint,
+/// which is how `grep` treats invalid UTF-8.
+fn utf8_len(b: u8) -> usize {
+    match b {
+        0xC0..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        0xF0..=0xF7 => 4,
+        _ => 1,
+    }
+}
+
+/// A [`UnicodeMatcher`] with grep's codepoint semantics for `e.{2}`, holding
+/// a counter borrowed from the test.
+///
+/// The contract under test is a ROUTING contract -- a mask bit is the byte
+/// engine's answer and a non-ASCII line must still reach the delegate -- so
+/// the test asserts the delegate was ASKED, not only what it answered. A
+/// mock that only scripted its answers would pass even if the settle spoke
+/// for the line and the delegate were never called.
+struct AskedDelegate<'a> {
+    asked: &'a core::sync::atomic::AtomicUsize,
+}
+
+impl crate::hybrid::UnicodeMatcher for AskedDelegate<'_> {
+    /// The leftmost match at or after `at` of `e` followed by two codepoints.
+    fn find_span(&self, line: &[u8], at: usize) -> Option<core::ops::Range<usize>> {
+        self.asked
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let mut i = at;
+        while i < line.len() {
+            if line[i] == b'e' {
+                let mut j = i + 1;
+                let mut whole = true;
+                for _ in 0..2 {
+                    if j >= line.len() {
+                        whole = false;
+                        break;
+                    }
+                    let n = utf8_len(line[j]);
+                    if j + n > line.len() {
+                        whole = false;
+                        break;
+                    }
+                    j += n;
+                }
+                if whole {
+                    return Some(i..j);
+                }
+            }
+            i += 1;
+        }
+        None
+    }
+}
+
+/// A mask bit must never settle a line the byte engine may not decide.
+///
+/// The witness is `.`-counting over a two-byte codepoint: the byte engine
+/// matches `e` + any TWO bytes, so `eé` (65 C3 A9) leaves a mask bit, while
+/// the delegate counts `é` as one codepoint and sees two codepoints on a line
+/// where `e.{2}` needs three. The ASCII line settles from its bit without
+/// the delegate; the non-ASCII lines must be asked of the delegate -- one to
+/// be REJECTED despite its bit, one to be ACCEPTED on the delegate's word.
+#[test]
+fn a_mask_bit_does_not_settle_a_line_the_byte_engine_may_not_decide() {
+    use crate::hybrid::HybridMatcher;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    let re = ByteRegex::new(b"e.{2}").unwrap();
+    let asked = AtomicUsize::new(0);
+    let hyb = HybridMatcher::new(&re, AskedDelegate { asked: &asked });
+    // "zz":   ASCII with NO bit, and BEFORE the bit-bearing lines -- the
+    //         walk's empty-tail early-exit hides such a line when it comes
+    //         last, and a settle that returned `true` for every clean line
+    //         reported 827k of these on the 246 MB row.
+    // "eab": ASCII, a bit, settles without the delegate.
+    // "eé":   a bit the byte engine owes to two high bytes; the delegate
+    //         sees `e` + one codepoint and must reject it.
+    // "eéa":  three codepoints behind `e`; the delegate must accept it.
+    // "xa":   no bit, no question asked of anyone.
+    let hay = "zz\neab\ne\u{e9}\ne\u{e9}a\nxa\n".as_bytes();
+    // If the settle path is not lit the test degenerates into the confirm
+    // path and proves nothing about the veto.
+    assert!(
+        CandidateSource::map_is_match_mask(&hyb, hay).is_some(),
+        "the mask settle must be engaged on this fixture"
+    );
+    let mut rec = Recorded::default();
+    Searcher::with_candidates(&hyb, &hyb, cfg_default())
+        .search_slice(hay, &mut rec)
+        .unwrap();
+    assert_eq!(
+        rec.matched_lines(),
+        alloc::vec!["eab\n".to_string(), "e\u{e9}a\n".to_string()],
+        "the delegate owns both non-ASCII lines: its reject must win over \
+         the byte engine's bit and its accept must survive it"
+    );
+    assert_eq!(
+        asked.load(Ordering::Relaxed),
+        2,
+        "exactly the two non-ASCII lines may reach the delegate"
+    );
+}
+
+/// A clean line WITHOUT a candidate is not a match.
+///
+/// In a dense region the walk visits every line, including one that has no
+/// candidate at all. A composed shortcut tried on top of the window rule
+/// settled `true` for every clean line and reported those as matches -- 827k
+/// of them on the 246 MB row, caught by the A/B's count gate. A sparse
+/// fixture hides that bug class completely: its no-bit lines are jumped
+/// over by the candidate walk and never reach any per-line logic, so the
+/// pin needs the dense shape. The shortcut was measured and reverted
+/// (`benchmark/findings.md` §17); the invariant it broke is what stays.
+#[test]
+fn a_clean_line_without_a_candidate_is_not_a_match() {
+    use crate::hybrid::HybridMatcher;
+    use core::sync::atomic::AtomicUsize;
+
+    let re = ByteRegex::new(b"e.{2}").unwrap();
+    let asked = AtomicUsize::new(0);
+    let hyb = HybridMatcher::new(&re, AskedDelegate { asked: &asked });
+    let mut hay: Vec<u8> = Vec::new();
+    for i in 0..200 {
+        if i == 100 {
+            hay.extend_from_slice(b"zz\n");
+        } else {
+            hay.extend_from_slice(b"eab\n");
+        }
+    }
+    let mut rec = Recorded::default();
+    Searcher::with_candidates(&hyb, &hyb, cfg_default())
+        .search_slice(&hay, &mut rec)
+        .unwrap();
+    let matched = rec.matched_lines();
+    assert_eq!(matched.len(), 199, "every `eab` and not the `zz` line");
+    assert!(
+        !matched.iter().any(|l| l == "zz\n"),
+        "a line with no candidate and no bit must not settle as a match"
+    );
+}
+
+/// The window rule settles a non-ASCII line when some bit's window is pure
+/// ASCII, without asking the delegate at all.
+///
+/// `eé eab` carries two mask bits: the one at 0 has a dirty window (its
+/// span reaches into the `é`) and the one at 3 sits on `eab`, which both
+/// engines match identically. The rule is per WINDOW, not per line: the
+/// clean window proves the line matches in both engines, so the delegate
+/// has nothing left to decide and must not be asked.
+#[test]
+fn a_clean_match_window_settles_a_non_ascii_line_without_the_delegate() {
+    use crate::hybrid::HybridMatcher;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    let re = ByteRegex::new(b"e.{2}").unwrap();
+    let asked = AtomicUsize::new(0);
+    let hyb = HybridMatcher::new(&re, AskedDelegate { asked: &asked });
+    // Two bits on one non-ASCII line: 0 (dirty window) and 3 (`eab`, clean).
+    let hay = "e\u{e9}eab\n".as_bytes();
+    let mut rec = Recorded::default();
+    Searcher::with_candidates(&hyb, &hyb, cfg_default())
+        .search_slice(hay, &mut rec)
+        .unwrap();
+    assert_eq!(
+        rec.matched_lines(),
+        alloc::vec!["e\u{e9}eab\n".to_string()],
+        "the clean window at `eab` proves the line matches in both engines"
+    );
+    assert_eq!(
+        asked.load(Ordering::Relaxed),
+        0,
+        "a line with a clean match window never reaches the delegate"
+    );
 }

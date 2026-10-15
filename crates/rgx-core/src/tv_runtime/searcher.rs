@@ -54,6 +54,7 @@ use std::time::Instant;
 
 use crate::hybrid::{HybridMatcher, UnicodeMatcher};
 use crate::memmap2::Mmap;
+use crate::ngram::NgramSig512;
 use crate::regex::{ByteRegex, Matcher as _};
 use crate::searcher as rgxsearcher;
 // The query vocabulary and the planner are `no_std` and live in `rgx-core`,
@@ -86,6 +87,10 @@ pub enum Engine {
         /// `src/engine.rs` documents for `ByteDelegate`: a case-insensitive
         /// non-ASCII line uses byte-mode folding, which is what rgx ships.
         delegate: Arc<ByteRegex>,
+        /// The n-gram query signature, or `None` when the pattern stands
+        /// the filter down. Built once per query, from the literal every
+        /// match must contain; see [`crate::ngram::query_sig512`].
+        ngram_query: Option<NgramSig512>,
     },
 }
 
@@ -117,11 +122,31 @@ impl Engine {
         // VM tables, and the same prefilter.
         let byte = Arc::new(compile()?);
         let delegate = Arc::clone(&byte);
+        // The filter is not available to every pattern -- a folded literal
+        // or a branch split stands it down -- and `None` here means "search
+        // every file", never "search none"; see [`crate::ngram::query_sig512`].
+        // `RGX_ABLATE_NGRAM` forces that stand-down state for the paper's
+        // end-to-end tier ablation: cost may change, answers never do.
+        let ngram_query = if crate::ablate_ngram() {
+            None
+        } else {
+            crate::ngram::query_sig512(pattern, false)
+        };
         Ok(Engine::Hybrid {
             start_inhouse: true,
             byte,
             delegate,
+            ngram_query,
         })
+    }
+
+    /// The n-gram query signature this pattern can filter with, or `None`
+    /// when it cannot filter at all.
+    #[inline]
+    pub(crate) fn ngram_query(&self) -> Option<NgramSig512> {
+        match self {
+            Engine::Hybrid { ngram_query, .. } => *ngram_query,
+        }
     }
 
     /// The in-house matcher, exposed under the old `grep` name so call sites
@@ -538,6 +563,11 @@ pub struct SearchStats {
     /// them had a file to search.
     pub total_packs_scanned: usize,
     pub total_files_searched: usize,
+    /// Files the n-gram filter rejected before their bytes were read. The
+    /// filter never rejects a file that holds a match, so these are not
+    /// files the query skipped -- they are files it answered without
+    /// reading. `0` when the pattern stood the filter down.
+    pub total_files_pruned: usize,
     pub total_files_matched: usize,
     pub total_lines_matched: usize,
     /// In-process wall clock from entry to "matches are ready", excluding the
@@ -764,6 +794,7 @@ fn run_search<F: FileSource + 'static>(
     let total_matched_files = Arc::new(AtomicUsize::new(0));
     let total_matched_lines = Arc::new(AtomicUsize::new(0));
     let total_files_searched = Arc::new(AtomicUsize::new(0));
+    let total_files_pruned = Arc::new(AtomicUsize::new(0));
 
     let num_threads = config.threads.max(1);
     let chunk_size = if shared_files.len() == 0 {
@@ -782,6 +813,7 @@ fn run_search<F: FileSource + 'static>(
         let matched_files = Arc::clone(&total_matched_files);
         let matched_lines = Arc::clone(&total_matched_lines);
         let searched_files = Arc::clone(&total_files_searched);
+        let pruned_files = Arc::clone(&total_files_pruned);
         let cfg = config.clone();
         let e_clone = Arc::clone(&engine);
 
@@ -798,10 +830,12 @@ fn run_search<F: FileSource + 'static>(
             // be flipped by a claim. Only the parallel-buffered path has a
             // per-claim read and scan to compare.
             let mut engines = Engines::new(&inhouse);
+            let ngram_q = e_clone.ngram_query();
 
             let mut thread_matches: Vec<(u32, Vec<SearchMatch>)> = Vec::new();
             let mut cur: Vec<SearchMatch> = Vec::new();
             let mut thread_searched_files = 0usize;
+            let mut thread_pruned_files = 0usize;
             let mut thread_file_matches = 0usize;
             let mut thread_line_matches = 0usize;
 
@@ -816,6 +850,18 @@ fn run_search<F: FileSource + 'static>(
                 for i in start_idx..end_idx {
                     let f = files.get(i);
                     thread_searched_files += 1;
+
+                    // The n-gram filter, before the file's bytes are touched:
+                    // a signature missing a bit the pattern's holds is proof
+                    // the file cannot match. `None` (and the all-zero file
+                    // signature) stands the filter down -- see
+                    // [`crate::ngram::query_sig512`].
+                    if let Some(q) = ngram_q {
+                        if !NgramSig512::from_words(f.ngram).contains_query(&q) {
+                            thread_pruned_files += 1;
+                            continue;
+                        }
+                    }
 
                     let pack_bytes = match storage_map.payload(f.pack_id) {
                         Some(b) => b,
@@ -863,6 +909,7 @@ fn run_search<F: FileSource + 'static>(
             }
 
             searched_files.fetch_add(thread_searched_files, Ordering::Relaxed);
+            pruned_files.fetch_add(thread_pruned_files, Ordering::Relaxed);
             matched_files.fetch_add(thread_file_matches, Ordering::Relaxed);
             matched_lines.fetch_add(thread_line_matches, Ordering::Relaxed);
             Ok(ChunkOut {
@@ -943,6 +990,7 @@ fn run_search<F: FileSource + 'static>(
         SearchStats {
             total_packs_scanned: total_packs,
             total_files_searched: total_files_searched.load(Ordering::Relaxed),
+            total_files_pruned: total_files_pruned.load(Ordering::Relaxed),
             total_files_matched: total_matched_files.load(Ordering::Relaxed),
             total_lines_matched: total_lines,
             elapsed_ms: elapsed,
@@ -1018,6 +1066,7 @@ fn pack_worker(
     let inhouse =
         rgxsearcher::Searcher::with_candidates(&hybrid, &hybrid, inhouse_config_for(&config));
     let mut engines = Engines::new(&inhouse);
+    let ngram_q = engine.ngram_query();
 
     // One search of a throwaway byte, before the first claim, so that the
     // first pack a worker reads is measured as a scan and not as a scan
@@ -1045,6 +1094,7 @@ fn pack_worker(
     let mut current_file: Option<(usize, File)> = None;
     let mut buckets: Vec<Bucket> = Vec::new();
     let mut searched = 0usize;
+    let mut pruned = 0usize;
     let mut matched = 0usize;
     let mut lines = 0usize;
     let mut read_ns: u128 = 0;
@@ -1108,6 +1158,16 @@ fn pack_worker(
             for k in unit.first..unit.last {
                 let f = plan.locs[plan.files[k as usize] as usize];
                 searched += 1;
+
+                // The n-gram filter, at the same point as the mapping path:
+                // before the file's bytes are read out of the pack. `None`
+                // (and the all-zero file signature) stands it down.
+                if let Some(q) = ngram_q {
+                    if !NgramSig512::from_words(f.ngram).contains_query(&q) {
+                        pruned += 1;
+                        continue;
+                    }
+                }
 
                 // Relative to the unit, which starts at the first file's offset.
                 let start = f.offset as usize - unit.start as usize;
@@ -1182,6 +1242,7 @@ fn pack_worker(
     Ok(WorkerOut {
         buckets,
         searched,
+        pruned,
         matched,
         lines,
         read_ns,
@@ -1194,6 +1255,7 @@ fn pack_worker(
 pub struct WorkerOut {
     buckets: Vec<Bucket>,
     searched: usize,
+    pruned: usize,
     matched: usize,
     lines: usize,
     read_ns: u128,
@@ -1210,6 +1272,7 @@ impl WorkerOut {
         WorkerOut {
             buckets: Vec::new(),
             searched: 0,
+            pruned: 0,
             matched: 0,
             lines: 0,
             read_ns: 0,
@@ -1224,9 +1287,18 @@ impl WorkerOut {
 /// A file is stale when it is gone, when its length differs, or when its
 /// modification time does. Size first because it is the cheap half of the
 /// answer and catches an edit that kept the length; mtime second because it
-/// catches the rest.
+/// catches the rest. What it cannot see is a file *added* after the build:
+/// that needs the walk the store exists to avoid, and is the documented
+/// boundary of this check rather than a hole it pretends to cover.
 pub fn stale_files(store_dir: &Path) -> io::Result<(usize, usize)> {
     let m = super::format::load_manifest(store_dir)?;
+    Ok(stale_in(&m))
+}
+
+/// [`stale_files`] over an already-loaded manifest, so a caller that has
+/// one -- `run_tv_query` loads it a moment later anyway -- pays the stat
+/// pass and not a second parse.
+pub fn stale_in(m: &super::format::Manifest) -> (usize, usize) {
     let root = Path::new(&m.root_path);
     let mut checked = 0usize;
     let mut stale = 0usize;
@@ -1248,7 +1320,7 @@ pub fn stale_files(store_dir: &Path) -> io::Result<(usize, usize)> {
             }
         }
     }
-    Ok((checked, stale))
+    (checked, stale)
 }
 
 fn raw_decode(raw: &Arc<RawManifest>, config: &SearchConfig) -> io::Result<(PackPlan, Vec<u32>)> {
@@ -1353,6 +1425,7 @@ pub(crate) fn search_parallel_buffered(
     let mut read_ns = 0u128;
     let mut scan_ns = 0u128;
     let mut n_searched = 0usize;
+    let mut n_pruned = 0usize;
     let mut n_matched = 0usize;
     let mut n_lines = 0usize;
     let mut service_ns: Vec<u64> = Vec::with_capacity(n_units);
@@ -1368,6 +1441,7 @@ pub(crate) fn search_parallel_buffered(
             read_ns += out.read_ns;
             scan_ns += out.scan_ns;
             n_searched += out.searched;
+            n_pruned += out.pruned;
             n_matched += out.matched;
             n_lines += out.lines;
             service_ns.extend_from_slice(&out.service_ns);
@@ -1460,6 +1534,7 @@ pub(crate) fn search_parallel_buffered(
         SearchStats {
             total_packs_scanned: total_packs,
             total_files_searched: n_searched,
+            total_files_pruned: n_pruned,
             total_files_matched: n_matched,
             total_lines_matched: n_lines,
             elapsed_ms: stages.work_ms,

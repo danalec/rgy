@@ -45,6 +45,11 @@ pub mod index_parser;
 /// upstream lineage the djson suite still carries. The copy-time
 /// changes are listed in `scripts/vendored-sources.tsv`.
 pub mod json_scan;
+/// Lazy (on-demand) views over the same structural index: values are
+/// validated like [`index_parser`] validates them but materialised
+/// only where the consumer touches them. See the module header for the
+/// three contracts that keep it a companion of the Arena parser.
+pub mod ondemand;
 pub mod parser;
 /// Borrowed byte-slice pointer to a JSON fragment: `RawValue` and its
 /// `from_str` entry point. The type and the byte walker are always

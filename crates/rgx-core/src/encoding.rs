@@ -123,6 +123,27 @@ impl Transcoder {
         }
     }
 
+    /// A stream the caller has already labelled (rgx's `-E`): decode with
+    /// `bom` from the first byte, mark or no mark.
+    ///
+    /// A mark is DATA here -- the declaration is what is honoured, not a
+    /// guess at the front -- which is [`force_decode`]'s rule over a stream
+    /// instead of a buffer. `Bom::Utf8` is a pass-through, so a forced
+    /// UTF-8 stream costs a short read and nothing else.
+    pub fn forced(bom: Bom) -> Self {
+        Self {
+            head: [0; 4],
+            nhead: 0,
+            bom: Some(bom),
+            decided: true,
+            utf16: Utf16::new(bom != Bom::Utf16Be),
+            out: Vec::new(),
+            at: 0,
+            scratch: Vec::new(),
+            eof: false,
+        }
+    }
+
     /// Hand decoded bytes to `dst`, pulling from `src` as needed. `0` means the
     /// source is exhausted.
     ///

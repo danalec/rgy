@@ -31,6 +31,38 @@ pub trait Matcher: Send + Sync {
     /// from `find_at` would make a searcher skip lines inconsistently.
     fn is_match_at(&self, hay: &[u8], at: usize) -> bool;
 
+    /// Whether a byte-engine match spanning `window` settles its line, or a
+    /// delegate behind this matcher owns the last word.
+    ///
+    /// The answer may depend only on `window_ascii` -- the searcher hoists
+    /// it once per buffer with a clean window and takes the result as the
+    /// policy for every clean window on the buffer.
+    ///
+    /// The line loop consults this only where a deciding mask said `true`:
+    /// a mask bit is the byte engine's fact, and the window is either the
+    /// whole line or the widest span that one bit's match can occupy.
+    /// `window_ascii` is the searcher's fact about that span -- taken from
+    /// the fill's `high_bits` map in O(1), never by rescanning -- and it is
+    /// exact. A pure-ASCII window settles the line on the byte engine's
+    /// word -- on ASCII bytes a codepoint is a byte, so both engines match
+    /// there -- and the delegate is asked only when every window offered is
+    /// refused. The default is `true` (a byte engine decides every line),
+    /// and a matcher that refuses a window must be able to answer
+    /// `any_match_in` for the line from the line alone, without its
+    /// candidates.
+    fn decides_window(&self, _window: &[u8], _window_ascii: bool) -> bool {
+        true
+    }
+
+    /// Whether [`Self::decides_line`] can answer `false` for some line.
+    ///
+    /// The searcher fills its non-ASCII map and computes `line_ascii` only
+    /// when this is `true`: a matcher that never declines must not pay for
+    /// the fact. Asked once per search, not per line.
+    fn may_decline_lines(&self) -> bool {
+        false
+    }
+
     /// Whether any match begins in `line`, given the candidate offsets the
     /// searcher already holds for the buffer `line` is a view of.
     ///

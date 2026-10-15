@@ -289,6 +289,10 @@ pub fn build_store_with_extractor(
                 is_empty: true,
                 is_deleted: false,
                 is_binary: false,
+                // No bytes to sign. Zero is "unknown", not "empty", and
+                // unknown never rejects -- an empty file still matches a
+                // pattern that can match nothing (`x*`).
+                ngram: [0; 8],
             });
             file_id_counter += 1;
             total_files += 1;
@@ -357,6 +361,7 @@ pub fn build_store_with_extractor(
                         is_empty: false,
                         is_deleted: false,
                         is_binary: m_binary,
+                        ngram: crate::ngram::build_stored_sig512(&member_bytes).into_words(),
                     });
                     file_id_counter += 1;
                     total_files += 1;
@@ -405,6 +410,7 @@ pub fn build_store_with_extractor(
             is_empty: false,
             is_deleted: false,
             is_binary,
+            ngram: crate::ngram::build_stored_sig512(&content).into_words(),
         });
 
         file_id_counter += 1;

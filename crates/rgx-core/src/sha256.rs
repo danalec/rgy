@@ -175,18 +175,16 @@ impl Sha256 {
     }
 
     fn process_block(&mut self, block: &[u8; 64]) {
-        // When the `sha256-hw` feature is on AND the running CPU has
-        // the matching ISA extension, route the compression through the
-        // hardware backend. The cached `hardware_available` check is
-        // one branch on the hot path; the rest of the dispatch is a
-        // single function call.
+        // `sha256_hw::compress_block` owns the dispatch: it reaches the
+        // SHA-NI kernel when the running CPU has the extension and falls
+        // back to `process_block_scalar` when it does not. The
+        // `hardware_available()` check is not repeated here -- it used to
+        // be, which meant two cached atomic loads per 64-byte block to
+        // arrive at the same answer twice.
         #[cfg(feature = "sha256-hw")]
-        {
-            if crate::sha256_hw::hardware_available() {
-                crate::sha256_hw::compress_block(&mut self.h, block);
-                return;
-            }
-        }
+        crate::sha256_hw::compress_block(&mut self.h, block);
+
+        #[cfg(not(feature = "sha256-hw"))]
         process_block_scalar(&mut self.h, block);
     }
 }

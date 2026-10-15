@@ -38,7 +38,7 @@ pub const FORMAT_VERSION: u32 = 1;
 /// file with a NUL at byte 4,000 as text and answered for it while both
 /// reference engines suppressed it, so a v2 catalog is a different question
 /// and is refused with its version named.
-pub const MANIFEST_VERSION: u32 = 3;
+pub const MANIFEST_VERSION: u32 = 4;
 /// Default target pack size (16 MiB).
 pub const DEFAULT_PACK_SIZE: u64 = 16 * 1024 * 1024;
 
@@ -134,6 +134,18 @@ pub struct FileLoc {
     /// Offset of this record's path bytes within the manifest payload.
     pub path_at: u32,
     pub path_len: u32,
+    /// The file's 512-bit n-gram signature, as
+    /// [`crate::ngram::build_stored_sig512`] computes it at build time over
+    /// the text the searcher will see -- which for a byte-order-marked file
+    /// is its decoded form, not the stored bytes.
+    ///
+    /// It rides along in the locator so the query path can reject a file
+    /// without touching its bytes: a subset test against the pattern's own
+    /// signature, before the slice is borrowed. `false` is proof the file
+    /// cannot hold the needle; `true` proves nothing and costs a search.
+    /// All-zero is "unknown" (an archive member, an empty file) and never
+    /// rejects; see [`crate::ngram::NgramSig512::contains_query`].
+    pub ngram: [u64; 8],
     flags: u8,
 }
 
@@ -166,6 +178,8 @@ pub struct FileRecord {
     pub is_empty: bool,
     pub is_deleted: bool,
     pub is_binary: bool,
+    /// The file's 512-bit n-gram signature; see [`FileLoc::ngram`].
+    pub ngram: [u64; 8],
 }
 
 /// A manifest file that has been read and has not been decoded.
@@ -374,11 +388,16 @@ impl RawManifest {
             let path_len = u32::from_le_bytes(hdr[8..12].try_into().unwrap()) as usize;
             let path_at = c.position();
             c.take(path_len)?;
-            let trailer = c.take(37)?;
+            let trailer = c.take(101)?;
             let pack_id = u32::from_le_bytes(trailer[..4].try_into().unwrap());
             let offset = u64::from_le_bytes(trailer[4..12].try_into().unwrap());
             let length = u64::from_le_bytes(trailer[12..20].try_into().unwrap());
-            let flags = trailer[36];
+            let mut ngram = [0u64; 8];
+            for (i, w) in ngram.iter_mut().enumerate() {
+                let s = 36 + i * 8;
+                *w = u64::from_le_bytes(trailer[s..s + 8].try_into().unwrap());
+            }
+            let flags = trailer[100];
             locs.push(FileLoc {
                 file_id,
                 pack_id,
@@ -386,6 +405,7 @@ impl RawManifest {
                 length,
                 path_at: path_at as u32,
                 path_len: path_len as u32,
+                ngram,
                 flags,
             });
         }
@@ -471,6 +491,10 @@ impl RawManifest {
             let mtime_secs = c.u64()?;
             let mtime_nanos = c.u32()?;
             let crc32 = c.u32()?;
+            let mut ngram = [0u64; 8];
+            for w in ngram.iter_mut() {
+                *w = c.u64()?;
+            }
             let flags = c.take(1)?[0];
 
             files.push(FileRecord {
@@ -485,6 +509,7 @@ impl RawManifest {
                 is_empty: flags & 1 != 0,
                 is_deleted: flags & 2 != 0,
                 is_binary: flags & 4 != 0,
+                ngram,
             });
         }
 
@@ -582,6 +607,9 @@ impl Manifest {
             buf.extend_from_slice(&f.mtime_secs.to_le_bytes());
             buf.extend_from_slice(&f.mtime_nanos.to_le_bytes());
             buf.extend_from_slice(&f.crc32.to_le_bytes());
+            for w in f.ngram {
+                buf.extend_from_slice(&w.to_le_bytes());
+            }
             let flags: u8 = (if f.is_empty { 1 } else { 0 })
                 | (if f.is_deleted { 2 } else { 0 })
                 | (if f.is_binary { 4 } else { 0 });

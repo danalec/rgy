@@ -119,18 +119,19 @@ pub trait CandidateSource: Send + Sync {
         None
     }
 
-    /// The width of the MATCH MASK [`Self::map_candidates`] is about to
-    /// fill, or `None` when it is filling a prefilter. A mask's confirm
-    /// is the mask itself rather than a scan for a literal, and the
-    /// width says whether the line walk can skip the confirm: a
-    /// one-byte mask settles a line from the bit.
+    /// The line cut and match span of the MATCH MASK [`Self::map_candidates`]
+    /// is about to fill -- `(cut, span)` -- or `None` when it is filling a
+    /// prefilter. A mask's confirm is the mask itself rather than a scan for
+    /// a literal: `cut` is the NARROWEST branch (what the line range must
+    /// keep) and `span` the WIDEST (what a match's bytes can cover), and the
+    /// line walk settles a line from its bits through the window rule.
     ///
     /// Asked immediately after that call and about the same buffer.
     /// Separate from [`Self::map_candidates`] because the answer is a
     /// property of the mask, not of the stream's origin: a mask's bits
     /// are match starts in the buffer at offset zero, which is exactly
     /// what `Origin::Fixed(0)` already says.
-    fn map_is_match_mask(&self, _hay: &[u8]) -> Option<usize> {
+    fn map_is_match_mask(&self, _hay: &[u8]) -> Option<(usize, usize)> {
         None
     }
 }
@@ -160,6 +161,11 @@ pub struct Candidates<'a> {
     /// cutting five drops every `fn x` that ends a line — a match, and
     /// one the differential has a fixture for.
     mask_width: usize,
+    /// The WIDEST branch's width: the span a match at any bit can cover.
+    /// The window rule tests exactly these bytes before a bit settles its
+    /// line (see [`Matcher::decides_window`]); zero when this stream is not
+    /// a match mask.
+    window_span: usize,
 }
 
 /// What a candidate offset means to the code that confirms it.
@@ -302,6 +308,7 @@ impl<'a> Candidates<'a> {
             origin: Origin::Fixed(0),
             decides: false,
             mask_width: 0,
+            window_span: 0,
         }
     }
 
@@ -313,6 +320,7 @@ impl<'a> Candidates<'a> {
             origin: Origin::Fixed(0),
             decides: false,
             mask_width: 0,
+            window_span: 0,
         }
     }
 
@@ -351,6 +359,7 @@ impl<'a> Candidates<'a> {
             origin: Origin::Fixed(0),
             decides: false,
             mask_width: 0,
+            window_span: 0,
         }
     }
 
@@ -367,6 +376,7 @@ impl<'a> Candidates<'a> {
             origin: Origin::Fixed(0),
             decides: false,
             mask_width: 0,
+            window_span: 0,
         }
     }
 
@@ -380,18 +390,21 @@ impl<'a> Candidates<'a> {
     /// in its `pub ` branch, so cutting five drops every `fn x` that ends a
     /// line. [`super::scan::MatchMask::line_cut`] is where the number comes
     /// from, and it is `None` -- so this constructor is never reached -- for a
-    /// mask whose shape cannot be cut at all.
+    /// mask whose shape cannot be cut at all. `span` is the WIDEST branch:
+    /// every match at a bit occupies at most these bytes, which is what makes
+    /// the window rule's ASCII test a proof about the whole match.
     ///
     /// A width of zero is not a mask at all: it is what every prefilter
     /// answers, it leaves [`Self::decides`] false, and the line walk confirms
     /// exactly as it did before any of this.
-    pub fn of_mask(bits: &'a BitMap, width: usize) -> Self {
+    pub fn of_mask(bits: &'a BitMap, width: usize, span: usize) -> Self {
         Self {
             supply: Supply::Bits { bits, at: 0 },
             idx: 0,
             origin: Origin::Fixed(0),
             decides: width != 0,
             mask_width: width,
+            window_span: span,
         }
     }
 
@@ -406,6 +419,13 @@ impl<'a> Candidates<'a> {
     #[must_use]
     pub fn mask_width(&self) -> usize {
         self.mask_width
+    }
+
+    /// How many bytes a match at a bit can cover at the widest -- the span
+    /// the window rule tests. Zero when this stream is not a match mask.
+    #[must_use]
+    pub fn mask_window(&self) -> usize {
+        self.window_span
     }
 
     /// What a candidate offset means to whoever confirms it.
@@ -1340,6 +1360,18 @@ pub struct Config {
     /// to UTF-8, before any line is looked for. On by default, because that
     /// is what `grep-searcher` does and ripgrep's output depends on it.
     pub bom_sniffing: bool,
+    /// The caller has declared the input's encoding (rgx's `-E`): decode with
+    /// it before any line is looked for, mark or no mark, treating a mark as
+    /// data -- [`encoding::force_decode`]'s rule over a stream.
+    ///
+    /// `Some` outranks [`Self::bom_sniffing`]: a declaration is what the
+    /// bytes ARE, and a sniff is only a guess at their front. `Some` also
+    /// means no sniff at all, so `Some(Bom::Utf8)` searches the bytes as
+    /// they stand. The CLI leaves this `None` for `-E utf-8` and for no
+    /// flag, which keeps the sniff for those. It is for RAW INPUT only:
+    /// a searcher over adapter output must leave it unset, or extracted
+    /// text is decoded a second time.
+    pub forced_bom: Option<encoding::Bom>,
     /// Let one match span lines — rgx's `-U`.
     ///
     /// **The other half of `-U` is at compile time**: `ByteRegex::new_multiline`
@@ -1369,6 +1401,7 @@ impl Default for Config {
             line_numbers: false,
             buffer_capacity: LineBuffer::INITIAL_BUF,
             bom_sniffing: true,
+            forced_bom: None,
             multi_line: false,
         }
     }
@@ -1634,6 +1667,7 @@ impl<'m> Searcher<'m> {
         hay: &'a [u8],
         cands_map: &'a mut BitMap,
         mut terms_map: Option<&mut BitMap>,
+        mut nonascii_map: Option<&mut BitMap>,
         term: u8,
         offsets: &'a mut Vec<usize>,
     ) -> Option<Candidates<'a>> {
@@ -1647,18 +1681,30 @@ impl<'m> Searcher<'m> {
                 if let (Some((at, needle)), Some(t)) = (src.pair_needle(), terms_map.as_deref_mut())
                 {
                     super::scan::pair_term_bits(needle, term, hay, cands_map, t);
+                    if let Some(m) = nonascii_map {
+                        super::scan::high_bits(hay, m);
+                    }
                     return Some(Candidates::of_bits(cands_map).with_origin(Origin::Fixed(at)));
                 }
                 // Fill terms BEFORE the candidate map so it is populated
                 // even when `map_candidates` declines and the caller falls
-                // through to `candidates_for`.
-                if let Some(t) = terms_map {
-                    super::scan::term_bits(term, hay, t);
+                // through to `candidates_for`. The non-ASCII map rides the
+                // same pass.
+                if let (Some(t), Some(m)) = (terms_map.as_deref_mut(), nonascii_map.as_deref_mut())
+                {
+                    super::scan::term_high_bits(term, hay, t, m);
+                } else {
+                    if let Some(t) = terms_map {
+                        super::scan::term_bits(term, hay, t);
+                    }
+                    if let Some(m) = nonascii_map {
+                        super::scan::high_bits(hay, m);
+                    }
                 }
                 match src.map_candidates(hay, cands_map) {
                     Some(origin) => match src.map_is_match_mask(hay) {
-                        Some(width) => {
-                            Some(Candidates::of_mask(cands_map, width).with_origin(origin))
+                        Some((cut, span)) => {
+                            Some(Candidates::of_mask(cands_map, cut, span).with_origin(origin))
                         }
                         None => Some(Candidates::of_bits(cands_map).with_origin(origin)),
                     },
@@ -1722,6 +1768,13 @@ pub struct LineBuffer {
 pub struct Scratch {
     terms: BitMap,
     cands: BitMap,
+    /// A bit per high byte (`>= 0x80`), filled only for a matcher that may
+    /// decline a window (see [`Matcher::may_decline_lines`]). The line
+    /// loop's settle asks it O(1) what a per-line `is_ascii` rescan used to
+    /// cost 66 ms to answer (`benchmark/findings.md` §13): one lookup
+    /// settles a pure-ASCII line, and the window walk runs only on the
+    /// dirty minority.
+    nonascii: BitMap,
 }
 
 impl Scratch {
@@ -1729,6 +1782,7 @@ impl Scratch {
         Self {
             terms: BitMap::new(),
             cands: BitMap::new(),
+            nonascii: BitMap::new(),
         }
     }
 }
@@ -1770,6 +1824,22 @@ impl LineBuffer {
             line_term: config.line_term.line_term,
             scratch: Scratch::new(),
         }
+    }
+
+    /// A buffer sized for a stream whose length the caller already knows.
+    ///
+    /// This is [`Self::new`] today: FILL SIZE IS A MEASURED NULL. At 64 KiB,
+    /// 256 KiB and a file-sized 8 MiB fill the single-file floor is flat
+    /// (Linux bench host, 246 MB, base-vs-new interleaved: 0.995--1.02).
+    /// Bigger fills move sys into user -- the two bit maps scale with the
+    /// fill and evict the streaming haystack from L2 -- and smaller ones pay
+    /// more syscalls; on this corpus the two cancel exactly. The named
+    /// constructor is kept because the sizing question is per-platform and
+    /// per-shape (`benchmark/findings.md`), and the caller already knows the
+    /// length the day it changes.
+    pub fn new_sized(config: &Config, len: u64) -> Self {
+        let _ = len;
+        Self::new(config)
     }
 
     /// The searchable bytes: complete lines only, from `pos` to the last
@@ -2167,6 +2237,10 @@ impl<'c, 'm> Core<'c, 'm> {
     /// already searched and sunk on the previous fill, so the walk steps over
     /// them. They remain readable so `before_context` can reach back into
     /// them. `grep-searcher` does the same thing with its `pos`.
+    // Every parameter is a distinct per-buffer input the callers already
+    // hold: sink, buffer, resume point, skip, and the search views. A
+    // parameter struct would only rename them.
+    #[allow(clippy::too_many_arguments)]
     fn run<const MULTI: bool, S: Sink>(
         &mut self,
         sink: &mut S,
@@ -2175,8 +2249,20 @@ impl<'c, 'm> Core<'c, 'm> {
         skip: usize,
         candidates: Option<Candidates<'_>>,
         terms: Option<&BitMap>,
+        nonascii: Option<&BitMap>,
     ) -> Result<bool, S::Error> {
         let term = self.config.line_term.line_term;
+        // Whether this matcher may reserve a line for its delegate. Hoisted
+        // per buffer with the other config reads; when it is false the
+        // window rule below short-circuits to the mask's answer.
+        let routes_delegate = self.matcher.may_decline_lines();
+        // Hoisted once per buffer: whether a pure-ASCII window settles at
+        // all. The per-line shortcut then answers from the fill maps alone
+        // -- no virtual call on the 6.9M settled lines of a flagship row.
+        // A matcher that refuses clean windows (fold-risky case folding)
+        // gets `false` here and every line falls to the window walk, where
+        // it refuses each window and the delegate answers.
+        let clean_window_settles = self.matcher.decides_window(&[], true);
         // Config fields read per line are hoisted once per buffer, the same
         // treatment `term` already gets. Each access is a `&Config` load and
         // a field hop; over 200 lines per file the repeated loads are a few
@@ -2628,21 +2714,112 @@ impl<'c, 'm> Core<'c, 'm> {
             } else {
                 match cand.as_mut() {
                     Some(c) => {
-                        if let Some(m) = c.line_matches(line_start, content_end) {
-                            if content.is_empty() {
-                                matches_empty
+                        // The window rule (maintainer-approved,
+                        // `benchmark/findings.md` §13 shape 2): a mask bit
+                        // whose widest window is pure ASCII is a match in
+                        // both engines -- on ASCII bytes a codepoint is a
+                        // byte -- so the bit settles the line on its own. The
+                        // delegate is asked only when EVERY window on the
+                        // line is refused, and a line with no bit at all is
+                        // the mask's settled `false`. This replaced hybrid.rs's
+                        // whole-buffer `buffer_ascii` gate (one non-ASCII byte
+                        // in a 64 KiB fill cost every line of it the settle),
+                        // then a per-line ASCII rescan (66 ms of the row), and
+                        // the window is the pattern's fixed match span -- a
+                        // handful of bytes, not the line.
+                        if content.is_empty() {
+                            matches_empty
+                        } else if routes_delegate && c.decides() {
+                            // The line-clean shortcut first: one map lookup
+                            // settles the ~93% pure-ASCII lines outright, and
+                            // the window walk below runs only on the dirty
+                            // minority. Without it every settled line paid a
+                            // window walk or a per-line rescan
+                            // (`benchmark/findings.md` §13 prices both).
+                            let line_ascii = match nonascii {
+                                Some(m) => !m.any_set(line_start, content_end),
+                                None => content.is_ascii(),
+                            };
+                            if line_ascii && clean_window_settles {
+                                // A clean line's every window is clean, and
+                                // the matcher accepts clean windows (hoisted
+                                // above), so the mask's answer is the answer.
+                                // It is still the MASK's answer: a line with
+                                // no bit is a miss -- settling `true` here
+                                // regardless is what briefly over-reported
+                                // 827k lines of `e.` on the 246 MB row before
+                                // `a_clean_line_without_a_candidate_is_not_a_match`
+                                // pinned it. `None` is a non-mask stream and
+                                // cannot reach this arm.
+                                c.line_matches(line_start, content_end).unwrap_or(false)
                             } else {
-                                m
+                                // The window rule (maintainer-approved,
+                                // findings §13 shape 2): a mask bit whose
+                                // widest window is pure ASCII is a match in
+                                // both engines -- on ASCII bytes a codepoint
+                                // is a byte -- so the bit settles the line on
+                                // its own. The delegate is asked only when
+                                // EVERY window on the line is refused, and a
+                                // line with no bit at all is the mask's
+                                // settled `false`.
+                                let span = c.mask_window();
+                                let line_len = content.len();
+                                let mut saw_bit = false;
+                                let mut settled = false;
+                                // `in_line` yields the line's bits and parks
+                                // the cursor at the line end, exactly as the
+                                // settle does -- the delegate arm's empty
+                                // candidates are the same design as before.
+                                for rel in c.in_line(line_start, content_end) {
+                                    saw_bit = true;
+                                    let w_end = (rel + span).min(line_len);
+                                    let window_ascii = match nonascii {
+                                        Some(m) => !m.any_set(line_start + rel, line_start + w_end),
+                                        None => content[rel..w_end].is_ascii(),
+                                    };
+                                    // A clean window settles by the hoisted
+                                    // policy; the matcher is consulted only
+                                    // for the dirty windows it may still
+                                    // take, which are the rare ones.
+                                    if (window_ascii && clean_window_settles)
+                                        || self
+                                            .matcher
+                                            .decides_window(&content[rel..w_end], window_ascii)
+                                    {
+                                        settled = true;
+                                        break;
+                                    }
+                                }
+                                if settled {
+                                    true
+                                } else if !saw_bit {
+                                    false
+                                } else {
+                                    // Every window is refused: a hybrid's
+                                    // `any_match_in` scans the line whole and
+                                    // ignores the byte-oriented candidates,
+                                    // which is also why the cursor having been
+                                    // parked costs nothing here. A matcher
+                                    // that refuses a window must therefore be
+                                    // able to answer from the line alone.
+                                    let line_cands = c.in_line(line_start, content_end);
+                                    self.matcher.any_match_in(content, line_cands, origin)
+                                }
                             }
                         } else {
-                            let line_cands = c.in_line(line_start, content_end);
-                            let has = !line_cands.is_empty();
-                            if content.is_empty() {
-                                matches_empty
-                            } else if has && c.decides() {
-                                true
-                            } else {
-                                has && self.matcher.any_match_in(content, line_cands, origin)
+                            match c.line_matches(line_start, content_end) {
+                                Some(m) => m,
+                                None => {
+                                    let line_cands = c.in_line(line_start, content_end);
+                                    let has = !line_cands.is_empty();
+                                    if has && c.decides() {
+                                        true
+                                    } else {
+                                        has && self
+                                            .matcher
+                                            .any_match_in(content, line_cands, origin)
+                                    }
+                                }
                             }
                         }
                     }
@@ -2847,6 +3024,21 @@ impl<'m> Searcher<'m> {
         if !self.matcher.can_match() {
             return Ok(false);
         }
+        // A declared encoding outranks the sniff: the caller said what these
+        // bytes are (`Config::forced_bom`), and a mark at the front is data,
+        // not a claim to overrule it.
+        if let Some(bom) = self.config.forced_bom {
+            let decoded = encoding::force_decode(bom, hay);
+            let mut rest: &[u8] = &decoded;
+            let mut read = |b: &mut [u8]| -> Result<usize, fmt::Error> {
+                let n = core::cmp::min(b.len(), rest.len());
+                b[..n].copy_from_slice(&rest[..n]);
+                rest = &rest[n..];
+                Ok(n)
+            };
+            let mut buf = LineBuffer::new(&self.config);
+            return self.search_reader_inner(&mut read, sink, &mut buf);
+        }
         if self.config.bom_sniffing {
             if let Some(bom) = encoding::sniff(hay) {
                 let decoded = encoding::decode(bom, hay);
@@ -2908,6 +3100,7 @@ impl<'m> Searcher<'m> {
         offsets.clear();
         let term = self.config.line_term.line_term;
         let terms_avail = hay.len() <= MAX_BITMAP_INPUT;
+        let routes_delegate = self.matcher.may_decline_lines();
         let candidates = self.map_candidates_only(
             hay,
             &mut scratch.cands,
@@ -2916,11 +3109,21 @@ impl<'m> Searcher<'m> {
             } else {
                 None
             },
+            if terms_avail && routes_delegate {
+                Some(&mut scratch.nonascii as &mut BitMap)
+            } else {
+                None
+            },
             term,
             offsets,
         );
         let terms = if terms_avail {
             Some(&scratch.terms as &BitMap)
+        } else {
+            None
+        };
+        let nonascii = if terms_avail && routes_delegate {
+            Some(&scratch.nonascii as &BitMap)
         } else {
             None
         };
@@ -2940,9 +3143,9 @@ impl<'m> Searcher<'m> {
         }
         let mut core = Core::new(&self.config, self.matcher);
         let keep_going = if self.config.multi_line {
-            core.run::<true, _>(sink, hay, 0, 0, candidates, terms)?
+            core.run::<true, _>(sink, hay, 0, 0, candidates, terms, nonascii)?
         } else {
-            core.run::<false, _>(sink, hay, 0, 0, candidates, terms)?
+            core.run::<false, _>(sink, hay, 0, 0, candidates, terms, nonascii)?
         };
         if core.skipped != 0 {
             self.skipped
@@ -2970,6 +3173,240 @@ impl<'m> Searcher<'m> {
         Ok(keep_going)
     }
 
+    /// Search a haystack that is already addressable -- a mapping -- in
+    /// line-aligned windows, without copying it into a rolling buffer.
+    ///
+    /// The reader path copies every byte of every fill; on the 246 MB
+    /// single-file probe that fill stage is 52 of the 64 ms a zero-match
+    /// query spends, and a pure read of the same file costs 40 ms of it.
+    /// This is the same walk with the copy removed: one [`Core`] carried
+    /// across windows, each window's maps built exactly as a fill's are.
+    /// Every window is cut at a line terminator, so no line is split and a
+    /// trailing unterminated line is one line at EOF, reader semantics.
+    /// Windows are at most [`MAX_BITMAP_INPUT`] so the dense path keeps its
+    /// bit maps; a window with no candidate before the first `Core` exists
+    /// skips the line walk and folds its line count forward, which is the
+    /// reader's own lazy-core skip.
+    ///
+    /// The binary rule is carried HERE, not by a pre-scan of the whole
+    /// mapping: a window answers the binary byte from a `memchr` that runs
+    /// after the candidate map has already touched those pages, so the
+    /// answer costs a warm scan instead of the cold full-file one a guard
+    /// paid. `Quit` truncates the search at the byte exactly as the reader
+    /// stops reading there; `Convert` treats it as a line terminator,
+    /// which is what the reader's in-place rewrite produces -- same lines,
+    /// same counts, same offsets. The caller gates the entry only for what
+    /// the window walk cannot carry: context (the roll) and multi-line (a
+    /// match across a window boundary). BOM decoding is NOT a gate -- the
+    /// slice machinery decodes on every raw-input surface alike.
+    pub fn search_windows<S: Sink>(
+        &self,
+        hay: &[u8],
+        sink: &mut S,
+        scratch: &mut Scratch,
+        offsets: &mut Vec<usize>,
+    ) -> Result<bool, S::Error> {
+        const WINDOW: usize = 64 * 1024;
+        let term = self.config.line_term.line_term;
+        // The binary byte and what finding it means. `Quit` stops the
+        // search at the first one and reports its offset; `Convert` splits
+        // lines there and keeps going; `None` (`--text`) never looks.
+        let (bin_byte, quit_at_bin) = match self.config.binary {
+            BinaryDetection::Quit(b) => (Some(b), true),
+            BinaryDetection::Convert(b) => (Some(b), false),
+            BinaryDetection::None => (None, false),
+        };
+        let mut core: Option<Core<'_, 'm>> = None;
+        let mut line_number: u64 = if self.config.wants_line_numbers() {
+            1
+        } else {
+            0
+        };
+        let mut skipped_bytes: u64 = 0;
+        let mut bin_offset: Option<u64> = None;
+        let mut pos = 0usize;
+        while pos < hay.len() {
+            #[cfg(feature = "std")]
+            let cut_t0 = std::time::Instant::now();
+            // Cut at the last line end inside the window. Under `Convert`
+            // the binary byte IS a line end -- the reader's rewrite makes
+            // it one -- so the cut counts both. A window with no line end
+            // grows to the next one past it, and at EOF the trailing bytes
+            // are a line, terminator or not.
+            let mut end = core::cmp::min(pos + WINDOW, hay.len());
+            if end < hay.len() {
+                let last = match bin_byte {
+                    // `Quit` cannot reach a byte past the first binary one
+                    // -- the walk below stops there -- so its cut is the
+                    // terminator cut.
+                    Some(b) if !quit_at_bin => crate::memchr::memrchr2(term, b, &hay[pos..end]),
+                    _ => crate::memchr::memrchr(term, &hay[pos..end]),
+                };
+                end = match last {
+                    Some(i) => pos + i + 1,
+                    None => {
+                        let ahead = match bin_byte {
+                            Some(b) if !quit_at_bin => crate::memchr::memchr2(term, b, &hay[end..]),
+                            _ => crate::memchr::memchr(term, &hay[end..]),
+                        };
+                        match ahead {
+                            Some(i) => end + i + 1,
+                            None => hay.len(),
+                        }
+                    }
+                };
+            }
+            #[cfg(feature = "std")]
+            if crate::profile_enabled() {
+                crate::profile_add("win_cut_ns", cut_t0.elapsed().as_nanos() as u64);
+            }
+            let win = &hay[pos..end];
+            offsets.clear();
+            #[cfg(feature = "std")]
+            let map_t0 = std::time::Instant::now();
+            let terms_avail = win.len() <= MAX_BITMAP_INPUT;
+            // Candidates first and alone. A window the skip below will take
+            // never observes the term map -- line counting is off until a
+            // `Core` exists and a count is wanted -- and the term map is
+            // the expensive half of the fused fill: one scattered bit per
+            // line ending, which on a 246 MB file is 8.7 million of them.
+            // Only a window that will actually be walked pays for it, and
+            // then as one extra pass.
+            let cands =
+                self.map_candidates_only(win, &mut scratch.cands, None, None, term, offsets);
+            #[cfg(feature = "std")]
+            if crate::profile_enabled() {
+                crate::profile_add("win_map_ns", map_t0.elapsed().as_nanos() as u64);
+            }
+            // The binary byte, asked per window and after the map: the map
+            // already faulted these pages in, so this is the warm half of
+            // what a whole-file guard cost cold.
+            let hit = bin_byte.and_then(|b| crate::memchr::memchr(b, win));
+            // `Quit` truncates here: the bytes before the byte are a final
+            // region, trailing partial line and all -- the reader sets
+            // `last_lineterm` to exactly that boundary -- and nothing past
+            // it is ever searched.
+            let region = match (hit, quit_at_bin) {
+                (Some(i), true) => &win[..i],
+                _ => win,
+            };
+            if let Some(i) = hit {
+                let at = pos as u64 + i as u64;
+                if bin_offset.is_none() {
+                    bin_offset = Some(at);
+                }
+            }
+            let empty = !self.config.invert
+                && !self.config.multi_line
+                && !self.matcher.matches_empty()
+                && cands
+                    .as_ref()
+                    .is_some_and(|c| c.is_empty_in(0, region.len()));
+            if empty && core.is_none() {
+                self.skipped
+                    .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                skipped_bytes += region.len() as u64;
+                if line_number > 0 {
+                    // Under `Convert` a binary byte ends a line exactly as
+                    // the rewrite turns it into the terminator does.
+                    line_number += match (bin_byte, quit_at_bin) {
+                        (Some(b), false) => {
+                            crate::scan::count_byte(term, region)
+                                + crate::scan::count_byte(b, region)
+                        }
+                        _ => crate::scan::count_byte(term, region),
+                    };
+                }
+                if quit_at_bin && hit.is_some() {
+                    break;
+                }
+                pos = end;
+                continue;
+            }
+            // The walk needs the terminator map; build it now, in its own
+            // pass, only for windows that are walked. Under `Convert` the
+            // map marks the binary byte too -- same line boundaries the
+            // reader's rewrite leaves behind.
+            let want_nonascii = terms_avail && self.matcher.may_decline_lines();
+            if terms_avail {
+                match (bin_byte, quit_at_bin) {
+                    (Some(b), false) => {
+                        crate::scan::byte_bits(&[term, b, 0], 2, region, &mut scratch.terms);
+                        if want_nonascii {
+                            crate::scan::high_bits(region, &mut scratch.nonascii);
+                        }
+                    }
+                    _ => {
+                        if want_nonascii {
+                            crate::scan::term_high_bits(
+                                term,
+                                region,
+                                &mut scratch.terms,
+                                &mut scratch.nonascii,
+                            );
+                        } else {
+                            crate::scan::term_bits(term, region, &mut scratch.terms);
+                        }
+                    }
+                }
+            }
+            let nonascii = if want_nonascii {
+                Some(&scratch.nonascii as &BitMap)
+            } else {
+                None
+            };
+            let terms = if terms_avail {
+                Some(&scratch.terms as &BitMap)
+            } else {
+                None
+            };
+            let before_skips = core.as_ref().map_or(0, |c| c.skipped);
+            if core.is_none() {
+                // Fold the caller's line counter into the freshly built
+                // `Core` so the first reported line number is right.
+                let mut c = Core::new(&self.config, self.matcher);
+                c.line_number = line_number;
+                core = Some(c);
+            }
+            let core_ref = core.as_mut().expect("Core just inserted");
+            #[cfg(feature = "std")]
+            let run_t0 = std::time::Instant::now();
+            let keep = if self.config.multi_line {
+                core_ref.run::<true, _>(sink, region, pos as u64, 0, cands, terms, nonascii)?
+            } else {
+                core_ref.run::<false, _>(sink, region, pos as u64, 0, cands, terms, nonascii)?
+            };
+            #[cfg(feature = "std")]
+            if crate::profile_enabled() {
+                crate::profile_add("win_run_ns", run_t0.elapsed().as_nanos() as u64);
+            }
+            // Refresh the caller-level line counter from what `Core::run`
+            // left behind, so a later lazy skip starts from the right place.
+            line_number = core_ref.line_number;
+            self.skipped.fetch_add(
+                core_ref.skipped - before_skips,
+                core::sync::atomic::Ordering::Relaxed,
+            );
+            if !keep || (quit_at_bin && hit.is_some()) {
+                break;
+            }
+            pos = end;
+        }
+        match core.as_mut() {
+            Some(c) => {
+                c.byte_count += skipped_bytes;
+                c.finish(sink, bin_offset)?;
+            }
+            None => {
+                let mut c = Core::new(&self.config, self.matcher);
+                c.line_number = line_number;
+                c.byte_count = skipped_bytes;
+                c.finish(sink, bin_offset)?;
+            }
+        }
+        Ok(true)
+    }
+
     /// Search a `Read` by rolling a fixed buffer.
     ///
     /// This is `grep-searcher`'s `ReadByLine`, and it exists for
@@ -2990,8 +3427,13 @@ impl<'m> Searcher<'m> {
         if !self.matcher.can_match() {
             return Ok(false);
         }
-        if self.config.bom_sniffing {
-            let mut dec = encoding::Transcoder::new();
+        // A declared encoding outranks the sniff; see `Config::forced_bom`.
+        let transcode = match self.config.forced_bom {
+            Some(bom) => Some(encoding::Transcoder::forced(bom)),
+            None if self.config.bom_sniffing => Some(encoding::Transcoder::new()),
+            None => None,
+        };
+        if let Some(mut dec) = transcode {
             let mut decoded = |b: &mut [u8]| dec.read(b, rdr);
             return self.search_reader_inner(&mut decoded, sink, line_buffer);
         }
@@ -3071,6 +3513,8 @@ impl<'m> Searcher<'m> {
                 c.last_line_visited = 0;
             }
 
+            #[cfg(feature = "std")]
+            let fill_t0 = std::time::Instant::now();
             let more = match line_buffer.fill(rdr) {
                 Ok(m) => m,
                 // An I/O error is a failure, not an empty result. Mapping
@@ -3078,6 +3522,10 @@ impl<'m> Searcher<'m> {
                 // the searcher stops rather than guessing.
                 Err(_) => return Ok(false),
             };
+            #[cfg(feature = "std")]
+            if crate::profile_enabled() {
+                crate::profile_add("reader_fill_ns", fill_t0.elapsed().as_nanos() as u64);
+            }
             let abs = line_buffer.absolute_byte_offset();
             let (buf, scratch) = line_buffer.buffer_and_scratch();
             if buf.len() <= retained {
@@ -3105,6 +3553,9 @@ impl<'m> Searcher<'m> {
             // is what keeps this an accelerator and not a new requirement.
             let terms_avail = buf.len() <= MAX_BITMAP_INPUT;
             let term = self.config.line_term.line_term;
+            let routes_delegate = self.matcher.may_decline_lines();
+            #[cfg(feature = "std")]
+            let map_t0 = std::time::Instant::now();
             let cands = self.map_candidates_only(
                 buf,
                 &mut scratch.cands,
@@ -3113,11 +3564,25 @@ impl<'m> Searcher<'m> {
                 } else {
                     None
                 },
+                if terms_avail && routes_delegate {
+                    Some(&mut scratch.nonascii as &mut BitMap)
+                } else {
+                    None
+                },
                 term,
                 &mut offsets,
             );
+            #[cfg(feature = "std")]
+            if crate::profile_enabled() {
+                crate::profile_add("reader_map_ns", map_t0.elapsed().as_nanos() as u64);
+            }
             let terms = if terms_avail {
                 Some(&scratch.terms as &BitMap)
+            } else {
+                None
+            };
+            let nonascii = if terms_avail && routes_delegate {
+                Some(&scratch.nonascii as &BitMap)
             } else {
                 None
             };
@@ -3214,9 +3679,9 @@ impl<'m> Searcher<'m> {
             }
             let core_ref = core.as_mut().expect("Core just inserted");
             let keep = if self.config.multi_line {
-                core_ref.run::<true, _>(sink, buf, abs, retained, cands, terms)?
+                core_ref.run::<true, _>(sink, buf, abs, retained, cands, terms, nonascii)?
             } else {
-                core_ref.run::<false, _>(sink, buf, abs, retained, cands, terms)?
+                core_ref.run::<false, _>(sink, buf, abs, retained, cands, terms, nonascii)?
             };
             // Refresh the caller-level line counter from what `Core::run`
             // left behind, so a later lazy skip starts from the right

@@ -132,6 +132,15 @@ pub struct ByteRegex {
 /// the merged class costs one `pshufb` pair against `memchr3`'s three compares
 /// and the win is the 12.4 million three-byte confirms it removes.
 fn mask_anchor(ast: &syntax::Ast) -> Option<FastScan> {
+    // Ablation instrumentation (`RGX_ABLATE_MASK`): decline the mask and let
+    // the builder fall back to its next anchor, or to confirming every line
+    // when there is none. Cost may change; answers never do -- see
+    // `crate::ablate_mask`. The gate lives HERE rather than at the call
+    // sites because there are two of them and a third would silently escape
+    // an outer gate.
+    if crate::ablate_mask() {
+        return None;
+    }
     let plan = super::required::match_mask(ast)?;
     // **A mask that does not DECIDE is not offered.** A prefilter that is
     // only a prefix still has to be confirmed by the engine, so the only thing
@@ -2437,8 +2446,9 @@ impl ByteRegex {
         // `em` and not `EM`. A prefilter that misses a position the literal
         // occupies is not slow, it is WRONG, and the differential suite did
         // not catch it because no case in it had a caseless literal behind an
-        // unknown offset. `regressions::a_caseless_unknown_offset_literal_is_not_a_prefilter`
-        // is that case.
+        // unknown offset. `regex/tests.rs::a_caseless_literal_never_becomes_a_known_substring_anchor`
+        // and `required.rs::a_caseless_literal_is_present_for_every_spelling`
+        // are the cases that hold this down.
         if let Some(r) = super::required::anywhere(ast) {
             if r.bytes.len() >= 2
                 && !r.caseless
@@ -3836,6 +3846,18 @@ impl super::searcher::CandidateSource for ByteRegex {
         out: &mut super::scan::BitMap,
     ) -> Option<super::searcher::Origin> {
         let fast = self.fast.as_ref()?;
+        // **The mask answers here, whichever anchor the plan picked for the
+        // buffer.** `offer_mask` stores at most one, `mask_anchor` only a
+        // DECIDING one, and `match_bits` fills match starts -- so the map and
+        // [`Self::map_is_match_mask`] consult the same object. Routing this
+        // through the plan's choice sent the `e.`-shape (whose chosen anchor
+        // is the one-byte literal `e`) back to the per-line confirm chain.
+        for a in &fast.anchors {
+            if let FastScan::Mask { mask, .. } = &a.scan {
+                mask.match_bits(hay, out);
+                return Some(super::searcher::Origin::Fixed(0));
+            }
+        }
         let anchor = fast.plan(hay);
         let origin = if anchor.known {
             super::searcher::Origin::Fixed(anchor.at)
@@ -3910,22 +3932,29 @@ impl super::searcher::CandidateSource for ByteRegex {
     /// that race is either the same mask -- the same width -- or an anchor
     /// that is not a mask, which answers `None` and puts the line back on the
     /// confirm it takes today. Both are slow; neither is wrong.
-    fn map_is_match_mask(&self, hay: &[u8]) -> Option<usize> {
+    fn map_is_match_mask(&self, hay: &[u8]) -> Option<(usize, usize)> {
         let fast = self.fast.as_ref()?;
+        // Same object `map_candidates` fills from; the widths are properties
+        // of the mask, not of the plan's per-buffer anchor choice.
+        for a in &fast.anchors {
+            if let FastScan::Mask { mask, .. } = &a.scan {
+                return Some((mask.line_cut()?, mask.width()));
+            }
+        }
         let anchor = fast.plan(hay);
         match &anchor.scan {
-            FastScan::Mask { mask, .. } => mask.line_cut(),
+            FastScan::Mask { mask, .. } => Some((mask.line_cut()?, mask.width())),
             FastScan::Sub { needle } => {
                 if self.whole_literal && anchor.known && anchor.at == 0 && !needle.contains(&b'\n')
                 {
-                    Some(needle.len())
+                    Some((needle.len(), needle.len()))
                 } else {
                     None
                 }
             }
             FastScan::Byte { a, b } => {
                 if self.whole_literal && a == b && anchor.known && anchor.at == 0 && *a != b'\n' {
-                    Some(1)
+                    Some((1, 1))
                 } else {
                     None
                 }
@@ -3938,7 +3967,7 @@ impl super::searcher::CandidateSource for ByteRegex {
                     && *b != b'\n'
                     && *c != b'\n'
                 {
-                    Some(1)
+                    Some((1, 1))
                 } else {
                     None
                 }
@@ -3950,7 +3979,7 @@ impl super::searcher::CandidateSource for ByteRegex {
             FastScan::ByteN { bytes, count } => {
                 let set = &bytes[..*count as usize];
                 if fast.exact && anchor.known && anchor.at == 0 && !set.contains(&b'\n') {
-                    Some(1)
+                    Some((1, 1))
                 } else {
                     None
                 }
@@ -4154,5 +4183,508 @@ mod single_byte_prefilter_tests {
                 String::from_utf8_lossy(pat)
             );
         }
+    }
+
+    /// A short alternation branch that ends at the end of the haystack is
+    /// found beside a longer one -- the regression pin for the scan bound
+    /// that once dropped it.
+    ///
+    /// The shape:
+    ///
+    /// ```text
+    /// rgx 'ab|cde'  ->  "ab"  match          <- the short branch at the end
+    /// rgx 'ab|cde'  ->  "abx" match
+    /// ```
+    ///
+    /// The unanchored scan used to bound its candidate start positions by
+    /// the LONGEST branch, so a shorter branch whose match finished at the
+    /// last byte was never tried. `a|bc` against `"a"` was fine, and
+    /// `abc|de` against `"abc"` was fine; what failed was a short branch
+    /// meeting the end of the haystack while a longer branch exists.
+    ///
+    /// That defect is why `unicode_case::fold_char` used to narrow a fold to
+    /// one UTF-8 width: `ß` folds to `{ß, SS}`, branches of two and three
+    /// bytes, precisely this shape, and folding it would have stopped `ß`
+    /// matching a line that is nothing but `ß`. The narrowing is gone with
+    /// the defect, and the fold reaching KELVIN SIGN depends on this test
+    /// staying green.
+    #[test]
+    fn a_short_branch_at_the_haystack_end_is_found_beside_a_longer_one() {
+        use crate::matcher::Matcher as _;
+        let r = ByteRegex::new_flags(b"ab|cde", false).expect("compiles");
+        assert!(
+            r.find_at(b"abx", 0).is_some(),
+            "the pattern matches when the match is not at the end"
+        );
+        assert!(
+            r.find_at(b"ab", 0).is_some(),
+            "and the short branch is found when it ends at the haystack end"
+        );
+    }
+
+    #[test]
+    fn unicode_case_insensitive_matching() {
+        use crate::matcher::Matcher as _;
+        // Latin with diacritics
+        let r_cafe = ByteRegex::new_flags("café".as_bytes(), true).expect("compiles");
+        assert!(
+            r_cafe.find_at("CAFÉ".as_bytes(), 0).is_some(),
+            "café matches CAFÉ"
+        );
+        assert!(
+            r_cafe.find_at("Café".as_bytes(), 0).is_some(),
+            "café matches Café"
+        );
+        assert!(
+            r_cafe.find_at("café".as_bytes(), 0).is_some(),
+            "café matches café"
+        );
+        assert!(
+            r_cafe.find_at("caf".as_bytes(), 0).is_none(),
+            "café does not match caf"
+        );
+
+        // Greek
+        let r_greek = ByteRegex::new_flags("σῖγμα".as_bytes(), true).expect("compiles");
+        assert!(
+            r_greek.find_at("Σῖγμα".as_bytes(), 0).is_some(),
+            "σῖγμα matches Σῖγμα"
+        );
+
+        // Cyrillic
+        let r_cyr = ByteRegex::new_flags("привет".as_bytes(), true).expect("compiles");
+        assert!(
+            r_cyr.find_at("ПРИВЕТ".as_bytes(), 0).is_some(),
+            "привет matches ПРИВЕТ"
+        );
+        assert!(
+            r_cyr.find_at("Привет".as_bytes(), 0).is_some(),
+            "привет matches Привет"
+        );
+
+        // Same byte length in both cases, so the fold is searchable: an alternation
+        // whose branches all have the SAME length is the shape the Pike VM
+        // handles. See `CaseVariants::uniform_len` for the ones that are not.
+        //
+        // A match that ends at the last byte of the line is included on
+        // purpose, because that is exactly where a shorter branch would be
+        // lost if the two lengths differed.
+        assert!(
+            r_cafe.find_at("x CAFÉ".as_bytes(), 0).is_some(),
+            "café matches CAFÉ at the end of the haystack"
+        );
+    }
+
+    /// A multi-character case mapping must match as a sequence.
+    ///
+    /// This is the regression that made the first version of `unicode_case`
+    /// wrong. Case variants were stored as single *characters*, but a full
+    /// Unicode case mapping is a *sequence*: `ß` uppercases to `SS`. Pushing
+    /// each character of that sequence as its own variant turned it into a
+    /// union, so `(?i)ß` compiled to `Alt[Concat[C3,9F], Class(53)]` and
+    /// matched any line containing one capital `S`. `İ` lowercases to `i`
+    /// plus U+0307 and did the same with the combining dot.
+    ///
+    /// Both are false *positives* on the default `-i` path of a release
+    /// build -- wrong answers rather than missing ones, which is the worst
+    /// failure mode a search tool has.
+    #[test]
+    fn multi_character_case_mapping_matches_as_a_sequence_not_a_union() {
+        use crate::matcher::Matcher as _;
+
+        let sharp_s = ByteRegex::new_flags("ß".as_bytes(), true).expect("compiles");
+        assert!(
+            sharp_s.find_at("ß".as_bytes(), 0).is_some(),
+            "ß matches itself"
+        );
+        assert!(
+            sharp_s.find_at("Straße".as_bytes(), 0).is_some(),
+            "ß matches inside Straße"
+        );
+        assert!(
+            sharp_s.find_at("The S is here".as_bytes(), 0).is_none(),
+            "ß must not match a bare capital S -- this is the bug"
+        );
+        // `SS` is ß's FULL uppercase mapping, and simple folding does not
+        // contain it. So `rgx -i 'ß'` does not reach `STRASSE` -- which is
+        // what ripgrep does too, and the difference from the previous
+        // revision of this file. The bare `S` is still refused, and now for
+        // the ordinary reason rather than because a sequence was split.
+        assert!(
+            !sharp_s.find_at("SS".as_bytes(), 0).is_some(),
+            "ß does not match SS: simple folding has no SS entry"
+        );
+        assert!(
+            !sharp_s.find_at("x STRASSE y".as_bytes(), 0).is_some(),
+            "ß does not match STRASSE, matching ripgrep"
+        );
+
+        let dotted_i = ByteRegex::new_flags("\u{0130}".as_bytes(), true).expect("compiles");
+        assert!(
+            dotted_i.find_at("\u{0130}".as_bytes(), 0).is_some(),
+            "İ matches itself"
+        );
+        assert!(
+            dotted_i.find_at("plain i here".as_bytes(), 0).is_none(),
+            "İ must not match a bare i"
+        );
+        assert!(
+            dotted_i
+                .find_at("a lone \u{307} dot".as_bytes(), 0)
+                .is_none(),
+            "İ must not match a bare combining dot -- this is the bug"
+        );
+        // `İ` lowercases to `i` + U+0307 in the FULL mapping; simple folding has
+        // no entry for it, so it does not fold at all.
+        assert!(
+            !dotted_i.find_at("i\u{307}".as_bytes(), 0).is_some(),
+            "İ does not fold: simple folding has no entry for U+0130"
+        );
+
+        let ligature = ByteRegex::new_flags("\u{FB01}".as_bytes(), true).expect("compiles");
+        assert!(
+            ligature.find_at("\u{FB01}".as_bytes(), 0).is_some(),
+            "ﬁ matches itself"
+        );
+        assert!(
+            ligature.find_at("F".as_bytes(), 0).is_none(),
+            "ﬁ must not match a bare F"
+        );
+        // `ﬁ` uppercases to `FI` in the FULL mapping only; simple folding leaves it.
+        assert!(
+            !ligature.find_at("FI".as_bytes(), 0).is_some(),
+            "ﬁ does not fold to FI: simple folding has no entry for U+FB01"
+        );
+    }
+
+    /// Differential against the `regex` crate, which is the only oracle
+    /// left in this tree -- `differential.rs` and the `grep-searcher`
+    /// dev-dependency were removed when the grep dependencies were dropped.
+    ///
+    /// The two engines fold differently and the difference is a decision,
+    /// not an accident: `regex` uses *simple* case folding
+    /// (`CaseFolding.txt`), rgx uses *full* case mapping
+    /// (`char::to_lowercase`/`to_uppercase`, i.e. `SpecialCasing.txt`). This
+    /// test pins the cases where they agree, so a future change to either
+    /// side that moves one of them trips here rather than surfacing as a
+    /// silent difference in a user's search. The disagreements are asserted
+    /// explicitly below, with the behaviour stated rather than left for a
+    /// reader to discover.
+    #[test]
+    fn case_folding_is_differential_against_the_regex_crate() {
+        use crate::matcher::Matcher as _;
+
+        // Agreeing set. Pattern, haystack, and whether it must match.
+        let agree: &[(&str, &str, bool)] = &[
+            ("é", "café", true),
+            ("é", "CAFÉ", true),
+            ("é", "cafe", false),
+            ("Σ", "σ", true),
+            ("σ", "Σ", true),
+            ("привет", "ПРИВЕТ", true),
+            ("привет", "Привет", true),
+            ("ß", "ß", true),
+            // A match ending at the last byte, which is exactly where a
+            // shorter branch would be lost if branch lengths differed.
+            ("é", "CAFÉ", true),
+        ];
+
+        for (pat, hay, expected) in agree {
+            let mine = ByteRegex::new_flags(pat.as_bytes(), true).expect("compiles");
+            let got = mine.find_at(hay.as_bytes(), 0).is_some();
+            let theirs = regex::RegexBuilder::new(&regex::escape(pat))
+                .case_insensitive(true)
+                .build()
+                .expect("oracle compiles")
+                .is_match(hay);
+            assert_eq!(
+                got, *expected,
+                "rgx vs expectation for (?i){pat:?} against {hay:?}"
+            );
+            assert_eq!(
+                got, theirs,
+                "rgx disagrees with the regex crate for (?i){pat:?} against {hay:?}"
+            );
+        }
+    }
+
+    /// The disagreements, stated rather than left for a reader to find.
+    /// Each is a place rgx and ripgrep answer differently today.
+    ///
+    /// The final-sigma row is the one that costs a *miss*: `regex` applies
+    /// the Greek rule and folds `ς` to `σ`, so ripgrep finds `ς` and rgx
+    /// does not. That breaks the superset property for Greek patterns under
+    /// `-i`. It did not hold for these patterns before this feature either
+    /// -- ASCII-only folding did not reach `ς` either -- so this is not a
+    /// regression, it is the boundary of what `char::to_lowercase` can
+    /// answer. Matching `regex` exactly needs the `CaseFolding.txt` simple
+    /// table and the conditional final-sigma rule, which is a separate piece
+    /// of work with its own measurement.
+    /// The escaped and bare spellings of `é` now agree under `(?i)`.
+    ///
+    /// `\é` used to fold through `case_variant`, which knows only `a-z`, so
+    /// it matched `é` and could not match `É` while the bare literal matched
+    /// both. A silent disagreement between two spellings of one character,
+    /// in a default-built release binary.
+    #[test]
+    fn escaped_and_bare_non_ascii_fold_the_same_way() {
+        use crate::matcher::Matcher as _;
+        for pattern in ["\u{e9}".as_bytes(), b"\\\xc3\xa9"] {
+            let r = ByteRegex::new_flags(pattern, true).expect("compiles");
+            for (hay, want) in [
+                ("\u{e9}", true),
+                ("\u{c9}", true),
+                ("CAF\u{c9}", true),
+                ("cafe", false),
+            ] {
+                assert_eq!(
+                    r.find_at(hay.as_bytes(), 0).is_some(),
+                    want,
+                    "{pattern:?} against {hay:?}"
+                );
+            }
+        }
+    }
+
+    /// `[é]` is one character, must match one character, and must NOT case-fold
+    /// without `(?i)`.
+    ///
+    /// A `ByteSet` is one byte per position, so the class used to collect
+    /// 0xC3 and 0xA9 as two independent members and match a lone `Ã`, a
+    /// lone `©`, and any two-byte UTF-8 sequence with lead byte 0xC3. That
+    /// over-match has no connection to `(?i)`; it predates this work.
+    ///
+    /// The `É` and `È` rows are a regression an earlier attempt in this same
+    /// change introduced: the lowered class called `fold_char` unconditionally,
+    /// so a case-SENSITIVE `[é]` matched `É`, and `^[é]$` reported uppercase
+    /// lines. A class that folds without being asked to is the opposite of
+    /// what a character class is for.
+    #[test]
+    fn a_class_of_one_multibyte_character_matches_one_character() {
+        use crate::matcher::Matcher as _;
+        let r = ByteRegex::new_flags("[\u{e9}]".as_bytes(), false).expect("compiles");
+        assert!(r.find_at("\u{e9}".as_bytes(), 0).is_some(), "[é] matches é");
+        assert!(
+            r.find_at("x \u{e9} y".as_bytes(), 0).is_some(),
+            "[é] inside a line"
+        );
+        for (hay, why) in [
+            ("\u{c3}", "a lone Ã is byte 0xC3"),
+            ("\u{a9}", "a lone © is byte 0xA9"),
+            (
+                "\u{c1}",
+                "Á is C3 81: lead byte is a class member, the pair is not",
+            ),
+            (
+                "\u{c3}\u{a9}",
+                "Ã© is C3 A9: the two bytes, not the character",
+            ),
+            ("cafe", "ASCII must not match"),
+            ("\u{c9}", "É is not é, and there is no (?i)"),
+            ("\u{c8}", "È is not é either"),
+        ] {
+            assert!(
+                !r.find_at(hay.as_bytes(), 0).is_some(),
+                "[é] wrongly matched, {why}: {hay:?}"
+            );
+        }
+        let folded = ByteRegex::new_flags("[\u{e9}]".as_bytes(), true).expect("compiles");
+        assert!(
+            folded.find_at("\u{c9}".as_bytes(), 0).is_some(),
+            "(?i)[é] matches É"
+        );
+        assert!(
+            !folded.find_at("\u{c3}".as_bytes(), 0).is_some(),
+            "(?i)[é] still must not match a lone Ã"
+        );
+    }
+
+    /// An explicit `\xNN` byte that happens to equal one of a multi-byte
+    /// character's bytes is still its own member.
+    ///
+    /// `[\xA9é]` has two members. 0xA9 is inside é's encoding, so "no byte
+    /// of the set lies outside the character" is true and is NOT sufficient:
+    /// taking the character path dropped the named byte and the class stopped
+    /// matching it. The member count is what separates the two cases.
+    #[test]
+    fn an_explicit_byte_inside_a_character_is_still_its_own_member() {
+        use crate::matcher::Matcher as _;
+        let patterns: [&[u8]; 2] = [b"[\\xA9\xc3\xa9]", b"[\xc3\xa9\\xA9]"];
+        for pattern in patterns {
+            let r = ByteRegex::new_flags(pattern, false).expect("compiles");
+            assert!(
+                r.find_at(b"\xA9", 0).is_some(),
+                "{pattern:?} must still match the explicit \\xA9 byte"
+            );
+            assert!(
+                r.find_at("\u{e9}".as_bytes(), 0).is_some(),
+                "{pattern:?} must still match é"
+            );
+        }
+    }
+
+    /// `[\é]` -- an escaped character inside a class -- still over-matches, and
+    /// that is NOT fixed here. Pinned so the defect stays visible.
+    ///
+    /// `é` and `(?i)\é` were made to agree by the escaped-character fold, and
+    /// this is the fourth spelling, which they do not. A class does not go
+    /// through `parse_escape` at all: `class_item` carries its own escape
+    /// table and hands back one byte per member, so the escaped character
+    /// lands as {0xC3, 0xA9} and matches `ü` (C3 BC).
+    ///
+    /// Fixing it means the class has to know a member is a character, which is
+    /// the same `ByteSet`-cannot-express-a-sequence problem as the other
+    /// class tests here.
+    #[test]
+    #[ignore = "class_item has its own escape path and a ByteSet cannot hold a character"]
+    fn an_escaped_character_inside_a_class_over_matches() {
+        use crate::matcher::Matcher as _;
+        let r = ByteRegex::new_flags("[\\\u{e9}]".as_bytes(), false).expect("compiles");
+        assert!(
+            !r.find_at("\u{fc}".as_bytes(), 0).is_some(),
+            "[\\é] must not match ü (C3 BC)"
+        );
+        assert!(
+            r.find_at("\u{e9}".as_bytes(), 0).is_some(),
+            "[\\é] should match é"
+        );
+    }
+
+    /// `[^…]` with a multi-byte character still over-matches, and that is NOT
+    /// fixed here. Pinned so the defect stays visible.
+    ///
+    /// `[^é]` has to mean "any single byte that is not the character é",
+    /// which is not a question a `ByteSet` can answer: negation over a
+    /// sequence has no byte-set meaning. It stays byte-wise and matches a
+    /// lone `Ã` and a lone `©`, as it always has.
+    ///
+    /// An earlier attempt in this change advanced the cursor past the whole
+    /// character even when negated, which left the continuation bytes out of
+    /// `set` and made `negate()` leave them IN -- so `[^é]` matched `é`. The
+    /// advance is conditional on `!negated` now, which restores the old
+    /// behaviour rather than a worse one.
+    #[test]
+    #[ignore = "needs negation over a sequence, which ByteSet cannot express"]
+    fn a_negated_class_of_a_multibyte_character_over_matches() {
+        use crate::matcher::Matcher as _;
+        let r = ByteRegex::new_flags("[^\u{e9}]".as_bytes(), false).expect("compiles");
+        assert!(
+            !r.find_at("\u{e9}".as_bytes(), 0).is_some(),
+            "[^é] must not match é"
+        );
+        assert!(
+            !r.find_at("\u{c3}".as_bytes(), 0).is_some(),
+            "[^é] must not match a lone Ã"
+        );
+    }
+
+    /// A class mixing ASCII and a multi-byte character still over-matches,
+    /// and that is NOT fixed here. Pinned so the defect stays visible.
+    ///
+    /// `[a-zé]` has to mean "a-z, A-Z, é, É": a 26-way one-byte set beside a
+    /// two-byte character. `Ast::Class` compiles to one `Inst::Byte`, so the
+    /// only in-model shape is an alternation mixing one-byte and two-byte
+    /// branches -- and the Pike VM loses a shorter branch that ends at the
+    /// end of the haystack, so that shape is not safe to emit yet.
+    ///
+    /// Fixing it is two changes in order: the scan bound in `vm::run`, then
+    /// an `Ast` able to express "a set OR a sequence", including what `[^…]`
+    /// means over a sequence, which `ByteSet::negate` has no answer for.
+    #[test]
+    #[ignore = "needs an Ast mixing a ByteSet with sequences, and a Pike VM that can search unequal-length alternation branches"]
+    fn a_class_mixing_ascii_and_a_multibyte_character_over_matches() {
+        use crate::matcher::Matcher as _;
+        let r = ByteRegex::new_flags("[a-z\u{e9}]".as_bytes(), false).expect("compiles");
+        assert!(
+            !r.find_at("\u{c1}".as_bytes(), 0).is_some(),
+            "[a-zé] should not match Á (C3 81), whose lead byte is a class member"
+        );
+        assert!(
+            r.find_at("\u{e9}".as_bytes(), 0).is_some(),
+            "and it should match é itself"
+        );
+    }
+
+    /// Case folding agrees with the `regex` crate across the width shapes
+    /// that used to diverge.
+    ///
+    /// The old divergences were the same defect in different characters: the
+    /// table folds pairs whose two characters are different numbers of UTF-8
+    /// bytes (`ß`/`ẞ` at two and three, `k`/KELVIN SIGN at one and three),
+    /// and an unanchored scan that bounded candidate starts by the longest
+    /// alternation branch missed a shorter branch at the haystack end. The
+    /// scan is fixed and `fold_char` now emits the whole class, so the
+    /// former false negatives are agreements and are asserted as such
+    /// against the oracle. What remains a divergence is only the class
+    /// over-matching of the three ignored tests above -- a `ByteSet` class
+    /// collecting a multi-byte character's bytes independently.
+    ///
+    /// The direction that is NOT taken is the other one: folding with
+    /// `char::to_lowercase` is the FULL mapping, where `rgx -i 'ß'` would
+    /// report `STRASSE`, which ripgrep passes over. A search tool that
+    /// reports a line ripgrep ignores is worse than one that misses it.
+    #[test]
+    fn case_folding_reaches_every_width_the_oracle_does() {
+        use crate::matcher::Matcher as _;
+
+        // The Greek final sigma, which is now agreement rather than a
+        // divergence. Before the table, rgx folded with `char::to_lowercase`
+        // and reached neither ς nor the pair; with `CaseFolding.txt` it folds
+        // ς to σ, which is what `regex` does too -- including mid-word,
+        // where the conditional Final_Sigma rule in UAX #29 would *not*
+        // match. Both engines match "αςβ", so the conditional rule is not a
+        // difference between them and not a divergence to record.
+        let sigma = ByteRegex::new_flags("Σ".as_bytes(), true).expect("compiles");
+        let oracle = regex::RegexBuilder::new(&regex::escape("Σ"))
+            .case_insensitive(true)
+            .build()
+            .expect("oracle compiles");
+        assert!(
+            sigma.find_at("ς".as_bytes(), 0).is_some(),
+            "rgx folds ς to σ, matching the table"
+        );
+        for hay in ["ς", "αςβ", "Σ", "σ"] {
+            assert_eq!(
+                sigma.find_at(hay.as_bytes(), 0).is_some(),
+                oracle.is_match(hay),
+                "rgx and the oracle disagree on {hay:?}"
+            );
+        }
+
+        // ß and ẞ fold together in the table -- two bytes against three --
+        // and the wider member is no longer dropped.
+        let sharp_s = ByteRegex::new_flags("ß".as_bytes(), true).expect("compiles");
+        let oracle = regex::RegexBuilder::new(&regex::escape("ß"))
+            .case_insensitive(true)
+            .build()
+            .expect("oracle compiles");
+        for hay in ["ẞ", "ß", "SS", "STRASSE"] {
+            assert_eq!(
+                sharp_s.find_at(hay.as_bytes(), 0).is_some(),
+                oracle.is_match(hay),
+                "rgx and the oracle disagree on {hay:?}"
+            );
+        }
+
+        // Same shape: KELVIN SIGN U+212A is three bytes, `k` is one, and
+        // the sign is reached -- `rgx -i 'kelvin'` finds KELVIN the way
+        // ripgrep does.
+        let kelvin = ByteRegex::new_flags("k".as_bytes(), true).expect("compiles");
+        let oracle = regex::RegexBuilder::new(&regex::escape("k"))
+            .case_insensitive(true)
+            .build()
+            .expect("oracle compiles");
+        for hay in ["K", "k", "\u{212A}", "x"] {
+            assert_eq!(
+                kelvin.find_at(hay.as_bytes(), 0).is_some(),
+                oracle.is_match(hay),
+                "rgx and the oracle disagree on {hay:?}"
+            );
+        }
+        let word = ByteRegex::new_flags("kelvin".as_bytes(), true).expect("compiles");
+        assert!(
+            word.find_at("\u{212A}ELVIN".as_bytes(), 0).is_some(),
+            "the whole word reaches the sign in the first letter of it"
+        );
     }
 }

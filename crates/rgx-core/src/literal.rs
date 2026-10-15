@@ -705,10 +705,16 @@ pub fn extract(pattern: &[u8], caseless: bool) -> LiteralSet {
         return LiteralSet::none();
     }
 
-    // A caseless literal over a non-ASCII byte cannot be `Exact`. Unicode
-    // case folding maps `é` to `É` and `k` to U+212A, neither of
-    // which an ASCII fold reaches.
-    if caseless && pattern.iter().any(|&b| b >= 0x80) {
+    // A caseless literal whose fold leaves ASCII cannot be `Exact`. Unicode
+    // case folding maps `é` to `É` and `k` to U+212A, neither of which an
+    // ASCII fold reaches -- and `k` is an ASCII byte, so the ≥ 0x80 test
+    // alone does not catch the literal that matters. A mask built from the
+    // ASCII pairs would drop every match that uses a wider member.
+    if caseless
+        && pattern
+            .iter()
+            .any(|&b| b >= 0x80 || !crate::unicode_case::fold_stays_ascii(b))
+    {
         return LiteralSet::none();
     }
 
@@ -803,7 +809,14 @@ fn extract_alts(arms: &[&[u8]], caseless: bool) -> LiteralSet {
         if arm.iter().any(|&b| is_meta(b)) {
             return LiteralSet::none();
         }
-        if caseless && arm.iter().any(|&b| b >= 0x80) {
+        // Same rule as `extract`'s own check: a caseless arm whose fold
+        // leaves ASCII is not a fixed byte-set literal, and a mask over
+        // the ASCII pairs would drop the wider members' matches.
+        if caseless
+            && arm
+                .iter()
+                .any(|&b| b >= 0x80 || !crate::unicode_case::fold_stays_ascii(b))
+        {
             return LiteralSet::none();
         }
         if arm.len() < MIN_FINGERPRINT {
@@ -1091,6 +1104,30 @@ mod tests {
         assert_eq!(extract(b"\xe2\x84\xaa", true).kind(), LiteralKind::None);
         // Non-caseless non-ASCII is fine: those bytes have no case variants.
         assert_eq!(extract("é".as_bytes(), false).kind(), LiteralKind::Exact);
+    }
+
+    /// An ASCII byte whose fold reaches outside ASCII is not `Exact` under
+    /// `(?i)` either: `k` folds to U+212A and `s` to `ſ`/`ς`, so the ASCII
+    /// pairs a mask would carry are not all of the matches. This is the
+    /// check `caseless_non_ascii_is_never_exact` could not see -- `k` is
+    /// below 0x80 -- and it is what made `rgx -i kelvin` miss KELVIN when
+    /// the fold gained its wider members.
+    #[test]
+    fn caseless_wider_fold_letters_are_never_exact() {
+        for word in [b"kelvin".as_slice(), b"fast", b"kelvins"] {
+            assert_eq!(
+                extract(word, true).kind(),
+                LiteralKind::None,
+                "caseless {word:?} reaches outside ASCII"
+            );
+            assert_eq!(
+                extract(word, false).kind(),
+                LiteralKind::Exact,
+                "but case-sensitive is a plain literal"
+            );
+        }
+        // ASCII letters whose fold stays in ASCII keep their prefilter.
+        assert_eq!(extract(b"pub fn m", true).kind(), LiteralKind::Exact);
     }
 
     /// An empty print must be refused, because accepting one sets `used`

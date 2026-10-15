@@ -189,6 +189,20 @@ impl<'a, D: UnicodeMatcher> Matcher for HybridMatcher<'a, D> {
     fn can_match(&self) -> bool {
         self.byte.can_match() && self.unicode.can_match()
     }
+
+    /// The window rule (maintainer-approved, `benchmark/findings.md` §13):
+    /// a mask match whose widest window is pure ASCII is a match in both
+    /// engines -- on ASCII bytes a codepoint is a byte -- so it settles the
+    /// line; the delegate is asked only when every window is refused. The
+    /// searcher offers the whole line first (one map lookup settles a clean
+    /// line outright) and each bit's window only on a dirty line.
+    fn decides_window(&self, _window: &[u8], window_ascii: bool) -> bool {
+        self.byte_always_decides || (!self.fold_risky && window_ascii)
+    }
+
+    fn may_decline_lines(&self) -> bool {
+        !self.byte_always_decides && !self.fold_risky
+    }
 }
 
 impl<'a, D: UnicodeMatcher> CandidateSource for HybridMatcher<'a, D> {
@@ -276,21 +290,25 @@ impl<'a, D: UnicodeMatcher> CandidateSource for HybridMatcher<'a, D> {
         self.byte.map_candidates(hay, out)
     }
 
-    /// The width of the match mask the byte engine just filled, or `None`.
+    /// The `(cut, span)` widths of the match mask the byte engine just
+    /// filled, or `None`.
     ///
-    /// Forwarded for the same reason as [`Self::map_candidates`]: the
-    /// three declining cases above are the three declining cases there,
-    /// and a mask behind one of them would settle a line the delegate
-    /// still has to decide.
-    fn map_is_match_mask(&self, hay: &[u8]) -> Option<usize> {
+    /// Forwarded for the same reason as [`Self::map_candidates`]: the two
+    /// declining cases there (no prefilter to map, a mixed buffer that needs
+    /// widening) decline before this is reached at all, and a mask behind one
+    /// of them would settle a line the delegate still has to decide.
+    ///
+    /// The old whole-buffer `buffer_ascii` gate is gone: the searcher's line
+    /// loop takes the window rule instead (see [`Matcher::decides_window`]),
+    /// so a bit whose match window is pure ASCII settles its line and the
+    /// delegate is asked only about the windows that touch a high byte. The
+    /// buffer gate was correct but paid for the whole fill -- one `é` in a
+    /// 64 KiB source window put every line of it back on the confirm chain,
+    /// which on the 247 MB single-file row is most of the walk (`e.`:
+    /// 291.6 -> 100.2 ms with the settle forced, which also skips the report
+    /// tail; benchmark/findings.md §13 decomposes it).
+    fn map_is_match_mask(&self, hay: &[u8]) -> Option<(usize, usize)> {
         if self.fold_risky || !self.byte.has_prefilter() {
-            return None;
-        }
-        if !self.byte_always_decides
-            && !self
-                .buffer_ascii
-                .load(core::sync::atomic::Ordering::Relaxed)
-        {
             return None;
         }
         self.byte.map_is_match_mask(hay)

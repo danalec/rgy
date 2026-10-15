@@ -1,12 +1,25 @@
 //! The byte-mode pattern syntax: a parser from bytes to an [`Ast`].
 //!
 //! Byte-oriented from end to end. A literal is a `u8`, a class is a
-//! [`ByteSet`], and there is no `char` anywhere in the grammar. That is
+//! [`ByteSet`], and the grammar itself never produces a `char`. That is
 //! the whole reason this exists rather than a thin wrapper over
 //! `b02::lang::regex_engine`: rgx searches bytes that are routinely not
 //! valid UTF-8 — extracted adapter output, raw passthrough, and with
 //! `-a`, binary files — and a `char` engine handed lossy-decoded input
 //! silently changes what a pattern means.
+//!
+//! There is one place a `char` appears, and it is worth naming because the
+//! sentence above used to be absolute. A non-ASCII literal under `(?i)` is
+//! decoded to one codepoint so `unicode_case::fold_char` can be asked what
+//! its case mappings are; what comes back is folded into byte alternations
+//! and the AST is bytes again on the far side. The codepoint exists to
+//! answer one question at parse time and is gone before the NFA is built.
+//! It is confined to that question for one reason: how a character folds
+//! cannot depend on the rest of the pattern being valid UTF-8. The fold is
+//! the full case class, whatever the members' UTF-8 widths — `k` reaches
+//! three-byte KELVIN SIGN — which needed the unanchored scan to stop
+//! bounding candidate starts by the longest alternation branch. See
+//! `decode_char` and [`crate::unicode_case::fold_char`].
 //!
 //! # What the syntax covers
 //!
@@ -364,7 +377,10 @@ impl<'a> Parser<'a> {
             .ok_or_else(|| self.err("unexpected end of pattern"))?;
         match b {
             b'(' => self.parse_group(),
-            b'[' => Ok(Ast::Class(self.parse_class()?)),
+            b'[' => match self.parse_class()? {
+                ClassResult::Set(set) => Ok(Ast::Class(set)),
+                ClassResult::Character(branches) => Ok(Ast::Alt(branches)),
+            },
             b'.' => {
                 self.pos += 1;
                 self.pure_ascii = false;
@@ -393,6 +409,30 @@ impl<'a> Parser<'a> {
             b'\\' => self.parse_escape(),
             b'*' | b'+' | b'?' => Err(self.err("repetition with nothing to repeat")),
             _ => {
+                // A literal under `(?i)` needs the whole codepoint.
+                // Folding asks for case *mappings*, which for `ß` is the two
+                // bytes `SS` and for `İ` is `i` followed by U+0307, so a
+                // byte-at-a-time walk cannot answer the question -- and
+                // folding the lead byte `C3` on its own answers nothing
+                // useful. `unicode_case::CaseVariants` resolves the mapping
+                // once, here, and the matcher keeps receiving bytes.
+                //
+                // ASCII goes through the same fold, and that is not
+                // cosmetic: `case_fold_set` folds the ASCII pair only, so
+                // `k` would never reach three-byte KELVIN SIGN. The wider
+                // members live in the same case class and the fold emits
+                // all of them; a class that is only the ASCII pair comes
+                // back as the same `ByteSet` `literal` would have built.
+                //
+                // Case-sensitive patterns of any script keep the byte path
+                // too: this engine is byte-mode, and the prefilter analyses
+                // bytes, so splitting a codepoint only helps the one case
+                // that needs the split.
+                if self.flags.case_insensitive {
+                    if let Some(ast) = self.folded_codepoint_at(b)? {
+                        return Ok(ast);
+                    }
+                }
                 self.pos += 1;
                 if b >= 128 {
                     self.pure_ascii = false;
@@ -400,6 +440,56 @@ impl<'a> Parser<'a> {
                 Ok(Ast::Class(self.literal(b)))
             }
         }
+    }
+
+    /// Lower one non-ASCII codepoint under `(?i)` into its case variants, as a
+    /// byte alternation. `b` is the byte at `self.pos`, which must be a lead
+    /// byte; on success `self.pos` has advanced past the whole character.
+    ///
+    /// Returns `None` when the bytes at `self.pos` do not start a well-formed
+    /// character, leaving `self.pos` untouched so the caller can fall back to
+    /// the byte path. That is the invalid-input case, and it must stay
+    /// byte-at-a-time: a pattern that is not valid UTF-8 has no codepoints to
+    /// fold.
+    ///
+    /// Shared by `parse_atom` and `parse_escape` so that the bare and escaped
+    /// spellings of a character -- `é` and `(?i)\é` -- cannot disagree. The
+    /// second was byte-wise and therefore ASCII-only, which made the two
+    /// answer differently in a release binary.
+    ///
+    /// It does NOT cover the fourth spelling, `(?i)[\é]`. Classes do not go
+    /// through `parse_escape`: `class_item` carries its own escape table, and
+    /// a class is a `ByteSet` with one byte per position, so an escaped
+    /// multi-byte character inside one still collects its bytes
+    /// independently. See the ignored test
+    /// `an_escaped_character_inside_a_class_over_matches`.
+    fn folded_codepoint_at(&mut self, b: u8) -> Result<Option<Ast>, SyntaxError> {
+        let Some(c) = decode_char(&self.pat[self.pos..]) else {
+            return Ok(None);
+        };
+        self.pos += c.len_utf8();
+        self.pure_ascii = false;
+        let _ = b;
+        let variants = crate::unicode_case::fold_char(c);
+        // The FULL case class, mixed widths included: `k` folds to
+        // `{k, K, KELVIN SIGN}` and `ß` to `{ß, ẞ}`. This used to narrow
+        // to one UTF-8 width because an unanchored scan missed a shorter
+        // alternation branch at the haystack end; the scan is fixed and
+        // `unicode_case::fold_char` returns the whole class.
+        if variants.len() == 1 {
+            let mut buf = [0u8; 4];
+            let only = variants.iter().next().expect("one variant");
+            return Ok(Some(bytes_to_ast(only.encode_utf8(&mut buf).as_bytes())));
+        }
+        let mut buf = [0u8; 4];
+        let branches: Vec<Ast> = variants
+            .iter()
+            .map(|ch| bytes_to_ast(ch.encode_utf8(&mut buf).as_bytes()))
+            .collect();
+        if let Some(class) = disjoint_single_byte_class(&branches) {
+            return Ok(Some(Ast::Class(class)));
+        }
+        Ok(Some(Ast::Alt(branches)))
     }
 
     /// The byte set a literal `b` compiles to under the current flags.
@@ -577,6 +667,32 @@ impl<'a> Parser<'a> {
             }
             // Escaping a non-alphanumeric byte is that byte. `\q` is `q`,
             // not an error, which is what every other engine does.
+            //
+            // A byte under `(?i)` is the one exception, and it is what `é`
+            // and `(?i)\é` disagreeing used to come from: the escape path
+            // folded byte-wise with `case_variant`, which knows about `a-z`
+            // only, so `\é` matched `é` and could not match `É`. ASCII joins
+            // it so that `(?i)\k` reaches KELVIN SIGN the way bare `k` does.
+            // `bump()` already consumed the byte, so the decode starts one
+            // byte back.
+            _ if self.flags.case_insensitive => {
+                // Returns from `parse_escape` outright: the fold produces an
+                // `Ast::Alt` of sequences, and the arms around this one all
+                // yield a `ByteSet`.
+                self.pos -= 1;
+                return match self.folded_codepoint_at(c)? {
+                    Some(ast) => Ok(ast),
+                    // Not a well-formed character after all: give the byte
+                    // back and let the byte path have it.
+                    None => {
+                        self.pos += 1;
+                        if c >= 128 {
+                            self.pure_ascii = false;
+                        }
+                        Ok(Ast::Class(self.literal(c)))
+                    }
+                };
+            }
             _ => {
                 if c >= 128 {
                     self.pure_ascii = false;
@@ -613,7 +729,7 @@ impl<'a> Parser<'a> {
 
     /// `[...]`, with ranges, negation and the `\d \w \s` shorthands
     /// allowed inside. A `]` immediately after `[` or `[^` is a literal.
-    fn parse_class(&mut self) -> Result<ByteSet, SyntaxError> {
+    fn parse_class(&mut self) -> Result<ClassResult, SyntaxError> {
         self.pos += 1; // '['
         let negated = if self.peek() == Some(b'^') {
             self.pos += 1;
@@ -625,6 +741,12 @@ impl<'a> Parser<'a> {
 
         let mut set = ByteSet::empty();
         let mut first = true;
+        // Whole multi-byte characters seen as members, and how many members
+        // the class has in total. Both are needed to tell "[é]" from
+        // "[\\xA9é]", where 0xA9 is inside é's encoding but was named on its
+        // own as a byte.
+        let mut sequences: Vec<&[u8]> = Vec::new();
+        let mut members = 0usize;
         loop {
             let Some(c) = self.peek() else {
                 return Err(self.err("unclosed character class"));
@@ -635,7 +757,10 @@ impl<'a> Parser<'a> {
             }
             first = false;
 
-            match self.class_item()? {
+            let before = self.pos;
+            let item = self.class_item()?;
+
+            match item {
                 // A shorthand stands alone; a range would be meaningless.
                 ClassItem::Set(s) => {
                     self.pure_ascii = false;
@@ -643,8 +768,29 @@ impl<'a> Parser<'a> {
                     continue;
                 }
                 ClassItem::Byte(lo) => {
+                    members += 1;
                     if lo >= 128 {
                         self.pure_ascii = false;
+                        // `class_item` hands back one BYTE, so a two- to
+                        // four-byte character arrives one byte per iteration.
+                        // Take the rest of it and record the whole character.
+                        //
+                        // NOT when negated. Advancing past the continuation
+                        // bytes leaves them out of `set`, and `negate()` then
+                        // leaves them IN the class -- `[^é]` came to match the
+                        // continuation byte of the very character it names.
+                        // `[^…]` stays byte-wise, over-matching as it always
+                        // has; see the ignored test
+                        // `a_negated_class_of_a_multibyte_character_over_matches`.
+                        if !negated {
+                            if let Some(ch) = decode_char(&self.pat[before..]) {
+                                if ch.len_utf8() > 1 {
+                                    let end = before + ch.len_utf8();
+                                    sequences.push(&self.pat[before..end]);
+                                    self.pos = end;
+                                }
+                            }
+                        }
                     }
                     // A `-` is a range only when a member follows it, so
                     // `[a-]` and `[a-z0-9_-]` both work.
@@ -685,7 +831,52 @@ impl<'a> Parser<'a> {
         if negated {
             set = set.negate();
         }
-        Ok(set)
+
+        // A class whose only member is one multi-byte character cannot be a
+        // `ByteSet`. `ByteSet` is one byte per position, so `[é]` collected
+        // as {0xC3, 0xA9} matches a lone `Ã`, a lone `©`, and every
+        // two-byte sequence whose lead byte is 0xC3 -- an over-match that
+        // has nothing to do with `(?i)` and predates the case-folding work.
+        // When the class is exactly that one character, lower it to an
+        // alternation of whole characters instead.
+        //
+        // The mixed case -- `[a-zé]`, a 26-byte set beside a two-byte
+        // character -- is NOT handled, and cannot be without changing the
+        // model: `Ast::Class` compiles to one `Inst::Byte`, and an alternation
+        // mixing one-byte and two-byte branches is the shape the Pike VM
+        // loses. See `ClassResult` and the ignored test
+        // `a_class_mixing_ascii_and_a_multibyte_character_over_matches`.
+        if !negated && members == 1 && sequences.len() == 1 {
+            let seq = sequences[0];
+            // `set` may legitimately be missing one of the character's bytes
+            // -- `class_item` handed back only the lead byte before the
+            // cursor was advanced -- so the test is "no byte outside the
+            // character", not "exactly its bytes". `members == 1` above is
+            // what separates `[é]` from `[\xA9é]`, where 0xA9 is inside é's
+            // encoding but was named as a byte in its own right.
+            let only_this_character = set.iter().all(|b| seq.contains(&b));
+            if only_this_character && !set.is_empty() {
+                if let Some(c) = decode_char(seq) {
+                    let mut buf = [0u8; 4];
+                    // A class folds ONLY under `(?i)`. `Alt[é, É]` for a
+                    // bare `[é]` made it match `É` in a case-SENSITIVE
+                    // search, which is the opposite of what a character class
+                    // is for.
+                    let branches: Vec<Ast> = if self.flags.case_insensitive {
+                        crate::unicode_case::fold_char(c)
+                            .iter()
+                            .map(|ch| bytes_to_ast(ch.encode_utf8(&mut buf).as_bytes()))
+                            .collect()
+                    } else {
+                        vec![bytes_to_ast(c.encode_utf8(&mut buf).as_bytes())]
+                    };
+                    if !branches.is_empty() {
+                        return Ok(ClassResult::Character(branches));
+                    }
+                }
+            }
+        }
+        Ok(ClassResult::Set(set))
     }
 
     /// One member of a class: a single byte, or a whole set when the
@@ -835,6 +1026,23 @@ enum ClassItem {
     Set(ByteSet),
 }
 
+/// What a bracket expression parsed to.
+enum ClassResult {
+    /// An ordinary byte class.
+    Set(ByteSet),
+    /// Exactly one character, and it is multi-byte. A `ByteSet` holds one
+    /// byte per position, so it cannot represent this: `[é]` collected as
+    /// {0xC3, 0xA9} would match a lone `Ã` and a lone `©`, and every
+    /// two-byte sequence whose lead byte is 0xC3. The class becomes an
+    /// alternation of whole characters instead.
+    ///
+    /// Only reachable when the class is a single character. A class mixing
+    /// ASCII and a multi-byte character still returns `Set`, over-matching,
+    /// because expressing it needs an `Ast` model change and a Pike VM that
+    /// can search unequal-length alternation branches.
+    Character(Vec<Ast>),
+}
+
 fn word_set() -> ByteSet {
     let mut s = ByteSet::range(b'a', b'z');
     s = s.union(&ByteSet::range(b'A', b'Z'));
@@ -915,6 +1123,44 @@ fn case_fold_set(set: &ByteSet) -> ByteSet {
         out = out.union(&case_variant(b));
     }
     out
+}
+
+/// Decode exactly one UTF-8 character from the start of `bytes`.
+///
+/// Bounded at four attempts of at most four bytes, so parsing stays linear in
+/// the pattern length. The previous version called `core::str::from_utf8` on
+/// the whole remaining pattern once per literal, which validated the tail on
+/// every character -- quadratic overall, and wrong in a way that only showed
+/// on invalid input: in `café\xff` the `é` was well-formed but `from_utf8`
+/// still failed on the `\xff`, so the whole branch was skipped and `é` lost
+/// its folding. How a character folds cannot depend on what comes after it.
+fn decode_char(bytes: &[u8]) -> Option<char> {
+    for len in 1..=bytes.len().min(4) {
+        if let Ok(s) = core::str::from_utf8(&bytes[..len]) {
+            return s.chars().next();
+        }
+    }
+    None
+}
+
+/// The AST for one byte sequence: a single byte becomes a Class, a longer
+/// one a Concat of single-byte Classes.
+///
+/// A case variant can be several bytes (`SS` from `ß`), so this has to take
+/// a slice and not a character. That is the whole point -- the previous
+/// helper could only express one byte per variant, which is what turned a
+/// multi-character mapping into a union of single characters.
+fn bytes_to_ast(bytes: &[u8]) -> Ast {
+    if bytes.len() == 1 {
+        Ast::Class(ByteSet::single(bytes[0]))
+    } else {
+        Ast::Concat(
+            bytes
+                .iter()
+                .map(|&b| Ast::Class(ByteSet::single(b)))
+                .collect(),
+        )
+    }
 }
 
 /// If every branch is a single disjoint byte (`a|b|c`), return the
@@ -1000,5 +1246,35 @@ mod parse_alt_coalesce_tests {
             }
             other => panic!("expected Class, got {other:?}"),
         }
+    }
+
+    /// The first `Ast::Alt` reachable without descending into a branch.
+    fn find_alt(ast: &Ast) -> Option<&[Ast]> {
+        match ast {
+            Ast::Alt(branches) => Some(branches),
+            Ast::Concat(items) => items.iter().find_map(find_alt),
+            _ => None,
+        }
+    }
+
+    /// A multi-byte Unicode character under `(?i)` expands to an alternation of
+    /// its case variants.
+    ///
+    /// The alternation is deliberately not asserted at the ROOT. `(?i)` on
+    /// its own parses to `Ast::Empty`, and `parse_concat` pushes every atom
+    /// including that one, so the pattern arrives as
+    /// `Concat[Empty, Alt[...]]`. An earlier revision dropped `Empty` atoms
+    /// and did put the `Alt` at the root -- but that change was unrelated to
+    /// case folding, reshaped the AST for every regex carrying an inline
+    /// flag, and was reverted. This test asserts the property it is actually
+    /// about, which is that the case variants became an alternation, and
+    /// finds it where the parser puts it.
+    #[test]
+    fn unicode_case_folding_compiles_to_alternation() {
+        let ast = parse_one(b"(?i)\xc3\xa9");
+        let branches = find_alt(&ast).unwrap_or_else(|| {
+            panic!("expected an alternation for multi-byte case folding, got {ast:?}")
+        });
+        assert_eq!(branches.len(), 2, "é has two case forms: é and É");
     }
 }

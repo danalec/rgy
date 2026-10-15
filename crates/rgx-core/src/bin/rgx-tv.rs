@@ -260,9 +260,16 @@ fn run_build(args: &[String]) {
 /// because every other flag on the line is bundled.
 ///
 /// Returns `Some((name, value))` when `arg` carries its own value.
+///
+/// **A token is an option only when it starts with `-`.** Patterns contain
+/// `=` routinely (`status=200`, `foo=bar`), and splitting those into a
+/// name and a value turned the pattern into an unrecognised option: the
+/// query `rgx-tv search -c 'status=200' --store ...` exited 1 against a
+/// corpus its own direct arm matched 500,429 times. The leading dash is
+/// what makes the difference an option name can have.
 fn split_bundled(arg: &str) -> Option<(&str, &str)> {
     let (name, value) = arg.split_once('=')?;
-    if name.is_empty() || value.is_empty() {
+    if name.is_empty() || value.is_empty() || !name.starts_with('-') {
         return None;
     }
     Some((name, value))
@@ -642,13 +649,14 @@ fn print_stages(config: &SearchConfig, stats: &rgx_core::tv_runtime::SearchStats
         format!("{start}->{}", stats.workers)
     };
     eprintln!(
-        "rgx-tv: mode={} pool={} engine={} threads={} packs={} files_searched={} lines={}",
+        "rgx-tv: mode={} pool={} engine={} threads={} packs={} files_searched={} files_pruned={} lines={}",
         mode,
         stats.pooled,
         stats.engine,
         width,
         stats.total_packs_scanned,
         stats.total_files_searched,
+        stats.total_files_pruned,
         stats.total_lines_matched,
     );
     eprintln!(
@@ -809,5 +817,33 @@ fn run_inspect(args: &[String]) {
             eprintln!("rgx-tv: inspect error: {}", e);
             process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_bundled;
+
+    /// A pattern may hold `=` and must stay a pattern. Only a leading dash
+    /// makes a token an option; `status=200` is what the query is about,
+    /// and splitting it turned a corpus that matched 500,429 times into a
+    /// query that matched none.
+    #[test]
+    fn an_equals_in_a_pattern_is_not_an_option() {
+        assert_eq!(split_bundled("status=200"), None);
+        assert_eq!(split_bundled("foo=bar"), None);
+        assert_eq!(split_bundled("a=b=c"), None);
+    }
+
+    #[test]
+    fn a_bundled_option_still_splits() {
+        assert_eq!(split_bundled("--threads=8"), Some(("--threads", "8")));
+        assert_eq!(
+            split_bundled("--max-filesize=300"),
+            Some(("--max-filesize", "300"))
+        );
+        // Empty halves are not options either.
+        assert_eq!(split_bundled("-j="), None);
+        assert_eq!(split_bundled("=8"), None);
     }
 }
