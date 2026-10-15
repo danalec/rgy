@@ -17,7 +17,10 @@
 
 param(
     [string]$Repo = (Split-Path $PSScriptRoot -Parent),
-    [int[]]$Scales = @(200000, 5000000),
+    # Comma-joined on purpose: `pwsh -File` passes list arguments as one
+    # literal string, and the documented invocation must work in both
+    # `-File` and `-Command` modes.
+    [string]$Scales = '200000,5000000',
     [int]$Rounds = 7,
     [int]$Threads = 16,
     [string]$Out = 'benchmark/rgy-name-transcript.md',
@@ -25,6 +28,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$scales = @($Scales.Split(',') | ForEach-Object { [int]$_.Trim() })
 $bin = Join-Path $Repo 'target\release\examples\name_proto.exe'
 if (!(Test-Path $bin)) {
     cargo build --release --manifest-path (Join-Path $Repo 'Cargo.toml') `
