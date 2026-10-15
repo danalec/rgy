@@ -1082,10 +1082,7 @@ mod blob_tests {
         std::fs::write(&p, vec![7u8; 4096]).unwrap();
         let f = std::fs::File::open(&p).unwrap();
         let b = Blob::from_file(&f).unwrap();
-        assert!(
-            matches!(b, Blob::Mapped(_)),
-            "a non-empty file must map on unix; got Owned — the fallback won"
-        );
+        assert!(matches!(b, Blob::Mapped(_)), "a non-empty file must map on unix; got Owned — the fallback won");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

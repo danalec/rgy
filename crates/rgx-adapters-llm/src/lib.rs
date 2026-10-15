@@ -231,55 +231,139 @@ impl Adapter for Safetensors {
         if hlen == 0 || hlen > (1 << 26) || hlen > data.len().saturating_sub(8) {
             bail!("bad safetensors header length");
         }
-        let header_arena = rgx_core::djson::parse(
-            str::from_utf8(&data[8..8 + hlen]).context("safetensors header is not UTF-8")?,
-        )
-        .map_err(rgx_core::Error::msg)
-        .context("safetensors header is not JSON")?;
-        let header = header_arena.root();
-        let mut out = String::new();
-        if let Some(meta_v) = header.get(&header_arena, "__metadata__") {
-            if let Some(meta) = meta_v.as_object(&header_arena) {
-                for (k_idx, v) in meta.iter() {
-                    let k = header_arena.get_string(*k_idx);
-                    let val_text = v.as_str(&header_arena).unwrap_or("?");
-                    use core::fmt::Write as _;
-                    let _ = writeln!(out, "{k}: {val_text}");
-                }
-            }
+        let text = str::from_utf8(&data[8..8 + hlen]).context("safetensors header is not UTF-8")?;
+        // The lazy walk, not the Arena parser: the summary reads two
+        // fields per tensor and the metadata strings -- `data_offsets`
+        // and any extra fields are validated and never materialised.
+        // Every walk error takes the same context the Arena parser's
+        // errors took. The output keeps the Arena parser's key order
+        // (first-appearance rank) and its last-wins duplicate
+        // semantics, pinned byte for byte by the golden tests.
+        let mut doc = rgx_core::djson::ondemand::Ondemand::new(text)
+            .map_err(rgx_core::Error::msg)
+            .context("safetensors header is not JSON")?;
+        let jerr = |e: rgx_core::djson::parser::JsonParseError| {
+            rgx_core::Error::msg(e).context("safetensors header is not JSON")
+        };
+
+        // Collected in source order, deduped last-wins by key name --
+        // the `BTreeMap` lookup semantics of the parser being replaced.
+        struct TensorLine {
+            name: String,
+            dtype: String,
+            shape: Vec<Option<u64>>,
         }
-        if let Some(obj) = header.as_object(&header_arena) {
-            for (k_idx, t) in obj.iter() {
-                let name = header_arena.get_string(*k_idx);
-                if name == "__metadata__" {
-                    continue;
+        let mut meta: Vec<(String, String)> = Vec::new();
+        let mut tensors: Vec<TensorLine> = Vec::new();
+
+        let mut root = doc.root().map_err(jerr)?;
+        if root.is_object().map_err(jerr)? {
+            root.object_entries(|k, mut v| {
+                if k.as_ref() == "__metadata__" {
+                    // The LAST `__metadata__` entry wins outright.
+                    meta.clear();
+                    if v.is_object()? {
+                        v.object_entries(|mk, mv| {
+                            let key = mk.into_owned();
+                            let val = mv
+                                .as_str()?
+                                .map(|s| s.into_owned())
+                                .unwrap_or_else(|| String::from("?"));
+                            match meta.iter_mut().find(|(ek, _)| *ek == key) {
+                                Some(slot) => slot.1 = val,
+                                None => meta.push((key, val)),
+                            }
+                            Ok(true)
+                        })?;
+                    } else {
+                        v.skip()?;
+                    }
+                    return Ok(true);
                 }
-                let dtype = t
-                    .get(&header_arena, "dtype")
-                    .and_then(|d| d.as_str(&header_arena))
-                    .unwrap_or("?");
-                let shape = t
-                    .get(&header_arena, "shape")
-                    .and_then(|s| s.as_array(&header_arena));
-                use core::fmt::Write as _;
-                let _ = write!(out, "tensor {name}: dtype={dtype} shape=[");
-                if let Some(a) = shape {
-                    for (i, v) in a.iter().enumerate() {
-                        if i > 0 {
-                            let _ = write!(out, "x");
-                        }
-                        match v.as_u64() {
-                            Some(u) => {
-                                let _ = write!(out, "{u}");
+                let name = k.into_owned();
+                let mut dtype = String::from("?");
+                let mut shape: Vec<Option<u64>> = Vec::new();
+                if v.is_object()? {
+                    v.object_entries(|tk, mut tv| {
+                        match tk.as_ref() {
+                            "dtype" => {
+                                dtype = tv
+                                    .as_str()?
+                                    .map(|s| s.into_owned())
+                                    .unwrap_or_else(|| String::from("?"));
                             }
-                            None => {
-                                let _ = write!(out, "?");
+                            "shape" => {
+                                // Last `shape` key wins, and a
+                                // non-array one prints as empty.
+                                shape.clear();
+                                if tv.is_array()? {
+                                    tv.array_items(|_, item| {
+                                        shape.push(item.as_u64()?);
+                                        Ok(true)
+                                    })?;
+                                }
                             }
+                            _ => {}
                         }
+                        Ok(true)
+                    })?;
+                } else {
+                    v.skip()?;
+                }
+                match tensors.iter_mut().find(|t| t.name == name) {
+                    Some(slot) => *slot = TensorLine { name, dtype, shape },
+                    None => tensors.push(TensorLine { name, dtype, shape }),
+                }
+                Ok(true)
+            })
+            .map_err(jerr)?;
+        } else {
+            root.skip().map_err(jerr)?;
+        }
+        doc.finish().map_err(jerr)?;
+
+        // Sort both groups into the Arena parser's iteration order:
+        // ascending first-appearance rank of the key string anywhere in
+        // the document. One rank pass answers every name at once.
+        let mut rank_names: Vec<&str> = meta.iter().map(|(k, _)| k.as_str()).collect();
+        rank_names.extend(tensors.iter().map(|t| t.name.as_str()));
+        let ranks = doc.first_string_positions(&rank_names);
+        let mut rank_of: alloc::collections::BTreeMap<&str, usize> =
+            alloc::collections::BTreeMap::new();
+        for (n, r) in rank_names.iter().zip(ranks) {
+            rank_of.entry(*n).or_insert(r);
+        }
+        let meta_ranks: Vec<usize> = meta.iter().map(|(k, _)| rank_of[k.as_str()]).collect();
+        let tensor_ranks: Vec<usize> = tensors.iter().map(|t| rank_of[t.name.as_str()]).collect();
+        drop(rank_of);
+        let mut tagged: Vec<(usize, (String, String))> = meta.into_iter().enumerate().collect();
+        tagged.sort_by_key(|(i, _)| meta_ranks[*i]);
+        let meta: Vec<(String, String)> = tagged.into_iter().map(|(_, e)| e).collect();
+        let mut tagged: Vec<(usize, TensorLine)> = tensors.into_iter().enumerate().collect();
+        tagged.sort_by_key(|(i, _)| tensor_ranks[*i]);
+        let tensors: Vec<TensorLine> = tagged.into_iter().map(|(_, t)| t).collect();
+
+        use core::fmt::Write as _;
+        let mut out = String::new();
+        for (k, v) in &meta {
+            let _ = writeln!(out, "{k}: {v}");
+        }
+        for t in &tensors {
+            let _ = write!(out, "tensor {}: dtype={} shape=[", t.name, t.dtype);
+            for (i, s) in t.shape.iter().enumerate() {
+                if i > 0 {
+                    let _ = write!(out, "x");
+                }
+                match s {
+                    Some(u) => {
+                        let _ = write!(out, "{u}");
+                    }
+                    None => {
+                        let _ = write!(out, "?");
                     }
                 }
-                let _ = writeln!(out, "]");
             }
+            let _ = writeln!(out, "]");
         }
         Ok(Outcome::Text(out.into_bytes()))
     }
@@ -643,6 +727,87 @@ mod tests {
             }
             _ => panic!("expected text"),
         }
+    }
+
+    /// Wrap a JSON header in the 8-byte-length prefix safetensors uses.
+    fn st_wrap(header: &[u8]) -> Vec<u8> {
+        let mut data = (header.len() as u64).to_le_bytes().to_vec();
+        data.extend_from_slice(header);
+        data
+    }
+
+    /// Golden: the full summary, byte for byte -- including the Arena
+    /// parser's key order. `"alpha"` is interned as a shape value of
+    /// `zeta` before it appears as a root key, so its tensor line
+    /// leads `mid` even though `mid` comes first in the source. The
+    /// lazy walk must reproduce this intern-rank order exactly.
+    #[test]
+    fn safetensors_output_is_pinned_byte_for_byte() {
+        let header = br#"{"zeta":{"shape":["alpha"]},"mid":{"dtype":"F16","shape":[1]},"alpha":{"dtype":"BF16","shape":[8]},"__metadata__":{"z":"1"}}"#;
+        let out = Safetensors
+            .extract(&st_wrap(header), "m.safetensors")
+            .unwrap();
+        let Outcome::Text(t) = out else {
+            panic!("expected text");
+        };
+        let s = String::from_utf8(t).unwrap();
+        assert_eq!(
+            s,
+            "z: 1\n\
+tensor zeta: dtype=? shape=[?]\n\
+tensor alpha: dtype=BF16 shape=[8]\n\
+tensor mid: dtype=F16 shape=[1]\n"
+        );
+    }
+
+    /// Golden: `__metadata__` keys come out in intern-rank order too,
+    /// duplicate keys keep the last value, and a non-string value
+    /// prints `?` -- the `as_str().unwrap_or("?")` contract.
+    #[test]
+    fn safetensors_metadata_order_dedupe_and_types() {
+        let header = br#"{"w":{"dtype":"U8","shape":["meta"]},"__metadata__":{"z":"1","meta":"2","dup":"old","dup":"new","n":7}}"#;
+        let out = Safetensors
+            .extract(&st_wrap(header), "m.safetensors")
+            .unwrap();
+        let Outcome::Text(t) = out else {
+            panic!("expected text");
+        };
+        let s = String::from_utf8(t).unwrap();
+        assert_eq!(
+            s,
+            "meta: 2\n\
+z: 1\n\
+dup: new\n\
+n: ?\n\
+tensor w: dtype=U8 shape=[?]\n"
+        );
+    }
+
+    /// Duplicate tensor names collapse to the last entry, matching the
+    /// Arena parser's `BTreeMap` lookup.
+    #[test]
+    fn safetensors_duplicate_tensor_names_take_the_last_value() {
+        let header = br#"{"a":{"dtype":"F32","shape":[1]},"a":{"dtype":"BF16","shape":[2,3]}}"#;
+        let out = Safetensors
+            .extract(&st_wrap(header), "m.safetensors")
+            .unwrap();
+        let Outcome::Text(t) = out else {
+            panic!("expected text");
+        };
+        let s = String::from_utf8(t).unwrap();
+        assert_eq!(s, "tensor a: dtype=BF16 shape=[2x3]\n");
+    }
+
+    /// An invalid header is an adapter failure with its context
+    /// message, not a silent empty summary.
+    #[test]
+    fn safetensors_invalid_json_reports_the_context_error() {
+        let err = match Safetensors.extract(&st_wrap(br#"{"a": 01}"#), "m.safetensors") {
+            Ok(_) => panic!("bad number must fail"),
+            Err(e) => e,
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("safetensors header is not JSON"), "{msg}");
     }
 
     #[test]

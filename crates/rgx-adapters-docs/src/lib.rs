@@ -63,6 +63,9 @@ fn which_uncached(binary: &str) -> bool {
         return false;
     };
     std::env::split_paths(&path_var).any(|dir| {
+        // `mut` is exercised only by the Windows extension probing below;
+        // on any other target it is a warning on every build.
+        #[cfg_attr(not(windows), allow(unused_mut))]
         let mut p = dir.join(binary);
         if p.is_file() {
             return true;

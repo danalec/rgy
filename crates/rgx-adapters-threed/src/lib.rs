@@ -77,14 +77,25 @@ impl Adapter for Glb {
         if json_end > total || json_end > data.len() {
             bail!("GLB JSON chunk length overruns file");
         }
-        let json_arena = rgx_core::djson::parse(
-            str::from_utf8(&data[20..json_end]).context("GLB JSON chunk is not UTF-8")?,
-        )
-        .map_err(rgx_core::Error::msg)
-        .context("GLB JSON chunk is not valid JSON")?;
-        let json = json_arena.root();
-        let mut out = String::new();
-        for key in [
+        let text = str::from_utf8(&data[20..json_end]).context("GLB JSON chunk is not UTF-8")?;
+        // The lazy walk, not the Arena parser: the summary needs seven
+        // fixed keys, each item's `name`, and the `asset` fragment --
+        // the accessor/bufferView tails that dominate a glTF chunk are
+        // validated and never materialised. Every walk error takes the
+        // same context the Arena parser's errors took, so a malformed
+        // chunk fails exactly as it failed before.
+        let mut doc = rgx_core::djson::ondemand::Ondemand::new(text)
+            .map_err(rgx_core::Error::msg)
+            .context("GLB JSON chunk is not valid JSON")?;
+        let jerr = |e: rgx_core::djson::parser::JsonParseError| {
+            rgx_core::Error::msg(e).context("GLB JSON chunk is not valid JSON")
+        };
+
+        // One forward pass collects everything; output order is the
+        // fixed key list below, not source order. Per key, the LAST
+        // duplicate entry wins (the Arena's `object_get` semantics),
+        // which is why each entry overwrites rather than accumulates.
+        const KEYS: [&str; 7] = [
             "scenes",
             "nodes",
             "meshes",
@@ -92,28 +103,57 @@ impl Adapter for Glb {
             "animations",
             "skins",
             "images",
-        ] {
-            if let Some(arr) = json
-                .get(&json_arena, key)
-                .and_then(|v| v.as_array(&json_arena))
-            {
-                let _ = writeln!(out, "{key}: {}", arr.len());
-                for item in arr {
-                    if let Some(name) = item
-                        .get(&json_arena, "name")
-                        .and_then(|n| n.as_str(&json_arena))
-                    {
-                        let _ = writeln!(out, "  {key}[..]: {name}");
+        ];
+        let mut found: [Option<(usize, Vec<String>)>; 7] = Default::default();
+        let mut asset: Option<String> = None;
+
+        let mut root = doc.root().map_err(jerr)?;
+        if root.is_object().map_err(jerr)? {
+            root.object_entries(|k, mut v| {
+                if k.as_ref() == "asset" {
+                    asset = Some(v.to_compact_string()?);
+                    return Ok(true);
+                }
+                if let Some(slot) = KEYS.iter().position(|&key| key == k.as_ref()) {
+                    let mut got = None;
+                    if v.is_array()? {
+                        let mut len = 0usize;
+                        let mut names = Vec::new();
+                        v.array_items(|_, item| {
+                            len += 1;
+                            let mut name = None;
+                            item.find_key("name", |n| {
+                                name = n.as_str()?;
+                                Ok(())
+                            })?;
+                            if let Some(n) = name {
+                                names.push(n.into_owned());
+                            }
+                            Ok(true)
+                        })?;
+                        got = Some((len, names));
                     }
+                    found[slot] = got;
+                }
+                Ok(true)
+            })
+            .map_err(jerr)?;
+        } else {
+            root.skip().map_err(jerr)?;
+        }
+        doc.finish().map_err(jerr)?;
+
+        let mut out = String::new();
+        for (i, key) in KEYS.iter().enumerate() {
+            if let Some((len, names)) = &found[i] {
+                let _ = writeln!(out, "{key}: {len}");
+                for name in names {
+                    let _ = writeln!(out, "  {key}[..]: {name}");
                 }
             }
         }
-        if let Some(asset) = json.get(&json_arena, "asset") {
-            let _ = writeln!(
-                out,
-                "asset: {}",
-                rgx_core::djson::to_string(asset, &json_arena)
-            );
+        if let Some(a) = &asset {
+            let _ = writeln!(out, "asset: {a}");
         }
         Ok(Outcome::Text(out.into_bytes()))
     }
@@ -890,6 +930,82 @@ mod tests {
             }
             _ => panic!("expected text"),
         }
+    }
+
+    /// Wrap a JSON chunk in the minimal GLB container the adapter
+    /// accepts: 12-byte header + 8-byte chunk header + chunk.
+    fn glb_wrap(json: &[u8]) -> Vec<u8> {
+        let mut glb = Vec::new();
+        glb.extend_from_slice(b"glTF");
+        glb.extend_from_slice(&2u32.to_le_bytes());
+        glb.extend_from_slice(&((12 + 8 + json.len()) as u32).to_le_bytes());
+        glb.extend_from_slice(&(json.len() as u32).to_le_bytes());
+        glb.extend_from_slice(b"JSON");
+        glb.extend_from_slice(json);
+        glb
+    }
+
+    /// Golden: the full GLB summary, byte for byte.
+    ///
+    /// The `asset` fragment pins the one order quirk of the Arena
+    /// parser: object keys serialise in first-appearance rank order,
+    /// not source order. `"version"` is interned under `"pre"` before
+    /// `"generator"` appears, so `version` leads the `asset` line even
+    /// though `generator` comes first in the source. The lazy walk
+    /// must reproduce this exactly.
+    #[test]
+    fn glb_output_is_pinned_byte_for_byte() {
+        let json = br#"{"pre":{"version":null},"asset":{"generator":"g","version":"2.0"},"scenes":[{"name":"Scene"}],"nodes":[{"name":"Wheel","mesh":0},{"name":"Door"}],"meshes":[{}],"images":[{},{"name":"tex"}]}"#;
+        let out = Glb.extract(&glb_wrap(json), "m.glb").unwrap();
+        let Outcome::Text(t) = out else {
+            panic!("expected text");
+        };
+        let s = String::from_utf8_lossy(&t);
+        assert_eq!(
+            s,
+            "scenes: 1\n  scenes[..]: Scene\nnodes: 2\n  nodes[..]: Wheel\n  \
+nodes[..]: Door\nmeshes: 1\nimages: 2\n  images[..]: tex\n\
+asset: {\"version\":\"2.0\",\"generator\":\"g\"}\n"
+        );
+    }
+
+    /// Duplicate keys take the last value, matching the Arena parser's
+    /// `BTreeMap` lookup.
+    #[test]
+    fn glb_duplicate_keys_take_the_last_value() {
+        let json = br#"{"images":[{"name":"first"}],"images":[{"name":"second"}],"nodes":[{"name":"a"},{"name":"a"}]}"#;
+        let out = Glb.extract(&glb_wrap(json), "m.glb").unwrap();
+        let Outcome::Text(t) = out else {
+            panic!("expected text");
+        };
+        let s = String::from_utf8_lossy(&t);
+        assert_eq!(
+            s,
+            "nodes: 2\n  nodes[..]: a\n  nodes[..]: a\nimages: 1\n  images[..]: second\n"
+        );
+    }
+
+    /// A valid JSON chunk that is not an object summarises to nothing,
+    /// just as `Value::get` finds nothing on a non-object.
+    #[test]
+    fn glb_non_object_json_chunk_yields_empty_text() {
+        let out = Glb.extract(&glb_wrap(b"[1, 2, 3]"), "m.glb").unwrap();
+        let Outcome::Text(t) = out else {
+            panic!("expected text");
+        };
+        assert!(t.is_empty(), "{t:?}");
+    }
+
+    /// Invalid JSON in the chunk is an adapter failure with its
+    /// context message, not a silent empty summary.
+    #[test]
+    fn glb_invalid_json_reports_the_context_error() {
+        let err = match Glb.extract(&glb_wrap(b"{\"a\": 01}"), "m.glb") {
+            Ok(_) => panic!("bad number must fail"),
+            Err(e) => e,
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("GLB JSON chunk is not valid JSON"), "{msg}");
     }
 
     mod fuzz {

@@ -3557,10 +3557,7 @@ mod open_flags_tests {
         let r = unsafe { mkfifo(c.as_ptr(), 0o600) };
         assert_eq!(r, 0, "mkfifo must succeed");
         // No writer exists: ENXIO — not a block — is the pass condition.
-        assert!(
-            open_sized(c.as_bytes()).is_none(),
-            "a writerless FIFO must answer None, not hang or claim a size"
-        );
+        assert!(open_sized(c.as_bytes()).is_none(), "a writerless FIFO must answer None, not hang or claim a size");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

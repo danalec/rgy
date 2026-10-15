@@ -120,6 +120,7 @@ pub mod memmap2;
 pub mod casefold_table;
 pub mod djson;
 pub mod fuzzkit;
+pub mod fuzzy;
 pub mod hybrid;
 pub mod index;
 pub mod index_io;

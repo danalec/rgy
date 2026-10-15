@@ -21,6 +21,7 @@ use alloc::vec::Vec;
 use rgx_core::{bail, Context, Result};
 use rgx_core::{Adapter, Outcome};
 
+mod eri;
 mod scientific;
 
 pub fn adapters() -> Vec<Box<dyn Adapter>> {
@@ -32,6 +33,7 @@ pub fn adapters() -> Vec<Box<dyn Adapter>> {
         Box::new(Dbf),
         Box::new(Shp),
         Box::new(Parquet),
+        Box::new(eri::Eri),
         Box::new(scientific::MatV5),
         Box::new(scientific::NetCdf3),
         Box::new(scientific::ArrowIpc),
