@@ -28,6 +28,10 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# RGY_NAME_SCALES overrides the parameter: environment variables survive
+# the argument marshalling of nested shells, which has been observed to
+# deliver a comma-joined list as one space-joined token.
+if ($env:RGY_NAME_SCALES) { $Scales = $env:RGY_NAME_SCALES }
 # Split on commas and whitespace alike: an outer PowerShell marshals a
 # `-Scales 200000,5000000` argument as an array and the native command
 # line may deliver it joined by spaces instead of commas.
