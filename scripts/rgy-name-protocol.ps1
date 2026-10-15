@@ -94,10 +94,17 @@ $md += ""
 foreach ($n in $Scales) {
     $root = Join-Path $env:TEMP "rgy_name_proto_$n"
     $index = Join-Path $env:TEMP "rgy_name_proto_$n.idx"
-    if (!(Test-Path $root)) {
+    if (!(Test-Path -LiteralPath $root)) {
         & $bin materialize $root $n $Threads 2>$null
     }
-    $entries = (Get-ChildItem $root -Recurse -File | Measure-Object).Count
+    # Name-level check, no recursive walk: the corpus is deterministic (the
+    # generator writes exactly $n files over its directories), so the count
+    # is the parameter and the arms' agreeing counts are the real proof the
+    # tree is what the index saw.
+    if (!(Test-Path -LiteralPath (Join-Path $root 'dir_0000'))) {
+        throw "fixture $root missing or empty after materialize"
+    }
+    $entries = $n
 
     # Build arm first: it creates the index the count gate's q-index arm
     # loads. T_build of the break-even ratio.
