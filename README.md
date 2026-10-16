@@ -4,15 +4,6 @@ Whole-filesystem name search and content search in one stack: fsearch's name
 engine and query ergonomics, zen-rs's Windows discovery, rgx's content engine,
 adapters and pack store. Windows, Linux and macOS.
 
-| I want to… | Go to |
-|---|---|
-| know which one I want: rgy or rgx | [rgy or rgx?](#rgy-or-rgx) |
-| understand the design and the feature matrix | [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md) |
-| see what landed and what is unverified | [Workspace status](#workspace-status) |
-| run something right now | [Try it](#try-it) |
-| know why the storage layer is shaped the way it is | [`docs/insights-from-rgx.md`](docs/insights-from-rgx.md) |
-| port it to FreeBSD | [`docs/freebsd-support.md`](docs/freebsd-support.md) |
-
 ## rgy or rgx?
 
 [rgx](https://github.com/danalec/rgx) is the content-search specialist: an
@@ -33,7 +24,7 @@ filesystem, then **what is inside it?** in the same query.
 | Name and content in one query | ✅ `report ext:pdf grep:tesla` | pattern + globs |
 | Drop-in `rg` (flags, output, exit codes) | exit codes only | ✅ |
 | Persistent index across runs | ✅ `--index` (pinned root, `--max-age`) | walk per run (pack store opt-in) |
-| Pack-store control | `searchd --tv-dir` | ✅ `--tv-build`, `--engine auto\|tv\|rgx` |
+| Pack-store control | `searchd --tv-dir`, `rgx-tv build/search/update/inspect` | ✅ `--tv-build`, `--engine auto\|tv\|rgx` |
 | Forensic triage (magic ID, carving, strings, entropy, x509) | — | ✅ `inspect` adapter |
 
 **The tech-savvy pick is rgx.** If you already think in `rg` flags and
@@ -87,6 +78,84 @@ echo '["-e","Listing"]' | cargo run --release -p searchd -- --root crates --serv
 `type:` names kinds (`file`/`dir`/`link`, media kinds like `image`); a bare
 extension goes in `ext:`. An unknown `type:` fails closed — warning on
 stderr, zero matches, exit 1.
+
+## The pack store (`rgx-tv`)
+
+`grep:`/`regex:`/`sym:` search file bytes on demand. A **pack store** is the
+other shape: ingest a tree once into aggregated, CRC32-checked packs, then
+answer content queries out of the packed bytes — a corpus that does not
+change re-reads nothing.
+
+Four subcommands, one store. `rgx-tv` is a target of the vendored
+`rgx-core` crate behind `required-features = ["tv-runtime"]`, so a plain
+`cargo build` skips it — build it explicitly:
+
+```sh
+cargo build --release -p rgx-core --bin rgx-tv --features tv-runtime
+
+./target/release/rgx-tv build . --store ~/tv-store          # ingest a tree
+./target/release/rgx-tv search tesla --store ~/tv-store --stats
+./target/release/rgx-tv update . --store ~/tv-store --compact
+./target/release/rgx-tv inspect --store ~/tv-store          # CRC32 + stats
+```
+
+| Subcommand | Does | Takes |
+|---|---|---|
+| `build <root> --store <dir>` | ingest a raw tree into verified packs | ingest flags |
+| `search <pattern> --store <dir>` | query the packs, keeping strict file boundaries | search flags |
+| `update <root> --store <dir>` | publish a new generation from new/modified files | ingest flags |
+| `inspect --store <dir>` | verify pack checksums, report store statistics | `--store` only |
+
+**Flags are per-subcommand and they fail loudly.** A flag the subcommand does
+not own is an error, not a no-op: `rgx-tv build . --store d --stats` exits 1
+with `rgx-tv build: unrecognized option '--stats'`.
+
+### Ingest flags — `build` and `update`
+
+| Flag | Effect |
+|---|---|
+| `--store <dir>` | the store directory — required by every subcommand |
+| `--pack-size-mb <N>` | target pack size in MiB (default 16). `build` only |
+| `-g, --glob <PAT>` | include/exclude glob, repeatable, gitignore-style |
+| `--hidden` | ingest hidden files, as rgx's `--hidden` means it |
+| `-L, --follow` | follow symbolic links |
+| `--no-ignore` | do not read `.gitignore`, `.ignore` or parents' |
+| `--max-depth <N>` | maximum directory depth |
+| `--compact` | **update only.** Updates are append-only, so a store updated often grows without bound; this reclaims the superseded payloads. It is accepted but missing from `rgx-tv --help` |
+
+### Search flags — `search` only
+
+| Flag | Effect |
+|---|---|
+| `--engine <which>` | `auto` (default: the in-house engine for a line-anchored pattern, `grep` otherwise — measured, see `EngineMode::pick`), `rgx` (always in-house where the pattern compiles), `grep`, or `both` (cross-checked, divergences named on stderr) |
+| `-j, --threads <N>` | search threads. Default is three quarters of the physical cores, opened up to every logical processor when the pack's own timings say the scan, not the copy, is the expensive half. `-j` pins it |
+| `-c, --count` | print only the count of matching lines per file |
+| `-n, --line-number` | show 1-based line numbers (default: already on) |
+| `-A/-B/-C <n>` | after / before / both context lines |
+| `-a, --text` | search files the build marked binary |
+| `-M, --max-filesize <N>` | skip files larger than N; suffixes `k`/`m`/`g`, as in `rg` |
+| `--no-mmap` | **default.** Buffered reads; workers claim whole packs in parallel, nothing is mapped |
+| `--mmap` | map every pack instead of reading it. The unmap is the largest single stage of a one-shot query on Windows — for comparison, and for processes that hold a store open across queries |
+| `--serial-buffered` | buffered reads by the coordinator, one pack at a time; the `--no-mmap` behaviour before that flag existed |
+| `--packs-per-thread <N>` | packs a worker claims per claim, buffered mode only (default 1) |
+| `--pool` | reuse one set of pack mappings across queries in this process. Only useful with `--mmap`, and only when the process queries the store more than once |
+| `--no-pool` | deprecated — the pool is off by default, so this asks for what a bare invocation already does. Accepted with a stderr note so old scripts notice |
+| `--leak-mmap` | skip the explicit unmap, let process exit reclaim the mappings. Single-shot only; a no-op in buffered mode |
+| `--validate` | stat every file the manifest claims and report the ones the filesystem disagrees about. A stat per file — the cost the pack exists to avoid — and what it buys is the difference between this generation and now |
+| `--stats` | print the stage breakdown to stderr |
+
+### What rgy's own binaries expose
+
+`searchctl` has **no** pack-store flag. `searchd` has exactly one:
+`--tv-dir <store>`, and it routes both the `grep` op and the `--serve`
+compat front to the packs instead of the direct engine.
+
+**The tuning flags stop at the daemon's edge.** `searchd` calls the pack
+searcher with a hardcoded `SearchConfig::default()`
+([`crates/engine/src/tv.rs`](crates/engine/src/tv.rs)), so none of the search
+flags above are reachable from `searchd` — no `--engine`, `-j`, `--stats`,
+`-A/-B/-C`, `-M`, or mmap choice. Set those by running `rgx-tv search`
+directly.
 
 ## Workspace status
 
