@@ -11,14 +11,23 @@
 //! for the traits, so the selector that knows all of them cannot live
 //! there without a dependency cycle.
 
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use std::path::PathBuf;
 
-use discovery::walk::{self, Cancel, Cancelled, Listing, Progress};
+use discovery::walk::{Cancel, Cancelled, Listing, Progress};
 use discovery::{PortableSource, Source};
 
 /// The backend [`AnySource`] delegates to. Not public: the only thing a
 /// caller may need is [`AnySource::backend_name`].
 enum Kind {
+    /// The portable walk. It is the pick where the platform has no native
+    /// backend of its own, and on Windows where the MFT walk declines a root
+    /// that is not a volume root.
+    ///
+    /// Linux, macOS and FreeBSD always have their own backend, so the
+    /// variant does not exist there: their fallback to the portable walk is
+    /// a run-time decision (`enumerate_cancellable`), not a pick.
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd")))]
     Portable,
     #[cfg(target_os = "linux")]
     Linux(discovery_linux::LinuxSource),
@@ -60,16 +69,14 @@ pub fn source_for(root: Vec<u8>, threads: usize) -> AnySource {
     AnySource { root, threads, kind }
 }
 
+/// The root as a path, for the backends that take one. Linux and FreeBSD
+/// only: those two walks want a `PathBuf`, and a Unix path is a byte string
+/// rather than a UTF-8 string, so the bytes are carried through unchanged.
+/// The Windows and macOS backends take the root as it is.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn path_of(root: &[u8]) -> PathBuf {
-    #[cfg(windows)]
-    {
-        PathBuf::from(String::from_utf8_lossy(root).into_owned())
-    }
-    #[cfg(not(windows))]
-    {
-        use std::os::unix::ffi::OsStringExt;
-        PathBuf::from(std::ffi::OsString::from_vec(root.to_vec()))
-    }
+    use std::os::unix::ffi::OsStringExt;
+    PathBuf::from(std::ffi::OsString::from_vec(root.to_vec()))
 }
 
 fn pick(root: &[u8], threads: usize) -> Kind {
@@ -96,7 +103,7 @@ fn pick(root: &[u8], threads: usize) -> Kind {
         if let Some(mft) = try_mft(root) {
             return Kind::Mft(mft);
         }
-        return Kind::Portable;
+        Kind::Portable
     }
     #[cfg(not(any(windows, target_os = "linux", target_os = "macos", target_os = "freebsd")))]
     {
@@ -122,7 +129,7 @@ fn try_mft(root: &[u8]) -> Option<discovery_windows::MftSource<'static>> {
     // 'static borrow (the same trade `searchd`'s `open_watch` makes).
     let volume: &'static discovery_windows::volume::Volume =
         Box::leak(Box::new(discovery_windows::volume::Volume::open(vol_root).ok()?));
-    let indexer = discovery_windows::indexer::Indexer::new(volume, 0);
+    let indexer = discovery_windows::indexer::Indexer::new(volume);
     Some(discovery_windows::MftSource::new(indexer))
 }
 
@@ -132,6 +139,7 @@ impl AnySource {
     /// look right.
     pub fn backend_name(&self) -> &'static str {
         match &self.kind {
+            #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd")))]
             Kind::Portable => "portable",
             #[cfg(target_os = "linux")]
             Kind::Linux(_) => "linux",
@@ -149,7 +157,8 @@ impl AnySource {
     /// of quietly handing the walk to the portable path.
     pub fn enumerate(&self) -> Result<Vec<Listing>, String> {
         match &self.kind {
-            Kind::Portable => Ok(walk::scan(&self.root, self.threads)),
+            #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd")))]
+            Kind::Portable => Ok(discovery::walk::scan(&self.root, self.threads)),
             #[cfg(target_os = "linux")]
             Kind::Linux(s) => s.enumerate(),
             #[cfg(target_os = "macos")]
@@ -172,6 +181,7 @@ impl AnySource {
         on_progress: &(dyn Fn(Progress) + Sync),
     ) -> Result<Vec<Listing>, Cancelled> {
         match &self.kind {
+            #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd")))]
             Kind::Portable => self.portable().enumerate_cancellable(cancel, on_progress),
             _ => {
                 if cancel.is_cancelled() {
@@ -200,6 +210,7 @@ impl AnySource {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use std::path::PathBuf;
 
     use discovery::walk::{NONE, RawEnt, scan_sequential};
 

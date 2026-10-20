@@ -16,10 +16,15 @@
 // below is the index writing and its tests, which are platform-independent.
 #[cfg(windows)]
 use discovery_windows::{indexer, ntfs, seam, volume};
+#[cfg(windows)]
 use name_core::live::Live;
+#[cfg(windows)]
 use name_core::name_index::Index;
+#[cfg(windows)]
 use name_core::name_query::{Alternatives, Hit, Searcher};
+#[cfg(windows)]
 use name_core::persist;
+#[cfg(windows)]
 use search_ui as ui;
 
 // One allocator story (plan 4.4/4.10): mimalloc for the general heap, matching
@@ -33,6 +38,7 @@ use indexer::Indexer;
 use volume::Volume;
 
 /// Seconds since the epoch -- the index's timestamp base, same as searchd.
+#[cfg(windows)]
 fn now_secs() -> u32 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -42,16 +48,19 @@ fn now_secs() -> u32 {
 
 /// The display path for one hit: the root plus the index-relative path, the
 /// same composition `searchd` puts on the wire.
+#[cfg(windows)]
 fn full_path(root: &str, rel: &str) -> String {
     format!("{root}{}", rel.trim_start_matches(['/', '\\']))
 }
 
 /// The home directory `name_query` resolves `~` against.
+#[cfg(windows)]
 fn query_home() -> String {
     std::env::var("USERPROFILE").unwrap_or_default()
 }
 
 /// Sorted display paths matching `query_str`, deduped across `|` alternatives.
+#[cfg(windows)]
 fn search_paths(live: &Live, root: &str, query_str: &str) -> Result<Vec<String>, String> {
     let home = query_home();
     let alts = Alternatives::parse(query_str, &home)?;
@@ -87,7 +96,7 @@ fn search_paths(live: &Live, root: &str, query_str: &str) -> Result<Vec<String>,
 /// rejoins the root for display (the UI does it too).
 #[cfg(windows)]
 fn build_index(volume: &Volume) -> Result<(Index, indexer::IndexStats), String> {
-    let indexer = Indexer::new(volume, 0);
+    let indexer = Indexer::new(volume);
     let mut last = std::time::Instant::now();
     let (rows, stats) = indexer
         .scan_rows(&mut |done, total, _limit| {
@@ -117,6 +126,7 @@ fn load_or_build(source: &str) -> Result<(Index, String), String> {
     }
 }
 
+#[cfg(windows)]
 fn usage() -> ! {
     eprintln!(
         "zen-rs <command> [args]\n\n\
@@ -409,13 +419,13 @@ fn cmd_tail(volume_path: &str) -> Result<(), String> {
     let (idx, _stats) = build_index(&volume)?;
     let before = idx.n;
     let mut live = Live::new(idx);
-    let mut watch = seam::UsnWatch::new(Indexer::new(&volume, 0));
+    let mut watch = seam::UsnWatch::new(Indexer::new(&volume));
 
     let mut rounds = 0u32;
     let mut total = 0usize;
     while rounds < 10 {
         rounds += 1;
-        match watch.next_batch().map_err(|e| e)? {
+        match watch.next_batch()? {
             discovery::ChangeBatch::Events(events) => {
                 let n = events.len();
                 if n == 0 {
@@ -439,8 +449,12 @@ fn cmd_tail(volume_path: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use discovery::walk::{KIND_DIR, KIND_FILE, Listing, NONE, RawEnt};
+    // The save/load round trip runs off Windows too, so the index format and
+    // its persistence are imported here rather than through the gated
+    // imports at the top of the file.
+    use name_core::name_index::Index;
+    use name_core::persist;
 
     /// root (listing 0) has "projects" (dir, listing 1) with "notes.txt".
     /// Built from `discovery::walk` listings rather than an MFT scan, so the

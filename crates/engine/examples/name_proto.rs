@@ -167,10 +167,10 @@ fn main() {
                 for ent in &ls.ents {
                     let name = &ls.names[ent.name_off as usize
                         ..(ent.name_off as usize + ent.name_len as usize)];
-                    if let Ok(name) = std::str::from_utf8(name) {
-                        if matches_ref(q, name) {
-                            count += 1;
-                        }
+                    if let Ok(name) = std::str::from_utf8(name)
+                        && matches_ref(q, name)
+                    {
+                        count += 1;
                     }
                 }
             }

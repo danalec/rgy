@@ -141,14 +141,17 @@ pub struct IndexStats {
 
 pub struct Indexer<'a> {
     volume: &'a Volume,
-    /// Position of this volume in a multi-volume scan. Prepended to every FRN
-    /// so two volumes cannot collide on the same record number.
-    ordinal: u16,
 }
 
 impl<'a> Indexer<'a> {
-    pub fn new(volume: &'a Volume, ordinal: u16) -> Self {
-        Indexer { volume, ordinal }
+    /// The indexer for one volume.
+    ///
+    /// There is no volume ordinal to carry. A multi-volume scan gives each
+    /// volume its own name index (`zen-rs`'s `index-all` builds one per
+    /// volume), so two volumes never share an FRN space and no key has to
+    /// disambiguate them.
+    pub fn new(volume: &'a Volume) -> Self {
+        Indexer { volume }
     }
 
     /// Walk the MFT and collect every indexed name as a [`NameRow`] — the
@@ -666,7 +669,7 @@ mod tests {
 
     fn ingest_rows(records: &[(u64, Vec<u8>)]) -> (Vec<NameRow>, IndexStats) {
         let volume = crate::volume::Volume::dummy_for_tests();
-        let indexer = Indexer::new(&volume, 0);
+        let indexer = Indexer::new(&volume);
         let mut stats = IndexStats::default();
         let mut rows = Vec::new();
         for (frn, rec) in records {

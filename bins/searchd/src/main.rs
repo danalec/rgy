@@ -66,7 +66,7 @@ struct Ctx {
     ///   the change is silently missed -- the same class of path-space bug
     ///   `wanted`/`wants` already crossed once.
     /// - The Windows factory is the heavy one: `UsnWatch::new(Indexer)` and
-    ///   `Indexer::new(&Volume, ordinal)` borrow up a chain (Volume ->
+    ///   `Indexer::new(&Volume)` borrow up a chain (Volume ->
     ///   Indexer<'a> -> UsnWatch<'a>), so a `'static` thread either holds all
     ///   three or `Box::leak`s the Volume/Indexer for the daemon's life. The
     ///   Volume open + USN journal setup is OS-specific and hard to test here;
@@ -636,7 +636,7 @@ fn open_watch(root: &[u8]) -> Option<Box<dyn discovery::Watch>> {
     let volume: &'static discovery_windows::volume::Volume = Box::leak(Box::new(
         discovery_windows::volume::Volume::open(vol_root).ok()?,
     ));
-    let indexer = discovery_windows::indexer::Indexer::new(volume, 0);
+    let indexer = discovery_windows::indexer::Indexer::new(volume);
     Some(Box::new(discovery_windows::UsnWatch::new(indexer)))
 }
 

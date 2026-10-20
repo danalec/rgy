@@ -3830,7 +3830,7 @@ mod grep_pipeline_tests {
         // Edit the file; the Live and the content index must both catch up.
         std::fs::write(dir.join("edit.rs"), b"fn after() {}\n").unwrap();
         live.apply_dir(&root, true);
-        let rebuilt = content.sync(&live, b"", &[], &[root.clone()], &root);
+        let rebuilt = content.sync(&live, b"", &[], std::slice::from_ref(&root), &root);
 
         assert_eq!(content.search(&before, &q).files.len(), 0, "the old text is gone after the sync");
         assert_eq!(content.search(&after, &q).files.len(), 1, "the edit is indexed after the sync (sync rebuilt {rebuilt} docs)");
@@ -3872,7 +3872,7 @@ mod grep_pipeline_tests {
         // Delete the file; the query must stop reporting it.
         std::fs::remove_file(dir.join("gone.rs")).unwrap();
         live.apply_dir(&root, true);
-        content.sync(&live, b"", &[], &[root.clone()], &root);
+        content.sync(&live, b"", &[], std::slice::from_ref(&root), &root);
 
         assert_eq!(
             answer(&g, &q, &root, &live, b"", Some(&content), 10).files.len(),
@@ -3921,7 +3921,7 @@ mod grep_pipeline_tests {
             name: dir.join("edit.rs").to_string_lossy().into_owned(),
         };
         live.apply_events(&[rec]);
-        content.sync(&live, b"", &[], &[root.clone()], &root);
+        content.sync(&live, b"", &[], std::slice::from_ref(&root), &root);
 
         assert_eq!(content.search(&before, &q).files.len(), 0, "the old text is gone");
         assert_eq!(content.search(&after, &q).files.len(), 1, "the edit is indexed after the Watch event");
@@ -3973,7 +3973,7 @@ mod grep_pipeline_tests {
         };
         let mut feed = OneShot(Some(discovery::ChangeBatch::Events(vec![rec])));
         assert!(live.run_watch_feed(&mut feed, &root).is_err(), "the feed ends with its error");
-        content.sync(&live, b"", &[], &[root.clone()], &root);
+        content.sync(&live, b"", &[], std::slice::from_ref(&root), &root);
 
         assert_eq!(content.search(&before, &q).files.len(), 0, "the old text is gone");
         assert_eq!(content.search(&after, &q).files.len(), 1, "the feed's edit reached the query");
@@ -4019,7 +4019,7 @@ mod grep_pipeline_tests {
             name: dir.join("sub").to_string_lossy().into_owned(),
         };
         live.apply_events(&[rec]);
-        content.sync(&live, b"", &[], &[root.clone()], &root);
+        content.sync(&live, b"", &[], std::slice::from_ref(&root), &root);
 
         assert_eq!(content.search(&before, &q).files.len(), 0, "the old text is gone");
         assert_eq!(content.search(&after, &q).files.len(), 1, "a directory event must re-list the directory, reaching the edit inside it");

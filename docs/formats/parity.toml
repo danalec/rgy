@@ -43,7 +43,7 @@ name = "Feed-loss detection"
 windows = "N"
 linux = "N"
 macos = "N"
-notes = "journal wrap / stale usn | IN_Q_OVERFLOW | MUST_SCAN_SUBDIRS, USER_DROPPED, KERNEL_DROPPED -> Rescan."
+notes = "journal wrap / stale usn | IN_Q_OVERFLOW | MUST_SCAN_SUBDIRS, USER_DROPPED, KERNEL_DROPPED. Windows and Linux map their loss signal to Rescan; the macOS flags are in the tree, but its watch is not wired into the daemon yet (searchd's open_watch says why)."
 
 [[feature]]
 id = "1.5"
@@ -75,7 +75,7 @@ name = "Multi-volume / multi-root"
 windows = "N"
 linux = "P"
 macos = "P"
-notes = "volume ordinal in FRN key | mount table + root set | mounts + firmlinks."
+notes = "one name index per volume | mount table + root set | mounts + firmlinks."
 
 [[feature]]
 id = "1.9"

@@ -2249,9 +2249,7 @@ impl Searcher<'_> {
         // No `note_attempt` here: this is not a path reached and rejected, it
         // is one deliberately not considered, and saying otherwise on every
         // `--explain` would be noise.
-        if std::env::var_os("RGY_FORCE_RANKED").is_none() {
-            return None;
-        }
+        std::env::var_os("RGY_FORCE_RANKED")?;
         if est >= RANKED_MIN {
             return Some((t, false));
         }

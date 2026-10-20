@@ -245,11 +245,11 @@ fails CI until it is ported or documented as degraded.
 | 1.1 | Full-tree enumeration | N | G | N | MFT scan (extent streaming) \| getdents64 bulk walk \| getattrlistbulk. |
 | 1.2 | Live change feed | N | G | N | USN journal \| inotify (recursive) \| FSEvents. Granularity differs: USN/FSEvents are directory-level, inotify per-entry. |
 | 1.3 | Restart replay (catch up while off) | N | G | N | resume from saved USN \| none - no journal \| FSEvents by event id. Linux has no journal to replay. |
-| 1.4 | Feed-loss detection | N | N | N | journal wrap / stale usn \| IN_Q_OVERFLOW \| MUST_SCAN_SUBDIRS, USER_DROPPED, KERNEL_DROPPED -> Rescan. |
+| 1.4 | Feed-loss detection | N | N | N | journal wrap / stale usn \| IN_Q_OVERFLOW \| MUST_SCAN_SUBDIRS, USER_DROPPED, KERNEL_DROPPED. Windows and Linux map their loss signal to Rescan; the macOS flags are in the tree, but its watch is not wired into the daemon yet (searchd's open_watch says why). |
 | 1.5 | Partial rescan (scope, not whole disk) | N | P | N | per-record rescan \| subtree walk on Rescan \| reliable replay by id. |
 | 1.6 | Permission-denied handling | P | P | P | skip + skipped list (ACL) \| EACCES skip + list \| TCC/gated skip. Never prompt from the daemon. |
 | 1.7 | Lazy/placeholder files | G | D | N | OneDrive/Cloud Files (do not hydrate) \| sparse/fscrypt visible as normal \| no_materialize (iCloud dataless fails fast). Windows needs the same never-hydrate guard fsearch has for iCloud. |
-| 1.8 | Multi-volume / multi-root | N | P | P | volume ordinal in FRN key \| mount table + root set \| mounts + firmlinks. |
+| 1.8 | Multi-volume / multi-root | N | P | P | one name index per volume \| mount table + root set \| mounts + firmlinks. |
 | 1.9 | Hard links & aliases | N | P | P | hardlinks + 8.3 short names \| hardlinks \| hardlinks + firmlinks + symlinks. |
 | 1.10 | Symlinks | N | G | P | reparse points (type:link) \| O_NOFOLLOW walk + link entries \| KIND_LINK, not crossed. Classify, do not unify blindly (Windows reparse vs POSIX symlink). |
 | 1.11 | Case sensitivity of the FS | D | G | D | case-insensitive (NTFS default) \| case-sensitive (ext4/btrfs) \| case-insensitive (APFS default). The biggest semantic parity trap - see 6.6. |
