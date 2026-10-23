@@ -73,6 +73,7 @@ verification on machines this host does not have.
 | PGO (trained on the name bench) | `pgo.sh` (unix), `pgo.ps1` (Windows) | ✅ validated end to end on Windows |
 | Bench harness + baselines | `crates/engine/examples`, `crates/name-core/examples`, `benchmark/` | ✅ |
 | The perf gate itself | `scripts/bench-names.py`, `benchmark/baseline-names.csv` | ✅ a fixed worker width, seven runs, the best of them, and the spread beside the number |
+| The CI (the gates, on three OSes) | `.github/workflows/ci.yml`, `.gitea/workflows/drift.yml` | ✅ written and pinned to the named images (Windows Server 2022, macOS 15 on arm64, Ubuntu 24.04); ⬜ **never run** — see below |
 
 ### Perf gate
 
@@ -244,4 +245,14 @@ the three platforms behaving alike.
   formula name a release that does not exist.
 - **A Mac.** The macOS column is the one column that has never run on the
   operating system it describes. The code is transported and compiles
-  there; nobody has watched it work.
+  there — checked for both `aarch64-apple-darwin` and `x86_64-apple-darwin`
+  — but nobody has watched it work.
+- **The CI has never run.** The workflow is written and pinned to the
+  images this project is verified against: Windows Server 2022, macOS 15 on
+  arm64 (the only place the NEON scorer and the macOS discovery backend
+  would ever run) and Ubuntu 24.04, with the `lld-link` step, the
+  `--locked` builds and the format gate. It has not run once, because the
+  repository lives only on the private forgejo, and the workflow asks for
+  GitHub-hosted labels while the only runner this project registers there
+  is a self-hosted Linux one. The matrix becomes a gate the day the
+  repository is on a host with those runners. Until then it is a promise.
