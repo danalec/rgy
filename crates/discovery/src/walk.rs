@@ -255,14 +255,13 @@ pub fn scan_with(
     // `Sync` because the parallel path hands it to the pool.
     on_progress: &(dyn Fn(Progress) + Sync),
 ) -> Result<Vec<Listing>, Cancelled> {
-    if threads > 1 {
-        if let Ok(pool) = rayon::ThreadPoolBuilder::new()
+    if threads > 1
+        && let Ok(pool) = rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .thread_name(|i| format!("rgy-walk-{i}"))
             .build()
-        {
-            return pool.install(|| walk_parallel(root, cancel, on_progress));
-        }
+    {
+        return pool.install(|| walk_parallel(root, cancel, on_progress));
     }
     scan_sequential_with(root, cancel, on_progress)
 }

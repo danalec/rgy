@@ -39,7 +39,7 @@ pub fn cancel_on_interrupt() -> Cancel {
 /// behaves exactly as it did before this existed.
 #[cfg(unix)]
 fn install() {
-    extern "C" {
+    unsafe extern "C" {
         fn signal(signum: i32, handler: usize) -> usize;
     }
     const SIGINT: i32 = 2;
@@ -60,7 +60,7 @@ fn install() {
 
 #[cfg(windows)]
 fn install() {
-    extern "system" {
+    unsafe extern "system" {
         fn SetConsoleCtrlHandler(
             routine: Option<unsafe extern "system" fn(u32) -> i32>,
             add: i32,
