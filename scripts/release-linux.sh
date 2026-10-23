@@ -24,10 +24,18 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 REF="main"
-# Where the Linux build runs. Overridable so the published script does not
-# hardcode one person's box; the default is the host this was written on.
-HOST="${RGY_RELEASE_HOST:-danalec@192.168.0.40}"
-FORGEJO="http://192.168.0.10:3000/danalec/rgy.git"
+# Where the Linux build runs, and the forgejo that hosts the release. Neither
+# address is in this repository: a public repository that names somebody's
+# private network is a map of that network, and the address is one line away
+# from being read by everybody. Set both.
+HOST="${RGY_RELEASE_HOST:-}"
+FORGEJO_URL="${RGY_FORGEJO_URL:-}"
+if [ -z "$HOST" ] || [ -z "$FORGEJO_URL" ]; then
+    echo "RGY_RELEASE_HOST and RGY_FORGEJO_URL must both be set" >&2
+    echo "e.g. RGY_RELEASE_HOST=user@host RGY_FORGEJO_URL=http://host:3000" >&2
+    exit 1
+fi
+FORGEJO="${FORGEJO_URL%/}/danalec/rgy.git"
 REMOTE="/tmp/rgy-release"
 
 while [ $# -gt 0 ]; do

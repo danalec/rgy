@@ -68,8 +68,23 @@ if (-not $Version) { $Version = Get-ManifestVersion "bins/searchctl/Cargo.toml" 
 if (-not $Version) { throw "no version in bins/searchctl/Cargo.toml" }
 $tag = "rgy-v$Version"
 
-$repoApi = "http://192.168.0.10:3000/api/v1/repos/danalec/rgy"
-$forgejo = "http://192.168.0.10:3000/danalec/rgy"
+# The forgejo that hosts the release. Its address is not in this repository:
+# a public repository that names somebody's private network is a map of that
+# network, and the address is one line away from being read by everybody.
+# Set RGY_FORGEJO_URL to the forgejo's base URL.
+$forgejoUrl = $env:RGY_FORGEJO_URL
+if (-not $forgejoUrl) {
+    [Console]::Error.WriteLine("RGY_FORGEJO_URL is not set: the forgejo that hosts the release is not in this repository")
+    [Console]::Error.WriteLine("set it to the forgejo's base URL, e.g. RGY_FORGEJO_URL=http://host:3000")
+    exit 1
+}
+$forgejoUrl = $forgejoUrl.TrimEnd("/")
+$repoApi = "$forgejoUrl/api/v1/repos/danalec/rgy"
+$forgejo = "$forgejoUrl/danalec/rgy"
+# A credential request names a host, not a URL: `host:port`, with neither
+# the scheme nor the path.
+if ($forgejoUrl -match '^([a-zA-Z][a-zA-Z0-9+.-]*)://') { $forgejoProto = $Matches[1] } else { $forgejoProto = "http" }
+$forgejoHost = ($forgejoUrl -replace '^[a-zA-Z][a-zA-Z0-9+.-]*://', '') -replace '/.*$', ''
 $ghRepo = "danalec/rgy"
 $gh = "https://github.com/$ghRepo"
 
@@ -179,7 +194,7 @@ $release = $null
 if ($ManifestsOnly) {
     Write-Host "[manifests-only] the forgejo release is not touched"
 } else {
-    $cred = Get-GitCredential "http" "192.168.0.10:3000"
+    $cred = Get-GitCredential $forgejoProto $forgejoHost
     $user = $cred["username"]
     $pass = $cred["password"]
     if (-not $user -or -not $pass) {

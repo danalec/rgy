@@ -53,13 +53,16 @@ command -v cargo > /dev/null 2>&1 || {
 
 # --- 1. the version ---------------------------------------------------------
 #
-# The workspace root is virtual: it has no version of its own. The four
-# binary crates carry it, and they have to agree.
+# The workspace root is virtual: it has no version of its own. The crates
+# that carry a version have to agree -- and `rgy-autostart` is one of them,
+# because the release ships it: the archive carries searchctl, searchd and
+# rgy-autostart, so a version drift in the autostart crate is a release
+# carrying three binaries that do not agree about which release they are.
 read_manifest_version() {
     sed -n 's/^version = "\(.*\)"/\1/p' "$1" | head -1
 }
 
-manifests="bins/searchctl/Cargo.toml bins/searchd/Cargo.toml bins/search-ui/Cargo.toml bins/zen-rs/Cargo.toml"
+manifests="bins/searchctl/Cargo.toml bins/searchd/Cargo.toml bins/search-ui/Cargo.toml bins/zen-rs/Cargo.toml crates/autostart/Cargo.toml"
 if [ -z "$version" ]; then
     version=$(read_manifest_version bins/searchctl/Cargo.toml)
 fi
@@ -69,7 +72,7 @@ for m in $manifests; do
     v=$(read_manifest_version "$m")
     if [ "$v" != "$version" ]; then
         echo "$m says version $v, but the release is $version" >&2
-        echo "the four binaries must agree about their version" >&2
+        echo "the crates must agree about their version" >&2
         exit 1
     fi
 done

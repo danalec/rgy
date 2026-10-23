@@ -57,8 +57,24 @@ done
 [ -n "$version" ] || { echo "no version in bins/searchctl/Cargo.toml" >&2; exit 1; }
 
 tag="rgy-v$version"
-repo_api="http://192.168.0.10:3000/api/v1/repos/danalec/rgy"
-forgejo="http://192.168.0.10:3000/danalec/rgy"
+# The forgejo that hosts the release. Its address is not in this repository:
+# a public repository that names somebody's private network is a map of that
+# network, and the address is one line away from being read by everybody.
+# Set RGY_FORGEJO_URL to the forgejo's base URL.
+forgejo_url="${RGY_FORGEJO_URL:-}"
+if [ -z "$forgejo_url" ]; then
+    echo "RGY_FORGEJO_URL is not set: the forgejo that hosts the release is not in this repository" >&2
+    echo "set it to the forgejo's base URL, e.g. RGY_FORGEJO_URL=http://host:3000" >&2
+    exit 1
+fi
+forgejo_url="${forgejo_url%/}"
+repo_api="$forgejo_url/api/v1/repos/danalec/rgy"
+forgejo="$forgejo_url/danalec/rgy"
+# A credential request names a host, not a URL: `host:port`, with neither
+# the scheme nor the path.
+forgejo_proto=$(printf '%s' "$forgejo_url" | sed -n 's|^\([a-zA-Z][a-zA-Z0-9+.-]*\)://.*|\1|p')
+[ -n "$forgejo_proto" ] || forgejo_proto="http"
+forgejo_host=$(printf '%s' "$forgejo_url" | sed -e 's|^[a-zA-Z][a-zA-Z0-9+.-]*://||' -e 's|/.*$||')
 gh_repo="danalec/rgy"
 gh="https://github.com/$gh_repo"
 
@@ -134,7 +150,7 @@ fi
 # and the manifests-only mode never call the API, and a host that has no
 # credential for the forgejo can still rewrite the manifests.
 fetch_credentials() {
-    cred=$(printf 'protocol=http\nhost=192.168.0.10:3000\n\n' | git credential fill 2>/dev/null)
+    cred=$(printf 'protocol=%s\nhost=%s\n\n' "$forgejo_proto" "$forgejo_host" | git credential fill 2>/dev/null)
     user=$(printf '%s\n' "$cred" | sed -n 's/^username=//p')
     pass=$(printf '%s\n' "$cred" | sed -n 's/^password=//p')
     if [ -z "$user" ] || [ -z "$pass" ]; then

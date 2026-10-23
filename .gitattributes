@@ -38,6 +38,10 @@
 *.sh text eol=lf
 *.tsv text eol=lf
 *.ps1 text eol=lf
+# The workflow files carry shell inside YAML: a `run: |` block is a shell
+# script, and a CRLF one has a carriage return at the end of every command.
+# On a unix runner that is "command not found" for the first line.
+*.yml text eol=lf
 
 # The local patches, byte for byte. `git apply` matches the context lines of
 # a patch against the file it is applied to, and a checkout that rewrote the

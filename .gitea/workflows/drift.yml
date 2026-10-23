@@ -2,10 +2,10 @@
 #
 # It lives here and not in .github/workflows/ci.yml because of where the
 # upstream is. rgx is a private repository on the forgejo, on the LAN:
-# github.com/danalec/rgx does not exist, and a runner that cannot reach
-# 192.168.0.10 cannot clone it. A drift check that could not reach the
-# upstream would fail on every push, and a check that fails on every push
-# teaches everybody to ignore it.
+# github.com/danalec/rgx does not exist, and a runner that cannot reach the
+# forgejo cannot clone it. A drift check that could not reach the upstream
+# would fail on every push, and a check that fails on every push teaches
+# everybody to ignore it.
 #
 # Gitea reads .gitea/workflows/; GitHub reads .github/workflows/ and never
 # sees this file. So this job waits for a runner on the LAN, and the
@@ -35,13 +35,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: the upstream, and the drift against it
-        env:
-          # The LAN forgejo, where rgx lives. The URL is not a secret: it is
-          # an address on the local network, and the credential for it is
-          # the runner's own.
-          RGX_UPSTREAM_URL: http://192.168.0.10:3000/danalec/rgx.git
         run: |
           set -eu
+          # The upstream's URL. The forgejo that hosts rgx is on the LAN, and
+          # its address is not in this repository: a public repository that
+          # names somebody's private network is a map of that network. The
+          # upstream lives on the same forgejo as this repository, so the URL
+          # is derived from where this checkout came from -- and a runner
+          # that wants another upstream sets RGX_UPSTREAM_URL in its own
+          # environment, and that wins.
+          upstream_url="${RGX_UPSTREAM_URL:-}"
+          if [ -z "$upstream_url" ]; then
+            origin="$(git remote get-url origin 2>/dev/null || true)"
+            case "${origin##*/}" in
+              rgy.git|rgy) upstream_url="${origin%/*}/rgx.git" ;;
+              *)
+                echo "cannot derive the upstream URL from origin '$origin'" >&2
+                echo "set RGX_UPSTREAM_URL in the runner's environment" >&2
+                exit 1
+                ;;
+            esac
+          fi
+          echo "upstream: $upstream_url"
           # No terminal prompt: a missing credential has to fail here, with
           # git's own message, and not hang the job waiting for a keypress.
           export GIT_TERMINAL_PROMPT=0
@@ -49,6 +64,6 @@ jobs:
           rm -rf "$upstream"
           # The full history, not a shallow one: the check asks what upstream
           # did since the pin, and a shallow clone has no answer to that.
-          git clone "$RGX_UPSTREAM_URL" "$upstream"
+          git clone "$upstream_url" "$upstream"
           git -C "$upstream" log --oneline -1
           bash scripts/check-drift.sh --upstream "$upstream"

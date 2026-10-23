@@ -51,11 +51,15 @@ function Get-ManifestVersion([string]$path) {
 
 # --- 1. the version ---------------------------------------------------------
 #
-# The workspace root is virtual: it has no version of its own. The four
-# binary crates carry it, and they have to agree.
+# The workspace root is virtual: it has no version of its own. The crates
+# that carry a version have to agree -- and `rgy-autostart` is one of them,
+# because the release ships it: the archive carries searchctl, searchd and
+# rgy-autostart, so a version drift in the autostart crate is a release
+# carrying three binaries that do not agree about which release they are.
 $manifests = @(
     "bins/searchctl/Cargo.toml", "bins/searchd/Cargo.toml",
-    "bins/search-ui/Cargo.toml", "bins/zen-rs/Cargo.toml"
+    "bins/search-ui/Cargo.toml", "bins/zen-rs/Cargo.toml",
+    "crates/autostart/Cargo.toml"
 )
 if (-not $Version) { $Version = Get-ManifestVersion "bins/searchctl/Cargo.toml" }
 if (-not $Version) { throw "no version in bins/searchctl/Cargo.toml" }
@@ -63,7 +67,11 @@ if (-not $Version) { throw "no version in bins/searchctl/Cargo.toml" }
 foreach ($m in $manifests) {
     $v = Get-ManifestVersion $m
     if ($v -ne $Version) {
-        Write-Error "$m says version $v, but the release is $Version`nthe four binaries must agree about their version"
+        # Plain lines on stderr, not `Write-Error`: the POSIX twin writes
+        # the same two lines with `echo >&2`, and an error record would
+        # print the script's path and line number on top of them.
+        [Console]::Error.WriteLine("$m says version $v, but the release is $Version")
+        [Console]::Error.WriteLine("the crates must agree about their version")
         exit 1
     }
 }
@@ -89,11 +97,11 @@ if (-not $SkipTests) {
     Write-Host "gate: clippy, then the test suite"
     cargo clippy --release --workspace --all-targets -- -D warnings
     if ($LASTEXITCODE -ne 0) {
-        Write-Error "clippy warnings found; the workspace must stay warning-free"
+        [Console]::Error.WriteLine("clippy warnings found; the workspace must stay warning-free")
         exit 1
     }
     cargo test --release --workspace
-    if ($LASTEXITCODE -ne 0) { Write-Error "tests failed"; exit 1 }
+    if ($LASTEXITCODE -ne 0) { [Console]::Error.WriteLine("tests failed"); exit 1 }
 } else {
     Write-Host "gate: skipped (--skip-tests)"
 }
@@ -101,7 +109,7 @@ if (-not $SkipTests) {
 # --- 4. the build -----------------------------------------------------------
 Write-Host "build: cargo build --release --workspace"
 cargo build --release --workspace
-if ($LASTEXITCODE -ne 0) { Write-Error "the build failed"; exit 1 }
+if ($LASTEXITCODE -ne 0) { [Console]::Error.WriteLine("the build failed"); exit 1 }
 
 $exeDir = Join-Path $root "target\release"
 
@@ -128,13 +136,13 @@ function Invoke-Smoke([string]$label, [string]$query) {
     $code = $LASTEXITCODE
     $ErrorActionPreference = $saved
     if ($code -ne 0) {
-        Write-Error "smoke: $label failed (exit $code)"
+        [Console]::Error.WriteLine("smoke: $label failed (exit $code)")
         exit 1
     }
     $text = ($out -join "`n")
     $m = [regex]::Match($text, '\d+')
     if (-not $m.Success -or [int]$m.Value -eq 0) {
-        Write-Error "smoke: $label answered with no hits"
+        [Console]::Error.WriteLine("smoke: $label answered with no hits")
         exit 1
     }
     Write-Host "smoke: $label -> $($m.Value) hits"
