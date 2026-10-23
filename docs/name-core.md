@@ -3,7 +3,7 @@
 The name index: what the disk looked like, and what it looks like now.
 This document is the contract the four modules of `crates/name-core` are
 written against. The on-disk formats it names are in
-[`formats/README.md`](on-disk-formats.md).
+[`on-disk-formats.md`](on-disk-formats.md).
 
 The crate has four modules:
 
@@ -62,7 +62,7 @@ A snapshot of one walk, stored in one file.
 - `Index::lookup(path)` finds an entry by its root-relative path.
 - `Index::path(i, out)` writes the root-relative path of entry `i`.
 - `Index::save` / `Index::load` are the FSIDX012 format
-  ([`formats/README.md`](on-disk-formats.md)).
+  ([`on-disk-formats.md`](on-disk-formats.md)).
 
 ## The overlay (`live`)
 
