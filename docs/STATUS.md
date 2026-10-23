@@ -232,7 +232,7 @@ the three platforms behaving alike.
   carries the `rgy-` prefix: `rgy-proto`, `rgy-discovery`,
   `rgy-name-core`, `rgy-engine`, `rgy-autostart`, the four
   `rgy-discovery-{windows,linux,macos,freebsd}`, `rgy-discovery-dispatch`,
-  `rgy-searchctl`, `rgy-searchd`, `rgy-search-ui` and `rgy-zen-rs`. The
+  `rgy-searchctl`, `rgy-searchd`, `rgy-search-ui` and `rgy-zen`. The
   library target names follow the package names (`rgy_discovery`,
   `rgy_name_core`, …), and that is not cosmetic: a library whose target
   name stayed `discovery` would collide with the crates.io crate of that

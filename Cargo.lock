@@ -646,7 +646,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "rgy-zen-rs"
+name = "rgy-zen"
 version = "0.1.0"
 dependencies = [
  "mimalloc",
