@@ -222,13 +222,66 @@ pub fn load_saved(index: &Path) -> Result<(Index, String), Miss> {
 
 /// Default index location for a root: `<cache_dir>/rgy/<digest>.idx`, so two
 /// roots never collide and no root has to be spelled into the filename.
+///
+/// The cache directory is the platform's own: `%LOCALAPPDATA%` on Windows,
+/// `$XDG_CACHE_HOME` (or `~/.cache`) on Linux, `~/Library/Caches` on macOS.
+/// `RGY_INDEX_DIR` overrides all of them.
+///
+/// This used to fall back to `std::env::temp_dir()` whenever none of those
+/// was set, and `XDG_CACHE_HOME` is unset by default on most Linux systems
+/// and on every macOS one -- so the index landed in `/tmp/rgy`, a directory
+/// every user on the host shares and every user can write to. Two users
+/// searching the same root landed on the same digest file, and the file
+/// itself sat where somebody else could have planted a symlink first. The
+/// temp dir is still the last resort, for a machine with no home at all,
+/// but it is no longer the first one reached.
 pub fn default_index_path(root: &Path) -> PathBuf {
     let digest = fnv1a(canon(root).to_string_lossy().as_bytes());
     let base = std::env::var_os("RGY_INDEX_DIR")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("LOCALAPPDATA").or_else(|| std::env::var_os("XDG_CACHE_HOME")).map(PathBuf::from))
+        .or_else(cache_dir)
         .unwrap_or_else(std::env::temp_dir);
     base.join("rgy").join(format!("{digest:016x}.idx"))
+}
+
+/// The platform's cache directory, read from the environment.
+///
+/// Split from the path logic so the test does not have to mutate the
+/// process environment: a test that sets `HOME` races every other test in
+/// the process.
+fn cache_dir() -> Option<PathBuf> {
+    // Windows has no `HOME`; the user's profile directory is the same
+    // thing under another name.
+    let home = if cfg!(windows) {
+        std::env::var_os("USERPROFILE")
+    } else {
+        std::env::var_os("HOME")
+    };
+    cache_dir_from(
+        std::env::var_os("XDG_CACHE_HOME").as_deref(),
+        home.as_deref(),
+        std::env::var_os("LOCALAPPDATA").as_deref(),
+    )
+}
+
+/// The cache directory, given the environment.
+///
+/// `$XDG_CACHE_HOME` when it is set, else `~/.cache` on Linux and
+/// `~/Library/Caches` on macOS -- the two the manual names. Windows keeps
+/// `%LOCALAPPDATA%`, and `%USERPROFILE%\AppData\Local` when that is unset.
+fn cache_dir_from(
+    xdg: Option<&std::ffi::OsStr>,
+    home: Option<&std::ffi::OsStr>,
+    local: Option<&std::ffi::OsStr>,
+) -> Option<PathBuf> {
+    let some = |v: Option<&std::ffi::OsStr>| v.filter(|s| !s.is_empty()).map(PathBuf::from);
+    if cfg!(windows) {
+        return some(local).or_else(|| some(home).map(|h| h.join("AppData").join("Local")));
+    }
+    if cfg!(target_os = "macos") {
+        return some(xdg).or_else(|| some(home).map(|h| h.join("Library").join("Caches")));
+    }
+    some(xdg).or_else(|| some(home).map(|h| h.join(".cache")))
 }
 
 fn fnv1a(bytes: &[u8]) -> u64 {
@@ -273,6 +326,68 @@ mod tests {
         let idx_path = dir.join("cache.idx");
         assert_eq!(outcome(&dir, &idx_path, None).unwrap_err(), Miss::Absent);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The cache directory is the platform's, and not the temp dir.
+    ///
+    /// The temp dir is the last resort, for a machine with no home at all:
+    /// it is shared by every user on the host, and a file there is a file
+    /// somebody else can replace.
+    #[test]
+    fn the_cache_dir_is_the_platforms_own() {
+        let home = std::ffi::OsStr::new("/home/tester");
+        let local = std::ffi::OsStr::new("C:/Users/tester/AppData/Local");
+        let got = cache_dir_from(None, Some(home), Some(local)).expect("a cache directory");
+        if cfg!(windows) {
+            assert_eq!(got, PathBuf::from("C:/Users/tester/AppData/Local"));
+        } else if cfg!(target_os = "macos") {
+            assert_eq!(got, PathBuf::from("/home/tester/Library/Caches"));
+        } else {
+            assert_eq!(got, PathBuf::from("/home/tester/.cache"));
+        }
+    }
+
+    /// An explicit `XDG_CACHE_HOME` wins where the platform has one: the
+    /// user said where the cache is. Windows has its own convention
+    /// (`%LOCALAPPDATA%`), and there the platform's answer stands.
+    #[test]
+    fn xdg_cache_home_wins_wherever_it_is_set() {
+        let xdg = std::ffi::OsStr::new("/xdg/cache");
+        let local = std::ffi::OsStr::new("C:/Users/tester/AppData/Local");
+        let got = cache_dir_from(Some(xdg), None, Some(local)).expect("a cache directory");
+        if cfg!(windows) {
+            assert_eq!(got, PathBuf::from("C:/Users/tester/AppData/Local"));
+        } else {
+            assert_eq!(got, PathBuf::from("/xdg/cache"));
+        }
+    }
+
+    /// An empty variable is not a directory. `XDG_CACHE_HOME=` in a shell
+    /// profile is a way of saying "unset", not a way of pointing the cache
+    /// at the current folder.
+    #[test]
+    fn an_empty_environment_variable_is_not_a_directory() {
+        let empty = std::ffi::OsStr::new("");
+        assert!(cache_dir_from(Some(empty), Some(empty), Some(empty)).is_none());
+    }
+
+    /// A machine with no home has no cache directory, and the temp dir is
+    /// then the last resort rather than the first one reached.
+    #[test]
+    fn a_machine_with_no_home_has_no_cache_dir() {
+        assert!(cache_dir_from(None, None, None).is_none());
+    }
+
+    /// The index file sits in the cache dir, under `rgy`, named by the
+    /// digest of the root -- so two roots never collide and no root has to
+    /// be spelled into the filename.
+    #[test]
+    fn the_index_path_is_the_cache_dirs_rgy_digest() {
+        let path = default_index_path(Path::new("/some/root"));
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.ends_with(".idx"), "{name}");
+        assert_eq!(name.len(), 16 + 4, "a 16-digit digest and .idx: {name}");
+        assert_eq!(path.parent().unwrap().file_name().unwrap(), "rgy");
     }
 
     #[test]

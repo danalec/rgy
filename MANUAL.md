@@ -235,13 +235,19 @@ the tree but not yet wired into the search path.
 | `--limit <n>` | how many hits to show (default: 50) |
 | `--count` | print the count instead of the list |
 | `--json` | one JSON object per hit, for scripts |
-| `--index <file>` | where to keep the name index (default: a cache folder) |
+| `--index <file>` | where to keep the name index (default: the platform's cache folder) |
 | `--reindex` | rebuild the index even if a usable one exists |
 | `--max-age <dur>` | rebuild an index older than this (`30m`, `2h`, `7d`) |
 | `--explain` | print the query plan on stderr — what rgy did with your query |
 
 The index is what makes the name half of the query fast. rgy keeps it
 between runs and rebuilds it when it is older than `--max-age`.
+
+The default folder is the platform's own cache folder, with an `rgy`
+folder inside it: `%LOCALAPPDATA%\rgy` on Windows,
+`$XDG_CACHE_HOME/rgy` (or `~/.cache/rgy`) on Linux, and
+`~/Library/Caches/rgy` on macOS. Set `RGY_INDEX_DIR` to keep the index
+somewhere else.
 
 ## 7. The daemon
 
