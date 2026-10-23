@@ -235,3 +235,17 @@ Recorded so it is not re-investigated:
   capability flags (journal replay: yes/no, QoS: native/approx,
   privilege: full/gated) so a "degraded" is visible at runtime and not
   only in the docs.
+- **The vendoring rules and the drift, in two different CI files.** The
+  vendoring rules ([`check-vendoring.*`](../scripts/check-vendoring.sh))
+  need nothing but the tree, so they gate in
+  [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) on all three
+  operating systems — which exercises both twins, because each OS runs
+  its native one. The drift check
+  ([`check-drift.*`](../scripts/check-drift.sh)) needs an upstream
+  *checkout*, and the upstream is a private repository on the forgejo, on
+  the LAN: `github.com/danalec/rgx` does not exist, and a runner that
+  cannot reach it has no answer to give. So the drift check lives in
+  [`.gitea/workflows/drift.yml`](../.gitea/workflows/drift.yml), on a
+  self-hosted runner on the LAN. Gitea reads `.gitea/workflows/` and
+  GitHub reads `.github/workflows/`, so each check gates where it can
+  and neither pretends to gate where it cannot.

@@ -71,6 +71,14 @@ case "$script_path" in
     /*|[A-Za-z]:[/\\]*) ;;
     *) script_path=$PWD/$script_path ;;
 esac
+# A Windows path handed to this script has backslashes, and the cut below
+# is on "/". A path with no "/" in it has no directory to cut, the guard
+# falls back to the current directory, and this script ends up looking for
+# the manifest one level above the repository root -- and reports a
+# manifest that is not missing. The .ps1 twin resolves the same path
+# correctly, so the two would answer differently on the same input, which
+# is the one thing they may not do.
+script_path=$(printf '%s' "$script_path" | tr '\\' '/')
 script_dir=${script_path%/*}
 [ "$script_dir" = "$script_path" ] && script_dir=.
 here=$(cd "$script_dir" && pwd)

@@ -3,13 +3,13 @@
 # upstream, and every vendored file declares its source.
 #
 # The bash twin of scripts/check-vendoring.ps1. The two are twins, not
-# cousins: same four checks, same messages, same order, same exit code. A
+# cousins: same five checks, same messages, same order, same exit code. A
 # check that says "ok" on one platform and "FAIL" on another is worse than
 # no check at all, so the text is identical, not merely equivalent.
 #
 # rgy copies code out of upstream; it never depends on it. This script fails
 # if that ever stops being true, so the rule is checked rather than
-# remembered. Four checks:
+# remembered. Five checks:
 #
 #   1. No upstream reference in any Cargo manifest, Cargo.lock, or
 #      .cargo/config.toml. Provenance comments in *other* files are fine
@@ -22,6 +22,12 @@
 #   4. No external crates.io dependencies. Known-remaining ones are
 #      listed with what replaces them, so the count is a progress metric
 #      and a newly added crate fails the check.
+#   5. Every dependency on a vendored crate names it by path, and no lock
+#      file resolves one from a registry. The vendored crates carry the
+#      names upstream publishes on crates.io, at the same version, so a
+#      version-only dependency would resolve to the registry copy instead
+#      of the tree -- silently, and with cargo having nothing to say about
+#      it.
 #
 # The list of known-remaining dependencies is the same list, with the same
 # notes, as the Windows script holds: it is the ledger of what is left to
@@ -40,6 +46,14 @@ case "$script_path" in
     /*|[A-Za-z]:[/\\]*) ;;
     *) script_path=$PWD/$script_path ;;
 esac
+# A Windows path handed to this script has backslashes, and the cut below
+# is on "/". A path with no "/" in it has no directory to cut, the guard
+# falls back to the current directory, and this script ends up scanning
+# the directory ABOVE the repository root -- which is not a wrong answer
+# but a scan of somebody else's tree, and a slow one. The .ps1 twin
+# resolves the same path correctly, so the two would not even be looking
+# at the same tree.
+script_path=$(printf '%s' "$script_path" | tr '\\' '/')
 script_dir=${script_path%/*}
 [ "$script_dir" = "$script_path" ] && script_dir=.
 here=$(cd "$script_dir" && pwd)
@@ -156,7 +170,7 @@ done
 # inherit. All three are forbidden. Comments that merely mention the
 # provenance are acceptable in Cargo.toml, so only the non-comment part
 # of a line is inspected.
-say_head "[1/4] no upstream in manifests"
+say_head "[1/5] no upstream in manifests"
 for f in ${manifests[@]+"${manifests[@]}"}; do
     rel=$(rel_path "$f")
     while IFS=$'\t' read -r line_no text; do
@@ -182,7 +196,7 @@ if [ "$failures" -eq 0 ]; then
 fi
 
 # --- 2. no [patch] in .cargo/config.toml ----------------------------------
-say_head "[2/4] no [patch] redirects"
+say_head "[2/5] no [patch] redirects"
 cfg="$repo_root/.cargo/config.toml"
 if [ -f "$cfg" ]; then
     if grep -Eqi '^[[:space:]]*\[patch' "$cfg"; then
@@ -206,7 +220,7 @@ fi
 # is lib.rs, so that is accepted as the root when mod.rs is absent.
 #
 # So the invariant checked here is: the tree root names its upstream source.
-say_head "[3/3] vendored trees declare provenance"
+say_head "[3/5] vendored trees declare provenance"
 # The roots are spelled with backslashes, as the .ps1 spells them: the
 # failure messages quote them the same way, and a message that says
 # crates\rar-codec\src on one platform and crates/rar-codec/src on the
@@ -287,7 +301,7 @@ known_external=$(printf '%s\t%s\n' \
     'zip' 'dev-dependency for test fixtures' \
     'libfuzzer-sys' 'fuzz harness only; not part of a shipped build')
 
-say_head "[4/4] no unexpected external crates"
+say_head "[4/5] no unexpected external crates"
 
 # known_desc <name> -- what replaces it, or nothing if the crate is unknown.
 # The lookup is case-insensitive, because a PowerShell hashtable is.
@@ -405,6 +419,155 @@ if [ -n "$remaining_names" ]; then
     done <<< "$(printf '%s' "$remaining_names" | LC_ALL=C sort)"
 else
     say "  zero external dependencies: the invariant holds"
+fi
+
+# --- 5. the vendored crates come from the tree --------------------------------
+# The vendored crates carry the package names upstream publishes on
+# crates.io, at the same version: rgx-core, the rgx-adapters-* family and
+# rar-codec. A dependency that names one of them without a `path` resolves
+# to the registry copy instead of the tree -- silently, and at the same
+# version, so cargo has nothing to say. The tree would stop being upstream's
+# bytes and the drift check would have nothing to compare.
+#
+# So the rule is: every dependency on a vendored name carries a path, and no
+# lock file resolves one of them from a registry. The scan covers every
+# manifest in the tree, not only the vendored ones: the offending
+# declaration would sit in rgy's own crate, not in the vendored tree.
+say_head "[5/5] the vendored crates come from the tree"
+
+# Every manifest in the tree, and every lock file.
+all_manifests=()
+while IFS= read -r f; do
+    all_manifests+=("$f")
+done < <(find_files Cargo.toml | walk_sort)
+all_locks=()
+while IFS= read -r f; do
+    all_locks+=("$f")
+done < <(find_files Cargo.lock | walk_sort)
+
+vendored_count=0
+vendored_failures=""
+
+# The scan is the .ps1's, rule for rule: a table header closes the table
+# before it; a named dependency table ([dependencies.rgx-core]) is followed
+# by its own keys, and it is the `path =` among them that counts; a
+# dependency written inline inside a dependency table is on one line, and
+# the `path =` has to be on that line.
+for f in ${all_manifests[@]+"${all_manifests[@]}"}; do
+    rel=$(rel_path "$f")
+    while IFS=$'\t' read -r line_no name has_path; do
+        [ -n "$name" ] || continue
+        vendored_count=$((vendored_count + 1))
+        if [ "$has_path" != "yes" ]; then
+            vendored_failures="$vendored_failures$rel:$line_no '$name' is declared without a path; a version-only dependency resolves to crates.io, not to the tree
+"
+        fi
+    done < <(awk '
+        function flush_named() {
+            # A named dependency is reported whether it carries a path or
+            # not: the count is the number of declarations, not the number
+            # of violations, and the two twins must agree on it.
+            if (named != "") {
+                printf "%d\t%s\t%s\n", named_line, named, (named_has_path ? "yes" : "no")
+            }
+            named = ""
+            named_has_path = 0
+        }
+        {
+            line = $0
+            sub(/\r$/, "", line)
+            trimmed = line
+            gsub(/^[[:space:]]+/, "", trimmed)
+            gsub(/[[:space:]]+$/, "", trimmed)
+            if (match(trimmed, /^\[+[[:space:]]*[^]]+[[:space:]]*\]+$/)) {
+                flush_named()
+                s = trimmed
+                sub(/^\[+/, "", s)
+                sub(/\]+[[:space:]]*$/, "", s)
+                gsub(/^[[:space:]]+/, "", s)
+                gsub(/[[:space:]]+$/, "", s)
+                section = s
+                dep = (section ~ /(^|\.)(dev-|build-)?dependencies$/)
+                # A named dependency table: [dependencies.rgx-core].
+                if (section ~ /(^|\.)(dev-|build-)?dependencies\./) {
+                    n = section
+                    sub(/^.*dependencies\./, "", n)
+                    if (n ~ /^(rgx-core|rgx-adapters-[a-z0-9-]+|rar-codec)$/) {
+                        named = n
+                        named_line = NR
+                        named_has_path = 0
+                    }
+                }
+                next
+            }
+            if (named != "") {
+                if (trimmed ~ /(^|[^A-Za-z0-9_])path[[:space:]]*=/) named_has_path = 1
+                next
+            }
+            if (!dep) next
+            code = trimmed
+            sub(/#.*/, "", code)
+            gsub(/^[[:space:]]+/, "", code)
+            gsub(/[[:space:]]+$/, "", code)
+            if (code !~ /^[A-Za-z0-9_-]+[[:space:]]*=/) next
+            name = code
+            sub(/[[:space:]]*=.*$/, "", name)
+            if (name !~ /^(rgx-core|rgx-adapters-[a-z0-9-]+|rar-codec)$/) next
+            has_path = (code ~ /(^|[^A-Za-z0-9_])path[[:space:]]*=/) ? "yes" : "no"
+            printf "%d\t%s\t%s\n", NR, name, has_path
+        }
+        END { flush_named() }
+    ' "$f")
+done
+
+# A lock file resolves a package from a registry by carrying a `source =`
+# line; a path dependency carries none. A vendored crate that has a source
+# came from somewhere else.
+for f in ${all_locks[@]+"${all_locks[@]}"}; do
+    rel=$(rel_path "$f")
+    while IFS=$'\t' read -r name src; do
+        [ -n "$name" ] || continue
+        vendored_failures="$vendored_failures$rel '$name' is resolved from $src, not from the tree
+"
+    done < <(awk '
+        function flush_package() {
+            if (inpkg && pkg_name ~ /^(rgx-core|rgx-adapters-[a-z0-9-]+|rar-codec)$/ && pkg_src != "") {
+                printf "%s\t%s\n", pkg_name, pkg_src
+            }
+            inpkg = 0
+            pkg_name = ""
+            pkg_src = ""
+        }
+        /^\[\[package\]\]$/ { flush_package(); inpkg = 1; next }
+        inpkg && /^[[:space:]]*name[[:space:]]*=/ {
+            t = $0
+            sub(/^[^"]*"/, "", t)
+            sub(/"[[:space:]]*$/, "", t)
+            pkg_name = t
+            next
+        }
+        inpkg && /^[[:space:]]*source[[:space:]]*=/ {
+            t = $0
+            sub(/^[^"]*"/, "", t)
+            sub(/"[[:space:]]*$/, "", t)
+            pkg_src = t
+            next
+        }
+        END { flush_package() }
+    ' "$f")
+done
+
+# The failures are sorted, not printed as they are found: the two twins walk
+# the tree in the same order but a reader comparing the two outputs should
+# not have to know that.
+while IFS= read -r msg; do
+    [ -n "$msg" ] || continue
+    fail "$msg"
+done <<< "$(printf '%s' "$vendored_failures" | LC_ALL=C sort)"
+
+if [ -z "$vendored_failures" ]; then
+    say "  ok: $vendored_count vendored dependency declarations, all by path"
+    say "  ok: no lock file resolves a vendored crate from a registry"
 fi
 
 # --- result ----------------------------------------------------------------

@@ -1,0 +1,54 @@
+# The drift check: has the vendored code fallen behind its upstream?
+#
+# It lives here and not in .github/workflows/ci.yml because of where the
+# upstream is. rgx is a private repository on the forgejo, on the LAN:
+# github.com/danalec/rgx does not exist, and a runner that cannot reach
+# 192.168.0.10 cannot clone it. A drift check that could not reach the
+# upstream would fail on every push, and a check that fails on every push
+# teaches everybody to ignore it.
+#
+# Gitea reads .gitea/workflows/; GitHub reads .github/workflows/ and never
+# sees this file. So this job waits for a runner on the LAN, and the
+# GitHub workflow is unaffected.
+#
+# What this file cannot provide is the runner itself. Register a
+# self-hosted runner on the forgejo and this runs; the runner needs the
+# forgejo's git credential for the upstream in its own credential store --
+# the way a developer's machine has it -- so the clone below is not a
+# prompt waiting for a keypress.
+#
+# The vendoring rules are checked in .github/workflows/ci.yml, which Gitea
+# reads as well: they need nothing but the tree, so they gate everywhere.
+name: drift
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  drift:
+    name: the vendored trees have not fallen behind their upstream
+    # The LAN runner. This job needs the upstream, and the upstream is on
+    # the forgejo, on the LAN.
+    runs-on: [self-hosted, linux, x64]
+    steps:
+      - uses: actions/checkout@v4
+      - name: the upstream, and the drift against it
+        env:
+          # The LAN forgejo, where rgx lives. The URL is not a secret: it is
+          # an address on the local network, and the credential for it is
+          # the runner's own.
+          RGX_UPSTREAM_URL: http://192.168.0.10:3000/danalec/rgx.git
+        run: |
+          set -eu
+          # No terminal prompt: a missing credential has to fail here, with
+          # git's own message, and not hang the job waiting for a keypress.
+          export GIT_TERMINAL_PROMPT=0
+          upstream="${RUNNER_TEMP:-/tmp}/rgx-upstream"
+          rm -rf "$upstream"
+          # The full history, not a shallow one: the check asks what upstream
+          # did since the pin, and a shallow clone has no answer to that.
+          git clone "$RGX_UPSTREAM_URL" "$upstream"
+          git -C "$upstream" log --oneline -1
+          bash scripts/check-drift.sh --upstream "$upstream"

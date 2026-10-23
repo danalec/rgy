@@ -28,6 +28,32 @@ jobs:
       # reads better than it is. Both fail here.
       - run: python3 scripts/parity-matrix.py --check
 
+  vendoring:
+    name: the vendoring rules hold on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      # The vendoring rules are the shape of the tree, not a build: rgx
+      # copies code out of upstream and never depends on it, every
+      # dependency on a vendored crate names it by path, and every vendored
+      # tree names its source in a provenance header. A check that only runs
+      # when somebody remembers it is a note, not a gate, and these were
+      # notes until this job existed.
+      #
+      # The two scripts are twins -- the same text on the same input -- so
+      # running the native one on each OS exercises both of them.
+      - name: the vendoring rules (unix)
+        if: runner.os != 'Windows'
+        run: bash scripts/check-vendoring.sh
+      - name: the vendoring rules (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/check-vendoring.ps1
+
   freebsd-check:
     name: "floor: cargo check for FreeBSD"
     runs-on: ubuntu-latest

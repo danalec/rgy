@@ -6,7 +6,7 @@
 .DESCRIPTION
     rgx copies code out of upstream; it never depends on it. This script fails
     if that ever stops being true, so the rule is checked rather than
-    remembered. Four checks:
+    remembered. Five checks:
 
       1. No upstream reference in any Cargo manifest, Cargo.lock, or
          .cargo/config.toml. Provenance comments in *other* files are
@@ -19,6 +19,12 @@
       4. No external crates.io dependencies. Known-remaining ones are
          listed with what replaces them, so the count is a progress
          metric and a newly added crate fails the check.
+      5. Every dependency on a vendored crate names it by path, and no
+         lock file resolves one from a registry. The vendored crates
+         carry the names upstream publishes on crates.io, at the same
+         version, so a version-only dependency would resolve to the
+         registry copy instead of the tree -- silently, and with cargo
+         having nothing to say about it.
 
     Run from the repo root:  powershell -File scripts/check-vendoring.ps1
     Exits 1 on any violation.
@@ -42,7 +48,7 @@ Write-Host "checking vendoring rules in $repoRoot" -ForegroundColor Cyan
 # inherit. All three are forbidden. Comments that merely mention the
 # provenance are acceptable in Cargo.toml, so only the non-comment part
 # of a line is inspected.
-Write-Host "`n[1/4] no upstream in manifests" -ForegroundColor Cyan
+Write-Host "`n[1/5] no upstream in manifests" -ForegroundColor Cyan
 # Scope to crates/rar-codec, crates/rgx-core, crates/rgx-adapters-* only: rgy's own crates (name-core, discovery*, engine, proto, bins/*) are not vendored-from-upstream and would false-positive.
 $scope = '[\\/]crates[\\/](?:rar-codec|rgx-core|rgx-adapters-[^\\/]+)(?:[\\/]|$)'
 $manifests = @()
@@ -70,7 +76,7 @@ if ($failures.Count -eq 0) {
 }
 
 # --- 2. no [patch] in .cargo/config.toml ----------------------------------
-Write-Host "`n[2/4] no [patch] redirects" -ForegroundColor Cyan
+Write-Host "`n[2/5] no [patch] redirects" -ForegroundColor Cyan
 $cfg = Join-Path $repoRoot '.cargo\config.toml'
 if (Test-Path $cfg) {
     if ((Get-Content $cfg -Raw) -match '(?m)^\s*\[patch') {
@@ -94,7 +100,7 @@ if (Test-Path $cfg) {
 # is lib.rs, so that is accepted as the root when mod.rs is absent.
 #
 # So the invariant checked here is: the tree root names its upstream source.
-Write-Host "`n[3/3] vendored trees declare provenance" -ForegroundColor Cyan
+Write-Host "`n[3/5] vendored trees declare provenance" -ForegroundColor Cyan
 $vendoredRoots = @('crates\rgx-adapters-archive\src\sevenz', 'crates\rar-codec\src', 'crates\rgx-core\src\memmap2')
 $checked = 0
 foreach ($vroot in $vendoredRoots) {
@@ -172,7 +178,7 @@ $knownExternal = @{
     'libfuzzer-sys' = 'fuzz harness only; not part of a shipped build'
 }
 
-Write-Host "`n[4/4] no unexpected external crates" -ForegroundColor Cyan
+Write-Host "`n[4/5] no unexpected external crates" -ForegroundColor Cyan
 
 # A dependency section is any [..dependencies] table, including
 # target-specific ones. Everything else is not a dependency list.
@@ -229,6 +235,115 @@ if ($remaining.Count -gt 0) {
     }
 } else {
     Write-Host "  zero external dependencies: the invariant holds" -ForegroundColor Green
+}
+
+# --- 5. the vendored crates come from the tree --------------------------------
+# The vendored crates carry the package names upstream publishes on
+# crates.io, at the same version: rgx-core, the rgx-adapters-* family and
+# rar-codec. A dependency that names one of them without a `path` resolves
+# to the registry copy instead of the tree -- silently, and at the same
+# version, so cargo has nothing to say. The tree would stop being upstream's
+# bytes and the drift check would have nothing to compare.
+#
+# So the rule is: every dependency on a vendored name carries a path, and no
+# lock file resolves one of them from a registry. The scan covers every
+# manifest in the tree, not only the vendored ones: the offending
+# declaration would sit in rgy's own crate, not in the vendored tree.
+Write-Host "`n[5/5] the vendored crates come from the tree" -ForegroundColor Cyan
+
+$vendoredRe = '^(rgx-core|rgx-adapters-[a-z0-9-]+|rar-codec)$'
+$vendoredFails = New-Object System.Collections.Generic.List[string]
+$vendoredCount = 0
+
+$allManifests = @(Get-ChildItem -Path . -Filter 'Cargo.toml' -Recurse -File |
+    Where-Object { $_.FullName -notmatch '[\\/]target[\\/]' })
+$allLocks = @(Get-ChildItem -Path . -Filter 'Cargo.lock' -Recurse -File |
+    Where-Object { $_.FullName -notmatch '[\\/]target[\\/]' })
+
+foreach ($f in $allManifests) {
+    $rel = Resolve-Path -Relative $f.FullName
+    $lines = @(Get-Content $f.FullName)
+    $depSection = $false
+    $namedDep = $null
+    $namedHasPath = $false
+    $namedLine = 0
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $lineNo = $i + 1
+        $trimmed = $lines[$i].Trim()
+        if ($trimmed -match '^\[+\s*([^\]]+?)\s*\]+$') {
+            # A table header closes the table before it.
+            if ($null -ne $namedDep -and -not $namedHasPath) {
+                $vendoredFails.Add("$rel`:$namedLine '$namedDep' is declared without a path; a version-only dependency resolves to crates.io, not to the tree")
+            }
+            $namedDep = $null
+            $namedHasPath = $false
+            $section = $matches[1]
+            $depSection = ($section -match '(^|\.)(dev-|build-)?dependencies$')
+            # A named dependency table: [dependencies.rgx-core].
+            if ($section -match '(^|\.)(dev-|build-)?dependencies\.(.+)$') {
+                $candidate = $matches[3]
+                if ($candidate -match $vendoredRe) {
+                    $namedDep = $candidate
+                    $namedLine = $lineNo
+                    $vendoredCount++
+                }
+            }
+            continue
+        }
+        if ($null -ne $namedDep) {
+            if ($trimmed -match '(^|[^A-Za-z0-9_])path\s*=') { $namedHasPath = $true }
+            continue
+        }
+        if (-not $depSection) { continue }
+        $code = ($trimmed -split '#', 2)[0].Trim()
+        if ($code -notmatch '^([A-Za-z0-9_-]+)\s*=') { continue }
+        $name = $matches[1]
+        if ($name -notmatch $vendoredRe) { continue }
+        $vendoredCount++
+        if ($code -notmatch '(^|[^A-Za-z0-9_])path\s*=') {
+            $vendoredFails.Add("$rel`:$lineNo '$name' is declared without a path; a version-only dependency resolves to crates.io, not to the tree")
+        }
+    }
+    # The last table in the file is closed by the end of the file.
+    if ($null -ne $namedDep -and -not $namedHasPath) {
+        $vendoredFails.Add("$rel`:$namedLine '$namedDep' is declared without a path; a version-only dependency resolves to crates.io, not to the tree")
+    }
+}
+
+foreach ($f in $allLocks) {
+    $rel = Resolve-Path -Relative $f.FullName
+    $lines = @(Get-Content $f.FullName)
+    $inPackage = $false
+    $pkgName = ''
+    $pkgSource = ''
+    foreach ($line in $lines) {
+        if ($line -match '^\s*\[\[package\]\]') {
+            if ($inPackage -and $pkgName -match $vendoredRe -and $pkgSource -ne '') {
+                $vendoredFails.Add("$rel '$pkgName' is resolved from $($pkgSource), not from the tree")
+            }
+            $inPackage = $true
+            $pkgName = ''
+            $pkgSource = ''
+            continue
+        }
+        if (-not $inPackage) { continue }
+        if ($line -match '^\s*name\s*=\s*"([^"]*)"') { $pkgName = $matches[1]; continue }
+        if ($line -match '^\s*source\s*=\s*"([^"]*)"') { $pkgSource = $matches[1]; continue }
+    }
+    if ($inPackage -and $pkgName -match $vendoredRe -and $pkgSource -ne '') {
+        $vendoredFails.Add("$rel '$pkgName' is resolved from $($pkgSource), not from the tree")
+    }
+}
+
+# The failures are sorted, not printed as they are found: the two twins walk
+# the tree in the same order but a reader comparing the two outputs should
+# not have to know that.
+$sortedFails = [string[]]$vendoredFails.ToArray()
+[Array]::Sort($sortedFails, [StringComparer]::Ordinal)
+foreach ($m in $sortedFails) { Add-Failure $m }
+if ($vendoredFails.Count -eq 0) {
+    Write-Host "  ok: $vendoredCount vendored dependency declarations, all by path" -ForegroundColor Green
+    Write-Host "  ok: no lock file resolves a vendored crate from a registry" -ForegroundColor Green
 }
 
 # --- result ----------------------------------------------------------------

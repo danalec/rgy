@@ -163,12 +163,20 @@ upstream's CI because it runs the suite in release mode where the overflow
 checks are off, and both are debug-mode panics in rgy, whose CI runs the
 suite the way it is meant to be run.
 
-**`scripts/check-vendoring.*` is a four-rule gate**, exit 1 on violation:
+**`scripts/check-vendoring.*` is a five-rule gate**, exit 1 on violation:
 (1) no upstream reference in any non-comment line of `Cargo.toml` /
 `Cargo.lock` / `.cargo/config.toml`; (2) no `[patch]` in
 `.cargo/config.toml`; (3) a provenance header on every vendored tree's root
 module (`vendored from` or `independent reimplementation`); (4) no
-unlisted crates.io dependency.
+unlisted crates.io dependency; (5) every dependency on a vendored crate
+names it by `path`, and no lock file resolves one from a registry.
+
+Rule (5) is the one that closes the trap the other four cannot see. The
+vendored crates carry the package names upstream publishes on crates.io, at
+the same version, so a dependency written without a `path` resolves to the
+registry copy — silently, and with cargo having nothing to say about it. The
+tree would stop being upstream's bytes and the drift check would have
+nothing to compare.
 
 **`scripts/vendored-sources.tsv` is written by the sync, not by hand.** It
 records the relationship that actually exists — these trees came from
