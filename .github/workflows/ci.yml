@@ -1,15 +1,26 @@
-# The FreeBSD gate (docs/design.md §6).
+# The gates (docs/design.md §6).
 #
-# Two layers, matching the plan: the floor is a cross-check that needs no
-# VM (catches cfg and dependency breakage for the FreeBSD target on every
-# push), and the bar is the full suite on a real FreeBSD kernel. Decision 5
-# in §5 names the vehicles for the bar - vmactions/freebsd-vm, a Gitea
-# runner, or a local one - and this workflow covers the first two wherever a
-# Docker-capable runner exists. The recorded local-VM run (15.1-RELEASE,
-# 2026-10-14) is filed in §4; this keeps it from being a one-off.
+# Two layers for FreeBSD: the floor is a cross-check that needs no VM (catches
+# cfg and dependency breakage for the FreeBSD target on every push), and the
+# bar is the full suite on a real FreeBSD kernel. Decision 5 in §5 names the
+# vehicles for the bar - vmactions/freebsd-vm, a Gitea runner, or a local one
+# - and this workflow covers the first two wherever a Docker-capable runner
+# exists. The recorded local-VM run (15.1-RELEASE, 2026-10-14) is filed in §4;
+# this keeps it from being a one-off.
 #
 # The e2e harness resolves bins by path, so every job builds first
 # (tests/harness.rs: `cargo test --workspace` alone is not a build-first).
+#
+# **The runners are named, not `-latest`.** `windows-latest` is Windows
+# Server 2025 and `macos-latest` is macOS 26 on Apple Silicon: both moved
+# under the label without a line of this repository changing, and a build
+# that breaks on the day the image moves is a build nobody can bisect. The
+# names here are the images this project is verified against -- Windows
+# Server 2022, macOS 15 on arm64, Ubuntu 24.04 -- and the `macos-15` runner
+# being arm64 is the point: it is the only place the NEON scorer and the
+# macOS discovery backend ever run. The upstream rgx moved to the same
+# labels for the same reason, and this tree vendors its crates verbatim, so
+# a runner that cannot build them cannot build this either.
 name: ci
 
 on:
@@ -17,10 +28,16 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   parity:
     name: the parity matrix is current and claims no gap
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       # The matrix is a promise, not a picture: a G cell is work required,
@@ -30,7 +47,7 @@ jobs:
 
   bench-table:
     name: the bench table is what the baseline renders
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       # The same shape as the parity matrix: the table in the write-up is
@@ -49,7 +66,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-24.04, windows-2022, macos-15]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -72,17 +89,18 @@ jobs:
 
   freebsd-check:
     name: "floor: cargo check for FreeBSD"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-freebsd
-      - run: cargo check --workspace --target x86_64-unknown-freebsd
+      - uses: swatinem/rust-cache@v2
+      - run: cargo check --workspace --target x86_64-unknown-freebsd --locked
 
   freebsd-suite:
     name: "bar: full suite on a FreeBSD kernel"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: vmactions/freebsd-vm@v1
@@ -90,6 +108,10 @@ jobs:
           usesh: true
           release: "15.1"
           prepare: pkg install -y rust git
+          # No `--locked` here: the Rust inside the VM is the one the
+          # distribution ships, and a lockfile this repository's toolchain
+          # wrote is not a promise that old cargo can read. The floor job
+          # above is where the lockfile is held.
           run: |
             cargo build --workspace
             cargo test --workspace --no-fail-fast
@@ -99,24 +121,52 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-24.04, windows-2022, macos-15]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      # `lld-link` has to be findable by name. The Windows images carry LLVM
+      # but do not put its bin directory on the PATH, and a toolchain that
+      # reaches for the linker by name then fails to find it -- on the
+      # runner, not in the code. The upstream rgx does the same, for the
+      # same reason.
+      - name: Ensure lld-link is on PATH (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (Test-Path "C:\Program Files\LLVM\bin") {
+            Add-Content $env:GITHUB_PATH "C:\Program Files\LLVM\bin"
+          }
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --workspace
-      - run: cargo test --workspace --no-fail-fast
+        with:
+          components: rustfmt, clippy
+      - uses: swatinem/rust-cache@v2
+      # `--locked`: the lockfile is what the tree says it builds with. A
+      # build that silently updates it is a build of something the
+      # repository does not describe.
+      - run: cargo build --workspace --locked
+      - run: cargo test --workspace --no-fail-fast --locked
 
   release:
     name: the release archive on ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-24.04, windows-2022, macos-15]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: Ensure lld-link is on PATH (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (Test-Path "C:\Program Files\LLVM\bin") {
+            Add-Content $env:GITHUB_PATH "C:\Program Files\LLVM\bin"
+          }
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: swatinem/rust-cache@v2
       # The archive the release publishes, built and smoked on this OS.
       # The test suite is the suite job's business; this one checks the
       # packaging: that the binaries build, that they answer a real
@@ -165,11 +215,18 @@ jobs:
         run: ./scripts/publish-release.ps1 -ManifestsOnly -SkipTests
 
   clippy:
-    name: the workspace stays warning-free
-    runs-on: ubuntu-latest
+    name: the workspace stays formatted and warning-free
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: swatinem/rust-cache@v2
+      # Formatting is a gate here for the same reason clippy is: a diff that
+      # nobody can read is a diff nobody wrote. The upstream rgx has the
+      # same check.
+      - run: cargo fmt --all -- --check
       # The release gate's first half (scripts/build-release.sh runs it
       # too): any warning fails, because a warning in a release is a
       # thing nobody has read.

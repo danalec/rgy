@@ -7,9 +7,13 @@
 #   pwsh -File scripts/build-release.ps1 -Version 0.1.0
 #
 # Unless -SkipTests, the build fails on any clippy warning
-# (`cargo clippy --release --workspace --all-targets -- -D warnings`) and on
-# any failing test. The workspace stays warning-free by policy, and a release
-# is not the moment to relax that.
+# (`cargo clippy --release --locked --workspace --all-targets -- -D warnings`)
+# and on any failing test. The workspace stays warning-free by policy, and a
+# release is not the moment to relax that.
+#
+# Every cargo call carries `--locked`: the lockfile is what this repository
+# says it builds with, and a release that silently updates it is a release
+# of something the repository does not describe.
 #
 # What it produces (.dist/):
 #
@@ -95,20 +99,20 @@ Write-Host "rgy release build: $Version ($platform)"
 # --- 3. the gate ------------------------------------------------------------
 if (-not $SkipTests) {
     Write-Host "gate: clippy, then the test suite"
-    cargo clippy --release --workspace --all-targets -- -D warnings
+    cargo clippy --release --locked --workspace --all-targets -- -D warnings
     if ($LASTEXITCODE -ne 0) {
         [Console]::Error.WriteLine("clippy warnings found; the workspace must stay warning-free")
         exit 1
     }
-    cargo test --release --workspace
+    cargo test --release --locked --workspace
     if ($LASTEXITCODE -ne 0) { [Console]::Error.WriteLine("tests failed"); exit 1 }
 } else {
     Write-Host "gate: skipped (--skip-tests)"
 }
 
 # --- 4. the build -----------------------------------------------------------
-Write-Host "build: cargo build --release --workspace"
-cargo build --release --workspace
+Write-Host "build: cargo build --release --locked --workspace"
+cargo build --release --locked --workspace
 if ($LASTEXITCODE -ne 0) { [Console]::Error.WriteLine("the build failed"); exit 1 }
 
 $exeDir = Join-Path $root "target\release"

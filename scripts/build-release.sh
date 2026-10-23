@@ -8,9 +8,13 @@
 #   bash scripts/build-release.sh --version 0.1.0
 #
 # Unless --skip-tests, the build fails on any clippy warning
-# (`cargo clippy --release --workspace --all-targets -- -D warnings`) and on
-# any failing test. The workspace stays warning-free by policy, and a release
-# is not the moment to relax that.
+# (`cargo clippy --release --locked --workspace --all-targets -- -D warnings`)
+# and on any failing test. The workspace stays warning-free by policy, and a
+# release is not the moment to relax that.
+#
+# Every cargo call carries `--locked`: the lockfile is what this repository
+# says it builds with, and a release that silently updates it is a release
+# of something the repository does not describe.
 #
 # What it produces (.dist/):
 #
@@ -96,18 +100,18 @@ echo "rgy release build: $version ($platform)"
 # --- 3. the gate ------------------------------------------------------------
 if [ "$skip_tests" -eq 0 ]; then
     echo "gate: clippy, then the test suite"
-    cargo clippy --release --workspace --all-targets -- -D warnings || {
+    cargo clippy --release --locked --workspace --all-targets -- -D warnings || {
         echo "clippy warnings found; the workspace must stay warning-free" >&2
         exit 1
     }
-    cargo test --release --workspace || { echo "tests failed" >&2; exit 1; }
+    cargo test --release --locked --workspace || { echo "tests failed" >&2; exit 1; }
 else
     echo "gate: skipped (--skip-tests)"
 fi
 
 # --- 4. the build -----------------------------------------------------------
-echo "build: cargo build --release --workspace"
-cargo build --release --workspace || { echo "the build failed" >&2; exit 1; }
+echo "build: cargo build --release --locked --workspace"
+cargo build --release --locked --workspace || { echo "the build failed" >&2; exit 1; }
 
 exe_dir="$repo/target/release"
 
