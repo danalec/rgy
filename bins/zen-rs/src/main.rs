@@ -21,7 +21,7 @@ use name_core::live::Live;
 #[cfg(windows)]
 use name_core::name_index::Index;
 #[cfg(windows)]
-use name_core::name_query::{Alternatives, Hit, Searcher};
+use name_core::name_query::{Alternatives, Searcher, merge_hits};
 #[cfg(windows)]
 use name_core::persist;
 #[cfg(windows)]
@@ -69,23 +69,36 @@ fn search_paths(live: &Live, root: &str, query_str: &str) -> Result<Vec<String>,
     }
 
     let searcher = Searcher { live };
-    let mut hits: Vec<Hit> = Vec::new();
+    // The merge is the searcher's, and the identity it keys on is the one
+    // that matters: keying it on `Hit::idx` keeps one entry and drops the
+    // rest, because every live entry shares the `u32::MAX` sentinel. Each
+    // alternative keeps the limit it was parsed with.
+    let mut all = Vec::new();
     for alt in &alts.alts {
-        for h in searcher.search(alt) {
-            match hits.iter_mut().find(|e| e.idx == h.idx) {
-                Some(e) if e.score < h.score => *e = h,
-                Some(_) => {}
-                None => hits.push(h),
-            }
-        }
+        all.extend(searcher.search(alt));
     }
+    // The union of the alternatives, not their sum: an entry two of them
+    // match is one result. `usize::MAX` is the same "no cut" the CLI uses.
+    let hits = merge_hits(all, usize::MAX);
 
     let mut out = Vec::new();
     let mut buf = Vec::new();
     for h in &hits {
-        live.base.path(h.idx as usize, &mut buf);
-        out.push(full_path(root, &String::from_utf8_lossy(&buf)));
-        buf.clear();
+        let full = match &h.over {
+            // An overlay hit already carries its own path: it is an entry
+            // the base index does not have, so reading it back from the
+            // base would index `parent[u32::MAX]` -- out of bounds -- and
+            // panic. The path is the index's internal form (`/`); the
+            // answer is the platform's.
+            Some(path) => String::from_utf8_lossy(path).replace('/', std::path::MAIN_SEPARATOR_STR),
+            None => {
+                live.base.path(h.idx as usize, &mut buf);
+                let rel = String::from_utf8_lossy(&buf).into_owned();
+                buf.clear();
+                full_path(root, &rel)
+            }
+        };
+        out.push(full);
     }
     out.sort_unstable();
     Ok(out)
@@ -576,5 +589,66 @@ mod tests {
         assert!(!err.to_string().is_empty());
 
         let _ = std::fs::remove_file(&dir);
+    }
+
+    /// Every live change is answered, and the answer is the overlay's own
+    /// path.
+    ///
+    /// The overlay holds the entries the base does not have, and they all
+    /// carry the same `Hit::idx` -- the `u32::MAX` sentinel. A merge keyed
+    /// on that key keeps one of them and drops the rest, and a path read
+    /// back from the base would index `parent[u32::MAX]`, out of bounds,
+    /// and panic. The daemon's answer is where this shows first; this is
+    /// the same shape in the CLI.
+    #[cfg(windows)]
+    #[test]
+    fn every_live_change_is_answered() {
+        use discovery::{PortableSource, Source};
+        use name_core::live::Live;
+
+        let dir = std::env::temp_dir().join(format!(
+            "zen-rs-live-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("the root dir");
+        std::fs::write(dir.join("hello.txt"), b"hello\n").expect("the first file");
+        let root_bytes = dir.as_os_str().as_encoded_bytes().to_vec();
+
+        // The index as it was before the files appeared.
+        let source = PortableSource::new(root_bytes.clone(), 2);
+        let mut live = Live::with_root(
+            Index::build(source.enumerate().expect("the walk"), 0, 1, b"/"),
+            &root_bytes,
+        );
+
+        // Two files appear, and the feed says the folder whose contents
+        // changed (what a directory-granular feed says).
+        std::fs::write(dir.join("late-one.txt"), b"one\n").expect("the first arrival");
+        std::fs::write(dir.join("late-two.txt"), b"two\n").expect("the second arrival");
+        live.apply_events(&[discovery::UsnRecord {
+            file_reference: 0,
+            parent_reference: 0,
+            usn: 0,
+            reason: 0,
+            file_attributes: discovery::FILE_ATTRIBUTE_DIRECTORY,
+            name: String::from_utf8_lossy(&root_bytes).into_owned(),
+        }]);
+
+        // The display root carries its trailing separator: the index's own
+        // paths are relative to it.
+        let root = format!("{}\\", dir.to_string_lossy());
+        let paths = super::search_paths(&live, &root, "late").expect("the search");
+        assert!(
+            paths.iter().any(|p| p.ends_with("late-one.txt")),
+            "the first new file must be answered; paths={paths:?}"
+        );
+        assert!(
+            paths.iter().any(|p| p.ends_with("late-two.txt")),
+            "the second new file must be answered too, not collapsed into the first; paths={paths:?}"
+        );
     }
 }

@@ -41,7 +41,7 @@ use engine::{keep_warm, warm_stop};
 use name_core::content::{self, Grep};
 use name_core::live::Live;
 use name_core::name_index::Index;
-use name_core::name_query::{Alternatives, Hit, Query, Searcher};
+use name_core::name_query::{Alternatives, Query, Searcher};
 use name_core::persist;
 use proto::{CatchUp, GrepFile, Hit as WireHit, Request, Response};
 
@@ -630,20 +630,13 @@ fn handle(req: Request, ctx: &Ctx) -> Vec<Response> {
                 }
                 let live_guard = ctx.live.read().unwrap();
                 let searcher = Searcher { live: &live_guard };
-                let mut hits: Vec<Hit> = Vec::new();
-                for alt in &alts.alts {
-                    let mut a: Query = alt.clone();
-                    a.limit = limit;
-                    for h in searcher.search(&a) {
-                        match hits.iter_mut().find(|e| e.idx == h.idx) {
-                            Some(e) if e.score < h.score => *e = h,
-                            Some(_) => {}
-                            None => hits.push(h),
-                        }
-                    }
-                }
-                hits.sort_by(|a, b| b.score.cmp(&a.score).then(a.idx.cmp(&b.idx)));
-                hits.truncate(limit);
+                // The merge is the searcher's, and the identity it keys on is
+                // the one that matters: keying it on `Hit::idx` keeps one
+                // entry and drops the rest, because every live entry shares
+                // the `u32::MAX` sentinel. A query that matched three files
+                // added since the last compaction answered with one of
+                // them -- and the daemon's answer is what the CLI reads.
+                let hits = searcher.search_alternatives(&alts.alts, limit);
                 let mut buf = Vec::new();
                 let wire: Vec<WireHit> = hits
                     .iter()
@@ -1422,6 +1415,83 @@ mod tests {
         assert!(
             hits.iter().any(|h| h.path.ends_with("late.txt")),
             "the new file must be answered; hits={hits:?}"
+        );
+    }
+
+    /// Two files that appear after the daemon started both have to be
+    /// found.
+    ///
+    /// The overlay holds the entries the base does not have, and they all
+    /// carry the same `Hit::idx` -- the `u32::MAX` sentinel. A merge keyed
+    /// on that key keeps one of them and drops the rest, so a query that
+    /// matched three files added since the last compaction answered with
+    /// one of them, and the daemon said the other two did not exist.
+    ///
+    /// The test above cannot see this: with one live entry there is
+    /// nothing to collapse.
+    #[test]
+    fn every_live_change_is_answered() {
+        let dir = std::env::temp_dir().join(format!(
+            "rgy-searchd-live-many-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("hello.txt"), b"hello\n").unwrap();
+        let root = dir.as_os_str().as_encoded_bytes().to_vec();
+
+        // The index as it was before the files appeared.
+        let source = PortableSource::new(root.clone(), 2);
+        let mut live = Live::with_root(
+            Index::build(source.enumerate().expect("the walk"), 0, 1, b"/"),
+            &root,
+        );
+
+        // Two files appear, and the feed says the folder whose contents
+        // changed (what a directory-granular feed says).
+        std::fs::write(dir.join("late-one.txt"), b"one\n").unwrap();
+        std::fs::write(dir.join("late-two.txt"), b"two\n").unwrap();
+        live.apply_events(&[discovery::UsnRecord {
+            file_reference: 0,
+            parent_reference: 0,
+            usn: 0,
+            reason: 0,
+            file_attributes: discovery::FILE_ATTRIBUTE_DIRECTORY,
+            name: String::from_utf8_lossy(&root).into_owned(),
+        }]);
+
+        let ctx = std::sync::Arc::new(Ctx {
+            root: root.clone(),
+            home: String::new(),
+            tv_dir: None,
+            live: std::sync::RwLock::new(live),
+            catch_up: std::sync::atomic::AtomicU8::new(CATCH_UP_RELISTED),
+        });
+
+        let responses = handle(
+            Request::Search {
+                q: "late".to_string(),
+                limit: 10,
+            },
+            &ctx,
+        );
+        let hits = responses
+            .iter()
+            .find_map(|r| match r {
+                Response::Hits { hits, .. } => Some(hits),
+                _ => None,
+            })
+            .expect("a hits frame");
+        assert!(
+            hits.iter().any(|h| h.path.ends_with("late-one.txt")),
+            "the first new file must be answered; hits={hits:?}"
+        );
+        assert!(
+            hits.iter().any(|h| h.path.ends_with("late-two.txt")),
+            "the second new file must be answered too, not collapsed into the first; hits={hits:?}"
         );
     }
 }
