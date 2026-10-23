@@ -914,7 +914,7 @@ fn serve_pattern(argv: &[String]) -> Option<(String, bool)> {
 }
 
 fn serve_file(out: &mut impl Write, path: &str, lines: &[(usize, String)]) {
-    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    let esc = proto::escape_json_string;
     let _ = writeln!(
         out,
         "{{\"type\":\"begin\",\"data\":{{\"path\":{{\"text\":\"{}\"}}}}}}",
@@ -948,7 +948,7 @@ fn serve_end(
         .map(|e| {
             format!(
                 ",\"error\":\"{}\"",
-                e.replace('\\', "\\\\").replace('"', "\\\"")
+                proto::escape_json_string(e)
             )
         })
         .unwrap_or_default();
@@ -1246,6 +1246,41 @@ fn now_secs() -> u32 {
 mod tests {
     use super::*;
     use discovery::Source;
+
+    /// The JSON escaper this repository uses and the one upstream's rgx
+    /// uses must agree on the same input, byte for byte.
+    ///
+    /// They are two implementations of one rule — RFC 8259 §7 — and this
+    /// daemon speaks to both kinds of client: the rgy protocol and the rgx
+    /// compatibility front. If they ever disagree, a path or a grep line
+    /// would be readable by one reader and not the other. The upstream
+    /// escaper is upstream's and is not edited here; this test is what
+    /// keeps the two honest.
+    #[test]
+    fn the_two_json_escapers_agree() {
+        let cases = [
+            "plain",
+            "with \"quotes\"",
+            "with \\ backslash",
+            "with / solidus",
+            "tab\there",
+            "line\nbreak",
+            "carriage\rreturn",
+            "back\u{0008}space",
+            "form\u{000C}feed",
+            "nul\u{0000}byte",
+            "unit\u{001F}separator",
+            "del\u{007F}elete",
+            "non-ascii \u{00e9}\u{4e2d}\u{1f600}",
+        ];
+        for c in cases {
+            assert_eq!(
+                proto::escape_json_string(c),
+                rgx_core::djson::escape_json_string(c),
+                "the two escapers disagree on {c:?}"
+            );
+        }
+    }
 
     /// The root is one spelling: absolute, and the one the change feeds
     /// report. A relative root is resolved against the working directory,

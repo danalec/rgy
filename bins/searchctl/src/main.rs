@@ -362,7 +362,7 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
                 for (ln, text) in &f.lines {
                     shown += 1;
                     if json {
-                        let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+                        let esc = proto::escape_json_string;
                         engine::outln!(
                             "{{\"path\":\"{}\",\"line\":{ln},\"text\":\"{}\"}}",
                             esc(&path),
@@ -487,7 +487,7 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
             format!("{root_disp}{}{rel}", std::path::MAIN_SEPARATOR)
         };
         if json {
-            let esc = path.replace('\\', "\\\\").replace('"', "\\\"");
+            let esc = proto::escape_json_string(&path);
             engine::outln!("{{\"path\":\"{esc}\",\"score\":{}}}", h.score);
         } else {
             engine::outln!("{path}");

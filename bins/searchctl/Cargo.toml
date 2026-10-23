@@ -17,5 +17,8 @@ discovery-dispatch = { path = "../../crates/discovery-dispatch" }
 # The console's UTF-8 code page (parity row 4.7).
 engine = { path = "../../crates/engine" }
 name-core = { path = "../../crates/name-core" }
+# The JSON escaper the daemon uses, so a path or a grep line reaches the
+# wire the same way whichever side wrote it.
+proto = { path = "../../crates/proto" }
 # One allocator story (plan 4.4).
 mimalloc = { version = "0.1", default-features = false }

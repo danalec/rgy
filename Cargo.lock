@@ -685,6 +685,7 @@ dependencies = [
  "engine",
  "mimalloc",
  "name-core",
+ "proto",
 ]
 
 [[package]]
