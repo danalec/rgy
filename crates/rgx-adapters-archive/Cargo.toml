@@ -14,6 +14,18 @@ readme = "README.md"
 keywords = ["archive", "zip", "tar", "7z", "rar"]
 categories = ["encoding", "filesystem"]
 repository = "https://github.com/danalec/rgx"
+# What the published crate carries. The test corpus is the repository's:
+# the fixtures under `testdata/` are what this crate's own tests read, and
+# a user of the crate has no use for them. The examples are one-off
+# diagnostics, not API demos. The licence and the notice are here because
+# they are the law on the code.
+include = [
+    "/src/**",
+    "/Cargo.toml",
+    "/README.md",
+    "/LICENSE-APACHE",
+    "/NOTICE",
+]
 
 [features]
 # Every adapter answers one format, so every format gets one feature and a
@@ -90,7 +102,7 @@ squashfs = ["std", "rgx-core/lzma", "rgx-core/deflate", "rgx-core/xz", "rgx-core
 [dependencies]
 rgx-core = { path = "../rgx-core", version = "0.1.0", default-features = false, features = ["std", "sha256-hw"] }
 rar-codec = { path = "../rar-codec", version = "0.1.0", optional = true }
-zstd = { version = "0.13", optional = true }
+zstd = { version = "0.14", optional = true }
 
 # The benches reach into the codecs the adapter registry does not expose, so
 # they are named with the features that carry them.

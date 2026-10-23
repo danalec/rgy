@@ -204,21 +204,6 @@ it before they are committed, and the two refusals above are the ones it
 makes too — `There must not be duplicates in the 'order' tuple` for an order
 that is not a permutation, and `Invalid codec order` for a transpose that
 comes after the bytes codec.
-— the shape, the dtype, the chunk size, the codec — and the values live in
-the chunks beside it, compressed, in a format that says nothing about what
-it holds. The same eight bytes are eight `u1`, one `f8` or a ten-character
-string depending on the `dtype` line, so the manifest has to be read before
-the chunks mean anything. The adapter therefore leaves the file: it reads
-the manifest, decompresses the chunks with the codec named there (zlib,
-gzip, zstd, bzip2 or blosc), puts the `delta` filter's running sum back, and
-renders the values one chunk per line under the manifest's own bytes — the
-JSON stays at the top of the answer, because a search for a key in it still
-has to find it. It is the one adapter here that reads files other than the
-one it was handed, and it is deliberately absent from the cache's
-`MEMOISABLE` list: the key cannot see the chunks change. The **v3 layout** -- the one `zarr-python` writes by default, with the
-metadata in a `zarr.json`, the chunks named by a key encoding and the
-bytes of a chunk turned into elements by a pipeline of codecs -- is read
-too, and so is **blosc**, the codec `zarr-python` asks for by default.
 
 A netCDF classic file (CDF-1) or 64-bit-offset one (CDF-2) is a header and a
 data section. The header says the dimensions, the variables with their types
@@ -386,6 +371,6 @@ rest are.
 Apache-2.0 only. The layout of `src/databases.rs` (Redis and liblzf) and
 `src/lmdb.rs` (LMDB) was learned from those implementations, which are the
 descriptions of those formats that exist; the code in both files is the
-crate's own. See [LICENSE-APACHE](LICENSE-APACHE), and the
-repository's [COPYING](../../COPYING) for what the licence covers and what
+crate's own. See [LICENSE-APACHE](https://github.com/danalec/rgx/blob/main/crates/rgx-adapters-tabular/LICENSE-APACHE), and the
+repository's [COPYING](https://github.com/danalec/rgx/blob/main/COPYING) for what the licence covers and what
 it does not.

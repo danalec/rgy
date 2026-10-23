@@ -15,8 +15,10 @@
 #   * The third-party licence texts upstream keeps in LICENSES/ are copied
 #     to LICENSES/ as well, so a notice cannot go stale because the copy
 #     that needed it was not part of the crate. The copy never prunes: a
-#     text rgy carries and upstream does not (LICENSE-MIT-FSEARCH, and
-#     postgresql.txt when upstream's NOTICE names it) stays.
+#     text rgy carries and upstream does not stays. Upstream keeps no
+#     LICENSES/ directory today, so this is a rule and not a copy that
+#     ran; rgy's own notices live in NOTICE and in the licence files at
+#     the root, and those are not this directory's business.
 #   * Files rgy has and upstream does not are reported as STALE. `--prune`
 #     removes them; without it they are only listed, because a file rgy
 #     wrote itself (see KEEP below) is not stale but ours.
@@ -262,13 +264,18 @@ for crate in $CRATES; do
         -not -path '*/fuzz/target/*' \
         | sed "s|^$repo_root/||" | sort)
 
-    # What the upstream has that the pinned commit does not: the files it
-    # has staged or edited since. The copy is taken at the pin, so those
-    # are not here -- and saying so is better than a silent difference
-    # between what is here and what is upstream.
+    # What the upstream has that the commit does not: the files it has
+    # edited or staged but not committed. The copy is taken from the
+    # commit, so those are not here -- and saying so is better than a
+    # silent difference between what is here and what is upstream.
+    #
+    # The wording says "uncommitted", because that is what this list is:
+    # it is the upstream working tree against the commit being copied, so
+    # every name in it is a change upstream has not committed yet. A
+    # committed change upstream would have been copied, not reported.
     while IFS= read -r rel; do
         [ -n "$rel" ] || continue
-        echo "  ahead  $rel: upstream moved past the pinned commit; not copied yet" >&2
+        echo "  ahead  $rel: uncommitted upstream change; the copy takes the commit, so this is not in the tree yet" >&2
         ahead=$((ahead + 1))
     done < <(git -C "$UPSTREAM" diff --name-only "$upstream_commit" -- "crates/$crate" 2>/dev/null)
 
@@ -361,7 +368,7 @@ if [ "$DRY_RUN" = 0 ]; then
         echo "# README says so and the licence follows upstream's. The per-file"
         echo "# specification provenance of those files is upstream's own manifest"
         echo "# (scripts/vendored-sources.tsv in the rgx checkout), and the"
-        echo "# third-party notices are in NOTICE and LICENSES/."
+        echo "# third-party notices are in NOTICE and the licence files at the root."
         echo ""
         echo "# The upstream commit the copy was taken from: $upstream_commit"
         echo ""

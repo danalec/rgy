@@ -147,15 +147,20 @@ approximated, because each of them changes what the bytes mean. The corpus
 is again compared byte for byte against the encoder's input;
 `tests/jbig2_fixtures.rs` carries the streams and their bitmaps.
 
-**A hidden text layer is not a scan.** The text rendering mode is not tracked:
-text drawn with `3 Tr` is invisible on the page, and it is extracted exactly as
-visible text is — the same page with `0 Tr` and with `3 Tr` answers identically.
-A PDF carrying both a hidden layer and a page image is therefore answered from
-the layer, and the image is only OCR'd when the file is named `*.ocr.pdf`,
-which is what routes it to the `docs` adapter.
+**A hidden text layer is not a scan.** The rendering mode IS tracked: the text
+state follows the content stream, so text drawn with `3 Tr` is known to be
+invisible, and text drawn with `7 Tr` is known to be invisible and clipped. A
+document whose text layer is *entirely* invisible and that carries page images
+answers with both views: the hidden text stays in a `text.txt` member, and the
+page images are handed over as `page-N.ocr.jpg`, which the `docs` adapter
+OCRs. The two are not alternatives — the layer is the file's own content and
+the picture is the page — so the OCR of the picture is *added* to the layer and
+neither replaces the other. A document with both visible and invisible runs
+says how many of each it has, and keeps the text. A file named `*.ocr.pdf` is
+still routed to the `docs` adapter, and still means "OCR this file's pages".
 
 ## Licence
 
-Apache-2.0 only. See [LICENSE-APACHE](LICENSE-APACHE), and the
-repository's [COPYING](../../COPYING) for what the licence covers and what
+Apache-2.0 only. See [LICENSE-APACHE](https://github.com/danalec/rgx/blob/main/crates/rgx-adapters-pdf/LICENSE-APACHE), and the
+repository's [COPYING](https://github.com/danalec/rgx/blob/main/COPYING) for what the licence covers and what
 it does not.

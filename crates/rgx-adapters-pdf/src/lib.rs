@@ -17,8 +17,12 @@
 //! page ([`jbig2`]) — are decoded here, in house, before they are handed
 //! over.
 //!
-//! Encrypted PDFs are detected and reported as a bail (rgx has no
-//! decryption; such files simply yield no text).
+//! Encrypted PDFs are handled by the standard security handler: the file
+//! key is derived and proved against the file's own `/U` entry before
+//! anything is decrypted, and a document whose `/U` does not reproduce is
+//! declined rather than decrypted — a wrong key yields bytes that pass
+//! every structural check and read as text, so nothing downstream could
+//! tell a page of mojibake from a page of prose.
 
 #![no_std]
 

@@ -74,12 +74,13 @@ strings and lets the searcher do the matching.
 
 ## Feature flags
 
-`default` is empty and so is `std`. The `std` feature only re-enables the
-`std::error::Error` impl on `PstErr`, which the adapter itself never
-needs; the gate exists so the crate stays buildable as `no_std` + `alloc`.
+`default` is `std` and the nine mailbox formats (`mbox`, `eml`, `msg`, `emlx`,
+`pst`, `wab`, `mmdf`, `thunderbird`, `apple-mailbox`). The `std` feature
+re-enables the `std::error::Error` impl on `PstErr`; the gate exists so the
+crate stays buildable as `no_std` + `alloc` without it.
 
 ## Licence
 
-Apache-2.0 only. See [LICENSE-APACHE](LICENSE-APACHE), and the
-repository's [COPYING](../../COPYING) for what the licence covers and what
+Apache-2.0 only. See [LICENSE-APACHE](https://github.com/danalec/rgx/blob/main/crates/rgx-adapters-mail/LICENSE-APACHE), and the
+repository's [COPYING](https://github.com/danalec/rgx/blob/main/COPYING) for what the licence covers and what
 it does not.

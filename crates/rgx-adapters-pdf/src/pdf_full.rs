@@ -11,10 +11,12 @@
 //! A font whose codes cannot be placed is *reported* via
 //! `Extraction::undecodable`, never guessed at — `lib.rs` turns that into one
 //! `[rgx: pdf: …]` line beside the text that did decode. `/Encrypt` is
-//! detected and returned as `PdfError::Encrypted`; decryption itself is
-//! out of scope. Image XObjects are not part of *text* extraction, but the
-//! JPEG ones are reachable through [`jpeg_pages`] — a scanned page has no
-//! text layer, so its picture is the whole content.
+//! detected and the standard security handler decrypts the streams whose key
+//! reproduces the file's own `/U`; a document whose `/U` does not reproduce
+//! is declined, because a wrong key yields bytes that pass every structural
+//! check and read as text. Image XObjects are not part of *text* extraction,
+//! but the JPEG ones are reachable through [`jpeg_pages`] — a scanned page
+//! has no text layer, so its picture is the whole content.
 //!
 //! ## Filters
 //!

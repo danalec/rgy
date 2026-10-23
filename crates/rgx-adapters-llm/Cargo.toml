@@ -9,6 +9,18 @@ readme = "README.md"
 keywords = ["gguf", "safetensors", "npy", "protobuf"]
 categories = ["parser-implementations", "science"]
 repository = "https://github.com/danalec/rgx"
+# What the published crate carries. The test corpus is the repository's:
+# the fixtures under `testdata/` are what this crate's own tests read, and
+# a user of the crate has no use for them. The examples are one-off
+# diagnostics, not API demos. The licence and the notice are here because
+# they are the law on the code.
+include = [
+    "/src/**",
+    "/Cargo.toml",
+    "/README.md",
+    "/LICENSE-APACHE",
+    "/NOTICE",
+]
 
 [features]
 # One feature per adapter, in the order `adapters()` returns them. The

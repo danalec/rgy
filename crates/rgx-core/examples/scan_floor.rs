@@ -15,9 +15,12 @@
 use std::time::Instant;
 
 fn main() {
+    // The corpus is the operator's: a path written into this file would be
+    // one machine's, so it is named by the environment and by the argument.
     let path = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| r"C:\Users\danalec\.rgx-bench\big235.rs".to_string());
+        .or_else(|| std::env::var("RGX_BENCH_CORPUS").ok())
+        .unwrap_or_else(|| ".rgx-bench/big235.rs".to_string());
     let hay = std::fs::read(&path).expect("read corpus");
     let n = hay.len();
     println!("corpus {path}  {n} bytes");

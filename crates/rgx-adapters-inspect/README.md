@@ -98,6 +98,6 @@ working directory.
 
 Apache-2.0 only. The layout of `src/cad_sat.rs` was learned from ezdxf,
 which is the description of that format that exists; the code in the file is
-the crate's own. See [LICENSE-APACHE](LICENSE-APACHE), and the
-repository's [COPYING](../../COPYING) for what the licence covers and what
+the crate's own. See [LICENSE-APACHE](https://github.com/danalec/rgx/blob/main/crates/rgx-adapters-inspect/LICENSE-APACHE), and the
+repository's [COPYING](https://github.com/danalec/rgx/blob/main/COPYING) for what the licence covers and what
 it does not.

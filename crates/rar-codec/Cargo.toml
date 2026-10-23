@@ -13,6 +13,18 @@ keywords = ["rar", "codec", "archive", "compression"]
 categories = ["encoding", "compression"]
 repository = "https://github.com/danalec/rgx"
 
+# What the published crate carries. The test corpus is the repository's:
+# the fixtures under `testdata/` are what this crate's own tests read, and
+# a user of the crate has no use for them. The licence and the notice are
+# here because they are the law on the code.
+include = [
+    "/src/**",
+    "/Cargo.toml",
+    "/README.md",
+    "/LICENSE-APACHE",
+    "/NOTICE",
+]
+
 [features]
 default = []
 # `std` only relaxes nothing critical today; reserved for future IO adapters.

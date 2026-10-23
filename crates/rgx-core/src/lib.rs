@@ -15,9 +15,11 @@
 //! - `Outcome::Bail` mirrors rga's bail-out semantics: the file falls back
 //!   to the next adapter and finally to raw-text search — an adapter
 //!   declining a file is never an error.
-//! - **Byte scanning is the `memchr` crate, vendored** — `pub mod memchr;`,
-//!   a copy of upstream adapted to `no_std + alloc`, so this crate's
-//!   dependency graph no longer carries `memchr = "2"`. See below.
+//! - **Byte scanning is the upstream `memchr` crate, re-exported** —
+//!   `pub mod memchr;` is the crate itself under an in-tree name, so every
+//!   call site keeps the `rgx_core::memchr::*` path it has used since the
+//!   in-house module was deleted. It is a re-export, not a vendored copy:
+//!   the dependency graph still carries `memchr = "2"`. See below.
 //!
 //! ## Byte scanning: the crate wins
 //!

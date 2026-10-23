@@ -102,7 +102,8 @@ decode does not rescan its central directory once per entry.
 
 ## Feature flags
 
-- `std` (default) — pulls in `zstd` and `rar-codec/std`.
+- `std` (default) — pulls in `rar-codec/std`; the `decompress` feature is
+  the one that pulls in `zstd`.
 - `isa-huffman` — routes the vendored 7z deflate encoder through a
   wrapper over this crate's own encoder. rgx searches inside compressed
   archives; it does not write them.
@@ -114,5 +115,5 @@ the `src/sevenz/` tree included — that tree was written from the LZMA SDK,
 which its publisher placed in the public domain. The layout of `src/borg.rs`
 and `src/pgdump.rs` was learned from third-party implementations, which are
 the descriptions of those formats that exist; the code in both files is the
-crate's own. See the repository's [COPYING](../../COPYING) and
-[NOTICE](../../NOTICE).
+crate's own. See the repository's [COPYING](https://github.com/danalec/rgx/blob/main/COPYING) and
+[NOTICE](https://github.com/danalec/rgx/blob/main/NOTICE).

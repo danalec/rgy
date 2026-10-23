@@ -40,6 +40,6 @@ walked rather than treated as opaque bytes.
 
 ## Licence
 
-Apache-2.0 only. See [LICENSE-APACHE](LICENSE-APACHE), and the
-repository's [COPYING](../../COPYING) for what the licence covers and what
+Apache-2.0 only. See [LICENSE-APACHE](https://github.com/danalec/rgx/blob/main/crates/rgx-adapters-llm/LICENSE-APACHE), and the
+repository's [COPYING](https://github.com/danalec/rgx/blob/main/COPYING) for what the licence covers and what
 it does not.

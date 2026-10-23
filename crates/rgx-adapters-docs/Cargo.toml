@@ -9,6 +9,18 @@ readme = "README.md"
 keywords = ["markdown", "latex", "docbook", "markup"]
 categories = ["parser-implementations", "text-processing"]
 repository = "https://github.com/danalec/rgx"
+# What the published crate carries. The test corpus is the repository's:
+# the fixtures under `testdata/` are what this crate's own tests read, and
+# a user of the crate has no use for them. The examples are one-off
+# diagnostics, not API demos. The licence and the notice are here because
+# they are the law on the code.
+include = [
+    "/src/**",
+    "/Cargo.toml",
+    "/README.md",
+    "/LICENSE-APACHE",
+    "/NOTICE",
+]
 
 [features]
 # One feature per adapter, in the order `adapters()` returns them: the
@@ -29,7 +41,7 @@ soffice = ["dep:rgx-adapters-office", "rgx-adapters-office/office"]
 ocr = ["dep:rgx-adapters-pdf", "rgx-adapters-pdf/pdf"]
 
 [dependencies]
-rgx-core = { path = "../rgx-core", version = "0.1.0" }
+rgx-core = { path = "../rgx-core", version = "0.1.0", default-features = false, features = ["std", "sha256-hw"] }
 # for `xml_to_text` only: the soffice adapter converts to flat ODF (see
 # Soffice::extract) and this is the tree's one XML → text pass. Compile-time
 # only -- `rgx-adapters-office` reaches the registry through the root's own

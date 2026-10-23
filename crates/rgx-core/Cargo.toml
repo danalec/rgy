@@ -12,6 +12,18 @@ readme = "README.md"
 keywords = ["search", "regex", "engine", "ripgrep"]
 categories = ["text-processing", "command-line-utilities"]
 repository = "https://github.com/danalec/rgx"
+# What the published crate carries. The test corpus is the repository's:
+# the fixtures under `testdata/` are what this crate's own tests read, and
+# a user of the crate has no use for them. The examples are one-off
+# diagnostics, not API demos. The licence and the notice are here because
+# they are the law on the code.
+include = [
+    "/src/**",
+    "/Cargo.toml",
+    "/README.md",
+    "/LICENSE-APACHE",
+    "/NOTICE",
+]
 
 [features]
 # rgx-core is `#![no_std]` + `alloc`; this feature decides what else it may
@@ -26,7 +38,7 @@ repository = "https://github.com/danalec/rgx"
 # core atomic, stays; and the JSON float parser becomes this crate's own,
 # since `f64::from_str` is std-only.
 default = ["std", "sha256-hw", "gzip", "zlib", "deflate", "bzip2", "lzma", "xz", "zstd", "snappy", "lz4", "blosc", "zip"]
-std = ["dep:libc"]
+std = ["dep:libc", "memchr/std"]
 # The Tesla Valve pack store's codec, query vocabulary and planner. The
 # algorithmic half of `crates/rgx-tv`, held here so it can be `no_std` and so
 # `rgx` can take it without taking the thread pool with it. `rgx-tv` turns
@@ -105,9 +117,13 @@ libc = { version = "0.2", default-features = false, optional = true }
 # an in-tree module so every call site keeps the same
 # `rgx_core::memchr::*` path it has used since the in-house module
 # was deleted. `default-features = false` keeps `rgx-core`
-# `no_std + alloc` when the `std` feature is off; with `std` on, the
-# `memchr/std` feature lights up the `is_x86_feature_detected!`
-# SIMD dispatch.
+# `no_std + alloc` when the `std` feature is off, and `memchr/std` is
+# what the `std` feature turns on.
+#
+# The dispatch inside memchr is chosen at COMPILE time -- its SSE2 and
+# AVX2 paths are `target_feature` gates, and it carries no runtime CPU
+# probe -- so the feature buys the std-linked build of the dependency,
+# not a runtime detection that this crate would have to pay for.
 memchr = { version = "2", default-features = false }
 # Filesystem walker for the pack-store builder. Gated on the
 # `tv-runtime` feature because the builder is the only consumer and
@@ -125,11 +141,12 @@ ignore = { version = "0.4", default-features = false, optional = true }
 # The previous `grep-searcher` / `grep-matcher` / `grep-regex` triple here
 # served the same role for the line searcher: the differential test in
 # `crates/rgx-core/src/differential.rs` held the in-house searcher
-# against the upstream `grep-searcher` runner. That differential is
-# still in the test file but no longer needs the upstream crates --
-# the in-house searcher is now the only engine, so the differential
-# compares rgx's slice path against its own reader path. The 84 tests
-# still pin the in-house searcher; the 3 dev-deps are gone.
+# against the upstream `grep-searcher` runner. That file is gone; the
+# differential it held lives in `crates/rgx-core/src/searcher/tests.rs`,
+# and it no longer needs the upstream crates -- the in-house searcher is
+# now the only engine, so the differential compares rgx's slice path
+# against its own reader path. The 89 tests still pin the in-house
+# searcher; the 3 dev-deps are gone.
 regex = "1"
 # `aho-corasick` is gone. The only consumer was the
 # `examples/prefilter_ablate.rs` ablation, which used the packed
