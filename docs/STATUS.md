@@ -15,7 +15,7 @@ verification on machines this host does not have.
 | Name index v2 (intern, DFS, bitmaps, mmap blob) | `crates/name-core` (`name_index`) | ✅ from fsearch |
 | Query syntax merge (fsearch tokens + zen-rs filters) | `crates/name-core` (`name_query`) | ✅ `type:`/`dir:`/`size:`/`re:`/globs/\|, fail-closed |
 | fzf-v1 scorer + typos + top-k + NameCache + **SSE2 wide scorer** | `crates/name-core` (`name_query`) | ✅ parity-tested vs scalar |
-| Live overlay | `crates/name-core` (`live`) | ✅ portable `lstat`; the base's root-relative paths and the overlay's openable ones are crossed, so a re-listed folder answers each file once |
+| Live overlay | `crates/name-core` (`live`) | ✅ portable `lstat`; the base's root-relative paths and the overlay's openable ones are crossed, so a re-listed folder answers each file once. The daemon merges the overlay through `search_alternatives` and the CLI through `merge_hits`, so **every** live change is answered — the keyed-by-index merge it replaced dropped one change per file and made the CLI index the base with the overlay's `u32::MAX` sentinel (a panic); both paths are pinned by `every_live_change_is_answered` |
 | Index persistence (sidecar-pinned root) | `crates/name-core` (`persist`) | ✅ |
 | Path fold (ASCII case + Unicode NFC, UAX #15) | `crates/name-core` (`fold`, `nfc`) | ✅ tables generated from the UCD; 20,171 UCD conformance cases pass |
 
@@ -62,6 +62,7 @@ verification on machines this host does not have.
 |---|---|---|
 | `searchctl` (name + content CLI, rg exit codes, `--json`) | `bins/searchctl` | ✅ |
 | `searchd` (JSON-lines daemon) | `bins/searchd` | ✅ name + `grep:`/`regex:`/`sym:` ops |
+| The JSON-lines protocol and its one escaper | `crates/proto` | ✅ RFC 8259 §7: the quotation mark, the reverse solidus and every C0 control are escaped, so a path, a query or a grep line out of a TSV file reaches the wire as **one** line and the framing cannot be broken by the content. `proto`, `searchd` and `searchctl` share the escaper, and a test holds it byte-for-byte equal to the upstream `djson::escape_json_string` |
 | Named pipe / UDS fronts, `--serve` compat, `--tv-dir` | `bins/searchd` | ✅ |
 | zen-rs bin / TUI (unchanged behaviour) | `bins/zen-rs`, `bins/search-ui` | ✅ |
 | `rgy-autostart` (login item, per platform) | `crates/autostart` | ✅ startup task / HKCU Run, systemd user unit, launchd agent |
@@ -71,11 +72,31 @@ verification on machines this host does not have.
 | keep-warm / mimalloc / big-alloc (`BlobMut::anon`) | `crates/engine`, `crates/name-core` | ✅ |
 | PGO (trained on the name bench) | `pgo.sh` (unix), `pgo.ps1` (Windows) | ✅ validated end to end on Windows |
 | Bench harness + baselines | `crates/engine/examples`, `crates/name-core/examples`, `benchmark/` | ✅ |
+| The perf gate itself | `scripts/bench-names.py`, `benchmark/baseline-names.csv` | ✅ a fixed worker width, seven runs, the best of them, and the spread beside the number |
 
 ### Perf gate
 
-`cargo run --release -p engine --example name_bench` — a >20% regression on
-any `benchmark/baseline-names.md` row fails the PR.
+`python scripts/bench-names.py check --baseline benchmark/baseline-names.csv
+--runs 7` — a >20% regression on any **gated** row of
+`benchmark/baseline-names.md` fails the PR.
+
+The gate is not a single run of the bench. A measurement is seven
+independent runs at a fixed worker width (4 threads), the statistic is the
+**best** of them, and the spread across the runs is recorded next to the
+number. That is because the noise is wider than the threshold otherwise: on
+this host the same code moved the `mod` row's min between 65 µs and 116 µs
+across three runs at 32 workers, and the previous table — a single run per
+row — did not reproduce even in the commit that wrote it.
+
+Two things follow from it, and both are in the script:
+
+- a row whose spread is wider than the 20% threshold is **undecidable**, and
+  the gate says so instead of guessing;
+- the 200k rows are gated (a 3–8% spread) and the 5M rows are **measured and
+  reported, not gated** (a 5–52% spread on this host, and two sessions of
+  identical code disagreeing by 28%). A gate that fires on noise is worse
+  than no gate.
+
 `benchmark/mmap-vs-read.md` records the mmap-vs-read measurements
 (Linux + Windows) behind the access-shape choices in
 [`docs/insights-from-rgx.md`](insights-from-rgx.md).
@@ -202,6 +223,23 @@ the three platforms behaving alike.
   library); on winget and homebrew the name is free, and one name across
   the registries is worth more than the shorter one. The project, the
   repository (`danalec/rgy`) and the binaries keep the name `rgy`.
+
+  The names of the internal crates are a separate problem, and it is not
+  solved by publishing them. Checked against the crates.io API on
+  2026-10-23: `rgy`, `engine`, `proto`, `discovery`, `zen-rs` and
+  `autostart` are **all taken**; `rgy-search`, `rgx-core` and `rar-codec`
+  are free. So every internal crate needs a `rgy-` prefix (or another
+  name) before it can be published at all, and the order matters:
+  `name-core` depends on `rgx-core` by path, so `rgx-core` has to exist
+  first. `cargo publish --dry-run -p rgx-core` passes today (127 files,
+  compiles, stops at the upload); `-p name-core` fails, because a
+  path dependency without a version requirement cannot be published. The
+  crate names are the decision; the machinery is in place.
+- **The links to the rgx repository are dead.** `README.md`, `MANUAL.md`,
+  `FORMATS.md`, `COPYING` and this file link
+  `https://github.com/danalec/rgx`, which answers **404** — the repository
+  is not published. Either the repository goes up or the links point at
+  the tree this repository already carries.
 - **The first release.** The packaging is in place — the winget manifest,
   the Homebrew formula, the scripts that build the archives and publish
   them — but nothing has been published yet, so the manifest and the

@@ -116,13 +116,26 @@ verification behind it is worse than a `G`.
 ## 5. The perf gate is a number, and the number is the gate
 
 ```sh
-cargo run --release -p engine --example name_bench
+python scripts/bench-names.py check --baseline benchmark/baseline-names.csv --runs 7
 ```
 
-A **>20% regression** on any [`benchmark/baseline-names.md`](benchmark/baseline-names.md)
-row fails the PR. The measurements live in [`benchmark/`](benchmark/), and
+A **>20% regression** on any gated row of
+[`benchmark/baseline-names.md`](benchmark/baseline-names.md) fails the PR.
+The measurements live in [`benchmark/`](benchmark/), and
 the write-ups say what was measured, on what host, on what date. A number
 without its host and its date is a rumour.
+
+The gate is not one run of the bench. A measurement is several independent
+runs at a **fixed worker width**, the statistic is the **best** of them, and
+the spread across the runs is recorded next to the number — because the
+noise is otherwise wider than the threshold, and a gate that fires on noise
+is worse than no gate. A row whose spread is wider than the threshold is
+undecidable, and the script says so instead of guessing.
+
+The table is generated from [`benchmark/baseline-names.csv`](benchmark/baseline-names.csv),
+the way `docs/parity.md` is generated from `docs/parity.toml` (§4): the CSV
+is the source of truth, and `bench-names.py render --check` fails when the
+two have drifted.
 
 ## 6. Build before you test
 

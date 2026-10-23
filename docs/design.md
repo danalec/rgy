@@ -32,11 +32,21 @@ containers for content.
 | Content index on disk | ≤ 2.5× corpus text (bloom + postings; packs hold the bytes once) | fsearch 2.4× |
 
 **The perf gate is the number.** The bench harness blocks a PR on a >20%
-regression in any row of
+regression in any gated row of
 [`benchmark/baseline-names.md`](../benchmark/baseline-names.md). rgx's
 harness rules carry over: thread-matched rounds, corpus sha256
 fingerprints, min-of-N with warmups, and counts proven equal before
 timing.
+
+What a single run cannot give is added by
+[`scripts/bench-names.py`](../scripts/bench-names.py): the worker width is
+pinned, the measurement is several independent runs, the statistic is the
+best of them, and the spread is recorded beside the number. The reason is
+measured, not asserted — on this host the same code moved the `mod` row's
+min between 65 µs and 116 µs across three runs at 32 workers, and the
+single-run table did not reproduce in the commit that wrote it. A row whose
+spread is wider than the threshold is undecidable, and the gate says so
+rather than calling it either way.
 
 ## 2. The merge decisions
 
@@ -130,6 +140,16 @@ content worker that builds the trigrams, not a regex pass at query time.
   line) stays as a **compatibility front** that translates to the same
   engine calls, so rg harnesses keep working; rgx's `--json` output stays
   as it is.
+- **One escaper.** A JSON-lines protocol is a framing: one response per
+  line. RFC 8259 §7 says the quotation mark, the reverse solidus and
+  every C0 control (U+0000–U+001F) MUST be escaped, and a C0 control
+  left raw is a line break inside the frame — a grep line out of a TSV
+  file is enough to break it. `proto::escape_json_string` is the one
+  escaper in this repository's crates: `proto`, `searchd` and `searchctl`
+  all call it, and the reader in `proto` knows every escape the RFC
+  defines and refuses the ones it does not. `crates/rgx-core` has its own
+  (`djson::escape_json_string`), which is upstream's; a test in `searchd`
+  holds the two to the same bytes.
 - **One allocator story:** mimalloc for the general heap (rgx measured
   5–12% on 32-worker walks) + fsearch's big-block rule (≥ 1 MiB →
   mmap/VirtualAlloc, returned on free) for index builds and pack segments
