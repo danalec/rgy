@@ -12,7 +12,12 @@ Apache-2.0 only
 
 The product. Every source file in these trees carries
 `SPDX-License-Identifier: Apache-2.0` on its first line, and the crate
-manifests state the same terms:
+manifests state the same terms -- with one exception, named here so the
+claim is not read as a claim about something else: `crates/name-core/`
+states `Apache-2.0 AND MIT`, because three of its files arrived from
+fsearch under MIT and keep its terms (see NOTICE and LICENSE-MIT-FSEARCH).
+`tests/license.rs` names those three files, and fails if a fourth one
+appears or if one of them stops being MIT.
 
     crates/name-core/                  the name index, the query engine, the fuzzy ranker
     crates/discovery/                  the discovery seam
