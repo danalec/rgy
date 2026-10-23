@@ -237,10 +237,7 @@ pub fn load_saved(index: &Path) -> Result<(Index, String), Miss> {
 /// but it is no longer the first one reached.
 pub fn default_index_path(root: &Path) -> PathBuf {
     let digest = fnv1a(canon(root).to_string_lossy().as_bytes());
-    let base = std::env::var_os("RGY_INDEX_DIR")
-        .map(PathBuf::from)
-        .or_else(cache_dir)
-        .unwrap_or_else(std::env::temp_dir);
+    let base = std::env::var_os("RGY_INDEX_DIR").map(PathBuf::from).or_else(cache_dir).unwrap_or_else(std::env::temp_dir);
     base.join("rgy").join(format!("{digest:016x}.idx"))
 }
 
@@ -252,16 +249,8 @@ pub fn default_index_path(root: &Path) -> PathBuf {
 fn cache_dir() -> Option<PathBuf> {
     // Windows has no `HOME`; the user's profile directory is the same
     // thing under another name.
-    let home = if cfg!(windows) {
-        std::env::var_os("USERPROFILE")
-    } else {
-        std::env::var_os("HOME")
-    };
-    cache_dir_from(
-        std::env::var_os("XDG_CACHE_HOME").as_deref(),
-        home.as_deref(),
-        std::env::var_os("LOCALAPPDATA").as_deref(),
-    )
+    let home = if cfg!(windows) { std::env::var_os("USERPROFILE") } else { std::env::var_os("HOME") };
+    cache_dir_from(std::env::var_os("XDG_CACHE_HOME").as_deref(), home.as_deref(), std::env::var_os("LOCALAPPDATA").as_deref())
 }
 
 /// The cache directory, given the environment.
@@ -269,11 +258,7 @@ fn cache_dir() -> Option<PathBuf> {
 /// `$XDG_CACHE_HOME` when it is set, else `~/.cache` on Linux and
 /// `~/Library/Caches` on macOS -- the two the manual names. Windows keeps
 /// `%LOCALAPPDATA%`, and `%USERPROFILE%\AppData\Local` when that is unset.
-fn cache_dir_from(
-    xdg: Option<&std::ffi::OsStr>,
-    home: Option<&std::ffi::OsStr>,
-    local: Option<&std::ffi::OsStr>,
-) -> Option<PathBuf> {
+fn cache_dir_from(xdg: Option<&std::ffi::OsStr>, home: Option<&std::ffi::OsStr>, local: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
     let some = |v: Option<&std::ffi::OsStr>| v.filter(|s| !s.is_empty()).map(PathBuf::from);
     if cfg!(windows) {
         return some(local).or_else(|| some(home).map(|h| h.join("AppData").join("Local")));

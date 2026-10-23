@@ -945,12 +945,7 @@ fn serve_end(
     error: Option<&str>,
 ) {
     let err = error
-        .map(|e| {
-            format!(
-                ",\"error\":\"{}\"",
-                proto::escape_json_string(e)
-            )
-        })
+        .map(|e| format!(",\"error\":\"{}\"", proto::escape_json_string(e)))
         .unwrap_or_default();
     let _ = writeln!(
         out,

@@ -123,10 +123,18 @@ impl Request {
     pub fn to_json(&self) -> String {
         match self {
             Request::Search { q, limit } => {
-                format!(r#"{{"op":"search","q":"{}","limit":{}}}"#, escape_json_string(q), limit)
+                format!(
+                    r#"{{"op":"search","q":"{}","limit":{}}}"#,
+                    escape_json_string(q),
+                    limit
+                )
             }
             Request::Grep { q, limit } => {
-                format!(r#"{{"op":"grep","q":"{}","limit":{}}}"#, escape_json_string(q), limit)
+                format!(
+                    r#"{{"op":"grep","q":"{}","limit":{}}}"#,
+                    escape_json_string(q),
+                    limit
+                )
             }
             Request::Status => r#"{"op":"status"}"#.to_string(),
         }
@@ -139,7 +147,13 @@ impl Response {
             Response::Hits { hits, took_us } => {
                 let items: Vec<String> = hits
                     .iter()
-                    .map(|h| format!(r#"{{"path":"{}","score":{}}}"#, escape_json_string(&h.path), h.score))
+                    .map(|h| {
+                        format!(
+                            r#"{{"path":"{}","score":{}}}"#,
+                            escape_json_string(&h.path),
+                            h.score
+                        )
+                    })
                     .collect();
                 format!(
                     r#"{{"op":"hits","hits":[{}],"took_us":{}}}"#,
@@ -181,10 +195,16 @@ impl Response {
                 )
             }
             Response::Error { message } => {
-                format!(r#"{{"op":"error","message":"{}"}}"#, escape_json_string(message))
+                format!(
+                    r#"{{"op":"error","message":"{}"}}"#,
+                    escape_json_string(message)
+                )
             }
             Response::Warning { message } => {
-                format!(r#"{{"op":"warning","message":"{}"}}"#, escape_json_string(message))
+                format!(
+                    r#"{{"op":"warning","message":"{}"}}"#,
+                    escape_json_string(message)
+                )
             }
         }
     }

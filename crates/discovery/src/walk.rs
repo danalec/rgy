@@ -8,8 +8,8 @@
 //! Windows MFT, Linux `getdents64`).
 
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
 };
 
 /// Sentinel for "no child listing" (an entry with no directory table).
