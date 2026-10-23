@@ -217,12 +217,15 @@ the three platforms behaving alike.
   trigram means something different over extracted text than over raw
   bytes, and the pack path already covers the recurrent container
   queries.
-- **Publishing to a registry.** The rgx crates go to crates.io; rgy's
-  own crates are not published yet. The *distribution* package is called
-  `rgy-search`, because `rgy` is taken on crates.io (a GameBoy emulator
-  library); on winget and homebrew the name is free, and one name across
-  the registries is worth more than the shorter one. The project, the
-  repository (`danalec/rgy`) and the binaries keep the name `rgy`.
+- **Publishing to a registry.** The rgx repository is published
+  (`https://github.com/danalec/rgx`, answering 200 since 2026-10-23, and
+  the blob links in this file resolve), and the rgx crates are going to
+  crates.io. rgy's own crates are not published yet. The *distribution*
+  package is called `rgy-search`, because `rgy` is taken on crates.io (a
+  GameBoy emulator library); on winget and homebrew the name is free, and
+  one name across the registries is worth more than the shorter one. The
+  project, the repository (`danalec/rgy`) and the binaries keep the name
+  `rgy`.
 
   The names of the internal crates are a separate problem, and it is not
   solved by publishing them. Checked against the crates.io API on
@@ -235,11 +238,6 @@ the three platforms behaving alike.
   compiles, stops at the upload); `-p name-core` fails, because a
   path dependency without a version requirement cannot be published. The
   crate names are the decision; the machinery is in place.
-- **The links to the rgx repository are dead.** `README.md`, `MANUAL.md`,
-  `FORMATS.md`, `COPYING` and this file link
-  `https://github.com/danalec/rgx`, which answers **404** — the repository
-  is not published. Either the repository goes up or the links point at
-  the tree this repository already carries.
 - **The first release.** The packaging is in place — the winget manifest,
   the Homebrew formula, the scripts that build the archives and publish
   them — but nothing has been published yet, so the manifest and the

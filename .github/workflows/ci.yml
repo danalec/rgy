@@ -28,6 +28,22 @@ jobs:
       # reads better than it is. Both fail here.
       - run: python3 scripts/parity-matrix.py --check
 
+  bench-table:
+    name: the bench table is what the baseline renders
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The same shape as the parity matrix: the table in the write-up is
+      # generated from the CSV, and a table that is not what its source
+      # renders is a table that reads better than it is.
+      #
+      # What this does NOT do is run the perf gate itself. The gate compares
+      # a measurement against a baseline recorded on a named host, and a
+      # shared runner is neither that host nor quiet enough to decide a 20%
+      # threshold -- the measurement says UNDECIDABLE and the job would
+      # fail on noise. A perf gate belongs on a host that can be named.
+      - run: python3 scripts/bench-names.py render --csv benchmark/baseline-names.csv --check
+
   vendoring:
     name: the vendoring rules hold on ${{ matrix.os }}
     strategy:
