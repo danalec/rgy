@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Print what the JSON parser does with a battery of awkward inputs.
 //!
 //! A review wants to see behavior, not to infer it from the source: the

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Shared e2e helpers: locate the built bins, build runtime fixtures.
 //!
 //! The workspace root is virtual (no root package), so `CARGO_BIN_EXE_*`

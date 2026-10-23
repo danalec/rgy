@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Path regexes for `re:` query terms.
 //!
 //! Wrapper over the rgx-core engine (`syntax` → `nfa` → `vm`): a byte-mode

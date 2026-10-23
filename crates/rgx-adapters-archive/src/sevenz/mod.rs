@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! In-process 7z container support, vendored from the 7-Zip project
 //! (`https://7-zip.org/sdk.html`,
 //! `CPP/7zip/{Archive/7z,Compress}/*`)
@@ -32,4 +34,6 @@ pub mod lzma;
 #[allow(clippy::module_inception)]
 pub mod sevenz;
 
+#[cfg(test)]
+pub(crate) use sevenz::take_folder_decodes;
 pub use sevenz::{SevenzArchive, SevenzFile};

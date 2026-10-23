@@ -783,9 +783,15 @@ fn run_search<F: FileSource + 'static>(
     empty_files: F,
     engine: Arc<Engine>,
     config: &SearchConfig,
+    head_extract_fp: u64,
     t0: Instant,
     stages: &mut StageTimes,
 ) -> io::Result<(Vec<SearchMatch>, SearchStats, Arc<PackIndex>)> {
+    // Whether this query's rollup trust matches the catalog's: the per-file
+    // half is `FileLoc::sig_covers_adapter`, this is the head's. A record
+    // whose signature is the adapter rollup may be rejected only when both
+    // say so; see the filter below.
+    let rollup_ok = config.extract_fp == Some(head_extract_fp);
     let shared_storage = Arc::new(packs);
     let shared_files = Arc::new(files);
     let shared_empty = Arc::new(empty_files);
@@ -855,9 +861,21 @@ fn run_search<F: FileSource + 'static>(
                     // a signature missing a bit the pattern's holds is proof
                     // the file cannot match. `None` (and the all-zero file
                     // signature) stands the filter down -- see
-                    // [`crate::ngram::query_sig512`].
+                    // [`crate::ngram::query_sig512`]. One rule answers at
+                    // every filter site: a record whose signature is the
+                    // adapter rollup ([`FileLoc::SIG_COVERS_ADAPTER`]) is
+                    // rejected only under a matching extraction fingerprint,
+                    // and any other record is rejected on its own text's
+                    // coverage. This search reads the record's own bytes and
+                    // is covered either way; the gate is what keeps the
+                    // adapter-aware store search, whose haystack is the
+                    // pipeline's units, answering by the same line.
                     if let Some(q) = ngram_q {
-                        if !NgramSig512::from_words(f.ngram).contains_query(&q) {
+                        if crate::ngram::may_reject(
+                            &f.ngram,
+                            crate::ngram::covered_raw_bytes(f.sig_covers_adapter, rollup_ok),
+                            &q,
+                        ) {
                             thread_pruned_files += 1;
                             continue;
                         }
@@ -1048,6 +1066,7 @@ impl PackTable {
 
 /// One pack reader: claims packs, reads each into a buffer it keeps, and searches
 /// the files the manifest assigned to each.
+#[allow(clippy::too_many_arguments)]
 fn pack_worker(
     table: PackTable,
     plan: Arc<PackPlan>,
@@ -1056,6 +1075,7 @@ fn pack_worker(
     config: Arc<SearchConfig>,
     crew: Arc<Crew>,
     inhouse_on: Arc<AtomicBool>,
+    head_extract_fp: u64,
 ) -> io::Result<WorkerOut> {
     let batch = config.packs_per_thread.max(1);
     let hybrid = match &*engine {
@@ -1067,6 +1087,8 @@ fn pack_worker(
         rgxsearcher::Searcher::with_candidates(&hybrid, &hybrid, inhouse_config_for(&config));
     let mut engines = Engines::new(&inhouse);
     let ngram_q = engine.ngram_query();
+    // The same per-query gate `run_search` computes; see the filter below.
+    let rollup_ok = config.extract_fp == Some(head_extract_fp);
 
     // One search of a throwaway byte, before the first claim, so that the
     // first pack a worker reads is measured as a scan and not as a scan
@@ -1099,6 +1121,8 @@ fn pack_worker(
     let mut lines = 0usize;
     let mut read_ns: u128 = 0;
     let mut scan_ns: u128 = 0;
+    let mut bytes_read = 0u64;
+    let mut units_read = 0u64;
     let mut service_ns: Vec<u64> = Vec::new();
 
     let n_units = plan.units.len();
@@ -1150,6 +1174,8 @@ fn pack_worker(
             }
             let read_pack_ns = t.elapsed().as_nanos();
             read_ns += read_pack_ns;
+            bytes_read += len as u64;
+            units_read += 1;
 
             let pack_bytes = &buf[..len];
             let mut mine: Vec<SearchMatch> = Vec::new();
@@ -1161,9 +1187,15 @@ fn pack_worker(
 
                 // The n-gram filter, at the same point as the mapping path:
                 // before the file's bytes are read out of the pack. `None`
-                // (and the all-zero file signature) stands it down.
+                // (and the all-zero file signature) stands it down, and an
+                // adapter rollup record is rejected only under a matching
+                // extraction fingerprint -- see the mapping path's filter.
                 if let Some(q) = ngram_q {
-                    if !NgramSig512::from_words(f.ngram).contains_query(&q) {
+                    if crate::ngram::may_reject(
+                        &f.ngram,
+                        crate::ngram::covered_raw_bytes(f.sig_covers_adapter(), rollup_ok),
+                        &q,
+                    ) {
                         pruned += 1;
                         continue;
                     }
@@ -1227,7 +1259,18 @@ fn pack_worker(
                             let config = Arc::clone(&config);
                             let crew = Arc::clone(&crew);
                             let inhouse_on = Arc::clone(&inhouse_on);
-                            move || pack_worker(table, plan, next, engine, config, crew, inhouse_on)
+                            move || {
+                                pack_worker(
+                                    table,
+                                    plan,
+                                    next,
+                                    engine,
+                                    config,
+                                    crew,
+                                    inhouse_on,
+                                    head_extract_fp,
+                                )
+                            }
                         })
                     });
                 }
@@ -1247,6 +1290,8 @@ fn pack_worker(
         lines,
         read_ns,
         scan_ns,
+        bytes_read,
+        units_read,
         service_ns,
     })
 }
@@ -1260,6 +1305,11 @@ pub struct WorkerOut {
     lines: usize,
     read_ns: u128,
     scan_ns: u128,
+    /// What the sparse plan fetched: bytes in the units the worker claimed
+    /// and how many units they were. `RGX_EXTENT_STATS` compares these
+    /// against the pack payload to say what the plan did not read.
+    bytes_read: u64,
+    units_read: u64,
     /// Wall clock of one pack: the read plus the files inside it.
     service_ns: Vec<u64>,
 }
@@ -1277,6 +1327,8 @@ impl WorkerOut {
             lines: 0,
             read_ns: 0,
             scan_ns: 0,
+            bytes_read: 0,
+            units_read: 0,
             service_ns: Vec::new(),
         }
     }
@@ -1299,36 +1351,123 @@ pub fn stale_files(store_dir: &Path) -> io::Result<(usize, usize)> {
 /// one -- `run_tv_query` loads it a moment later anyway -- pays the stat
 /// pass and not a second parse.
 pub fn stale_in(m: &super::format::Manifest) -> (usize, usize) {
+    let (checked, stale) = stale_list_in(m);
+    (checked, stale.len())
+}
+
+/// [`stale_in`] as a list of the disagreeing records' indices into
+/// `m.files`, which is what a caller re-reading the changed files one by
+/// one -- the dirty-file overlay in `run_tv_query` -- needs; a count tells
+/// it how many to re-read but not which. Same stat pass, same verdicts.
+///
+/// A member record (the `container!member` names a `--tv-pre-extract`
+/// build writes) has no path of its own to stat, so it hangs off its owner
+/// container and is stale exactly when the owner is: the mtime its row
+/// carries is the owner's, signed at build. Judged by its own name instead,
+/// every member of every store read as gone-on-disk and the overlay then
+/// dropped the container's whole answer from a store nothing had changed
+/// in. Length is deliberately no part of the member verdict -- the row's
+/// length is the member's -- so a container resized while keeping its
+/// mtime is the boundary this rule names and does not pretend to see.
+pub fn stale_list_in(m: &super::format::Manifest) -> (usize, Vec<usize>) {
     let root = Path::new(&m.root_path);
+    // One path buffer for the whole walk. `root.join(&f.rel_path)` built a
+    // fresh PathBuf per record -- 20,000 allocations whose only job was to
+    // name a file we are about to stat -- and the manifest stage measured 41
+    // ms on a 20,000-record store, which is the wall clock this loop owns.
+    // The stat itself is the floor below; this removes the part of the cost
+    // that was never about the filesystem.
+    let mut p = root.to_path_buf();
     let mut checked = 0usize;
-    let mut stale = 0usize;
-    for f in m.files.iter().filter(|f| !f.is_deleted) {
-        checked += 1;
-        let Ok(md) = std::fs::metadata(root.join(&f.rel_path)) else {
-            stale += 1;
-            continue;
-        };
-        if md.len() != f.length {
-            stale += 1;
+    let mut stale = Vec::new();
+    for (i, f) in m.files.iter().enumerate() {
+        if f.is_deleted {
             continue;
         }
-        if let Ok(t) = md.modified() {
-            if let Ok(d) = t.duration_since(std::time::UNIX_EPOCH) {
-                if d.as_secs() != f.mtime_secs || d.subsec_nanos() != f.mtime_nanos {
-                    stale += 1;
+        checked += 1;
+        p.clear();
+        p.push(root);
+        p.push(&f.rel_path);
+        match std::fs::metadata(&p) {
+            Ok(md) => {
+                if md.len() != f.length || !mtime_matches(&md, f) {
+                    stale.push(i);
                 }
             }
+            Err(_) => match owner_rel(root, &f.rel_path).and_then(|o| {
+                p.clear();
+                p.push(root);
+                p.push(o);
+                std::fs::metadata(&p).ok()
+            }) {
+                Some(md) => {
+                    if !mtime_matches(&md, f) {
+                        stale.push(i);
+                    }
+                }
+                None => stale.push(i),
+            },
         }
     }
     (checked, stale)
 }
 
-fn raw_decode(raw: &Arc<RawManifest>, config: &SearchConfig) -> io::Result<(PackPlan, Vec<u32>)> {
+/// The record's mtime verdict: the modification time its row was signed
+/// against, compared to the file's as the OS reports it now. A time the
+/// OS will not hand over is not a disagreement.
+fn mtime_matches(md: &std::fs::Metadata, f: &super::format::FileRecord) -> bool {
+    match md.modified() {
+        Ok(t) => match t.duration_since(std::time::UNIX_EPOCH) {
+            Ok(d) => d.as_secs() == f.mtime_secs && d.subsec_nanos() == f.mtime_nanos,
+            Err(_) => true,
+        },
+        Err(_) => true,
+    }
+}
+
+/// The owner a member record hangs off: the longest prefix of the record's
+/// name, cut at a member separator, that exists on disk (`a.zip!b/c.txt`
+/// and `a.zip#b/c.txt` both hang off `a.zip`). A name with no existing
+/// prefix belongs to no owner -- its record is gone, not stale.
+pub fn owner_rel(root: &Path, rel_path: &str) -> Option<String> {
+    let mut owner = None;
+    for (p, _) in rel_path.match_indices(super::builder::MEMBER_SEPARATORS) {
+        // A prefix of nothing is the root itself, which owns nothing.
+        if p == 0 {
+            continue;
+        }
+        if std::fs::metadata(root.join(&rel_path[..p])).is_ok() {
+            owner = Some(rel_path[..p].to_string());
+        }
+    }
+    owner
+}
+
+/// The plan for a query: which records reach the workers and how the packs
+/// are cut for reading. Returns the plan, the 0-byte records, and the number
+/// of records the pre-plan filter rejected.
+///
+/// The pre-plan filter ([`crate::tv::plan::prune_by_ngram`]) is the same
+/// rule the workers apply per file, asked once per record before any byte
+/// is planned for reading: a rejected record leaves a hole in the plan and
+/// [`crate::tv::plan::cut_units`] is what decides the hole is never paid
+/// for.
+fn raw_decode(
+    raw: &Arc<RawManifest>,
+    config: &SearchConfig,
+) -> io::Result<(PackPlan, Vec<u32>, usize)> {
     let (head, locs) = raw.scan().map_err(super::format::to_io)?;
     let (active, empty) = split_locs(&locs, config);
+    let (active, pruned) = crate::tv::plan::prune_by_ngram(
+        active,
+        &locs,
+        config.ngram_query.as_ref(),
+        config.extract_fp == Some(head.extract_fp),
+    );
     Ok((
         PackPlan::build(Arc::clone(raw), &head, Arc::new(locs), &active),
         empty,
+        pruned,
     ))
 }
 
@@ -1348,6 +1487,14 @@ pub(crate) fn search_parallel_buffered(
     t0: Instant,
 ) -> io::Result<(Vec<SearchMatch>, SearchStats)> {
     let engine = Arc::new(Engine::new(pattern, config.engine)?);
+    // The planner's copy of the configuration, carrying the query signature
+    // the engine derived from the same pattern. Derived at exactly one place
+    // so the pre-plan filter and the per-file filters can never stand in
+    // different states.
+    let mut config = config.clone();
+    if config.ngram_query.is_none() {
+        config.ngram_query = engine.ngram_query();
+    }
     // Which engine a claim answers on. The text rule sets it before the first
     // claim and `Crew::maybe_pick_engine` may move it after one, so it is the
     // query's and not a worker's.
@@ -1356,6 +1503,7 @@ pub(crate) fn search_parallel_buffered(
     let t_manifest = Instant::now();
     let raw = super::format::load_raw_manifest(store_dir)?;
     let head = raw.head().map_err(super::format::to_io)?;
+    let head_extract_fp = head.extract_fp;
     let table = PackTable::new(store_dir, &head.packs);
     let manifest_ms = t_manifest.elapsed().as_secs_f64() * 1000.0;
     let mut stages = StageTimes {
@@ -1368,7 +1516,8 @@ pub(crate) fn search_parallel_buffered(
     // records are decoded.
     let t_decode = Instant::now();
     let raw = Arc::new(raw);
-    let (plan, empty) = raw_decode(&raw, config).map(|(p, e)| (Arc::new(p), e))?;
+    let (plan, empty, plan_pruned) =
+        raw_decode(&raw, &config).map(|(p, e, n)| (Arc::new(p), e, n))?;
     stages.filter_ms = t_decode.elapsed().as_secs_f64() * 1000.0;
 
     let n_units = plan.units.len();
@@ -1411,7 +1560,18 @@ pub(crate) fn search_parallel_buffered(
             let cfg = Arc::clone(&cfg);
             let crew = Arc::clone(&crew);
             let inhouse_on = Arc::clone(&inhouse_on);
-            move || pack_worker(table, plan, next, e_clone, cfg, crew, inhouse_on)
+            move || {
+                pack_worker(
+                    table,
+                    plan,
+                    next,
+                    e_clone,
+                    cfg,
+                    crew,
+                    inhouse_on,
+                    head_extract_fp,
+                )
+            }
         }));
     }
 
@@ -1424,8 +1584,13 @@ pub(crate) fn search_parallel_buffered(
     let mut buckets = Vec::with_capacity(n_units);
     let mut read_ns = 0u128;
     let mut scan_ns = 0u128;
+    let mut bytes_read = 0u64;
+    let mut units_read = 0u64;
     let mut n_searched = 0usize;
-    let mut n_pruned = 0usize;
+    // The pre-plan filter's rejects join the per-file filters' in one count:
+    // they are the same rule asked at two points, and a caller reading
+    // `total_files_pruned` must not care which point answered.
+    let mut n_pruned = plan_pruned;
     let mut n_matched = 0usize;
     let mut n_lines = 0usize;
     let mut service_ns: Vec<u64> = Vec::with_capacity(n_units);
@@ -1440,6 +1605,8 @@ pub(crate) fn search_parallel_buffered(
             buckets.append(&mut out.buckets);
             read_ns += out.read_ns;
             scan_ns += out.scan_ns;
+            bytes_read += out.bytes_read;
+            units_read += out.units_read;
             n_searched += out.searched;
             n_pruned += out.pruned;
             n_matched += out.matched;
@@ -1479,7 +1646,7 @@ pub(crate) fn search_parallel_buffered(
             }
         };
         let s =
-            rgxsearcher::Searcher::with_candidates(&hybrid, &hybrid, inhouse_config_for(config));
+            rgxsearcher::Searcher::with_candidates(&hybrid, &hybrid, inhouse_config_for(&config));
         for &ei in empty.iter() {
             let f = plan.locs[ei as usize];
             n_searched += 1;
@@ -1528,6 +1695,17 @@ pub(crate) fn search_parallel_buffered(
     } else {
         0.0
     };
+
+    // The sparse plan's own account, asked for by name: how much of the
+    // store the query actually fetched. Under `RGX_ABLATE_EXTENTS` these
+    // are the whole payload, which is exactly the A/B's control arm.
+    if std::env::var_os("RGX_EXTENT_STATS").is_some() {
+        let payload: u64 = head.packs.iter().map(|p| p.content_len).sum();
+        eprintln!(
+            "rgx-extents: read {} bytes in {} units (store payload {} bytes, {} packs)",
+            bytes_read, units_read, payload, total_packs
+        );
+    }
 
     Ok((
         final_matches,
@@ -1595,6 +1773,7 @@ pub fn search_store(
     let map_ms = t_map.elapsed().as_secs_f64() * 1000.0;
 
     let total_packs = manifest.packs.len();
+    let head_extract_fp = manifest.extract_fp;
     let t_filter = Instant::now();
     let (active, empty) = split_owned(Arc::try_unwrap(manifest).unwrap().files, config);
     let (active_files, empty_files) = (OwnedFiles(active), OwnedFiles(empty));
@@ -1614,6 +1793,7 @@ pub fn search_store(
         empty_files,
         Arc::clone(&engine),
         config,
+        head_extract_fp,
         t0,
         &mut stages,
     )?;
@@ -1713,6 +1893,7 @@ pub fn search_store_pooled(
         },
         Arc::clone(&engine),
         config,
+        snap.manifest.extract_fp,
         t0,
         &mut stages,
     )?;
@@ -1721,4 +1902,62 @@ pub fn search_store_pooled(
     stats.pooled = true;
     stats.stages.in_process_ms = t0.elapsed().as_secs_f64() * 1000.0;
     Ok((matches, stats))
+}
+
+// ---------------------------------------------------------------------------
+// The sparse plan's end-to-end contract.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod sparse_tests {
+    use super::*;
+    use crate::tv_runtime::builder::{build_store, BuildConfig};
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "rgx-sparse-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The ablation changes the plan and never the answer: same matches and
+    /// same prunes -- the pre-plan and the per-file filters are one rule
+    /// asked twice, so where it fired changes only what was read.
+    #[test]
+    fn the_extent_ablation_changes_the_plan_and_never_the_answer() {
+        let root = scratch("ablate");
+        let store = root.join("store");
+        std::fs::write(root.join("a.txt"), b"needle one\n").unwrap();
+        std::fs::write(root.join("b.txt"), b"nothing to see here\n").unwrap();
+        std::fs::write(root.join("c.txt"), b"needle two\n").unwrap();
+        build_store(&root, &store, &BuildConfig::default()).unwrap();
+
+        let cfg = SearchConfig::default();
+        let (m1, s1) = search_store(&store, "needle", &cfg).unwrap();
+        assert!(
+            s1.total_files_pruned >= 1,
+            "the fixture must give the filter something to prune or the \
+             comparison means nothing (pruned {})",
+            s1.total_files_pruned
+        );
+
+        let _guard = crate::ABLATE_EXTENTS_LOCK.lock().unwrap();
+        crate::set_ablate_extents(true);
+        let (m2, s2) = search_store(&store, "needle", &cfg).unwrap();
+        crate::set_ablate_extents(false);
+
+        assert_eq!(m1, m2, "the ablation may change cost, never answers");
+        assert_eq!(
+            s1.total_files_pruned, s2.total_files_pruned,
+            "the same files are answered without reading either way"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

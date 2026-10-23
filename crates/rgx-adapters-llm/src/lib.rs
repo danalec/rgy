@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Machine-learning model file adapters.
 //!
 //! These never extract weights (multi-GB payloads of floats are useless for
@@ -14,40 +16,119 @@ extern crate alloc;
 extern crate std;
 
 use alloc::boxed::Box;
-use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use core::fmt::Write as _;
-use core::str;
-use rgx_core::{bail, Context, Result};
-use rgx_core::{Adapter, Outcome};
+use rgx_core::Adapter;
 
+// The safetensors, npy, protobuf and tiktoken adapters name `String` in
+// their own code; the gguf adapter only builds one through `format!`.
+#[cfg(any(
+    feature = "safetensors",
+    feature = "npy",
+    feature = "protobuf",
+    feature = "tiktoken"
+))]
+use alloc::string::String;
+
+// The gguf, npy and tiktoken adapters turn a number into a `String`.
+#[cfg(any(feature = "gguf", feature = "npy", feature = "tiktoken"))]
+use alloc::string::ToString;
+
+// Only the safetensors adapter reads its header as text.
+#[cfg(feature = "safetensors")]
+use core::str;
+
+// The safetensors, protobuf and tiktoken adapters write into their
+// report.
+#[cfg(any(feature = "safetensors", feature = "protobuf", feature = "tiktoken"))]
+use core::fmt::Write as _;
+
+// The gguf and npy adapters report a broken file.
+#[cfg(any(feature = "gguf", feature = "npy"))]
+use rgx_core::bail;
+
+// Every adapter declines a file it does not recognise.
+#[cfg(any(
+    feature = "gguf",
+    feature = "safetensors",
+    feature = "npy",
+    feature = "protobuf",
+    feature = "tiktoken"
+))]
+use rgx_core::decline;
+
+// Only the safetensors adapter attaches a context to a failure.
+#[cfg(feature = "safetensors")]
+use rgx_core::Context;
+
+// Every adapter answers with a `Result`.
+#[cfg(any(
+    feature = "gguf",
+    feature = "safetensors",
+    feature = "npy",
+    feature = "protobuf",
+    feature = "tiktoken"
+))]
+use rgx_core::Result;
+
+// The gguf and safetensors adapters report facts.
+#[cfg(any(feature = "gguf", feature = "safetensors"))]
+use rgx_core::Field;
+
+// Every adapter answers with an `Outcome`.
+#[cfg(any(
+    feature = "gguf",
+    feature = "safetensors",
+    feature = "npy",
+    feature = "protobuf",
+    feature = "tiktoken"
+))]
+use rgx_core::Outcome;
+
+// The gguf and npy adapters read little-endian integers out of the file.
+#[cfg(any(feature = "gguf", feature = "npy"))]
 fn rd_u16(b: &[u8], o: usize) -> u16 {
     u16::from_le_bytes([b[o], b[o + 1]])
 }
+#[cfg(any(feature = "gguf", feature = "npy"))]
 fn rd_u32(b: &[u8], o: usize) -> u32 {
     u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
 }
+// The gguf and safetensors adapters read a little-endian `u64`.
+#[cfg(any(feature = "gguf", feature = "safetensors"))]
 fn rd_u64(b: &[u8], o: usize) -> u64 {
     u64::from_le_bytes(b[o..o + 8].try_into().unwrap())
 }
+// Only the gguf adapter reads a float out of the file.
+#[cfg(feature = "gguf")]
 fn rd_f32(b: &[u8], o: usize) -> f32 {
     f32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
 }
+#[cfg(feature = "gguf")]
 fn rd_f64(b: &[u8], o: usize) -> f64 {
     f64::from_le_bytes(b[o..o + 8].try_into().unwrap())
 }
 
+// The keras, torch and pickle adapters live in `extra.rs`.
+#[cfg(any(feature = "keras", feature = "torch", feature = "pickle"))]
 mod extra;
 
 pub fn adapters() -> Vec<Box<dyn Adapter>> {
     vec![
+        #[cfg(feature = "gguf")]
         Box::new(Gguf),
+        #[cfg(feature = "safetensors")]
         Box::new(Safetensors),
+        #[cfg(feature = "npy")]
         Box::new(Npy),
+        #[cfg(feature = "protobuf")]
         Box::new(Protobuf),
+        #[cfg(feature = "tiktoken")]
         Box::new(Tiktoken),
+        #[cfg(feature = "keras")]
         Box::new(extra::KerasZip),
+        #[cfg(feature = "torch")]
         Box::new(extra::Torch),
+        #[cfg(feature = "pickle")]
         Box::new(extra::PickleStrings),
     ]
 }
@@ -57,7 +138,9 @@ pub fn adapters() -> Vec<Box<dyn Adapter>> {
 /// Layout: magic "GGUF", u32 version, u64 n_tensors, u64 n_kv, then n_kv
 /// entries of: string key, u32 value-type, value. Strings are u64-len
 /// prefixed; array values are u32-type + u64-len + elements.
+#[cfg(feature = "gguf")]
 pub struct Gguf;
+#[cfg(feature = "gguf")]
 impl Adapter for Gguf {
     fn name(&self) -> &'static str {
         "gguf"
@@ -67,7 +150,7 @@ impl Adapter for Gguf {
     }
     fn extract(&self, data: &[u8], _path: &str) -> Result<Outcome> {
         if data.len() < 24 || &data[0..4] != b"GGUF" {
-            bail!("not a GGUF file (bad magic)");
+            decline!("not a GGUF file (bad magic)");
         }
         let version = rd_u32(data, 4);
         if version > 3 {
@@ -210,10 +293,192 @@ impl Adapter for Gguf {
         // already reported counts in header; tensor names are nice-to-have, skip safely
         Ok(Outcome::Text(out.into_bytes()))
     }
+
+    /// The facts the `--filter` asks about: how many tensors the header
+    /// declares.
+    ///
+    /// The summary reads the key/value metadata and stops there -- the
+    /// tensor directory is not walked -- so the names and the shapes of
+    /// the tensors are not facts this adapter can honestly report. The
+    /// count is, and it is the count the header carries.
+    fn facts(&self, data: &[u8], _path: &str) -> Vec<Field> {
+        if data.len() < 24 || &data[0..4] != b"GGUF" {
+            return Vec::new();
+        }
+        vec![Field::new("tensor.count", &rd_u64(data, 8).to_string())]
+    }
+}
+
+/// One tensor as the safetensors header describes it.
+#[cfg(feature = "safetensors")]
+struct TensorInfo {
+    name: String,
+    dtype: String,
+    shape: Vec<Option<u64>>,
+}
+
+/// What a safetensors header holds: its metadata and its tensors.
+#[cfg(feature = "safetensors")]
+struct StHeader {
+    /// The `__metadata__` entries, in the order the summary prints them.
+    meta: Vec<(String, String)>,
+    /// The tensors, in the order the summary prints them.
+    tensors: Vec<TensorInfo>,
+}
+
+/// The shape as the summary renders it: `[2x3]`, with a `?` for a
+/// dimension the header did not give.
+///
+/// The summary and the fact share this one function, so the value a
+/// filter sees is the value the text shows.
+#[cfg(feature = "safetensors")]
+fn shape_text(shape: &[Option<u64>]) -> String {
+    let mut out = String::from("[");
+    for (i, s) in shape.iter().enumerate() {
+        if i > 0 {
+            out.push('x');
+        }
+        match s {
+            Some(u) => {
+                let _ = write!(out, "{u}");
+            }
+            None => out.push('?'),
+        }
+    }
+    out.push(']');
+    out
+}
+
+/// Read a safetensors header: its metadata and its tensors.
+///
+/// `Ok(None)` means the file is not a safetensors file -- too small, or
+/// with a header length that does not fit. A header that is there and
+/// broken is an error, with the context the summary gives it.
+#[cfg(feature = "safetensors")]
+fn st_read(data: &[u8]) -> Result<Option<StHeader>> {
+    if data.len() < 8 {
+        return Ok(None);
+    }
+    let hlen = rd_u64(data, 0) as usize;
+    // saturating_sub: an absurd hlen must fail the bound, not the
+    // addition (8 + hlen overflowed with hlen = usize::MAX)
+    if hlen == 0 || hlen > (1 << 26) || hlen > data.len().saturating_sub(8) {
+        return Ok(None);
+    }
+    let text = str::from_utf8(&data[8..8 + hlen]).context("safetensors header is not UTF-8")?;
+    // The lazy walk, not the Arena parser: the summary reads two
+    // fields per tensor and the metadata strings -- `data_offsets`
+    // and any extra fields are validated and never materialised.
+    // Every walk error takes the same context the Arena parser's
+    // errors took. The output keeps the Arena parser's key order
+    // (first-appearance rank) and its last-wins duplicate
+    // semantics, pinned byte for byte by the golden tests.
+    let mut doc = rgx_core::djson::ondemand::Ondemand::new(text)
+        .map_err(rgx_core::Error::msg)
+        .context("safetensors header is not JSON")?;
+    let jerr = |e: rgx_core::djson::parser::JsonParseError| {
+        rgx_core::Error::msg(e).context("safetensors header is not JSON")
+    };
+
+    // Collected in source order, deduped last-wins by key name -- the
+    // `BTreeMap` lookup semantics of the parser being replaced.
+    let mut meta: Vec<(String, String)> = Vec::new();
+    let mut tensors: Vec<TensorInfo> = Vec::new();
+
+    let mut root = doc.root().map_err(jerr)?;
+    if root.is_object().map_err(jerr)? {
+        root.object_entries(|k, mut v| {
+            if k.as_ref() == "__metadata__" {
+                // The LAST `__metadata__` entry wins outright.
+                meta.clear();
+                if v.is_object()? {
+                    v.object_entries(|mk, mv| {
+                        let key = mk.into_owned();
+                        let val = mv
+                            .as_str()?
+                            .map(|s| s.into_owned())
+                            .unwrap_or_else(|| String::from("?"));
+                        match meta.iter_mut().find(|(ek, _)| *ek == key) {
+                            Some(slot) => slot.1 = val,
+                            None => meta.push((key, val)),
+                        }
+                        Ok(true)
+                    })?;
+                } else {
+                    v.skip()?;
+                }
+                return Ok(true);
+            }
+            let name = k.into_owned();
+            let mut dtype = String::from("?");
+            let mut shape: Vec<Option<u64>> = Vec::new();
+            if v.is_object()? {
+                v.object_entries(|tk, mut tv| {
+                    match tk.as_ref() {
+                        "dtype" => {
+                            dtype = tv
+                                .as_str()?
+                                .map(|s| s.into_owned())
+                                .unwrap_or_else(|| String::from("?"));
+                        }
+                        "shape" => {
+                            // Last `shape` key wins, and a
+                            // non-array one prints as empty.
+                            shape.clear();
+                            if tv.is_array()? {
+                                tv.array_items(|_, item| {
+                                    shape.push(item.as_u64()?);
+                                    Ok(true)
+                                })?;
+                            }
+                        }
+                        _ => {}
+                    }
+                    Ok(true)
+                })?;
+            } else {
+                v.skip()?;
+            }
+            match tensors.iter_mut().find(|t| t.name == name) {
+                Some(slot) => *slot = TensorInfo { name, dtype, shape },
+                None => tensors.push(TensorInfo { name, dtype, shape }),
+            }
+            Ok(true)
+        })
+        .map_err(jerr)?;
+    } else {
+        root.skip().map_err(jerr)?;
+    }
+    doc.finish().map_err(jerr)?;
+
+    // Sort both groups into the Arena parser's iteration order:
+    // ascending first-appearance rank of the key string anywhere in
+    // the document. One rank pass answers every name at once.
+    let mut rank_names: Vec<&str> = meta.iter().map(|(k, _)| k.as_str()).collect();
+    rank_names.extend(tensors.iter().map(|t| t.name.as_str()));
+    let ranks = doc.first_string_positions(&rank_names);
+    let mut rank_of: alloc::collections::BTreeMap<&str, usize> =
+        alloc::collections::BTreeMap::new();
+    for (n, r) in rank_names.iter().zip(ranks) {
+        rank_of.entry(*n).or_insert(r);
+    }
+    let meta_ranks: Vec<usize> = meta.iter().map(|(k, _)| rank_of[k.as_str()]).collect();
+    let tensor_ranks: Vec<usize> = tensors.iter().map(|t| rank_of[t.name.as_str()]).collect();
+    drop(rank_of);
+    let mut tagged: Vec<(usize, (String, String))> = meta.into_iter().enumerate().collect();
+    tagged.sort_by_key(|(i, _)| meta_ranks[*i]);
+    let meta: Vec<(String, String)> = tagged.into_iter().map(|(_, e)| e).collect();
+    let mut tagged: Vec<(usize, TensorInfo)> = tensors.into_iter().enumerate().collect();
+    tagged.sort_by_key(|(i, _)| tensor_ranks[*i]);
+    let tensors: Vec<TensorInfo> = tagged.into_iter().map(|(_, t)| t).collect();
+
+    Ok(Some(StHeader { meta, tensors }))
 }
 
 /// Hugging Face safetensors: 8-byte LE header length + JSON header.
+#[cfg(feature = "safetensors")]
 pub struct Safetensors;
+#[cfg(feature = "safetensors")]
 impl Adapter for Safetensors {
     fn name(&self) -> &'static str {
         "safetensors"
@@ -223,154 +488,57 @@ impl Adapter for Safetensors {
     }
     fn extract(&self, data: &[u8], _path: &str) -> Result<Outcome> {
         if data.len() < 8 {
-            bail!("too small for safetensors");
+            decline!("too small for safetensors");
         }
-        let hlen = rd_u64(data, 0) as usize;
-        // saturating_sub: an absurd hlen must fail the bound, not the
-        // addition (8 + hlen overflowed with hlen = usize::MAX)
-        if hlen == 0 || hlen > (1 << 26) || hlen > data.len().saturating_sub(8) {
-            bail!("bad safetensors header length");
-        }
-        let text = str::from_utf8(&data[8..8 + hlen]).context("safetensors header is not UTF-8")?;
-        // The lazy walk, not the Arena parser: the summary reads two
-        // fields per tensor and the metadata strings -- `data_offsets`
-        // and any extra fields are validated and never materialised.
-        // Every walk error takes the same context the Arena parser's
-        // errors took. The output keeps the Arena parser's key order
-        // (first-appearance rank) and its last-wins duplicate
-        // semantics, pinned byte for byte by the golden tests.
-        let mut doc = rgx_core::djson::ondemand::Ondemand::new(text)
-            .map_err(rgx_core::Error::msg)
-            .context("safetensors header is not JSON")?;
-        let jerr = |e: rgx_core::djson::parser::JsonParseError| {
-            rgx_core::Error::msg(e).context("safetensors header is not JSON")
+        let Some(header) = st_read(data)? else {
+            decline!("bad safetensors header length");
         };
-
-        // Collected in source order, deduped last-wins by key name --
-        // the `BTreeMap` lookup semantics of the parser being replaced.
-        struct TensorLine {
-            name: String,
-            dtype: String,
-            shape: Vec<Option<u64>>,
-        }
-        let mut meta: Vec<(String, String)> = Vec::new();
-        let mut tensors: Vec<TensorLine> = Vec::new();
-
-        let mut root = doc.root().map_err(jerr)?;
-        if root.is_object().map_err(jerr)? {
-            root.object_entries(|k, mut v| {
-                if k.as_ref() == "__metadata__" {
-                    // The LAST `__metadata__` entry wins outright.
-                    meta.clear();
-                    if v.is_object()? {
-                        v.object_entries(|mk, mv| {
-                            let key = mk.into_owned();
-                            let val = mv
-                                .as_str()?
-                                .map(|s| s.into_owned())
-                                .unwrap_or_else(|| String::from("?"));
-                            match meta.iter_mut().find(|(ek, _)| *ek == key) {
-                                Some(slot) => slot.1 = val,
-                                None => meta.push((key, val)),
-                            }
-                            Ok(true)
-                        })?;
-                    } else {
-                        v.skip()?;
-                    }
-                    return Ok(true);
-                }
-                let name = k.into_owned();
-                let mut dtype = String::from("?");
-                let mut shape: Vec<Option<u64>> = Vec::new();
-                if v.is_object()? {
-                    v.object_entries(|tk, mut tv| {
-                        match tk.as_ref() {
-                            "dtype" => {
-                                dtype = tv
-                                    .as_str()?
-                                    .map(|s| s.into_owned())
-                                    .unwrap_or_else(|| String::from("?"));
-                            }
-                            "shape" => {
-                                // Last `shape` key wins, and a
-                                // non-array one prints as empty.
-                                shape.clear();
-                                if tv.is_array()? {
-                                    tv.array_items(|_, item| {
-                                        shape.push(item.as_u64()?);
-                                        Ok(true)
-                                    })?;
-                                }
-                            }
-                            _ => {}
-                        }
-                        Ok(true)
-                    })?;
-                } else {
-                    v.skip()?;
-                }
-                match tensors.iter_mut().find(|t| t.name == name) {
-                    Some(slot) => *slot = TensorLine { name, dtype, shape },
-                    None => tensors.push(TensorLine { name, dtype, shape }),
-                }
-                Ok(true)
-            })
-            .map_err(jerr)?;
-        } else {
-            root.skip().map_err(jerr)?;
-        }
-        doc.finish().map_err(jerr)?;
-
-        // Sort both groups into the Arena parser's iteration order:
-        // ascending first-appearance rank of the key string anywhere in
-        // the document. One rank pass answers every name at once.
-        let mut rank_names: Vec<&str> = meta.iter().map(|(k, _)| k.as_str()).collect();
-        rank_names.extend(tensors.iter().map(|t| t.name.as_str()));
-        let ranks = doc.first_string_positions(&rank_names);
-        let mut rank_of: alloc::collections::BTreeMap<&str, usize> =
-            alloc::collections::BTreeMap::new();
-        for (n, r) in rank_names.iter().zip(ranks) {
-            rank_of.entry(*n).or_insert(r);
-        }
-        let meta_ranks: Vec<usize> = meta.iter().map(|(k, _)| rank_of[k.as_str()]).collect();
-        let tensor_ranks: Vec<usize> = tensors.iter().map(|t| rank_of[t.name.as_str()]).collect();
-        drop(rank_of);
-        let mut tagged: Vec<(usize, (String, String))> = meta.into_iter().enumerate().collect();
-        tagged.sort_by_key(|(i, _)| meta_ranks[*i]);
-        let meta: Vec<(String, String)> = tagged.into_iter().map(|(_, e)| e).collect();
-        let mut tagged: Vec<(usize, TensorLine)> = tensors.into_iter().enumerate().collect();
-        tagged.sort_by_key(|(i, _)| tensor_ranks[*i]);
-        let tensors: Vec<TensorLine> = tagged.into_iter().map(|(_, t)| t).collect();
-
         use core::fmt::Write as _;
         let mut out = String::new();
-        for (k, v) in &meta {
+        for (k, v) in &header.meta {
             let _ = writeln!(out, "{k}: {v}");
         }
-        for t in &tensors {
-            let _ = write!(out, "tensor {}: dtype={} shape=[", t.name, t.dtype);
-            for (i, s) in t.shape.iter().enumerate() {
-                if i > 0 {
-                    let _ = write!(out, "x");
-                }
-                match s {
-                    Some(u) => {
-                        let _ = write!(out, "{u}");
-                    }
-                    None => {
-                        let _ = write!(out, "?");
-                    }
-                }
-            }
-            let _ = writeln!(out, "]");
+        for t in &header.tensors {
+            let _ = writeln!(
+                out,
+                "tensor {}: dtype={} shape={}",
+                t.name,
+                t.dtype,
+                shape_text(&t.shape)
+            );
         }
         Ok(Outcome::Text(out.into_bytes()))
+    }
+
+    /// The facts the `--filter` asks about: one per tensor.
+    ///
+    /// The names are `tensor.name`, `tensor.shape` and `tensor.dtype`,
+    /// so `tensor:name:transformer` asks for a tensor whose name says
+    /// so, `tensor:shape` asks whether the model has a tensor at all,
+    /// and `tensor:shape:768` asks for one whose shape says 768.
+    fn facts(&self, data: &[u8], _path: &str) -> Vec<Field> {
+        let Ok(Some(header)) = st_read(data) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for t in &header.tensors {
+            out.push(Field::new("tensor.name", &t.name));
+            out.push(Field::new("tensor.shape", &shape_text(&t.shape)));
+            // The dtype is a fact only when the header gave one: the
+            // summary prints "?" for a tensor whose dtype it could not
+            // read, and "?" is not a dtype.
+            if !t.dtype.is_empty() && t.dtype != "?" {
+                out.push(Field::new("tensor.dtype", &t.dtype));
+            }
+        }
+        out
     }
 }
 
 /// NumPy .npy v1/v2: magic \x93NUMPY, version, header-length, header dict.
+#[cfg(feature = "npy")]
 pub struct Npy;
+#[cfg(feature = "npy")]
 impl Adapter for Npy {
     fn name(&self) -> &'static str {
         "npy"
@@ -380,7 +548,7 @@ impl Adapter for Npy {
     }
     fn extract(&self, data: &[u8], _path: &str) -> Result<Outcome> {
         if data.len() < 10 || &data[0..6] != b"\x93NUMPY" {
-            bail!("not an npy file (bad magic)");
+            decline!("not an npy file (bad magic)");
         }
         let major = data[6];
         let (hlen, hoff) = match major {
@@ -454,22 +622,34 @@ impl Adapter for Npy {
 /// Protobuf wire format: walk fields, print printable length-delimited
 /// payloads (architecture strings, vocab entries, names). Covers
 /// .onnx/.pb/.model without pulling a full protobuf stack.
+#[cfg(feature = "protobuf")]
 pub struct Protobuf;
+#[cfg(feature = "protobuf")]
 impl Adapter for Protobuf {
     fn name(&self) -> &'static str {
         "protobuf"
     }
     fn extensions(&self) -> &'static [&'static str] {
-        &["pb", "onnx", "model", "tflite", "pt2", "mlmodel"]
+        // `tflite` and `pt2` were listed here and are deliberately NOT. A
+        // TFLite model is FlatBuffers and a `.pt2` is a zipped torch archive,
+        // so the plausibility check below either refused them (LOUD, a wrong
+        // adapter claiming an extension it cannot read) or, worse, accepted a
+        // FlatBuffers buffer whose first 16 bytes hold no NUL and rendered it
+        // as protobuf field names that do not exist. Claiming the extension an
+        // adapter cannot read is how a wrong answer gets printed with
+        // confidence; leaving it unclaimed is not a gap, because an unclaimed
+        // extension falls through to the raw search and keeps `rg`'s answer.
+        // `pt2` belongs to extra::Torch, and `tflite` has no reader here yet.
+        &["pb", "onnx", "model", "mlmodel"]
     }
     fn extract(&self, data: &[u8], _path: &str) -> Result<Outcome> {
         // cheap plausibility check: a protobuf usually starts with a
         // field tag (varint key != 0) and has no NULs in the first 16 bytes
         if data.len() < 8 || data[0] == 0 {
-            bail!("not plausibly protobuf");
+            decline!("not plausibly protobuf");
         }
         if data[..16.min(data.len())].contains(&0) {
-            bail!("NUL in protobuf header region");
+            decline!("NUL in protobuf header region");
         }
         let mut out = String::new();
         let mut p = 0usize;
@@ -635,7 +815,7 @@ impl Adapter for Protobuf {
             }
         }
         if out.trim().is_empty() {
-            bail!("no printable protobuf content found");
+            decline!("no printable protobuf content found");
         }
         Ok(Outcome::Text(out.into_bytes()))
     }
@@ -643,7 +823,9 @@ impl Adapter for Protobuf {
 
 /// OpenAI tiktoken `.tiktoken` vocabularies: lines of `base64 rank`.
 /// Decoding each token makes the vocabulary greppable as plain text.
+#[cfg(feature = "tiktoken")]
 pub struct Tiktoken;
+#[cfg(feature = "tiktoken")]
 impl Adapter for Tiktoken {
     fn name(&self) -> &'static str {
         "tiktoken"
@@ -657,10 +839,10 @@ impl Adapter for Tiktoken {
         let first = String::from_utf8_lossy(&data[..first_nl]);
         let mut parts = first.split_whitespace();
         let (Some(tok), Some(rank), None) = (parts.next(), parts.next(), parts.next()) else {
-            bail!("not a tiktoken file (expected '<base64> <rank>')");
+            decline!("not a tiktoken file (expected '<base64> <rank>')");
         };
         if rank.parse::<u64>().is_err() || rgx_core::base64::base64_decode_strict(tok).is_err() {
-            bail!("not a tiktoken file (bad line shape)");
+            decline!("not a tiktoken file (bad line shape)");
         }
         let mut out = String::new();
         for line in String::from_utf8_lossy(data).lines().take(1_000_000) {
@@ -678,12 +860,22 @@ impl Adapter for Tiktoken {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(
+        feature = "gguf",
+        feature = "safetensors",
+        feature = "npy",
+        feature = "protobuf",
+        feature = "tiktoken"
+    )
+))]
 mod tests {
     use super::*;
 
     /// libFuzzer-found: hlen = u64::MAX as usize made `8 + hlen` overflow
     /// in the bound check itself. Must bail, never panic.
+    #[cfg(feature = "safetensors")]
     #[test]
     fn safetensors_absurd_header_length() {
         let mut data = u64::MAX.to_le_bytes().to_vec();
@@ -693,6 +885,7 @@ mod tests {
 
     /// libFuzzer-found: klen/vlen of usize::MAX in the GGUF kv walk
     /// overflowed `p + len + 4`, and u64 values could dangle past EOF.
+    #[cfg(feature = "gguf")]
     #[test]
     fn gguf_absurd_lengths_and_tail_values() {
         let mut data = b"GGUF".to_vec();
@@ -713,6 +906,7 @@ mod tests {
         assert!(Gguf.extract(&data, "m.gguf").is_ok());
     }
 
+    #[cfg(feature = "safetensors")]
     #[test]
     fn safetensors_header() {
         let mut header = br#"{"__metadata__":{"format":"pt"},"w":{"dtype":"F32","shape":[2,3],"data_offsets":[0,24]}}"#.to_vec();
@@ -730,6 +924,7 @@ mod tests {
     }
 
     /// Wrap a JSON header in the 8-byte-length prefix safetensors uses.
+    #[cfg(feature = "safetensors")]
     fn st_wrap(header: &[u8]) -> Vec<u8> {
         let mut data = (header.len() as u64).to_le_bytes().to_vec();
         data.extend_from_slice(header);
@@ -741,6 +936,7 @@ mod tests {
     /// `zeta` before it appears as a root key, so its tensor line
     /// leads `mid` even though `mid` comes first in the source. The
     /// lazy walk must reproduce this intern-rank order exactly.
+    #[cfg(feature = "safetensors")]
     #[test]
     fn safetensors_output_is_pinned_byte_for_byte() {
         let header = br#"{"zeta":{"shape":["alpha"]},"mid":{"dtype":"F16","shape":[1]},"alpha":{"dtype":"BF16","shape":[8]},"__metadata__":{"z":"1"}}"#;
@@ -763,6 +959,7 @@ tensor mid: dtype=F16 shape=[1]\n"
     /// Golden: `__metadata__` keys come out in intern-rank order too,
     /// duplicate keys keep the last value, and a non-string value
     /// prints `?` -- the `as_str().unwrap_or("?")` contract.
+    #[cfg(feature = "safetensors")]
     #[test]
     fn safetensors_metadata_order_dedupe_and_types() {
         let header = br#"{"w":{"dtype":"U8","shape":["meta"]},"__metadata__":{"z":"1","meta":"2","dup":"old","dup":"new","n":7}}"#;
@@ -785,6 +982,7 @@ tensor w: dtype=U8 shape=[?]\n"
 
     /// Duplicate tensor names collapse to the last entry, matching the
     /// Arena parser's `BTreeMap` lookup.
+    #[cfg(feature = "safetensors")]
     #[test]
     fn safetensors_duplicate_tensor_names_take_the_last_value() {
         let header = br#"{"a":{"dtype":"F32","shape":[1]},"a":{"dtype":"BF16","shape":[2,3]}}"#;
@@ -800,6 +998,7 @@ tensor w: dtype=U8 shape=[?]\n"
 
     /// An invalid header is an adapter failure with its context
     /// message, not a silent empty summary.
+    #[cfg(feature = "safetensors")]
     #[test]
     fn safetensors_invalid_json_reports_the_context_error() {
         let err = match Safetensors.extract(&st_wrap(br#"{"a": 01}"#), "m.safetensors") {
@@ -810,6 +1009,98 @@ tensor w: dtype=U8 shape=[?]\n"
         assert!(msg.contains("safetensors header is not JSON"), "{msg}");
     }
 
+    /// The facts a `--filter` asks about: one per tensor, with the
+    /// names the header gives them.
+    #[cfg(feature = "safetensors")]
+    #[test]
+    fn safetensors_facts_report_every_tensor_name_and_shape() {
+        let header = br#"{"w":{"dtype":"F32","shape":[2,3]},"b":{"dtype":"BF16","shape":[768]}}"#;
+        let facts = Safetensors.facts(&st_wrap(header), "m.safetensors");
+        let names: Vec<&str> = facts
+            .iter()
+            .filter(|f| f.name == "tensor.name")
+            .map(|f| f.value.as_str())
+            .collect();
+        assert_eq!(names, vec!["w", "b"]);
+        let shapes: Vec<&str> = facts
+            .iter()
+            .filter(|f| f.name == "tensor.shape")
+            .map(|f| f.value.as_str())
+            .collect();
+        assert_eq!(shapes, vec!["[2x3]", "[768]"]);
+        let dtypes: Vec<&str> = facts
+            .iter()
+            .filter(|f| f.name == "tensor.dtype")
+            .map(|f| f.value.as_str())
+            .collect();
+        assert_eq!(dtypes, vec!["F32", "BF16"]);
+    }
+
+    /// A model with no tensor must not report one: `tensor:name` has to
+    /// be false for a header that holds only metadata.
+    #[cfg(feature = "safetensors")]
+    #[test]
+    fn safetensors_facts_report_no_tensor_name_without_a_tensor() {
+        let facts = Safetensors.facts(
+            &st_wrap(br#"{"__metadata__":{"format":"pt"}}"#),
+            "m.safetensors",
+        );
+        assert!(
+            facts.iter().all(|f| f.name != "tensor.name"),
+            "a model with no tensor must not report one: {facts:?}"
+        );
+        let e = rgx_core::filter::parse("tensor:name").expect("parses");
+        assert!(
+            !rgx_core::filter::matches(&e, &facts),
+            "the filter must not match a model with no tensor: {facts:?}"
+        );
+    }
+
+    /// The dtype is a fact when the header gave one, and not when it
+    /// did not: "?" is the summary's way of saying "I could not read
+    /// it", and "?" is not a dtype.
+    #[cfg(feature = "safetensors")]
+    #[test]
+    fn safetensors_facts_report_the_dtype_only_when_the_header_gives_one() {
+        let facts = Safetensors.facts(&st_wrap(br#"{"w":{"shape":[1]}}"#), "m.safetensors");
+        assert!(facts.iter().all(|f| f.name != "tensor.dtype"), "{facts:?}");
+    }
+
+    /// A filter asks about the facts by name: `tensor:name:transformer`
+    /// is the question "is there a tensor whose name says transformer?".
+    #[cfg(feature = "safetensors")]
+    #[test]
+    fn a_filter_asks_a_safetensors_model_about_its_tensors() {
+        let header = br#"{"model.transformer.w":{"dtype":"F32","shape":[2,3]}}"#;
+        let facts = Safetensors.facts(&st_wrap(header), "m.safetensors");
+        let e = rgx_core::filter::parse("tensor:name:transformer").expect("parses");
+        assert!(
+            rgx_core::filter::matches(&e, &facts),
+            "the tensor name must be findable: {facts:?}"
+        );
+        let e = rgx_core::filter::parse("tensor:shape").expect("parses");
+        assert!(
+            rgx_core::filter::matches(&e, &facts),
+            "a model with tensors must answer the shape question: {facts:?}"
+        );
+    }
+
+    /// The GGUF summary reads the key/value metadata and not the tensor
+    /// directory, so the count is the fact it can honestly report.
+    #[cfg(feature = "gguf")]
+    #[test]
+    fn gguf_facts_report_the_tensor_count() {
+        let mut data = b"GGUF".to_vec();
+        data.extend_from_slice(&3u32.to_le_bytes()); // version
+        data.extend_from_slice(&7u64.to_le_bytes()); // tensor count
+        data.extend_from_slice(&0u64.to_le_bytes()); // kv count
+        let facts = Gguf.facts(&data, "m.gguf");
+        assert_eq!(facts.len(), 1, "{facts:?}");
+        assert_eq!(facts[0].name, "tensor.count");
+        assert_eq!(facts[0].value, "7");
+    }
+
+    #[cfg(feature = "npy")]
     #[test]
     fn npy_v1_header() {
         let mut data = b"\x93NUMPY\x01\x00".to_vec();
@@ -832,6 +1123,7 @@ tensor w: dtype=U8 shape=[?]\n"
         }
     }
 
+    #[cfg(feature = "tiktoken")]
     #[test]
     fn tiktoken_decodes() {
         // base64 of "hello"
@@ -846,9 +1138,19 @@ tensor w: dtype=U8 shape=[?]\n"
         }
     }
 
+    #[cfg(all(
+        test,
+        any(
+            feature = "gguf",
+            feature = "safetensors",
+            feature = "npy",
+            feature = "protobuf"
+        )
+    ))]
     mod fuzz {
         use super::*;
 
+        #[cfg(feature = "safetensors")]
         fn safetensors_fixture() -> Vec<u8> {
             let header = br#"{"__metadata__":{"format":"pt"},"w":{"dtype":"F32","shape":[2,3],"data_offsets":[0,24]}}"#.to_vec();
             let mut data = (header.len() as u64).to_le_bytes().to_vec();
@@ -857,6 +1159,7 @@ tensor w: dtype=U8 shape=[?]\n"
             data
         }
 
+        #[cfg(feature = "npy")]
         fn npy_fixture() -> Vec<u8> {
             let mut data = b"\x93NUMPY\x01\x00".to_vec();
             let hdr = b"{'descr': '<f4', 'fortran_order': False, 'shape': (2, 3), }";
@@ -869,6 +1172,7 @@ tensor w: dtype=U8 shape=[?]\n"
             data
         }
 
+        #[cfg(feature = "safetensors")]
         #[test]
         fn safetensors_never_panics_on_mutation() {
             rgx_core::fuzzkit::assert_never_panics(
@@ -881,6 +1185,20 @@ tensor w: dtype=U8 shape=[?]\n"
             );
         }
 
+        #[cfg(feature = "safetensors")]
+        #[test]
+        fn safetensors_facts_never_panics_on_mutation() {
+            rgx_core::fuzzkit::assert_never_panics(
+                vec![("st", safetensors_fixture()), ("empty", vec![])],
+                1200,
+                "safetensors-facts",
+                |data| {
+                    let _ = Safetensors.facts(data, "fuzz.safetensors");
+                },
+            );
+        }
+
+        #[cfg(feature = "npy")]
         #[test]
         fn npy_never_panics_on_mutation() {
             rgx_core::fuzzkit::assert_never_panics(
@@ -897,6 +1215,7 @@ tensor w: dtype=U8 shape=[?]\n"
             );
         }
 
+        #[cfg(feature = "gguf")]
         #[test]
         fn gguf_never_panics_on_mutation() {
             // minimal GGUF v3 header: magic, version, tensor_count, metadata_kv_count
@@ -918,6 +1237,7 @@ tensor w: dtype=U8 shape=[?]\n"
             );
         }
 
+        #[cfg(feature = "protobuf")]
         #[test]
         fn protobuf_never_panics_on_mutation() {
             // a couple of protobuf key/value varints

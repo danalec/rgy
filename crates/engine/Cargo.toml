@@ -2,8 +2,9 @@
 name = "engine"
 version = "0.1.0"
 edition = "2024"
+authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
 description = "Orchestration: keep-warm, TV pack store glue"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
 
 [dependencies]
 discovery = { path = "../discovery" }

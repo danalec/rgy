@@ -138,8 +138,21 @@ pub fn walk_root(root: &Path, store: &Path, config: &BuildConfig) -> io::Result<
     // Never descend into the store. The walker starts at the canonicalised
     // root, so the store's canonical path is exactly what it would yield for
     // that directory.
+    //
+    // The repository's own state is skipped here too, and for the same
+    // reason the direct walker skips it: it is metadata about the corpus,
+    // not the corpus. A `.gitignore` is a file and is still read.
     let store_dir_to_prune = store.to_path_buf();
-    builder.filter_entry(move |e| e.path() != store_dir_to_prune);
+    builder.filter_entry(move |e| {
+        if e.path() == store_dir_to_prune {
+            return false;
+        }
+        let is_vcs = e.file_type().is_some_and(|t| t.is_dir())
+            && e.file_name()
+                .to_str()
+                .is_some_and(crate::walk_policy::is_vcs_dir);
+        !is_vcs
+    });
 
     if !config.globs.is_empty() {
         let mut ob = OverrideBuilder::new(".");
@@ -164,21 +177,93 @@ pub fn walk_root(root: &Path, store: &Path, config: &BuildConfig) -> io::Result<
 
 pub type PreExtractor = dyn Fn(&str, &[u8]) -> Option<Vec<(String, Vec<u8>)>> + Send + Sync;
 
+/// The texts a searcher may see for a record *in addition to* the record's
+/// own bytes: every unit and `[rgx: ...]` note [`crate::process`] hands the
+/// search after the adapter pipeline runs. The stored signature is rolled up
+/// over these so a filter may reject an adapter-claimed file before its bytes
+/// are read. Returning too little loses matches, returning more (the raw
+/// bytes included) only costs prunes, so the hook mirrors the extraction
+/// hook's answer -- `Some(units)` when the pipeline answers for the file,
+/// flattened to bytes -- and one closure can serve both roles without the
+/// two disagreeing about what a file contains.
+pub type UnitSigner = dyn Fn(&str, &[u8]) -> Vec<Vec<u8>> + Send + Sync;
+
+/// The separators a member record's name can carry.
+///
+/// `!` is the separator the runtime path uses between a container and its
+/// member (`a.zip!member.txt`); `#` is the shape [`member_rel`] falls back
+/// to when a member's name does not already start with its container's;
+/// `/` is the path separator, which a member's own name can hold
+/// (`a.zip!docs/report.pdf`).
+///
+/// Every place that reads a record name back has to know all three: a
+/// prefix cut at the wrong separator names a path that does not exist, and
+/// a member whose owner cannot be found is a record whose answer is
+/// thrown away.
+pub const MEMBER_SEPARATORS: [char; 3] = ['/', '#', '!'];
+
+/// A member record's catalog name: the container's path with the member's
+/// appended, or `container#member` when the member name does not already
+/// start with the container's. The update path splits a record name on these
+/// prefixes to find the records one container owns; keep the two in step.
+pub fn member_rel(rel_path: &str, member_name: &str) -> String {
+    if member_name.is_empty() {
+        rel_path.to_string()
+    } else if member_name.starts_with(rel_path) {
+        member_name.to_string()
+    } else {
+        format!("{}#{}", rel_path, member_name)
+    }
+}
+
+/// The signature stored on one record and whether it is the adapter rollup.
+///
+/// [`crate::ngram::build_stored_sig512`] over the record's own bytes, OR'd
+/// with the same over every extra unit the signer names. The OR is what
+/// [`crate::tv::format::FileLoc::SIG_COVERS_ADAPTER`] promises: any single
+/// text holding the needle carries all the pattern's bits in its own
+/// signature, so the union carries them too and only a file no text holds
+/// the needle in is pruned. With no signer the signature covers the bytes
+/// alone and the flag stays clear, which is the signal for a search that
+/// runs the adapter pipeline to stand its filter down on the record.
+pub(crate) fn record_sig(signer: Option<&UnitSigner>, rel: &str, bytes: &[u8]) -> ([u64; 8], bool) {
+    let mut words = crate::ngram::build_stored_sig512(bytes).into_words();
+    if let Some(signer) = signer {
+        for unit in signer(rel, bytes) {
+            let unit_words = crate::ngram::build_stored_sig512(&unit).into_words();
+            for (w, uw) in words.iter_mut().zip(unit_words.iter()) {
+                *w |= uw;
+            }
+        }
+    }
+    (words, signer.is_some())
+}
+
 /// Builds aggregated packs from `root_dir` into `store_dir`.
 pub fn build_store(
     root_dir: &Path,
     store_dir: &Path,
     config: &BuildConfig,
 ) -> io::Result<BuildStats> {
-    build_store_with_extractor(root_dir, store_dir, config, None)
+    build_store_with_extractor(root_dir, store_dir, config, None, None, 0)
 }
 
-/// Builds aggregated packs with optional prepare-stage adapter extraction.
+/// Builds aggregated packs with optional prepare-stage adapter extraction
+/// and adapter rollup signing.
+///
+/// `extractor` stores a claimed file's units as records of their own;
+/// `signer` names the units every record's `ngram` must additionally cover
+/// (a signer-only build keeps one record per file and still signs for the
+/// pipeline its queries will run). `extract_fp` is the fingerprint of the
+/// extraction context both hooks ran under, stamped into the manifest head
+/// so a query can tell whether the rollups describe *its* pipeline.
 pub fn build_store_with_extractor(
     root_dir: &Path,
     store_dir: &Path,
     config: &BuildConfig,
     extractor: Option<&PreExtractor>,
+    signer: Option<&UnitSigner>,
+    extract_fp: u64,
 ) -> io::Result<BuildStats> {
     let t0 = Instant::now();
     fs::create_dir_all(store_dir)?;
@@ -192,6 +277,7 @@ pub fn build_store_with_extractor(
         config.fingerprint(),
         super::format::now_secs(),
     );
+    manifest.extract_fp = extract_fp;
 
     let walker = walk_root(&canon_root, &canon_store, config)?;
 
@@ -291,7 +377,10 @@ pub fn build_store_with_extractor(
                 is_binary: false,
                 // No bytes to sign. Zero is "unknown", not "empty", and
                 // unknown never rejects -- an empty file still matches a
-                // pattern that can match nothing (`x*`).
+                // pattern that can match nothing (`x*`). An empty record
+                // never reaches a searcher's n-gram filter either (it is
+                // searched as empty text), so it does not claim a rollup.
+                sig_covers_adapter: false,
                 ngram: [0; 8],
             });
             file_id_counter += 1;
@@ -328,13 +417,7 @@ pub fn build_store_with_extractor(
                     let m_len = member_bytes.len() as u64;
                     let m_crc = crc32(&member_bytes);
                     let m_binary = crate::encoding::is_binary(&member_bytes);
-                    let m_rel = if member_name.is_empty() {
-                        rel_path.clone()
-                    } else if member_name.starts_with(&rel_path) {
-                        member_name
-                    } else {
-                        format!("{}#{}", rel_path, member_name)
-                    };
+                    let m_rel = member_rel(&rel_path, &member_name);
                     if !current_pack_payload.is_empty()
                         && (current_pack_payload.len() as u64 + m_len > config.target_pack_size)
                     {
@@ -349,6 +432,7 @@ pub fn build_store_with_extractor(
                     }
                     let offset = current_pack_payload.len() as u64;
                     current_pack_payload.extend_from_slice(&member_bytes);
+                    let (m_ngram, m_rollup) = record_sig(signer, &m_rel, &member_bytes);
                     current_pack_files.push(FileRecord {
                         file_id: file_id_counter,
                         rel_path: m_rel,
@@ -361,7 +445,8 @@ pub fn build_store_with_extractor(
                         is_empty: false,
                         is_deleted: false,
                         is_binary: m_binary,
-                        ngram: crate::ngram::build_stored_sig512(&member_bytes).into_words(),
+                        sig_covers_adapter: m_rollup,
+                        ngram: m_ngram,
                     });
                     file_id_counter += 1;
                     total_files += 1;
@@ -398,6 +483,7 @@ pub fn build_store_with_extractor(
         let offset = current_pack_payload.len() as u64;
         current_pack_payload.extend_from_slice(&content);
 
+        let (ngram, rollup) = record_sig(signer, &rel_path, &content);
         current_pack_files.push(FileRecord {
             file_id: file_id_counter,
             rel_path,
@@ -410,7 +496,8 @@ pub fn build_store_with_extractor(
             is_empty: false,
             is_deleted: false,
             is_binary,
-            ngram: crate::ngram::build_stored_sig512(&content).into_words(),
+            sig_covers_adapter: rollup,
+            ngram,
         });
 
         file_id_counter += 1;
@@ -473,22 +560,26 @@ pub enum StoreAction {
 /// Build a fresh store or update an existing one, depending on whether
 /// `store_dir/manifest.tvm` already exists.
 ///
-/// The extractor (if any) is forwarded to both the build and the update
-/// paths; `build_store` calls `build_store_with_extractor` with `None`
-/// when no extractor was given.
+/// The extractor and signer (if any) are forwarded to both the build and
+/// the update paths -- an update that re-extracted through a different hook
+/// than the build signed through would roll its changed files up over units
+/// the catalog's `extract_fp` does not describe -- and `build_store` calls
+/// `build_store_with_extractor` with `None, None, 0` when neither was given.
 pub fn build_or_update_store_with_extractor(
     root_dir: &Path,
     store_dir: &Path,
     config: &BuildConfig,
     extractor: Option<&PreExtractor>,
+    signer: Option<&UnitSigner>,
+    extract_fp: u64,
 ) -> io::Result<(
     StoreAction,
     BuildStats,
     Option<crate::tv_runtime::update::UpdateStats>,
 )> {
-    use crate::tv_runtime::update::update_store;
+    use crate::tv_runtime::update::update_store_with;
     if store_dir.join("manifest.tvm").exists() {
-        let u = update_store(root_dir, store_dir, config)?;
+        let u = update_store_with(root_dir, store_dir, config, extractor, signer, extract_fp)?;
         // The update path does not re-run the build counters. Zero the
         // unused fields so a downstream that prints one struct per
         // action sees the same shape.
@@ -501,7 +592,8 @@ pub fn build_or_update_store_with_extractor(
         };
         Ok((StoreAction::Updated, b, Some(u)))
     } else {
-        let b = build_store_with_extractor(root_dir, store_dir, config, extractor)?;
+        let b =
+            build_store_with_extractor(root_dir, store_dir, config, extractor, signer, extract_fp)?;
         Ok((StoreAction::Built, b, None))
     }
 }

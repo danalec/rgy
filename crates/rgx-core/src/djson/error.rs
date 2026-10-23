@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Enhanced JSON error types with detailed diagnostics.
 //!
 //! Provides serde_json-compatible error types with:

@@ -2,8 +2,9 @@
 name = "discovery-macos"
 version = "0.1.0"
 edition = "2024"
+authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
 description = "macOS discovery backend: getattrlistbulk walk + FSEvents watch (from fsearch)"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
 
 [dependencies]
 discovery = { path = "../discovery" }

@@ -1,4 +1,6 @@
-//! FreeBSD discovery backend (`docs/freebsd-support.md` §5 decision 3):
+// SPDX-License-Identifier: Apache-2.0
+
+//! FreeBSD discovery backend (`docs/design.md` §4):
 //! the `getdirentries` bulk walk as a [`discovery::Source`], selected by
 //! `discovery-dispatch` on this target. The whole backend is
 //! `cfg(target_os = "freebsd")`; on other hosts this crate compiles empty
@@ -87,7 +89,7 @@ mod tests {
             .collect()
     }
 
-    /// P1.2 acceptance (`docs/freebsd-support.md`): the FreeBSD reader
+    /// P1.2 acceptance (`docs/design.md` §2.2): the FreeBSD reader
     /// matches `scan_sequential` — same names, kinds, sizes, mtimes and
     /// child links — so the backend is a speed decision, never a semantics
     /// one. Runs on the phase-4 kernel (P2.3).
@@ -103,7 +105,10 @@ mod tests {
             "fixture must exercise the root plus three subdirectories"
         );
         let got = normalize(&scan(&dir));
-        assert_eq!(want, got, "the getdirentries reader diverged from the oracle");
+        assert_eq!(
+            want, got,
+            "the getdirentries reader diverged from the oracle"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

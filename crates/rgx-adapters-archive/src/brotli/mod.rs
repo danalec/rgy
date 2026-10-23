@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! RFC 7932 Brotli decoder. Implements the full format: stream
 //! header, meta-block headers, block switching, context maps, the
 //! insert-and-copy command alphabet, backward references with the four

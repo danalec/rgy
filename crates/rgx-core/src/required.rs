@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Which bytes a pattern **requires**, read off its AST.
 //!
 //! A prefilter may produce false positives and may never produce a

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Decode throughput of the in-house codecs, on real corpora, min of N.
 //!
 //! ```text

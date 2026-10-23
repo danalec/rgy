@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Independent reimplementation of memmap2-rs platform dispatch.
 
 use std::fs::File;
@@ -27,9 +29,19 @@ mod windows;
 #[cfg(target_os = "windows")]
 pub(crate) use self::windows::MmapInner;
 
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd", target_os = "windows")))]
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "windows"
+)))]
 mod fallback;
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd", target_os = "windows")))]
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "windows"
+)))]
 pub(crate) use self::fallback::MmapInner;
 
 pub(crate) fn page_size() -> usize {
@@ -70,7 +82,12 @@ pub(crate) fn page_size() -> usize {
             info.dw_page_size as usize
         })
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd", target_os = "windows")))]
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "windows"
+    )))]
     {
         4096
     }
@@ -102,7 +119,12 @@ pub(crate) fn file_len_for_desc(desc: &MmapRawDescriptor) -> io::Result<u64> {
             Ok(size as u64)
         }
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd", target_os = "windows")))]
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "windows"
+    )))]
     {
         let _ = desc;
         Err(io::Error::new(
@@ -131,7 +153,12 @@ pub(crate) fn map(
     {
         MmapInner::map(len, desc.0, offset, populate)
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd", target_os = "windows")))]
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "windows"
+    )))]
     {
         let _ = (desc, len, offset, populate);
         Err(io::Error::new(
@@ -155,7 +182,12 @@ pub(crate) fn map_exec(
     {
         MmapInner::map_exec(len, desc.0, offset, populate)
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd", target_os = "windows")))]
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "windows"
+    )))]
     {
         let _ = (desc, len, offset, populate);
         Err(io::Error::new(
@@ -179,7 +211,12 @@ pub(crate) fn map_mut(
     {
         MmapInner::map_mut(len, desc.0, offset, populate)
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd", target_os = "windows")))]
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "windows"
+    )))]
     {
         let _ = (desc, len, offset, populate);
         Err(io::Error::new(
@@ -203,7 +240,12 @@ pub(crate) fn map_copy(
     {
         MmapInner::map_copy(len, desc.0, offset, populate)
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd", target_os = "windows")))]
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "windows"
+    )))]
     {
         let _ = (desc, len, offset, populate);
         Err(io::Error::new(
@@ -227,7 +269,12 @@ pub(crate) fn map_copy_read_only(
     {
         MmapInner::map_copy_read_only(len, desc.0, offset, populate)
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd", target_os = "windows")))]
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "windows"
+    )))]
     {
         let _ = (desc, len, offset, populate);
         Err(io::Error::new(
@@ -245,7 +292,12 @@ pub(crate) fn map_anon(len: usize, stack: bool, populate: bool) -> io::Result<Mm
 pub struct MmapRawDescriptor(pub std::os::unix::io::RawFd);
 #[cfg(target_os = "windows")]
 pub struct MmapRawDescriptor(pub std::os::windows::io::RawHandle);
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd", target_os = "windows")))]
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "windows"
+)))]
 pub struct MmapRawDescriptor<'a>(pub &'a File);
 
 pub trait MmapAsRawDesc {
@@ -286,7 +338,12 @@ where
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd", target_os = "windows")))]
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "windows"
+)))]
 impl<'a> MmapAsRawDesc for &'a File {
     fn as_raw_desc(&self) -> MmapRawDescriptor {
         MmapRawDescriptor(self)

@@ -1,13 +1,13 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! rgx's JSON value, parser, serializer and streaming layer.
 //!
 //! The suite is organised in two stages:
 //!
 //! * **Stage 1** ([`json_scan`]) produces two bitsets over the document:
 //!   which bytes are structural (`{ } [ ] : ,` and whitespace outside
-//!   strings) and which are string-delimiter quotes. Stage 1 is the one
-//!   piece of upstream lineage the suite still carries -- the
-//!   structural-index scanner whose vendoring pin is in
-//!   `scripts/vendored-sources.tsv`.
+//!   strings) and which are string-delimiter quotes. Stage 1 is rgx's own
+//!   code, like every other half of this suite.
 //! * **Stage 2** ([`index_parser`]) walks the two bitsets and populates
 //!   an [`Arena`] with the parsed document. The walker holds two sorted
 //!   `Vec<usize>` snapshots of the bitset iterations (one for
@@ -39,11 +39,8 @@ pub mod error;
 /// an [`Arena`]; it is the only public entry point
 /// [`crate::djson::parse`] uses.
 pub mod index_parser;
-/// Stage 1: structural-index scanner. The vendoring pin in
-/// `scripts/vendored-sources.tsv` points at the upstream
-/// `simdjson/simdjson` `json_scan` module -- this is the one piece of
-/// upstream lineage the djson suite still carries. The copy-time
-/// changes are listed in `scripts/vendored-sources.tsv`.
+/// Stage 1: structural-index scanner. rgx's own code, like the rest of this
+/// suite; its provenance note is in `scripts/vendored-sources.tsv`.
 pub mod json_scan;
 /// Lazy (on-demand) views over the same structural index: values are
 /// validated like [`index_parser`] validates them but materialised

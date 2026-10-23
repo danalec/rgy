@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! name_proto -- the name-tier protocol harness behind the paper's
 //! "an instance at filesystem scale: name search" case study.
 //!
@@ -71,8 +73,7 @@ fn materialize(dir: &Path, n: usize, threads: usize) {
                         } else {
                             format!("file_{:05}.dat", d * per + i)
                         };
-                        std::fs::write(sub.join(name), b"x")
-                            .expect("materialize: write file");
+                        std::fs::write(sub.join(name), b"x").expect("materialize: write file");
                     }
                 }
             });
@@ -116,8 +117,7 @@ fn main() {
     match mode {
         "floor" => {}
         "materialize" => {
-            let (Some(dir), Some(n), Some(threads)) =
-                (args.get(1), args.get(2), args.get(3))
+            let (Some(dir), Some(n), Some(threads)) = (args.get(1), args.get(2), args.get(3))
             else {
                 usage();
             };
@@ -126,8 +126,7 @@ fn main() {
             materialize(Path::new(dir), n, threads);
         }
         "build" => {
-            let (Some(dir), Some(index), Some(threads)) =
-                (args.get(1), args.get(2), args.get(3))
+            let (Some(dir), Some(index), Some(threads)) = (args.get(1), args.get(2), args.get(3))
             else {
                 usage();
             };
@@ -140,14 +139,11 @@ fn main() {
             eprintln!("name_proto: built in {:.3} s", t0.elapsed().as_secs_f64());
         }
         "q-index" => {
-            let (Some(dir), Some(index), Some(q)) =
-                (args.get(1), args.get(2), args.get(3))
-            else {
+            let (Some(dir), Some(index), Some(q)) = (args.get(1), args.get(2), args.get(3)) else {
                 usage();
             };
             let root = Path::new(dir);
-            let idx = persist::load_for(root, Path::new(index), None)
-                .expect("q-index: load");
+            let idx = persist::load_for(root, Path::new(index), None).expect("q-index: load");
             let live = Live::new(idx);
             let searcher = Searcher { live: &live };
             let mut parsed = Query::parse(q, "").expect("q-index: parse");
@@ -155,8 +151,7 @@ fn main() {
             println!("{}", searcher.search(&parsed).len());
         }
         "q-walk" => {
-            let (Some(dir), Some(threads), Some(q)) =
-                (args.get(1), args.get(2), args.get(3))
+            let (Some(dir), Some(threads), Some(q)) = (args.get(1), args.get(2), args.get(3))
             else {
                 usage();
             };
@@ -165,8 +160,8 @@ fn main() {
             let mut count = 0usize;
             for ls in &listings {
                 for ent in &ls.ents {
-                    let name = &ls.names[ent.name_off as usize
-                        ..(ent.name_off as usize + ent.name_len as usize)];
+                    let name = &ls.names
+                        [ent.name_off as usize..(ent.name_off as usize + ent.name_len as usize)];
                     if let Ok(name) = std::str::from_utf8(name)
                         && matches_ref(q, name)
                     {

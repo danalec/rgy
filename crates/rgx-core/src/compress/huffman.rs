@@ -628,7 +628,7 @@ impl<'a> BitReader<'a> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "huffman"))]
 mod tests {
     use super::*;
 
@@ -932,7 +932,7 @@ pub fn package_merge_lengths(freqs: &[u64], max_bits: u8) -> Vec<u8> {
     lengths
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "huffman"))]
 mod package_merge_tests {
     use super::*;
 

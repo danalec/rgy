@@ -5,12 +5,13 @@
 //! `MftSource` enumerates the volume as DFS directory blocks via the MFT
 //! walk (the trap suite in `indexer`); `UsnWatch` tails the USN journal as
 //! [`ChangeBatch`]es. Together they are the Windows half of
-//! `docs/IMPLEMENTATION_PLAN.md` §4.2.
+//! `docs/design.md` §2.2.
 
 use discovery::walk::Listing;
 use discovery::{ChangeBatch, Source, Watch};
 
 use crate::indexer::{Indexer, listings_from_rows};
+use crate::paths::Paths;
 
 /// `Source`: the NTFS MFT walk as DFS [`Listing`]s for
 /// `name_core::name_index::Index::build`.
@@ -43,21 +44,29 @@ impl Source for MftSource<'_> {
 /// `Watch`: the USN journal tail. A journal wrap or recreate is reported as
 /// [`ChangeBatch::Rescan`] — the feed lost history and the index must be
 /// rebuilt from a [`MftSource`].
+///
+/// The journal names a file and its parent's file reference, and nothing
+/// else. The path is rebuilt from the MFT ([`crate::paths`]), so a change
+/// arrives at the folder it happened in.
 pub struct UsnWatch<'a> {
     pub indexer: Indexer<'a>,
     pub start_usn: i64,
     pub journal_id: u64,
     pub max_records: usize,
+    /// The paths the journal's records are placed at.
+    paths: Paths<'a>,
 }
 
-impl UsnWatch<'_> {
-    pub fn new<'a>(indexer: Indexer<'a>) -> UsnWatch<'a> {
+impl<'a> UsnWatch<'a> {
+    pub fn new(indexer: Indexer<'a>) -> UsnWatch<'a> {
+        let paths = Paths::new(indexer.volume());
         UsnWatch {
             indexer,
             // The documented "first available record" sentinel.
             start_usn: 0x7FFF_FFFF,
             journal_id: 0,
             max_records: 4096,
+            paths,
         }
     }
 }
@@ -71,6 +80,25 @@ impl Watch for UsnWatch<'_> {
         if wrapped {
             return Ok(ChangeBatch::Rescan);
         }
+        // Place each record: the journal names the file, and the path comes
+        // from the MFT. A record whose path cannot be rebuilt keeps the bare
+        // name it came with, which names no folder — the change is then not
+        // applied, rather than applied to the wrong folder.
+        let records = records
+            .into_iter()
+            .map(|mut r| {
+                if let Some(path) = self.paths.of_record(&r) {
+                    r.name = path;
+                }
+                r
+            })
+            .collect();
         Ok(ChangeBatch::Events(records))
+    }
+
+    /// The USN position the records read so far run up to: the watermark an
+    /// index carries, and the point a later run resumes the journal from.
+    fn position(&self) -> Option<u64> {
+        Some(self.start_usn.max(0) as u64)
     }
 }

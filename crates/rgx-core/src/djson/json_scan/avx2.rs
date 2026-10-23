@@ -1,11 +1,12 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The vector path: 64 bytes of input per iteration, one `u64` of output.
 //!
-//! **The only `unsafe` in this module is what the vector width requires**.
-//! [`super::scan_scalar`] computes the identical predicate with no `unsafe`
-//! at all, and the tests compare the two on a corpus built to break exactly
-//! this code. The discipline is the one `b02/rgx/scan.rs` uses: every
-//! `#[target_feature]` function states, in a `SAFETY` comment, which runtime
-//! check lets its caller reach it.
+//! **Every `unsafe` here is what the vector width requires.** [`super::scan_scalar`]
+//! computes the identical predicate with none, and the tests compare the two
+//! on a corpus built to break exactly this code. The discipline: each
+//! `#[target_feature]` function states, in its safety documentation, which
+//! runtime check lets its caller reach it.
 //!
 //! ## Shape of an iteration
 //!
@@ -17,13 +18,18 @@
 //!                  -> one u64 of structural output, one of quote
 //! ```
 //!
-//! `pshufb` is per-128-bit-lane, so every 16-byte table is broadcast into
-//! both lanes of a `__m256i`; a table left in the high lane only would make
-//! bytes 16..32 of every chunk classify as OTHER, which no amount of testing
-//! on short inputs would catch. And the nibble indices are masked to four
-//! bits before they are used, both because `pshufb` zeroes any lane whose
-//! index has bit 7 set and because the high nibble of a byte `>= 0x80` is
-//! `>= 8`, where there is no table row.
+//! ## Two hazards a short input never shows
+//!
+//! `pshufb` is per-128-bit-lane, so every 16-byte table is broadcast into both
+//! lanes of the `__m256i`. A table left in the high lane alone would make
+//! bytes 16..32 of every chunk classify as OTHER — and since the tail bytes go
+//! through `step` rather than through here, the *unit* tests over short
+//! documents would all pass while the block loop was wrong for every input
+//! over 64 bytes. The boundary sweeps are what catch it.
+//!
+//! The nibble indices are masked to four bits before use, both because
+//! `pshufb` zeroes any lane whose index has bit 7 set and because the high
+//! nibble of a byte `>= 0x80` is `>= 8`, where no rectangle has a row.
 
 use core::arch::x86_64::*;
 
@@ -38,10 +44,9 @@ const BLOCK: usize = 64;
 
 /// Broadcast a 16-entry `pshufb` table into both 128-bit lanes.
 ///
-/// `pshufb` looks at bit 7 of the index and zeroes the lane when it is set —
-/// that is how the instruction stays in bounds, and it is also why the
-/// callers mask their indices to `0x0F`. This is not a bounds check; the
-/// tables here hold `0x00`/`0xFF` only.
+/// `pshufb` zeroes a lane when bit 7 of its index is set — that is how the
+/// instruction stays in bounds, and why the callers mask to `0x0F`. This is not
+/// a bounds check; the tables hold `0x00`/`0xFF` only.
 #[target_feature(enable = "avx2")]
 unsafe fn broadcast(table: &[u8; 16]) -> __m256i {
     // SAFETY: `table` is a `&[u8; 16]`, so the 16-byte load is in bounds by
@@ -49,12 +54,12 @@ unsafe fn broadcast(table: &[u8; 16]) -> __m256i {
     unsafe { _mm256_broadcastsi128_si256(_mm_loadu_si128(table.as_ptr() as *const __m128i)) }
 }
 
-/// One rectangle of the high-nibble x low-nibble grid.
+/// One rectangle of the high-nibble × low-nibble grid, 32 bytes wide.
 ///
 /// `pshufb(lo_table, lo) & pshufb(hi_table, hi)` is set exactly on the bytes
 /// whose low nibble `lo_table` accepts *and* whose high nibble `hi_table`
-/// accepts. `mod.rs` explains why the classification is a union of these
-/// rather than a single pair.
+/// accepts. `super` explains why the classification is a union of these rather
+/// than a single pair.
 #[inline(always)]
 unsafe fn rect(lo_table: __m256i, hi_table: __m256i, lo: __m256i, hi: __m256i) -> __m256i {
     // SAFETY: reached only from a function whose contract established AVX2;
@@ -68,7 +73,7 @@ unsafe fn rect(lo_table: __m256i, hi_table: __m256i, lo: __m256i, hi: __m256i) -
     }
 }
 
-/// The broadcast tables, built once for the whole scan.
+/// The broadcast tables, built once for a whole scan.
 struct Tables {
     space: (__m256i, __m256i),
     ctrl_ws: (__m256i, __m256i),
@@ -106,8 +111,8 @@ impl Tables {
         // `at + 64 <= bytes.len()` before entering the loop. The target
         // feature is this function's contract.
         let v = unsafe { _mm256_loadu_si256(ptr as *const __m256i) };
-        // `srli_epi16` shifts within 16-bit lanes, so byte 1's bits would
-        // land in byte 0; the AND is what keeps the high nibble a nibble.
+        // `srli_epi16` shifts within 16-bit lanes, so byte 1's bits would land
+        // in byte 0; the AND is what keeps the high nibble a nibble.
         let lo = _mm256_and_si256(v, _mm256_set1_epi8(0x0F));
         let hi = _mm256_and_si256(_mm256_srli_epi16(v, 4), _mm256_set1_epi8(0x0F));
 
@@ -162,8 +167,8 @@ unsafe fn block(lo: (u32, u32, u32), hi: (u32, u32, u32), carry: &mut super::Car
 /// Inclusive prefix-XOR of a 64-bit word: bit `i` of the result is the XOR of
 /// bits `0..=i` of `x`.
 ///
-/// `pclmulqdq` with an all-ones operand is the carry-less multiply by
-/// `1 + x + x^2 + ...`, which is exactly that sum. `super::prefix_xor` is the
+/// `pclmulqdq` against an all-ones operand is the carry-less multiply by
+/// `1 + x + x^2 + …`, which is exactly that sum. [`super::prefix_xor`] is the
 /// same function as a shift chain, and the tests check the two agree word for
 /// word — a carry-less multiply with the wrong operand, or reading the wrong
 /// half of its result, is a silent one-bit-per-block corruption otherwise.
@@ -178,9 +183,7 @@ pub(super) unsafe fn prefix_xor_clmul(x: u64) -> u64 {
     // any term using the high half has degree >= 64 and is shifted out.
     let ones = _mm_set1_epi64x(-1);
     // `0x00` selects the low 64 bits of each operand, and the target feature
-    // is this function's contract. The block was `unsafe { .. }` around the
-    // intrinsic; inside an `unsafe fn` that is redundant (2021), and
-    // `unnecessary_unsafe` says so. [Copy-time change.]
+    // is this function's contract.
     let r = _mm_clmulepi64_si128(a, ones, 0x00);
     _mm_cvtsi128_si64(r) as u64
 }
@@ -191,7 +194,7 @@ pub(super) unsafe fn prefix_xor_clmul(x: u64) -> u64 {
 ///
 /// The caller must have established that the CPU supports both AVX2 and
 /// PCLMULQDQ. [`super::scan`] does exactly that through
-/// [`super::has_avx2_pclmulqdq`] before calling; calling this without it is
+/// [`super::has_avx2_pclmulqdq`] before calling; reaching this without it is
 /// undefined behaviour, not a wrong answer.
 #[target_feature(enable = "avx2,pclmulqdq")]
 pub unsafe fn scan_avx2(bytes: &[u8]) -> super::StructuralIndex {
@@ -249,17 +252,16 @@ pub unsafe fn classify16_avx2_inner(bytes: &[u8; 16]) -> Classified16 {
         let mb = _mm_movemask_epi8(backslash) as u32 & 0xFFFF;
         let mw = _mm_movemask_epi8(ws) as u32 & 0xFFFF;
 
-        // Two bits per byte, byte `i` at bits `2i..2i+2`. `movemask` cannot
-        // do this -- it packs one bit per byte, which is a *different*
-        // layout, and an earlier version of this function returned it
-        // labelled as the code.
+        // Two bits per byte, byte `i` at bits `2i..2i+2`. `movemask` cannot do
+        // this — it packs one bit per byte, which is a *different* layout, and
+        // a version that returned it labelled as the code would agree with the
+        // scalar path on every lane where the code was 0 or 1.
         //
-        // The packing is two multiplies: pairs of code bytes fold into 16
-        // bits of code, then pairs of those into 32. What comes out is four
-        // dwords -- one per four input bytes -- so a `pshufb` gathers their
-        // low bytes into the first four. Both weight vectors are
-        // little-endian byte patterns, `[1, 4]` and `[1, 16]`, written as
-        // the `u32` whose bytes they are.
+        // The packing is two multiplies: pairs of code bytes fold into 16 bits
+        // of code, then pairs of those into 32. What comes out is four dwords —
+        // one per four input bytes — so a `pshufb` gathers their low bytes into
+        // the first four. Both weight vectors are little-endian byte patterns,
+        // `[1, 4]` and `[1, 16]`, written as the `u32` whose bytes they are.
         let code_bytes = _mm_or_si128(
             _mm_or_si128(
                 _mm_and_si128(structural, _mm_set1_epi8(1)),
@@ -272,8 +274,8 @@ pub unsafe fn classify16_avx2_inner(bytes: &[u8; 16]) -> Classified16 {
         let compact = _mm_shuffle_epi8(
             packed,
             // Bytes 0, 4, 8, 12 of `packed` are the first bytes of its four
-            // dwords. The rest of the control vector is 0x80, which
-            // `pshufb` writes as zero, so the upper bytes come out clear.
+            // dwords. The rest of the control vector is 0x80, which `pshufb`
+            // writes as zero, so the upper bytes come out clear.
             _mm_setr_epi8(0, 4, 8, 12, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1),
         );
 

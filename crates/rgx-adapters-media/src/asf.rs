@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! ASF/WMV metadata, hand-rolled — reduced port of an upstream ASF
 //! reader: File Properties (duration, bitrate, creation
 //! time), Content Description (title/author/...), Extended Content
@@ -7,7 +9,7 @@
 
 use alloc::string::{String, ToString};
 use core::fmt::Write as _;
-use rgx_core::{bail, Result};
+use rgx_core::{bail, decline, Result};
 use rgx_core::{Adapter, Outcome};
 
 pub struct AsfInfo;
@@ -16,7 +18,15 @@ impl Adapter for AsfInfo {
         "asf"
     }
     fn extensions(&self) -> &'static [&'static str] {
-        &["wmv", "asf", "wm"]
+        // `wma` is here for the same reason `wmv` is: a Windows Media file
+        // and a Windows Media Video file are the same ASF container, and
+        // the reader does not care which one it is holding. The claim was
+        // missing, and the missing claim was not a cosmetic gap: ASF
+        // stores its strings as UTF-16, so the title of a `.wma` is not
+        // findable in the raw bytes by a search for its own text -- the
+        // file was in the corpus, the words were in it, and only the
+        // reader could see them.
+        &["wmv", "asf", "wm", "wma"]
     }
     fn extract(&self, data: &[u8], _path: &str) -> Result<Outcome> {
         Ok(Outcome::Text(asf_text(data)?.into_bytes()))
@@ -101,10 +111,10 @@ struct Ctx {
 
 fn asf_text(data: &[u8]) -> Result<String> {
     if data.len() < 30 {
-        bail!("fewer bytes than an ASF header");
+        decline!("fewer bytes than an ASF header");
     }
     if data[0..16] != HEADER_OBJECT {
-        bail!("not an ASF/WMV file (bad header GUID)");
+        decline!("not an ASF/WMV file (bad header GUID)");
     }
     let header_size = rd_u64le(data, 16) as usize;
     if header_size < 30 || header_size > data.len() {
@@ -408,6 +418,27 @@ mod tests {
         assert!(text.contains("title: Zircaloy Clip"), "{text}");
         assert!(text.contains("author: rgx lab"), "{text}");
         assert!(text.contains("WM/ToolName: rgx-encoder 1.0"), "{text}");
+    }
+
+    /// A `.wma` is the same ASF container as a `.wmv`, and the claim was
+    /// missing. The missing claim was not a cosmetic gap: ASF stores its
+    /// strings as UTF-16, so the title of a `.wma` cannot be found in the
+    /// raw bytes by a search for its own text. The file was in the corpus,
+    /// the words were in it, and only the reader could see them.
+    #[test]
+    fn a_wma_is_the_same_container_and_is_claimed() {
+        let reg = rgx_core::Registry::new(vec![alloc::boxed::Box::new(AsfInfo)]);
+        assert!(
+            reg.may_claim_for_path("song.wma"),
+            "the registry must claim .wma"
+        );
+        match AsfInfo.extract(&mini_asf(), "song.wma").unwrap() {
+            Outcome::Text(t) => {
+                let s = String::from_utf8(t).unwrap();
+                assert!(s.contains("title: Zircaloy Clip"), "{s}");
+            }
+            _ => panic!("expected text"),
+        }
     }
 
     #[test]

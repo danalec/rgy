@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Unix ar archive and Debian package (.deb) adapter.
 //!
 //! Handles Unix `ar` archives (magic `!<arch>\n`), commonly used for static
@@ -9,7 +11,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::str;
-use rgx_core::{bail, Adapter, Context, Outcome, Result};
+use rgx_core::{decline, Adapter, Context, Outcome, Result};
 
 pub struct Ar;
 
@@ -24,7 +26,7 @@ impl Adapter for Ar {
 
     fn extract(&self, data: &[u8], _path: &str) -> Result<Outcome> {
         if data.len() < 8 || &data[..8] != b"!<arch>\n" {
-            bail!("not an ar archive (bad magic)");
+            decline!("not an ar archive (bad magic)");
         }
 
         let parse_ascii_dec = |b: &[u8]| -> Result<u64> {

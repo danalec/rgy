@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! A streaming line searcher: what a grep-shaped tool drives a matcher with.
 //!
 //! A [`Searcher`] reads bytes (a whole slice, or a `Read` it rolls through
@@ -2644,23 +2646,24 @@ impl<'c, 'm> Core<'c, 'm> {
             };
             let content = &buf[line_start..content_end];
 
-            // **`-U`.** A match pode atravessar a linha, e é reportada na
-            // linha onde ela TERMINA — a regra do ripgrep, não a óbvia. Fazer
-            // `is_match` significar "uma match multilinha termina NESTA linha"
-            // é o que deixa tudo abaixo deste ponto intocado: o `SinkMatch` é
-            // o de sempre, o `-A`/`-B` pendura onde pendurava, o `-m` conta
-            // onde contava. Só a pergunta muda, não a máquina que a consome.
+            // **`-U`.** A match may span the line, and it is reported on the
+            // line where it TERMINATES -- ripgrep's rule, not the obvious one.
+            // Making `is_match` mean "a multi-line match ends ON THIS LINE" is
+            // what leaves everything below this point untouched: the
+            // `SinkMatch` is the usual one, `-A`/`-B` hang where they hung,
+            // `-m` counts where it counted. Only the question changes, not the
+            // machine that consumes it.
             //
-            // Por isso o haystack handed ao matcher é o RESTO do buffer a
-            // partir de `pos`, e não `content`: cortar o terminador aqui é o
-            // que torna a match impossível. O stream de candidatos é
-            // deliberadamente ignorado — ele é por LINHA, e uma match de
-            // várias linhas não cabe num intervalo de linha; consultá-lo
-            // responderia "não" a uma match que existe.
+            // That is why the haystack handed to the matcher is the REST of
+            // the buffer from `pos` rather than `content`: cutting the
+            // terminator off here is what makes the match impossible. The
+            // candidate stream is deliberately ignored -- it is per LINE, and
+            // a match over several lines does not fit in a line range; asking
+            // it would answer "no" to a match that exists.
             //
-            // `ml_span` guarda a primeira match a partir de `pos`. A validade é
-            // pelo FIM, não pelo início: a linha que reporta é a do fim, então
-            // importa é a match alcançar à frente de `pos`.
+            // `ml_span` holds the first match from `pos`. Validity is by the
+            // END, not the start: the line that reports is the end line, so
+            // what matters is the match reaching past `pos`.
             let ml_span = if !multi_line {
                 None
             } else if ml_span.is_some_and(|(_, e)| e > pos) {
@@ -2850,7 +2853,7 @@ impl<'c, 'm> Core<'c, 'm> {
             // so `rgx -v -A1`, `-v -B1` and `-v -C1` printed **no context at
             // all**, and printed a `--` separator between two lines with
             // nothing between them. Found while adding a parity case for the
-            // specialised confirm, and reproduced identically on `11d7e5a`,
+            // specialised confirm, and reproduced identically on `main`,
             // so it predates that work.
             //
             // Under no inversion `report == is_match` and every arm below

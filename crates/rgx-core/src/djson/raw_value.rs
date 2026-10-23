@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! An owned handle to a JSON fragment, kept as raw bytes.
 //!
 //! [`RawValue`] captures a portion of the source JSON as raw bytes,

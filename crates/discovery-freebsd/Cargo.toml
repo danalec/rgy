@@ -2,8 +2,9 @@
 name = "discovery-freebsd"
 version = "0.1.0"
 edition = "2024"
+authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
 description = "FreeBSD discovery backend: getdirentries bulk walk with d_type from the dirent"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
 
 [dependencies]
 discovery = { path = "../discovery" }

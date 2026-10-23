@@ -2,6 +2,7 @@
 name = "rgx-core-fuzz"
 version = "0.0.0"
 publish = false
+license = "Apache-2.0"
 edition = "2021"
 
 [package.metadata]
@@ -35,6 +36,8 @@ path = "../../rgx-adapters-docs"
 path = "../../rgx-adapters-mail"
 [dependencies.rgx-adapters-inspect]
 path = "../../rgx-adapters-inspect"
+[dependencies.rgx-adapters-pdf]
+path = "../../rgx-adapters-pdf"
 
 [[bin]]
 name = "process"

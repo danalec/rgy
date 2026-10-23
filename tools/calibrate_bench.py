@@ -9,7 +9,6 @@ from pathlib import Path
 
 BIN = Path(r"C:\Users\danalec\Documents\src\rgy\target\release\searchctl.exe")
 CANDIDATES = [
-    r"C:\Users\danalec\Documents\src\seekfs",
     r"C:\Users\danalec\Documents\src\rgy\crates",
     r"C:\Users\danalec\Documents\src\rgy\crates\rgx-core",
     r"C:\Users\danalec\.cargo\registry",

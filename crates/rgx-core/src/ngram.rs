@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Per-file n-gram signatures: a Bloom-style filter that answers "this file
 //! cannot contain the needle" before a slice is ever borrowed.
 //!
@@ -85,7 +87,7 @@ impl NgramSig256 {
 /// 512-bit (AVX-512-sized) signature per file.
 ///
 /// 8 x u64 words: 4 forward conduit words + 4 reverse collision words.
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct NgramSig512 {
     w: [u64; 8],
 }
@@ -299,6 +301,44 @@ pub fn build_stored_sig512(content: &[u8]) -> NgramSig512 {
         Some(bom) => build_sig512(&crate::encoding::decode(bom, content)),
         None => build_sig512(content),
     }
+}
+
+/// Whether a search over the record's own bytes is covered by its stored
+/// signature -- the library's pack search, whose haystack is exactly the
+/// bytes the raw signature was built over. A rollup (the OR with every
+/// adapter unit) covers them too; one signed under a foreign extraction
+/// fingerprint is stood down anyway, conservatively, because the caller
+/// cannot say what units it would have produced.
+#[inline]
+pub fn covered_raw_bytes(sig_covers_adapter: bool, rollup_ok: bool) -> bool {
+    rollup_ok || !sig_covers_adapter
+}
+
+/// Whether a search that runs the adapter pipeline over the record
+/// (`run_tv_query`) is covered by its stored signature. An unclaimed file
+/// is searched as its own bytes and any signature covers those; a claimed
+/// one is searched as the pipeline's units, which only a rollup flagged
+/// `SIG_COVERS_ADAPTER` under a matching extraction fingerprint covers,
+/// because the units a different context would extract are not the units
+/// the signature OR'd.
+#[inline]
+pub fn covered_pipeline_units(claimed: bool, sig_covers_adapter: bool, rollup_ok: bool) -> bool {
+    !claimed || (sig_covers_adapter && rollup_ok)
+}
+
+/// One record-level rule for every n-gram filter site: with `covered` the
+/// site's own coverage answer (see [`covered_raw_bytes`] /
+/// [`covered_pipeline_units`]), a signature missing a bit the query's holds
+/// is proof the record cannot match and the record is rejected before its
+/// bytes are read. The all-zero signature (an un-analysed record) stands
+/// the filter down inside [`NgramSig512::contains_query`].
+///
+/// FNR=0 is the contract: this may over-report and must never lose a
+/// match, so every doubt is resolved at the `covered` gate before this
+/// predicate is asked anything.
+#[inline]
+pub fn may_reject(ngram: &[u64; 8], covered: bool, query: &NgramSig512) -> bool {
+    covered && !NgramSig512::from_words(*ngram).contains_query(query)
 }
 
 /// Query signature of a pattern, from the literal every match must contain,

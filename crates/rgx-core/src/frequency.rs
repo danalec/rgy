@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Background byte frequency: which bytes a prefilter should look for.
 //!
 //! **Provenance — read this before quoting any number from this file.** Every

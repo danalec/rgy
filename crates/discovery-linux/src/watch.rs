@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Recursive inotify `Watch`: every directory under the root gets a watch;
 //! an `IN_Q_OVERFLOW` (or watch-limit hit) reports [`ChangeBatch::Rescan`],
 //! and anything else is translated into `UsnRecord`-shaped

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! A byte-mode regex: the public face of the engine.
 //!
 //! [`ByteRegex`] compiles a pattern of bytes to a Thompson NFA and runs

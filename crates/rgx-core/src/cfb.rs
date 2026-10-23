@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Minimal CFB (OLE2) compound-file reader.
 //!
 //! The subset needed to reach named streams in legacy `.doc`/`.xls`/`.ppt`,
@@ -10,7 +12,7 @@
 //! Lives in rgx-core so every adapter crate (mail, office, …) shares one
 //! implementation instead of growing private copies.
 
-use crate::{bail, Result};
+use crate::{bail, decline, Result};
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::OnceCell;
@@ -63,7 +65,13 @@ pub struct Cfb<'a> {
 impl<'a> Cfb<'a> {
     pub fn parse(data: &'a [u8]) -> Result<Self> {
         if data.len() < 512 || data[0..8] != CFB_SIG {
-            bail!("not an OLE2 compound file (bad signature)");
+            // A decline, not a failure: a file that does not carry the
+            // signature is not a compound file, and the eleven extensions
+            // that reach this reader — `.doc`, `.xls`, `.ppt`, `.msg` and
+            // the rest — are mostly *not* compound files in the wild. A
+            // note here put "not an OLE2 compound file" into the corpus of
+            // every plain text file wearing a `.doc` name.
+            decline!("not an OLE2 compound file (bad signature)");
         }
         let sector_size = 1usize << rd_u16le(data, 30);
         let mini_sector_size = 1usize << rd_u16le(data, 32);

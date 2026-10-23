@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Error type, `Result`, the `Context` extension trait, and the `bail!` /
 //! `anyhow!` macros.
 //!
@@ -54,6 +56,14 @@ enum Link {
     Caught(Box<dyn StdError + Send + Sync>),
     /// A bare message, from `anyhow!("...")` or `.context("...")`.
     Message(Box<dyn fmt::Display + Send + Sync>),
+    /// A decline: "this file is not mine" or "I found nothing in it".
+    ///
+    /// It is an error so that `?` propagates it out of a helper that
+    /// returns `Result<T>` — the 33 such helpers in this workspace cannot
+    /// return `Outcome::Bail` — but it is not a failure. `process` treats
+    /// it as a silent fall-through to the next candidate, exactly like
+    /// `Outcome::Bail`, and never mints a note out of it.
+    Decline(Box<dyn fmt::Display + Send + Sync>),
 }
 
 impl Link {
@@ -62,6 +72,7 @@ impl Link {
             #[cfg(feature = "std")]
             Link::Caught(e) => e.as_ref(),
             Link::Message(m) => m.as_ref(),
+            Link::Decline(m) => m.as_ref(),
         }
     }
 }
@@ -100,13 +111,52 @@ impl Error {
         }
     }
 
+    /// Build a *decline*: "this file is not mine", or "I found nothing in
+    /// it that is worth reporting".
+    ///
+    /// A decline carries a message so the adapter can say why it stepped
+    /// aside, but it is not a failure. `process` routes it to the next
+    /// candidate silently, where `bail!` routes it to the note that becomes
+    /// a searchable unit beside the file's own bytes. That difference is
+    /// the whole point: an adapter declining a file is an ordinary event
+    /// and must not put a line in the corpus that is not in the file.
+    pub fn decline<M: fmt::Display + Send + Sync + 'static>(message: M) -> Self {
+        Self {
+            head: Link::Decline(Box::new(message)),
+            rest: Vec::new(),
+        }
+    }
+
+    /// Whether this error is a decline rather than a failure.
+    ///
+    /// The marker is looked for in the whole chain, not only in the head:
+    /// attaching context puts the new message on the head and pushes the
+    /// old one down, so a decline that has been given context is still a
+    /// decline. A decline stays a decline as it travels up through `?`.
+    pub fn is_decline(&self) -> bool {
+        matches!(self.head, Link::Decline(_))
+            || self.rest.iter().any(|l| matches!(l, Link::Decline(_)))
+    }
+
+    /// Turn this error into a decline carrying the given reason.
+    ///
+    /// The reason goes on the head and the original chain stays underneath
+    /// it, so the cause is still there to be read — the difference from
+    /// `context` is only that the head is a decline, and `process` treats
+    /// that as a step aside rather than a failure.
+    pub fn into_decline<M: fmt::Display + Send + Sync + 'static>(mut self, message: M) -> Self {
+        let old_head = core::mem::replace(&mut self.head, Link::Decline(Box::new(message)));
+        self.rest.insert(0, old_head);
+        self
+    }
+
     /// The underlying error, when the head is a real `std::error::Error`
     /// rather than a bare message.
     #[cfg(feature = "std")]
     pub fn as_std(&self) -> Option<&(dyn StdError + Send + Sync + 'static)> {
         match &self.head {
             Link::Caught(e) => Some(e.as_ref()),
-            Link::Message(_) => None,
+            Link::Message(_) | Link::Decline(_) => None,
         }
     }
 
@@ -165,6 +215,7 @@ impl Error {
         let mut out = Vec::new();
         let mut push = |link: &Link| match link {
             Link::Message(m) => out.push(m.to_string()),
+            Link::Decline(m) => out.push(m.to_string()),
             #[cfg(feature = "std")]
             Link::Caught(e) => {
                 out.push(e.to_string());
@@ -266,6 +317,21 @@ pub trait Context<T> {
     where
         C: FnOnce() -> D,
         D: fmt::Display + Send + Sync + 'static;
+
+    /// Attach a **decline** reason rather than a failure message.
+    ///
+    /// `context` says "here is what went wrong"; `decline_context` says
+    /// "this file is not mine, and here is how I know". The two differ in
+    /// what `process` does with the result: a failure becomes a note beside
+    /// the file's own bytes, a decline steps aside silently and lets the
+    /// next candidate answer.
+    ///
+    /// Use it where the failure *is* the recognition — a zip reader that
+    /// cannot find the EOCD has established that the file is not a zip, not
+    /// that a zip is broken.
+    fn decline_context<C>(self, context: C) -> Self::Output
+    where
+        C: fmt::Display + Send + Sync + 'static;
 }
 
 #[cfg(feature = "std")]
@@ -289,6 +355,13 @@ where
     {
         self.map_err(|error| Error::msg(f()).with_cause(error))
     }
+
+    fn decline_context<C>(self, context: C) -> Result<T>
+    where
+        C: fmt::Display + Send + Sync + 'static,
+    {
+        self.map_err(|error| Error::new(error).into_decline(context))
+    }
 }
 
 impl<T> Context<T> for StdResult<T, Error> {
@@ -307,6 +380,13 @@ impl<T> Context<T> for StdResult<T, Error> {
         D: fmt::Display + Send + Sync + 'static,
     {
         self.map_err(|error| Error::msg(f()).with_error(error))
+    }
+
+    fn decline_context<C>(self, context: C) -> Result<T>
+    where
+        C: fmt::Display + Send + Sync + 'static,
+    {
+        self.map_err(|error| error.into_decline(context))
     }
 }
 
@@ -327,6 +407,13 @@ impl<T> Context<T> for Option<T> {
     {
         self.ok_or_else(|| Error::msg(f()))
     }
+
+    fn decline_context<C>(self, context: C) -> Result<T>
+    where
+        C: fmt::Display + Send + Sync + 'static,
+    {
+        self.ok_or_else(|| Error::decline(context))
+    }
 }
 
 /// Return early with an error.
@@ -341,6 +428,39 @@ impl<T> Context<T> for Option<T> {
 macro_rules! bail {
     ($($arg:tt)*) => {
         return ::core::result::Result::Err($crate::anyhow!($($arg)*))
+    };
+}
+
+/// Return early with a **decline** rather than a failure.
+///
+/// A decline means "this file is not mine" or "I found nothing in it". It
+/// travels through `?` like any error, so it works in a helper that
+/// returns `Result<T>` — where `Outcome::Bail` does not typecheck — and it
+/// makes `process` fall through to the next candidate **silently**. No
+/// note is minted, so nothing is added to the searchable corpus that was
+/// not in the file.
+///
+/// Use `bail!` for a failure worth reporting: a file that claims to be
+/// this format and could not be decoded, a truncated container, a corrupt
+/// header. Use `decline!` for everything else.
+///
+/// ```ignore
+/// if data.starts_with(b"PK\x03\x04") { bail!("zip: corrupt central directory"); }
+/// if !looks_like_ours(data) { decline!("not our format"); }
+/// ```
+#[macro_export]
+macro_rules! decline {
+    ($msg:literal $(,)?) => {
+        return ::core::result::Result::Err($crate::error::Error::decline($crate::format!($msg)))
+    };
+    ($err:expr $(,)?) => {{
+        let value = $err;
+        return ::core::result::Result::Err($crate::error::Error::decline(value))
+    }};
+    ($fmt:expr, $($arg:tt)+) => {
+        return ::core::result::Result::Err(
+            $crate::error::Error::decline($crate::format!($fmt, $($arg)+))
+        )
     };
 }
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! # LZ4 codec
 //!
 //! Independent reimplementation of the published LZ4 block and frame

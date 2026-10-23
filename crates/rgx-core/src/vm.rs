@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The Pike VM: running an NFA over bytes, leftmost-first.
 //!
 //! [`find`] promises the leftmost match at or after the offset it was

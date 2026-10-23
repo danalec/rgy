@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Integration tests: writer→reader roundtrips, hand-built RAR4 fixture,
 //! and malformed-input robustness (no panics, ever).
 

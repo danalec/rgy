@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! What `fixed.rs` refuses, and what a straight-path predicate would decide
 //! instead -- measured on the candidates the real searcher produces, on the
 //! real corpus, in the same process.

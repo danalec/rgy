@@ -1,9 +1,11 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The byte-mode pattern syntax: a parser from bytes to an [`Ast`].
 //!
 //! Byte-oriented from end to end. A literal is a `u8`, a class is a
 //! [`ByteSet`], and the grammar itself never produces a `char`. That is
-//! the whole reason this exists rather than a thin wrapper over
-//! `b02::lang::regex_engine`: rgx searches bytes that are routinely not
+//! the whole reason this exists rather than a thin wrapper over a
+//! `char`-based regex engine: rgx searches bytes that are routinely not
 //! valid UTF-8 — extracted adapter output, raw passthrough, and with
 //! `-a`, binary files — and a `char` engine handed lossy-decoded input
 //! silently changes what a pattern means.

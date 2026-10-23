@@ -1,9 +1,11 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Media-metadata adapters: EXIF/TIFF, audio tags, FITS, DICOM.
 //!
 //! Heavy binary payloads (pixels, waveforms) are never extracted — only
 //! metadata. Audio tags are parsed manually (ID3v1, RIFF INFO, FLAC Vorbis
-//! comment, Ogg Vorbis) so the crate stays light and dependency-free beyond
-//! kamadak-exif.
+//! comment, Ogg Vorbis), and so is EXIF/TIFF, which is why the crate's only
+//! dependency is `rgx-core`.
 
 #![no_std]
 
@@ -14,56 +16,171 @@ extern crate alloc;
 extern crate std;
 
 use alloc::boxed::Box;
-use alloc::string::{String, ToString};
+#[cfg(any(
+    feature = "exif",
+    feature = "tiff",
+    feature = "psd",
+    feature = "jpeg2000",
+    feature = "jpegxl",
+    feature = "audio-tags",
+    feature = "video-tags",
+    feature = "fits",
+    feature = "dicom"
+))]
+use alloc::string::String;
+#[cfg(any(
+    feature = "exif",
+    feature = "tiff",
+    feature = "audio-tags",
+    feature = "video-tags",
+    feature = "fits",
+    feature = "dicom"
+))]
+use alloc::string::ToString;
 use alloc::vec::Vec;
+#[cfg(any(
+    feature = "exif",
+    feature = "tiff",
+    feature = "psd",
+    feature = "jpeg2000",
+    feature = "jpegxl",
+    feature = "audio-tags",
+    feature = "video-tags",
+    feature = "fits",
+    feature = "dicom"
+))]
 use core::fmt::Write as _;
-use rgx_core::{bail, Context, Result};
-use rgx_core::{Adapter, Outcome};
+#[cfg(feature = "tiff")]
+use rgx_core::bail;
+#[cfg(any(
+    feature = "exif",
+    feature = "audio-tags",
+    feature = "fits",
+    feature = "dicom"
+))]
+use rgx_core::decline;
+use rgx_core::Adapter;
+#[cfg(any(feature = "exif", feature = "tiff"))]
+use rgx_core::Context;
+#[cfg(any(feature = "exif", feature = "tiff"))]
+use rgx_core::Field;
+#[cfg(any(
+    feature = "exif",
+    feature = "tiff",
+    feature = "audio-tags",
+    feature = "fits",
+    feature = "dicom"
+))]
+use rgx_core::Outcome;
+#[cfg(any(
+    feature = "exif",
+    feature = "tiff",
+    feature = "audio-tags",
+    feature = "fits",
+    feature = "dicom"
+))]
+use rgx_core::Result;
 
+#[cfg(feature = "asf")]
 mod asf;
+#[cfg(feature = "avi")]
 mod avi;
+#[cfg(any(
+    feature = "exif",
+    feature = "tiff",
+    feature = "psd",
+    feature = "jpeg2000",
+    feature = "jpegxl"
+))]
 mod exif;
+#[cfg(any(feature = "font", feature = "woff", feature = "mobi"))]
 mod extra;
+#[cfg(feature = "flv")]
 mod flv;
+#[cfg(any(feature = "gif", feature = "bmp"))]
 mod imgmeta;
+#[cfg(feature = "video-tags")]
 mod mp4mkv;
+#[cfg(feature = "mpeg")]
 mod mpeg;
+#[cfg(any(
+    feature = "psd",
+    feature = "jpeg2000",
+    feature = "jpegxl",
+    feature = "openexr"
+))]
+mod photos;
 
 pub fn adapters() -> Vec<Box<dyn Adapter>> {
     vec![
+        #[cfg(feature = "exif")]
         Box::new(ExifJpeg),
+        #[cfg(feature = "tiff")]
         Box::new(Tiff),
+        #[cfg(feature = "gif")]
         Box::new(imgmeta::Gif),
+        #[cfg(feature = "bmp")]
         Box::new(imgmeta::Bmp),
+        #[cfg(feature = "psd")]
+        Box::new(photos::Psd),
+        #[cfg(feature = "jpeg2000")]
+        Box::new(photos::Jpeg2000),
+        #[cfg(feature = "jpegxl")]
+        Box::new(photos::JpegXl),
+        #[cfg(feature = "openexr")]
+        Box::new(photos::OpenExr),
+        #[cfg(feature = "avi")]
         Box::new(avi::AviInfo),
+        #[cfg(feature = "asf")]
         Box::new(asf::AsfInfo),
+        #[cfg(feature = "flv")]
         Box::new(flv::FlvInfo),
+        #[cfg(feature = "mpeg")]
         Box::new(mpeg::MpegInfo),
+        #[cfg(feature = "audio-tags")]
         Box::new(AudioTags),
+        #[cfg(feature = "fits")]
         Box::new(Fits),
+        #[cfg(feature = "dicom")]
         Box::new(Dicom),
+        #[cfg(feature = "font")]
         Box::new(extra::FontNames),
+        #[cfg(feature = "woff")]
         Box::new(extra::Woff),
+        #[cfg(feature = "mobi")]
         Box::new(extra::Mobi),
+        #[cfg(feature = "video-tags")]
         Box::new(mp4mkv::VideoTags),
     ]
 }
 
+#[cfg(feature = "dicom")]
 fn rd_u16le(b: &[u8], o: usize) -> u16 {
     u16::from_le_bytes([b[o], b[o + 1]])
 }
+#[cfg(any(feature = "audio-tags", feature = "dicom", feature = "video-tags"))]
 fn rd_u32le(b: &[u8], o: usize) -> u32 {
     u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
 }
+#[cfg(any(feature = "audio-tags", feature = "video-tags"))]
 fn rd_u32be(b: &[u8], o: usize) -> u32 {
     u32::from_be_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
 }
 
 /// Whole-file EXIF listing: every IFD (primary, thumbnail, Exif, GPS,
-/// Interop) walked tag by tag. The in-house reader does this for JPEG,
-/// WebP, PNG and TIFF — kamadak-exif needed its container-aware API for
-/// the same, which is what made it a dependency.
-fn fmt_exif(r: &exif::ExifReader) -> String {
+/// Interop) walked tag by tag. `exif::ExifReader` is this crate's own
+/// (see `exif/`), container-aware for JPEG, WebP, PNG and TIFF alike.
+///
+/// The `photos` module reads the EXIF block of a PSD, a JPEG 2000 or a
+/// JPEG XL, and renders it the same way.
+#[cfg(any(
+    feature = "exif",
+    feature = "tiff",
+    feature = "psd",
+    feature = "jpeg2000",
+    feature = "jpegxl"
+))]
+pub(crate) fn fmt_exif(r: &exif::ExifReader) -> String {
     let mut out = String::new();
     let ifds: [(&str, &[exif::IfdEntry]); 5] = [
         ("ifd0", &r.ifd0),
@@ -76,7 +193,7 @@ fn fmt_exif(r: &exif::ExifReader) -> String {
         for e in entries {
             // `tag_name` returns a `&'static str` for the well-known tags;
             // the `format!` fallback only fires for the long tail of
-            // vendor-specific tags that aren't in the kamadak table. The
+            // vendor-specific tags that aren't in the table. The
             // value formatter is `Display` already, so route everything
             // through `writeln!` to keep the loop alloc-free.
             if let Some(tag) = exif::tag_name(e.tag) {
@@ -89,14 +206,111 @@ fn fmt_exif(r: &exif::ExifReader) -> String {
     out
 }
 
-/// JPEG EXIF via kamadak-exif.
+/// A tag's own string, cut at its NUL and trimmed of the padding
+/// around it.
+///
+/// The padding is not part of the name a user types: a camera writes
+/// `NIKON CORPORATION` padded with spaces and NULs, and a fact
+/// carrying the padding would not compare equal to the camera the
+/// user is asking about.
+///
+/// An empty tag is not a value at all. A fact carrying one would
+/// match a predicate that asks for nothing, and the answer to
+/// "does this picture name its camera?" would be yes for every
+/// picture.
+#[cfg(any(feature = "exif", feature = "tiff"))]
+fn tag_text(value: Option<String>) -> Option<String> {
+    let value = value?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// The EXIF metadata of a parsed picture, as the facts a filter asks
+/// about.
+///
+/// The names are the ones this adapter owns, namespaced `exif.` so
+/// that no other adapter's `camera` or `gps` can answer for a
+/// picture: `exif.make`, `exif.model`, `exif.camera`, `exif.gps` and
+/// `exif.datetime`.
+///
+/// **The values are the file's.** A make is the string the file
+/// holds — `NIKON CORPORATION`, not `Nikon` — because a predicate
+/// compares what the file says, and a rewritten make is a make the
+/// file does not have.
+///
+/// **The camera fact is the two tags together**, make and model joined
+/// by a space, and either one alone when the file carries only that
+/// one. It is reported when the file names a camera at all.
+///
+/// **The GPS fact is reported only when the file has coordinates.** A
+/// picture with a GPS directory but no readable latitude and
+/// longitude has no place and no coordinates, and a fact that said
+/// it did would turn `exif:gps` — which asks whether the picture *has*
+/// a GPS fact — into a lie.
+///
+/// **The date is the capture date**: `DateTimeOriginal` (0x9003) when
+/// the file has it, and the file's own `DateTime` (0x0132) when it
+/// does not. Both are dates the file holds; neither is invented.
+#[cfg(any(feature = "exif", feature = "tiff"))]
+fn exif_facts(r: &exif::ExifReader) -> Vec<Field> {
+    let mut facts = Vec::new();
+
+    let make = tag_text(r.make());
+    let model = tag_text(r.model());
+    if let Some(value) = &make {
+        facts.push(Field::new("exif.make", value));
+    }
+    if let Some(value) = &model {
+        facts.push(Field::new("exif.model", value));
+    }
+    let camera = match (&make, &model) {
+        (Some(make), Some(model)) => Some(format!("{make} {model}")),
+        (Some(make), None) => Some(make.clone()),
+        (None, Some(model)) => Some(model.clone()),
+        (None, None) => None,
+    };
+    if let Some(value) = &camera {
+        facts.push(Field::new("exif.camera", value));
+    }
+    if let Some((lat, lon)) = r.get_gps() {
+        // The file's coordinates, in decimal degrees — the reader's
+        // own conversion of the DMS triple, signed for south and
+        // west.
+        facts.push(Field::new("exif.gps", &format!("{lat:.6}, {lon:.6}")));
+    }
+    if let Some(value) = tag_text(r.datetime_original()).or_else(|| tag_text(r.datetime())) {
+        facts.push(Field::new("exif.datetime", &value));
+    }
+    facts
+}
+
+/// EXIF metadata, by this crate's own in-house reader (`exif/`).
+#[cfg(feature = "exif")]
 pub struct ExifJpeg;
+#[cfg(feature = "exif")]
 impl Adapter for ExifJpeg {
     fn name(&self) -> &'static str {
         "exif"
     }
     fn extensions(&self) -> &'static [&'static str] {
         &["jpg", "jpeg", "webp", "png"]
+    }
+    /// The picture's EXIF metadata as facts: `exif.make`,
+    /// `exif.model`, `exif.camera`, `exif.gps` and `exif.datetime`.
+    ///
+    /// A picture with no EXIF payload reports no facts. The question
+    /// is asked of a file this adapter could not read, and the honest
+    /// answer to a question about an unreadable file is that there is
+    /// nothing to say.
+    fn facts(&self, data: &[u8], _path: &str) -> Vec<Field> {
+        match exif::ExifReader::parse_container(data) {
+            Ok(r) => exif_facts(&r),
+            Err(_) => Vec::new(),
+        }
     }
     fn extract(&self, data: &[u8], _path: &str) -> Result<Outcome> {
         // The in-house reader unwraps the container itself (JPEG marker
@@ -105,17 +319,27 @@ impl Adapter for ExifJpeg {
         // payload is an item, not a top-level chunk.
         let r = exif::ExifReader::parse_container(data)
             .map_err(rgx_core::Error::msg)
-            .context("no EXIF payload")?;
+            .decline_context("no EXIF payload")?;
         let text = fmt_exif(&r);
         if text.trim().is_empty() {
-            bail!("EXIF container present but no fields");
+            decline!("EXIF container present but no fields");
         }
         Ok(Outcome::Text(text.into_bytes()))
     }
 }
 
 /// TIFF/GeoTIFF: the in-house reader parses a bare TIFF directly.
+///
+/// **Declines a multi-page TIFF on purpose.** `parse_tiff` reads the first
+/// IFD only, so answering a two-page scan with page 1's EXIF and calling it
+/// the file is a silent truncation — the page the reader wanted is not in
+/// the output and nothing says so. `rgx-adapters-inspect` is registered
+/// after this crate and its `Tiff` walks the whole IFD chain, so bailing
+/// here hands the multipage case to the adapter that can answer it. The
+/// single-page path keeps this one, whose EXIF set is the richer output.
+#[cfg(feature = "tiff")]
 pub struct Tiff;
+#[cfg(feature = "tiff")]
 impl Adapter for Tiff {
     fn name(&self) -> &'static str {
         "tiff"
@@ -123,11 +347,31 @@ impl Adapter for Tiff {
     fn extensions(&self) -> &'static [&'static str] {
         &["tif", "tiff"]
     }
+    /// The picture's EXIF metadata as facts: `exif.make`,
+    /// `exif.model`, `exif.camera`, `exif.gps` and `exif.datetime`.
+    ///
+    /// A multi-page TIFF reports no facts, the same way it declines
+    /// to extract: this adapter reads the first IFD only, and the
+    /// camera of the first page presented as the camera of the file
+    /// is a truncation that nothing in the answer would show.
+    fn facts(&self, data: &[u8], _path: &str) -> Vec<Field> {
+        let mut r = exif::ExifReader::new(data);
+        if r.parse_tiff().is_err() {
+            return Vec::new();
+        }
+        if tiff_ifd_count(data) > 1 {
+            return Vec::new();
+        }
+        exif_facts(&r)
+    }
     fn extract(&self, data: &[u8], _path: &str) -> Result<Outcome> {
         let mut r = exif::ExifReader::new(data);
         r.parse_tiff()
             .map_err(rgx_core::Error::msg)
-            .context("not a TIFF IFD structure")?;
+            .decline_context("not a TIFF IFD structure")?;
+        if tiff_ifd_count(data) > 1 {
+            bail!("multipage TIFF: first IFD only, deferring to the chain-walking reader");
+        }
         let text = fmt_exif(&r);
         if text.trim().is_empty() {
             bail!("TIFF contains no readable tags");
@@ -136,9 +380,75 @@ impl Adapter for Tiff {
     }
 }
 
+/// How many IFDs the chain starting at the header's first-IFD offset holds.
+///
+/// Counts links, never parses a directory: the question is only "is there
+/// more than one page", so the cost of a malformed entry is nil. Classic
+/// TIFF offsets the first IFD with a `u32` at 4; BigTIFF uses a `u64` at 8.
+/// Both byte orders exist, so the header magic — not the host — picks the
+/// reader, exactly as the rest of this crate does.
+#[cfg(feature = "tiff")]
+fn tiff_ifd_count(data: &[u8]) -> usize {
+    let (big, le) = match data.get(0..4) {
+        Some(b"II\x2a\x00") => (false, true),
+        Some(b"MM\x00\x2a") => (false, false),
+        Some(b"II\x2b\x00") => (true, true),
+        Some(b"MM\x00\x2b") => (true, false),
+        _ => return 1,
+    };
+    let rd = |b: &[u8]| -> u64 {
+        let mut v = 0u64;
+        for i in 0..b.len() {
+            // Accumulated left-to-right, so a little-endian file has to be
+            // fed its bytes back to front or every value comes out reversed.
+            v = (v << 8) | u64::from(if le { b[b.len() - 1 - i] } else { b[i] });
+        }
+        v
+    };
+    let mut at = if big {
+        match data.get(8..16) {
+            Some(b) => rd(b) as usize,
+            None => return 1,
+        }
+    } else {
+        match data.get(4..8) {
+            Some(b) => rd(b) as usize,
+            None => return 1,
+        }
+    };
+    // Bounded: a cycle in the chain must not spin here, and a file with more
+    // pages than this is already far past anything a report would print.
+    // The link sits past the entry *count* AND past every entry, and its own
+    // width differs from the count's in a classic TIFF (2 vs 4).
+    let (count_w, entry_w, link_w) = if big {
+        (8usize, 20usize, 8usize)
+    } else {
+        (2, 12, 4)
+    };
+    let mut n = 1usize;
+    while n < 1024 {
+        let Some(raw) = data.get(at..at + count_w).map(rd) else {
+            return n;
+        };
+        let link_at = at + count_w + (raw as usize).saturating_mul(entry_w);
+        let Some(next) = data.get(link_at..link_at + link_w).map(rd) else {
+            return n;
+        };
+        let next = next as usize;
+        if next == 0 || next == at {
+            return n;
+        }
+        at = next;
+        n += 1;
+    }
+    n
+}
+
 /// Audio tags, hand-rolled: ID3v1 (MP3), RIFF INFO (WAV), Vorbis comment
-/// (FLAC), Vorbis/Ogg. No external crates — a few dozen bytes each.
+/// (FLAC), Vorbis/Ogg/Opus. No external crates — a few dozen bytes each.
+#[cfg(feature = "audio-tags")]
 pub struct AudioTags;
+#[cfg(feature = "audio-tags")]
 impl Adapter for AudioTags {
     fn name(&self) -> &'static str {
         "audiotags"
@@ -159,22 +469,24 @@ impl Adapter for AudioTags {
             }
             "wav" => riff_info(data),
             "flac" => flac_vorbis(data),
-            "ogg" | "oga" | "opus" => ogg_vorbis(data),
-            _ => bail!("no lightweight tag parser for .{ext}"),
+            "ogg" | "oga" | "opus" => ogg_comment(data),
+            _ => decline!("no lightweight tag parser for .{ext}"),
         };
         if text.trim().is_empty() {
-            bail!("no tags found");
+            decline!("no tags found");
         }
         Ok(Outcome::Text(text.into_bytes()))
     }
 }
 
+#[cfg(any(feature = "audio-tags", feature = "fits", feature = "video-tags"))]
 fn trim_cstr(b: &[u8]) -> String {
     let s = String::from_utf8_lossy(b);
     s.trim_matches(char::from(0)).trim().to_string()
 }
 
 /// ID3v1: last 128 bytes, "TAG" + title/artist/album/year/comment 30/30/30/4/30.
+#[cfg(feature = "audio-tags")]
 fn id3v1(data: &[u8]) -> String {
     if data.len() < 128 {
         return String::new();
@@ -199,6 +511,7 @@ fn id3v1(data: &[u8]) -> String {
 /// ID3v2 (2.3/2.4): header "ID3" + 3 bytes + syncsafe size, then 10-byte
 /// frames (id, syncsafe size, flags). Text frames carry a 1-byte encoding
 /// prefix. We map the common T* frames to friendly names.
+#[cfg(feature = "audio-tags")]
 fn id3v2(data: &[u8]) -> String {
     if data.len() < 10 || &data[0..3] != b"ID3" {
         return String::new();
@@ -260,11 +573,13 @@ fn id3v2(data: &[u8]) -> String {
     out
 }
 
+#[cfg(feature = "audio-tags")]
 fn rd_u32be_sz(b: &[u8], o: usize) -> usize {
     rd_u32be(b, o) as usize
 }
 
 /// Decode an ID3 text frame payload: 1 encoding byte + text.
+#[cfg(feature = "audio-tags")]
 fn decode_id3_text(payload: &[u8]) -> String {
     if payload.is_empty() {
         return String::new();
@@ -304,6 +619,7 @@ fn decode_id3_text(payload: &[u8]) -> String {
 }
 
 /// RIFF INFO list: "LIST" chunk with INFO type, subchunks INAM/IART/IPRD...
+#[cfg(feature = "audio-tags")]
 fn riff_info(data: &[u8]) -> String {
     if data.len() < 12 || &data[0..4] != b"RIFF" || &data[8..12] != b"WAVE" {
         return String::new();
@@ -335,6 +651,7 @@ fn riff_info(data: &[u8]) -> String {
 }
 
 /// FLAC metadata blocks: block type 4 = Vorbis comment (vendor + key=value).
+#[cfg(feature = "audio-tags")]
 fn flac_vorbis(data: &[u8]) -> String {
     if data.len() < 42 || &data[0..4] != b"fLaC" {
         return String::new();
@@ -357,6 +674,9 @@ fn flac_vorbis(data: &[u8]) -> String {
     String::new()
 }
 
+/// Vorbis comment block: a vendor string, then a list of `key=value`
+/// entries. The same block in every container that carries one.
+#[cfg(any(feature = "audio-tags", feature = "video-tags"))]
 fn vorbis_comment(b: &[u8]) -> String {
     if b.len() < 8 {
         return String::new();
@@ -387,21 +707,52 @@ fn vorbis_comment(b: &[u8]) -> String {
     out
 }
 
-/// Ogg: find first "\x03vorbis" packet and parse its comment header.
-fn ogg_vorbis(data: &[u8]) -> String {
+/// Ogg: find the comment header packet and parse it.
+///
+/// The comment block is the same in every Ogg codec -- the vendor string
+/// and the `key=value` list the Vorbis comment defines -- but the packet
+/// that introduces it is not. Each codec names its own headers: Vorbis
+/// opens with `\x01vorbis` and comments in `\x03vorbis`, Opus opens with
+/// `OpusHead` and comments in `OpusTags`, Theora opens with `\x80theora`
+/// and comments in `\x81theora`.
+///
+/// A reader that looked for the Vorbis marker alone read the comment of a
+/// Vorbis stream and nothing else. An Opus file has no `\x03vorbis`
+/// anywhere in it, so the reader came back empty, the adapter declined,
+/// and the file fell through to the raw search -- where the NUL in the
+/// Ogg page header cut the search before the comment. The file was in
+/// the corpus and the answer was not: the tags were in the file, and
+/// nothing in the file said so.
+#[cfg(any(feature = "audio-tags", feature = "video-tags"))]
+pub(crate) fn ogg_comment(data: &[u8]) -> String {
     if data.len() < 64 || &data[0..4] != b"OggS" {
         return String::new();
     }
-    // search the first ~64 KiB for the vorbis id header packet marker
+    // The comment header is in the first pages of the stream; the window
+    // is the one the Vorbis-only reader used.
     let window = &data[..data.len().min(1 << 16)];
-    let Some(pos) = rgx_core::memchr::memmem::find(window, b"\x03vorbis") else {
+    // The earliest marker wins. The comment packet follows its own
+    // identification header, and a file may carry more than one codec --
+    // an Ogg Theora video with a Vorbis soundtrack has both -- in which
+    // case the first comment is the one the file leads with.
+    let mut found: Option<(usize, usize)> = None; // (position, marker length)
+    for marker in [&b"\x03vorbis"[..], &b"OpusTags"[..], &b"\x81theora"[..]] {
+        if let Some(pos) = rgx_core::memchr::memmem::find(window, marker) {
+            if found.is_none_or(|(p, _)| pos < p) {
+                found = Some((pos, marker.len()));
+            }
+        }
+    }
+    let Some((pos, len)) = found else {
         return String::new();
     };
-    vorbis_comment(&window[pos + 7..])
+    vorbis_comment(&window[pos + len..])
 }
 
 /// FITS astronomy images: 80-byte keyword cards until END, `KEY = value`.
+#[cfg(feature = "fits")]
 pub struct Fits;
+#[cfg(feature = "fits")]
 impl Adapter for Fits {
     fn name(&self) -> &'static str {
         "fits"
@@ -416,7 +767,7 @@ impl Adapter for Fits {
                 b.is_ascii_uppercase() || b.is_ascii_digit() || matches!(b, b' ' | b'-' | b'_')
             })
         {
-            bail!("not a FITS file (bad keyword card)");
+            decline!("not a FITS file (bad keyword card)");
         }
         let mut out = String::new();
         let mut p = 0usize;
@@ -442,7 +793,7 @@ impl Adapter for Fits {
             }
         }
         if out.trim().is_empty() {
-            bail!("FITS header has no keywords");
+            decline!("FITS header has no keywords");
         }
         Ok(Outcome::Text(out.into_bytes()))
     }
@@ -450,7 +801,9 @@ impl Adapter for Fits {
 
 /// DICOM (medical imaging): 128-byte preamble + "DICM", then data elements.
 /// Stops before pixel data (7FE0,0010); strings and numeric VRs only.
+#[cfg(feature = "dicom")]
 pub struct Dicom;
+#[cfg(feature = "dicom")]
 impl Adapter for Dicom {
     fn name(&self) -> &'static str {
         "dicom"
@@ -460,7 +813,7 @@ impl Adapter for Dicom {
     }
     fn extract(&self, data: &[u8], _path: &str) -> Result<Outcome> {
         if data.len() < 132 || &data[128..132] != b"DICM" {
-            bail!("not a DICOM file (missing DICM preamble)");
+            decline!("not a DICOM file (missing DICM preamble)");
         }
         // long VRs carry 32-bit lengths (OB, OD, OF, OL, OW, SQ, UC, UR, UT, UN)
         const LONG_VR: &[&[u8; 2]] = &[
@@ -520,17 +873,178 @@ impl Adapter for Dicom {
             p = voff + vlen;
         }
         if out.trim().is_empty() {
-            bail!("no DICOM elements decoded");
+            decline!("no DICOM elements decoded");
         }
         Ok(Outcome::Text(out.into_bytes()))
     }
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(
+        feature = "exif",
+        feature = "tiff",
+        feature = "audio-tags",
+        feature = "video-tags",
+        feature = "fits",
+        feature = "dicom"
+    )
+))]
 mod tests {
     use super::*;
 
+    /// A little-endian TIFF/EXIF payload with the given ASCII IFD0
+    /// tags.
+    ///
+    /// A string longer than four bytes is stored out of line, the way
+    /// a real file stores it, so the reader's offset handling is
+    /// exercised rather than bypassed.
+    #[cfg(feature = "exif")]
+    fn tiff_with_ascii(tags: &[(u16, &str)]) -> Vec<u8> {
+        let mut tiff = Vec::new();
+        tiff.extend_from_slice(b"II");
+        tiff.extend_from_slice(&42u16.to_le_bytes());
+        tiff.extend_from_slice(&8u32.to_le_bytes()); // IFD0 at 8
+        tiff.extend_from_slice(&(tags.len() as u16).to_le_bytes());
+        // The data area follows the directory: the count, the entries
+        // and the next-IFD offset.
+        let data_at = (8 + 2 + 12 * tags.len() + 4) as u32;
+        let mut at = data_at;
+        let mut values: Vec<Vec<u8>> = Vec::new();
+        for (tag, text) in tags {
+            let bytes = text.as_bytes();
+            let count = bytes.len() as u32 + 1; // with its NUL
+            tiff.extend_from_slice(&tag.to_le_bytes());
+            tiff.extend_from_slice(&2u16.to_le_bytes()); // ASCII
+            tiff.extend_from_slice(&count.to_le_bytes());
+            if count <= 4 {
+                let mut slot = [0u8; 4];
+                slot[..bytes.len()].copy_from_slice(bytes);
+                tiff.extend_from_slice(&slot);
+            } else {
+                tiff.extend_from_slice(&at.to_le_bytes());
+                let mut value = bytes.to_vec();
+                value.push(0);
+                at += value.len() as u32;
+                values.push(value);
+            }
+        }
+        tiff.extend_from_slice(&0u32.to_le_bytes()); // no next IFD
+        assert_eq!(
+            tiff.len() as u32,
+            data_at,
+            "the data area starts right past the directory"
+        );
+        for value in values {
+            tiff.extend_from_slice(&value);
+        }
+        tiff
+    }
+
+    /// A JPEG whose APP1 segment carries the given TIFF/EXIF payload.
+    #[cfg(feature = "exif")]
+    fn jpeg_with_exif(tiff: &[u8]) -> Vec<u8> {
+        let mut segment = Vec::new();
+        segment.extend_from_slice(b"Exif\0\0");
+        segment.extend_from_slice(tiff);
+        let mut jpeg = Vec::new();
+        jpeg.extend_from_slice(&[0xFF, 0xD8]); // SOI
+        jpeg.extend_from_slice(&[0xFF, 0xE1]); // APP1
+        jpeg.extend_from_slice(&((segment.len() + 2) as u16).to_be_bytes());
+        jpeg.extend_from_slice(&segment);
+        jpeg.extend_from_slice(&[0xFF, 0xD9]); // EOI
+        jpeg
+    }
+
+    /// The value of a fact, when it was reported.
+    #[cfg(any(feature = "exif", feature = "tiff"))]
+    fn fact_value<'a>(facts: &'a [Field], name: &str) -> Option<&'a str> {
+        facts
+            .iter()
+            .find(|f| f.name == name)
+            .map(|f| f.value.as_str())
+    }
+
+    /// The camera of a picture is the make and the model the file
+    /// holds, and each of them on its own.
     #[test]
+    #[cfg(feature = "exif")]
+    fn exif_facts_carry_the_make_and_the_model() {
+        let jpeg = jpeg_with_exif(&tiff_with_ascii(&[
+            (0x010F, "NIKON CORPORATION"),
+            (0x0110, "NIKON D850"),
+        ]));
+        let facts = ExifJpeg.facts(&jpeg, "photo.jpg");
+        assert_eq!(fact_value(&facts, "exif.make"), Some("NIKON CORPORATION"));
+        assert_eq!(fact_value(&facts, "exif.model"), Some("NIKON D850"));
+        assert_eq!(
+            fact_value(&facts, "exif.camera"),
+            Some("NIKON CORPORATION NIKON D850")
+        );
+    }
+
+    /// A picture with no coordinates reports no `exif.gps` fact. The
+    /// fact's presence is the answer to `exif:gps`, so reporting one
+    /// for a picture without GPS would make the predicate a lie.
+    #[test]
+    #[cfg(feature = "exif")]
+    fn exif_facts_omit_gps_when_the_file_has_no_coordinates() {
+        let jpeg = jpeg_with_exif(&tiff_with_ascii(&[(0x010F, "KADANE")]));
+        let facts = ExifJpeg.facts(&jpeg, "photo.jpg");
+        assert_eq!(fact_value(&facts, "exif.make"), Some("KADANE"));
+        assert_eq!(fact_value(&facts, "exif.gps"), None);
+    }
+
+    /// A picture that really carries coordinates reports them, in
+    /// decimal degrees, together with the camera that took it and the
+    /// date it was taken.
+    #[test]
+    #[cfg(feature = "exif")]
+    fn exif_facts_report_the_coordinates_a_file_holds() {
+        let jpeg = include_bytes!("../testdata/exif_sample.jpg");
+        let facts = ExifJpeg.facts(jpeg, "photo.jpg");
+        assert_eq!(fact_value(&facts, "exif.make"), Some("KADANE"));
+        assert_eq!(fact_value(&facts, "exif.model"), Some("RGX-CAM"));
+        assert_eq!(fact_value(&facts, "exif.camera"), Some("KADANE RGX-CAM"));
+        let gps = fact_value(&facts, "exif.gps").expect("the sample has GPS");
+        assert!(gps.starts_with("48.858"), "{gps}");
+        assert!(gps.contains("2.292"), "{gps}");
+        assert_eq!(
+            fact_value(&facts, "exif.datetime"),
+            Some("2026:09:28 12:00:00")
+        );
+    }
+
+    /// The TIFF adapter reports the same facts from a bare TIFF.
+    #[test]
+    #[cfg(feature = "tiff")]
+    fn tiff_facts_carry_the_camera_and_the_coordinates() {
+        let tiff = include_bytes!("../testdata/exif_sample.tiff");
+        let facts = Tiff.facts(tiff, "scan.tif");
+        assert_eq!(fact_value(&facts, "exif.make"), Some("KADANE"));
+        assert_eq!(fact_value(&facts, "exif.model"), Some("RGX-CAM"));
+        assert_eq!(fact_value(&facts, "exif.camera"), Some("KADANE RGX-CAM"));
+        assert!(
+            fact_value(&facts, "exif.gps").is_some(),
+            "the sample carries coordinates"
+        );
+    }
+
+    /// A file with no EXIF at all reports no facts, and reports none
+    /// rather than failing: the question is asked of a file this
+    /// adapter could not read.
+    #[test]
+    #[cfg(all(feature = "exif", feature = "tiff"))]
+    fn exif_facts_are_empty_for_a_file_without_exif() {
+        assert!(ExifJpeg
+            .facts(&[0xFF, 0xD8, 0xFF, 0xD9], "photo.jpg")
+            .is_empty());
+        assert!(Tiff.facts(b"II*\x00", "scan.tif").is_empty());
+        assert!(ExifJpeg.facts(&[], "photo.jpg").is_empty());
+    }
+
+    #[test]
+    #[cfg(feature = "audio-tags")]
     fn id3v1_basic() {
         let mut mp3 = vec![0xff; 500];
         let mut tag = vec![0u8; 128];
@@ -543,7 +1057,61 @@ mod tests {
         assert!(t.contains("artist: Band"), "{t}");
     }
 
+    /// A minimal Ogg stream carrying one codec's comment header and a
+    /// comment block: the page header, the marker, then the vendor
+    /// string and the `key=value` list the Vorbis comment defines.
+    #[cfg(any(feature = "audio-tags", feature = "video-tags"))]
+    fn ogg_with(marker: &[u8], comments: &[(&str, &str)]) -> Vec<u8> {
+        let mut d = vec![0u8; 64];
+        d[0..4].copy_from_slice(b"OggS");
+        d.extend_from_slice(marker);
+        d.extend_from_slice(&3u32.to_le_bytes()); // vendor length
+        d.extend_from_slice(b"rgx");
+        d.extend_from_slice(&(comments.len() as u32).to_le_bytes());
+        for (k, v) in comments {
+            let kv = format!("{k}={v}");
+            d.extend_from_slice(&(kv.len() as u32).to_le_bytes());
+            d.extend_from_slice(kv.as_bytes());
+        }
+        d
+    }
+
+    /// The comment block is the same in every Ogg codec, but the packet
+    /// that introduces it is not: Vorbis comments in `\x03vorbis`, Opus in
+    /// `OpusTags`, Theora in `\x81theora`. A reader that knew only the
+    /// Vorbis marker read a Vorbis stream and nothing else -- and an Opus
+    /// file has no `\x03vorbis` in it at all, so the adapter declined, the
+    /// file fell to the raw search, and the NUL in the Ogg page header
+    /// cut the search before the comment. The tags were in the file and
+    /// the answer was not.
     #[test]
+    #[cfg(any(feature = "audio-tags", feature = "video-tags"))]
+    fn the_ogg_comment_is_read_whatever_the_codec_is() {
+        for marker in [&b"\x03vorbis"[..], &b"OpusTags"[..], &b"\x81theora"[..]] {
+            let d = ogg_with(marker, &[("TITLE", "Zircaloy Clip")]);
+            let text = ogg_comment(&d);
+            assert!(text.contains("TITLE: Zircaloy Clip"), "{text}");
+        }
+    }
+
+    /// The Opus file the corpus holds: an Ogg Opus stream whose comment
+    /// header is `OpusTags`. The adapter claims `.opus`, so this is the
+    /// path that has to answer.
+    #[test]
+    #[cfg(feature = "audio-tags")]
+    fn an_opus_file_is_read_through_its_own_comment_header() {
+        let d = ogg_with(b"OpusTags", &[("TITLE", "Zircaloy Clip")]);
+        match AudioTags.extract(&d, "a.opus").unwrap() {
+            Outcome::Text(t) => {
+                let s = String::from_utf8(t).unwrap();
+                assert!(s.contains("TITLE: Zircaloy Clip"), "{s}");
+            }
+            _ => panic!("expected text"),
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "fits")]
     fn fits_cards() {
         let card = |k: &str, v: &str| {
             let mut c = format!("{k:<8}= {v}");
@@ -566,6 +1134,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "dicom")]
     fn dicom_preamble() {
         let mut data = vec![0u8; 128];
         data.extend_from_slice(b"DICM");
@@ -587,6 +1156,7 @@ mod tests {
     mod fuzz {
         use super::*;
 
+        #[cfg(feature = "fits")]
         fn fits_cards() -> Vec<u8> {
             let card = |k: &str, v: &str| {
                 let mut c = format!("{k:<8}= {v}");
@@ -600,6 +1170,7 @@ mod tests {
             data.into_bytes()
         }
 
+        #[cfg(feature = "dicom")]
         fn dicom_mr() -> Vec<u8> {
             let mut data = vec![0u8; 128];
             data.extend_from_slice(b"DICM");
@@ -610,6 +1181,7 @@ mod tests {
             data
         }
 
+        #[cfg(feature = "audio-tags")]
         fn mp3_id3v1() -> Vec<u8> {
             let mut mp3 = vec![0xffu8; 500];
             let mut tag = vec![0u8; 128];
@@ -619,6 +1191,7 @@ mod tests {
             mp3
         }
 
+        #[cfg(feature = "exif")]
         fn mini_jpeg() -> Vec<u8> {
             let mut j = Vec::new();
             j.extend_from_slice(&[0xFF, 0xD8]); // SOI
@@ -629,6 +1202,7 @@ mod tests {
             j
         }
 
+        #[cfg(feature = "tiff")]
         fn mini_tiff() -> Vec<u8> {
             let mut t = Vec::new();
             t.extend_from_slice(b"II*\x00"); // little-endian, magic 42
@@ -639,6 +1213,38 @@ mod tests {
         }
 
         #[test]
+        #[cfg(feature = "tiff")]
+        fn a_single_page_tiff_answers_here_and_a_two_page_one_defers() {
+            /// `n` classic-TIFF pages, chained.
+            fn pages(n: u16) -> Vec<u8> {
+                let mut t = Vec::new();
+                t.extend_from_slice(b"II*\x00");
+                t.extend_from_slice(&8u32.to_le_bytes());
+                let mut at = 8u32;
+                for i in 0..n {
+                    let next = if i + 1 == n { 0 } else { at + 18 };
+                    t.extend_from_slice(&1u16.to_le_bytes()); // one entry
+                    t.extend_from_slice(&256u16.to_le_bytes()); // ImageWidth
+                    t.extend_from_slice(&4u16.to_le_bytes()); // LONG
+                    t.extend_from_slice(&1u32.to_le_bytes());
+                    t.extend_from_slice(&800u32.to_le_bytes());
+                    t.extend_from_slice(&next.to_le_bytes());
+                    at += 18;
+                }
+                t
+            }
+            assert_eq!(tiff_ifd_count(&pages(1)), 1);
+            assert_eq!(tiff_ifd_count(&pages(2)), 2);
+            assert_eq!(tiff_ifd_count(&pages(4)), 4);
+            // The two-page file must be refused so the chain walker answers; the
+            // one-page file must NOT be, because this adapter's EXIF set is
+            // the richer output and it is the one that should get it.
+            assert!(Tiff.extract(&pages(2), "x.tif").is_err());
+            assert!(Tiff.extract(&pages(1), "x.tif").is_ok());
+        }
+
+        #[test]
+        #[cfg(feature = "fits")]
         fn fits_never_panics_on_mutation() {
             rgx_core::fuzzkit::assert_never_panics(
                 vec![("cards", fits_cards()), ("empty", vec![])],
@@ -651,6 +1257,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg(feature = "dicom")]
         fn dicom_never_panics_on_mutation() {
             rgx_core::fuzzkit::assert_never_panics(
                 vec![
@@ -667,6 +1274,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg(feature = "audio-tags")]
         fn audio_tags_never_panics_on_mutation() {
             rgx_core::fuzzkit::assert_never_panics(
                 vec![("id3v1", mp3_id3v1()), ("empty", vec![])],
@@ -679,6 +1287,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg(feature = "exif")]
         fn exif_jpeg_never_panics_on_mutation() {
             rgx_core::fuzzkit::assert_never_panics(
                 vec![
@@ -695,6 +1304,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg(feature = "tiff")]
         fn tiff_never_panics_on_mutation() {
             rgx_core::fuzzkit::assert_never_panics(
                 vec![
@@ -706,6 +1316,31 @@ mod tests {
                 "tiff",
                 |data| {
                     let _ = Tiff.extract(data, "fuzz.tiff");
+                },
+            );
+        }
+
+        /// The facts are asked of whatever the bytes turned out to be,
+        /// so they must not panic on a mutated picture either.
+        #[test]
+        #[cfg(all(feature = "exif", feature = "tiff"))]
+        fn exif_facts_never_panics_on_mutation() {
+            let jpeg = jpeg_with_exif(&tiff_with_ascii(&[(0x010F, "KADANE")]));
+            rgx_core::fuzzkit::assert_never_panics(
+                vec![
+                    ("jpeg-with-exif", jpeg),
+                    (
+                        "sample",
+                        include_bytes!("../testdata/exif_sample.jpg").to_vec(),
+                    ),
+                    ("soi-only", vec![0xFF, 0xD8]),
+                    ("empty", vec![]),
+                ],
+                1500,
+                "exif-facts",
+                |data| {
+                    let _ = ExifJpeg.facts(data, "fuzz.jpg");
+                    let _ = Tiff.facts(data, "fuzz.tif");
                 },
             );
         }

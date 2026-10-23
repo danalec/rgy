@@ -3,8 +3,8 @@
 rgx (`../rgx`) has already paid for the lessons below — measured on its own
 corpora, documented in its `AGENTS.md` / `ROADMAP.md` / `src/mmap.rs`. rgy
 inherits them so the same bill is not paid twice. (Its `rar-codec` rewrite
-settled: this workspace's copies of the `rgx-*` crates are verbatim with the
-cleanroom codec rewrites, and `benchmark/winrar-oracle.md` records what the
+settled: this workspace's copies of the `rgx-*` crates are upstream's own,
+transported verbatim, and `benchmark/winrar-oracle.md` records what the
 WinRAR oracle verified.)
 
 ## Memory mapping
@@ -131,27 +131,58 @@ content walk sorts at a sink.
 
 ## Vendoring
 
-**rgx never copies a file from any upstream.** Vendored trees are
-independent reimplementations: read the upstream source or spec for the API
-contract and the per-platform algorithm, then write fresh code. Every
-vendored file carries a `//!` provenance header naming the upstream and the
-commit it was based on. `scripts/check-vendoring.ps1` is a four-rule gate,
-exit 1 on violation: (1) no upstream reference in any non-comment line of
-`Cargo.toml` / `Cargo.lock` / `.cargo/config.toml`; (2) no `[patch]` in
+**rgx never copies a file from any upstream.** That is rgx's rule for
+*its own* trees: they are independent reimplementations, written from the
+upstream source or the specification for the API contract and the
+per-platform algorithm. Every vendored file carries a `//!` provenance
+header naming the upstream and the commit it was based on.
+
+**rgy is the other way round, and deliberately.** rgy does not reimplement
+rgx: it *is* rgx's engine and adapters, transported verbatim. `crates/rgx-*`
+and `crates/rar-codec` are upstream rgx's crates, byte for byte, and
+`scripts/sync-rgx-upstream.sh` is what puts them there. The licence follows
+upstream's (Apache-2.0, with five files whose layout was transcribed from
+a third party), so `COPYING` and `NOTICE` say so and `LICENSE-MIT-FSEARCH`
+carries the notice of the one upstream whose code is carried here.
+
+The earlier shape — rgy's copies of the rgx crates being a *curated
+subset*, each file with a provenance header of its own — cost 210 upstream
+commits of drift before it was noticed, and it was the drift that made the
+provenance headers wrong rather than right: a header that names an
+upstream is a claim that this file is ours, and it stopped being true for
+every file upstream touched.
+
+**Where rgy must differ from upstream, the difference is a patch.**
+`scripts/rgx-local-patches/` holds one patch per divergence, applied on top
+of the copy, and `scripts/apply-vendored-edits.*` derives each patched
+file from upstream's current content plus its patch. Two patches are live:
+an overflow in upstream's HFS+ encoder bitmap (`1u64 << 64`) and an
+overflow in upstream's Firebird creation-date arithmetic
+(`frac * 86_400` in a `u32`). Both are upstream's, both are invisible to
+upstream's CI because it runs the suite in release mode where the overflow
+checks are off, and both are debug-mode panics in rgy, whose CI runs the
+suite the way it is meant to be run.
+
+**`scripts/check-vendoring.*` is a four-rule gate**, exit 1 on violation:
+(1) no upstream reference in any non-comment line of `Cargo.toml` /
+`Cargo.lock` / `.cargo/config.toml`; (2) no `[patch]` in
 `.cargo/config.toml`; (3) a provenance header on every vendored tree's root
 module (`vendored from` or `independent reimplementation`); (4) no
 unlisted crates.io dependency.
 
-**`vendored-sources.tsv` pins are the sync point, not decoration.** A pin
-is the commit (or version) the file was *actually* taken from — the newest
-one whose content still matches, not "whatever HEAD is now" — which turns
-"has upstream moved?" into a question with an answer: every commit past the
-pin is a change the copy has not seen. **A row pinned `-` is a failure on
-purpose** — it says "no established sync point", and a manifest that
-quietly omits or dashes a file is worse than one that admits it has not
-been looked at, because the omission reads as "nothing to do here". Never
-hand-write a commit to make the gate green. rgy's `scripts/vendored-sources.tsv`
-carries the same rule in its header.
+**`scripts/vendored-sources.tsv` is written by the sync, not by hand.** It
+records the relationship that actually exists — these trees came from
+those trees at that commit — and every pin in it is a commit, so
+`scripts/check-drift.*` can ask "has the upstream moved past the pin?" and
+get an answer. The old manifest listed, per file, the *specification* the
+file was written from (`RFC 1950`, `FIPS-180-4`, and so on), and the drift
+check could never verify a row like that: a specification version is not a
+git commit, so every one of them read as drift and the check reported 81
+of 115 rows broken, which says nothing at all. **A row pinned `-` is a
+failure on purpose** — it says "no established sync point", and a manifest
+that quietly omits a file is worse than one that admits it has not been
+looked at, because the omission reads as "nothing to do here". Never
+hand-write a commit to make the gate green.
 
 ## Gotchas
 
@@ -210,7 +241,7 @@ min-of-N; 4.3 ms spawn floor measured and reported separately):
 - Release profile follows rgx's (`lto = "fat"`, `codegen-units = 1`,
   `strip`); `pgo.sh` is fsearch's pattern trained on the name bench.
 
-## Still open (Phase 6 polish, named honestly)
+## Still open, named honestly
 
 - ~~PGO validated end-to-end on Windows~~ — **done**: `pgo.ps1` drives the
   same two-pass shape as `pgo.sh` (instrumented `name_bench` trainer →
@@ -224,4 +255,5 @@ min-of-N; 4.3 ms spawn floor measured and reported separately):
   the delta is the read() copy vs page faults. Windows first-touch cold
   stays unmeasured (needs a kernel driver to drop the standby list).
 - `discovery-macos` is imports-only transport, unverified (no macOS
-  target on the machine that built this workspace).
+  target on the machine that built this workspace). It is the first row
+  of the macOS limits in [STATUS.md](STATUS.md).

@@ -1,4 +1,6 @@
-//! The `Source` selector (`docs/freebsd-support.md` §5 decision 3).
+// SPDX-License-Identifier: Apache-2.0
+
+//! The `Source` selector (`docs/design.md` §4).
 //!
 //! One walk per platform, chosen by `cfg`, with the portable walk as the
 //! answer everywhere else and as the fallback whenever a native backend
@@ -10,12 +12,99 @@
 //! This crate exists because the platform backends depend on `discovery`
 //! for the traits, so the selector that knows all of them cannot live
 //! there without a dependency cycle.
+//!
+//! It also holds the one place the catch-up rule lives: what a restart can
+//! do on each OS ([`catch_up_for`]). The Windows, macOS, Linux and FreeBSD
+//! paths cannot disagree about "replayed" vs "relisted", because there is
+//! only one function that answers it.
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use std::path::PathBuf;
 
 use discovery::walk::{Cancel, Cancelled, Listing, Progress};
 use discovery::{PortableSource, Source};
+use proto::CatchUp;
+
+/// The platform whose change feed decides how a restart catches up.
+///
+/// The selector already picks a backend per platform ([`pick`]); this is
+/// the same choice named as a value, so the rule that follows it can be
+/// stated once and tested on any host rather than only on the host the
+/// test happens to run on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Platform {
+    /// NTFS and the USN journal.
+    Windows,
+    /// HFS+/APFS and FSEvents.
+    MacOs,
+    /// ext4 and friends, and inotify.
+    Linux,
+    /// ZFS/UFS and kqueue.
+    FreeBsd,
+    /// Every other target: the portable walk, and no change feed at all.
+    Other,
+}
+
+/// The platform this build runs on.
+pub fn current_platform() -> Platform {
+    #[cfg(windows)]
+    {
+        Platform::Windows
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Platform::MacOs
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Platform::Linux
+    }
+    #[cfg(target_os = "freebsd")]
+    {
+        Platform::FreeBsd
+    }
+    #[cfg(not(any(
+        windows,
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "freebsd"
+    )))]
+    {
+        Platform::Other
+    }
+}
+
+/// How the index catches up after a restart, per platform.
+///
+/// This is the whole of `docs/design.md` §3, rule 5 ("live-feed honesty"),
+/// in one place:
+///
+/// * **Windows** (the USN journal) and **macOS** (the FSEvents event id)
+///   keep the OS's history, so a restart can resume that journal at the
+///   saved watermark and apply what changed while the daemon was off — the
+///   catch-up can be **replayed**;
+/// * **Linux** (inotify) and **FreeBSD** (kqueue) keep no such history:
+///   there is no journal to resume, so the only way to catch up is to walk
+///   the tree again and diff it — the catch-up is **relisted**.
+///
+/// The answer is what the *platform* can do, not what one particular
+/// restart did. A journal can wrap (the feed then reports a rescan and the
+/// index is re-listed), and a daemon that starts without a saved index walks
+/// the tree whatever the OS could have replayed. It is therefore the
+/// capability, and the daemon answers with an observation of its own: it
+/// reports "replayed" only when it actually resumed a journal at a saved
+/// watermark.
+pub fn catch_up_for(platform: Platform) -> CatchUp {
+    match platform {
+        Platform::Windows | Platform::MacOs => CatchUp::Replayed,
+        Platform::Linux | Platform::FreeBsd | Platform::Other => CatchUp::Relisted,
+    }
+}
+
+/// How the index catches up after a restart on this platform.
+pub fn catch_up() -> CatchUp {
+    catch_up_for(current_platform())
+}
 
 /// The backend [`AnySource`] delegates to. Not public: the only thing a
 /// caller may need is [`AnySource::backend_name`].
@@ -63,10 +152,14 @@ pub struct AnySource {
     kind: Kind,
 }
 
-/// Build the platform [`Source`] for `root` (docs/freebsd-support.md P2.1).
+/// Build the platform [`Source`] for `root` (docs/design.md §2.2).
 pub fn source_for(root: Vec<u8>, threads: usize) -> AnySource {
     let kind = pick(&root, threads);
-    AnySource { root, threads, kind }
+    AnySource {
+        root,
+        threads,
+        kind,
+    }
 }
 
 /// The root as a path, for the backends that take one. Linux and FreeBSD
@@ -83,12 +176,16 @@ fn pick(root: &[u8], threads: usize) -> Kind {
     #[cfg(target_os = "linux")]
     {
         let _ = threads;
-        return Kind::Linux(discovery_linux::LinuxSource { root: path_of(root) });
+        return Kind::Linux(discovery_linux::LinuxSource {
+            root: path_of(root),
+        });
     }
     #[cfg(target_os = "freebsd")]
     {
         let _ = threads;
-        return Kind::FreeBsd(discovery_freebsd::FreeBsdSource { root: path_of(root) });
+        return Kind::FreeBsd(discovery_freebsd::FreeBsdSource {
+            root: path_of(root),
+        });
     }
     #[cfg(target_os = "macos")]
     {
@@ -105,7 +202,12 @@ fn pick(root: &[u8], threads: usize) -> Kind {
         }
         Kind::Portable
     }
-    #[cfg(not(any(windows, target_os = "linux", target_os = "macos", target_os = "freebsd")))]
+    #[cfg(not(any(
+        windows,
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "freebsd"
+    )))]
     {
         let _ = (root, threads);
         Kind::Portable
@@ -127,8 +229,9 @@ fn try_mft(root: &[u8]) -> Option<discovery_windows::MftSource<'static>> {
     let vol_root = p.to_str()?;
     // The volume lives for the process; leak it so the MftSource owns a
     // 'static borrow (the same trade `searchd`'s `open_watch` makes).
-    let volume: &'static discovery_windows::volume::Volume =
-        Box::leak(Box::new(discovery_windows::volume::Volume::open(vol_root).ok()?));
+    let volume: &'static discovery_windows::volume::Volume = Box::leak(Box::new(
+        discovery_windows::volume::Volume::open(vol_root).ok()?,
+    ));
     let indexer = discovery_windows::indexer::Indexer::new(volume);
     Some(discovery_windows::MftSource::new(indexer))
 }
@@ -321,5 +424,50 @@ mod tests {
             .expect("an uncancelled walk must answer");
         assert_eq!(want, normalize(&got));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The catch-up rule as `docs/design.md` §3 states it: a platform whose
+    /// OS keeps a journal replays it, a platform whose OS keeps none
+    /// relists the tree. Asserted for every platform, so the rule is the
+    /// same on every host -- not only the one the test runs on.
+    #[test]
+    fn the_catch_up_rule_is_the_one_the_design_doc_states() {
+        assert_eq!(catch_up_for(Platform::Windows), CatchUp::Replayed);
+        assert_eq!(catch_up_for(Platform::MacOs), CatchUp::Replayed);
+        assert_eq!(catch_up_for(Platform::Linux), CatchUp::Relisted);
+        assert_eq!(catch_up_for(Platform::FreeBsd), CatchUp::Relisted);
+        // No native backend and no feed: the tree is walked again.
+        assert_eq!(catch_up_for(Platform::Other), CatchUp::Relisted);
+    }
+
+    /// The rule is stated once, so the spelling cannot drift from it: the
+    /// two values the wire carries are the two the doc spells.
+    #[test]
+    fn the_catch_up_spellings_are_the_ones_the_doc_uses() {
+        assert_eq!(CatchUp::Replayed.as_str(), "replayed");
+        assert_eq!(CatchUp::Relisted.as_str(), "relisted");
+    }
+
+    /// The platform this build targets is the one the selector reports --
+    /// a mis-wired `cfg` here would give every platform the wrong answer.
+    #[test]
+    fn the_running_platform_is_the_one_the_build_targets() {
+        #[cfg(windows)]
+        assert_eq!(current_platform(), Platform::Windows);
+        #[cfg(target_os = "macos")]
+        assert_eq!(current_platform(), Platform::MacOs);
+        #[cfg(target_os = "linux")]
+        assert_eq!(current_platform(), Platform::Linux);
+        #[cfg(target_os = "freebsd")]
+        assert_eq!(current_platform(), Platform::FreeBsd);
+        #[cfg(not(any(
+            windows,
+            target_os = "macos",
+            target_os = "linux",
+            target_os = "freebsd"
+        )))]
+        assert_eq!(current_platform(), Platform::Other);
+        // And the shortcut agrees with the rule, not with a second copy of it.
+        assert_eq!(catch_up(), catch_up_for(current_platform()));
     }
 }

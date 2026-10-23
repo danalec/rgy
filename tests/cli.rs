@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! End-to-end tests for `searchctl`: walk-style name queries, filters,
 //! `--json`, `--limit`, `grep:` content search, and rg-compatible exit
 //! codes (0 match / 1 no match / 2 error). Fixtures are runtime temp trees.
@@ -554,5 +556,49 @@ fn an_index_built_for_another_tree_is_refused() {
     assert!(
         !out.contains(a.to_str().unwrap()),
         "no path from the other tree may leak into results; got {out}"
+    );
+}
+
+// --- console encoding --------------------------------------------------------
+
+/// A redirected stdout keeps the raw UTF-8 bytes (parity row 4.7).
+///
+/// The console's code page decides how the bytes are *rendered* on a
+/// terminal, and that is where the fix belongs. A pipe is not a terminal:
+/// the machine on the other end must get the UTF-8 the program wrote --
+/// not a `?` where the accent was, and not a console's idea of the text.
+#[test]
+fn a_redirected_stdout_keeps_the_utf8_bytes() {
+    let dir = fixture_dir("utf8");
+    let name = "ação-nota.txt";
+    std::fs::write(dir.join(name), "needle\n").unwrap();
+    let root = dir.to_str().unwrap();
+
+    let (code, out, err) = run(&searchctl(), &["--root", root, "nota"]);
+    assert_eq!(code, 0, "the name must match; stdout={out} stderr={err}");
+    assert!(
+        out.contains(name),
+        "the name must reach the pipe as UTF-8: {out}"
+    );
+    assert!(
+        !out.contains('?'),
+        "the accent must not become a question mark: {out}"
+    );
+}
+
+/// The same, through `--json`: the machine consumer reads a field, so the
+/// bytes inside it must be the UTF-8 the program wrote.
+#[test]
+fn a_redirected_stdout_keeps_the_utf8_bytes_in_json() {
+    let dir = fixture_dir("utf8json");
+    let name = "ação-nota.txt";
+    std::fs::write(dir.join(name), "needle\n").unwrap();
+    let root = dir.to_str().unwrap();
+
+    let (code, out, err) = run(&searchctl(), &["--root", root, "--json", "nota"]);
+    assert_eq!(code, 0, "stdout={out} stderr={err}");
+    assert!(
+        out.contains(name),
+        "the JSON must carry the name as UTF-8: {out}"
     );
 }

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! MakerNote support for manufacturer-specific EXIF data.
 //!
 //! Carries tag tables and parses the MakerNote IFD of the camera makers whose

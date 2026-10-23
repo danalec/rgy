@@ -2,14 +2,15 @@
 name = "name-core"
 version = "0.1.0"
 edition = "2024"
+authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
 description = "Name index, query filters, fuzzy ranking (fsearch engine + zen query vocabulary)"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0 AND MIT"
 
 [dependencies]
 discovery = { path = "../discovery" }
 # One regex engine (§4.4): the vendored zen-rs copy is gone; `re:`
 # path patterns compile through rgx-core's syntax/nfa/vm, the same engine
-# the copy was taken from (MIT OR Apache-2.0).
+# the copy was taken from (Apache-2.0).
 rgx-core = { path = "../rgx-core" }
 # fsearch's name index v2 mmaps its name blob (name_index.rs).
 memmap2 = "0.9"

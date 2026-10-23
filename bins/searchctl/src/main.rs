@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! searchctl — the merged name-search CLI.
 //!
 //! fsearch one-shot ergonomics + zen-rs's filter vocabulary (see
@@ -9,8 +11,11 @@
 //! With `--index`, a built index is reused across invocations: the walk and
 //! the build happen once, and later queries pay an mmap instead. The portable
 //! walk has no change feed, so freshness is explicit — `--reindex` forces a
-//! rebuild and `--max-age` expires one, and the root is pinned in a sidecar
-//! so an index built for another tree can never be loaded (see
+//! rebuild and `--max-age` expires one; without a `--max-age` of its own an
+//! index expires after 30 minutes, because a saved index is a snapshot and a
+//! snapshot of any age served without saying so is how a query ends up
+//! missing a file created yesterday. The root is pinned in a sidecar so an
+//! index built for another tree can never be loaded (see
 //! `name_core::persist`).
 //!
 //! rg-compatible exit codes: 0 = matches, 1 = no matches, 2 = error.
@@ -39,7 +44,7 @@ const REPORT_EVERY: Duration = Duration::from_millis(500);
 /// for help, 2 for the rg convention's "bad invocation". `--help` used to
 /// exit 2 like a malformed command, which a script reads as an error.
 fn usage(code: i32) -> ! {
-    eprintln!(
+    engine::errln!(
         "searchctl [options] <query>\n\n\
          options:\n  \
            --root <dir>       tree to index (default: .)\n  \
@@ -49,7 +54,7 @@ fn usage(code: i32) -> ! {
            --explain           report the query plan on stderr\n  \
            --index <file>     reuse/persist an index (default: cache dir)\n  \
            --reindex          rebuild even if a usable index exists\n  \
-           --max-age <dur>    rebuild an index older than 30m/2h/7d\n\n\
+           --max-age <dur>    rebuild an index older than this (default 30m; 0 = never reuse)\n\n\
          query: fsearch tokens (bare=fuzzy, 'x exact, ^x prefix, x$ suffix,\n\
          !x negate) + zen-rs filters (ext: dir: type: size: re:),\n\
          | alternates, * and ? glob the whole path."
@@ -58,7 +63,8 @@ fn usage(code: i32) -> ! {
 }
 
 /// Parse `30m` / `2h` / `7d` / `90s` / `1w` into a duration. Bare numbers are
-/// seconds, so `--max-age 0` means "expire anything a second old".
+/// seconds, so `--max-age 0` means "never reuse": the index is rebuilt every
+/// time, which is the point of asking for no tolerance at all.
 fn parse_age(s: &str) -> Option<std::time::Duration> {
     let s = s.trim();
     let (digits, mult) = match s.as_bytes().last()? {
@@ -77,6 +83,12 @@ fn parse_age(s: &str) -> Option<std::time::Duration> {
 }
 
 fn main() {
+    // The console decides how the UTF-8 bytes below are decoded, so it is
+    // put into UTF-8 before anything is printed (parity row 4.7). A
+    // redirected stdout keeps its raw bytes: a machine consumer wants
+    // UTF-8, not a console's idea of it.
+    engine::console::init();
+
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut root = String::from(".");
     let mut limit = 50usize;
@@ -120,7 +132,7 @@ fn main() {
             "--json" => json = true,
             "-h" | "--help" => usage(0),
             a if a.starts_with('-') => {
-                eprintln!("searchctl: unknown option {a}");
+                engine::errln!("searchctl: unknown option {a}");
                 std::process::exit(2);
             }
             a => {
@@ -147,7 +159,7 @@ fn main() {
         max_age,
     };
     if let Err(e) = run(&opts, &query) {
-        eprintln!("searchctl: {e}");
+        engine::errln!("searchctl: {e}");
         std::process::exit(2);
     }
 }
@@ -184,18 +196,22 @@ fn obtain_index(opts: &Opts) -> Result<Index, String> {
     if !opts.reindex {
         match persist::load_for(&root_path, &index_path, opts.max_age) {
             Ok(idx) => {
-                eprintln!(
-                    "searchctl: reusing index {} ({} entries)",
+                // The age goes with the reuse: an index that is "reused" is a
+                // snapshot, and a snapshot of unknown age is how a query
+                // answers "no such file" for a file that exists.
+                engine::errln!(
+                    "searchctl: reusing index {} ({} entries, built {})",
                     index_path.display(),
-                    idx.n
+                    idx.n,
+                    persist::age_text(age_of(&idx))
                 );
                 return Ok(idx);
             }
-            Err(why) => eprintln!("searchctl: rebuilding — {why}"),
+            Err(why) => engine::errln!("searchctl: rebuilding — {why}"),
         }
     }
 
-    // The platform walk where one exists (docs/freebsd-support.md P2.1),
+    // The platform walk where one exists (docs/design.md §2.2),
     // the portable walk where none does or where the native one refuses —
     // no privileges needed either way, the selector falls back on its own.
     let source = source_for(
@@ -220,20 +236,20 @@ fn obtain_index(opts: &Opts) -> Result<Index, String> {
                     + REPORT_EVERY.as_millis() as u64
             {
                 last_report.store(now, std::sync::atomic::Ordering::Relaxed);
-                eprintln!("searchctl: scanning… {}", interrupt::line(p));
+                engine::errln!("searchctl: scanning… {}", interrupt::line(p));
             }
         })
         .map_err(|_| "scan cancelled — no index written".to_string())?;
     let idx = Index::build(listings, 0, now_secs(), opts.root.as_bytes());
     match persist::save(&idx, &root_path, &index_path) {
-        Ok(saved) => eprintln!(
+        Ok(saved) => engine::errln!(
             "searchctl: indexed {} entries → {}",
             idx.n,
             saved.index.display()
         ),
         // A cache miss must not fail the query: the index is built and
         // usable, it just will not be there next time.
-        Err(e) => eprintln!(
+        Err(e) => engine::errln!(
             "searchctl: could not save index to {}: {e}",
             index_path.display()
         ),
@@ -247,7 +263,7 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
     let json = opts.json;
     let count = opts.count;
     let idx = obtain_index(opts)?;
-    let live = Live::new(idx);
+    let live = Live::with_root(idx, root.as_bytes());
     let searcher = Searcher { live: &live };
 
     // Merged query syntax: `|` alternatives, fail-closed filters.
@@ -256,7 +272,7 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
         .unwrap_or_default();
     let alts = Alternatives::parse(query, &home)?;
     for w in &alts.warnings {
-        eprintln!("warning: {w}");
+        engine::errln!("warning: {w}");
     }
 
     // Content index, when one is already built alongside this root's name
@@ -317,9 +333,9 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
                 std::process::exit(1);
             }
             if json {
-                println!("{{\"count\":{n}}}");
+                engine::outln!("{{\"count\":{n}}}");
             } else {
-                println!("{n}");
+                engine::outln!("{n}");
             }
             return Ok(());
         }
@@ -342,13 +358,13 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
                     shown += 1;
                     if json {
                         let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
-                        println!(
+                        engine::outln!(
                             "{{\"path\":\"{}\",\"line\":{ln},\"text\":\"{}\"}}",
                             esc(&path),
                             esc(text)
                         );
                     } else {
-                        println!("{path}:{ln}:{text}");
+                        engine::outln!("{path}:{ln}:{text}");
                     }
                 }
             }
@@ -403,12 +419,12 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
         // command prints is worse than no total at all. `merge_hits` is the
         // same merge the results go through.
         let total = merge_hits(all, usize::MAX).len();
-        eprintln!(
+        engine::errln!(
             "searchctl: {} entries indexed, {total} matches",
             searcher.live.base.n
         );
         for line in &summary {
-            eprintln!("searchctl: {line}");
+            engine::errln!("searchctl: {line}");
         }
     }
 
@@ -422,9 +438,9 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
             std::process::exit(1);
         }
         if json {
-            println!("{{\"count\":{n}}}");
+            engine::outln!("{{\"count\":{n}}}");
         } else {
-            println!("{n}");
+            engine::outln!("{n}");
         }
         return Ok(());
     }
@@ -467,13 +483,19 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
         };
         if json {
             let esc = path.replace('\\', "\\\\").replace('"', "\\\"");
-            println!("{{\"path\":\"{esc}\",\"score\":{}}}", h.score);
+            engine::outln!("{{\"path\":\"{esc}\",\"score\":{}}}", h.score);
         } else {
-            println!("{path}");
+            engine::outln!("{path}");
         }
         out.clear();
     }
     Ok(())
+}
+
+/// How old the index is, in seconds: the header's `synced_at` is the
+/// wall-clock second the index was built at.
+fn age_of(idx: &Index) -> u64 {
+    (now_secs() as u64).saturating_sub(idx.synced_at as u64)
 }
 
 fn now_secs() -> u32 {

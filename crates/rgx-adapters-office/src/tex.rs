@@ -1,14 +1,18 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! TeX / LaTeX → text (detex-style): drop the preamble, comments and
 //! control words, unwrap section titles, skip verbatim environments.
 //! Math delimiters are dropped but their content is kept — for grep, the
 //! symbols inside math are usually still meaningful.
 //!
-//! Canonical full implementation: `upstream::b01::io::document::tex`
-//! (adds the section outline and preamble-skipped provenance).
+//! A reduced port of the TeX reader of the `io` project by Dan Gohman,
+//! whose work is used here under Apache-2.0: the section outline and the
+//! preamble-skipped provenance are the upstream's, and this one carries the
+//! flat-text flattening. See `NOTICE`.
 
 use alloc::string::{String, ToString};
 use core::str;
-use rgx_core::{bail, Result};
+use rgx_core::{decline, Result};
 use rgx_core::{Adapter, Outcome, Reach};
 
 /// environments whose bodies are code, not prose
@@ -31,7 +35,7 @@ pub fn extract_text(data: &[u8]) -> Result<String> {
     // into a heap `String` just to test fixed substrings -- the
     // `memchr::memmem` finder skips that.
     if !has_tell(data) {
-        bail!("doesn't look like TeX (no documentclass/begin/section)");
+        decline!("doesn't look like TeX (no documentclass/begin/section)");
     }
     // skip the preamble when there is one: definitions are noise for grep
     let start = find_sub(data, 0, b"\\begin{document}")
@@ -41,7 +45,7 @@ pub fn extract_text(data: &[u8]) -> Result<String> {
     detex(data, start, data.len(), &mut out, 0);
     let text = out.trim().to_string();
     if text.is_empty() {
-        bail!("no text content in TeX");
+        decline!("no text content in TeX");
     }
     Ok(text)
 }

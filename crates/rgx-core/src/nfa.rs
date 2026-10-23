@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Compiling an [`Ast`] to a Thompson NFA.
 //!
 //! # Fragments, and why the builder returns a pair
@@ -7,8 +9,7 @@
 //! have to be spliced into the second pattern's entry, and those edges
 //! are not known until the first pattern is finished. A builder that
 //! returned only an entry point cannot express that, and the splice
-//! ends up joining the wrong end — which is the defect recorded in
-//! 88741b0.
+//! ends up joining the wrong end.
 //!
 //! So a fragment is a pair: an entry `pc`, and the list of `pc`s whose
 //! outgoing edge is still dangling. The caller that consumes the
@@ -108,7 +109,7 @@ pub fn compile(ast: &Ast, groups: usize) -> Program {
     // the same pool id, which is what shrinks the program from 48
     // bytes per inst to 16. The pool survives in `Program::sets`; the
     // builder's local one is dropped here.
-    let sets = std::mem::take(&mut nfa.set_pool);
+    let sets = core::mem::take(&mut nfa.set_pool);
     let (insts, sets) = dedupe_sets(insts, sets);
     Program {
         insts,

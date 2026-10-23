@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The RANGED pre-confirm, and the substring anchor beside it.
 //!
 //! **What lives here and why it is not in `differential.rs`.** The ranged

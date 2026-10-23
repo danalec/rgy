@@ -1,180 +1,193 @@
-# Re-applies the copy-time transforms to a vendored rgx-core module.
+# apply-vendored-edits.ps1 -- apply rgy's own divergences to the vendored rgx trees.
 #
 # Usage:
-#   pwsh -File scripts/apply-vendored-edits.ps1 -Files a.rs,b.rs [-WhatIf]
+#   pwsh -File scripts/apply-vendored-edits.ps1 [-Upstream <path>] [-DryRun]
 #
-# Why this exists: upstream is the source of truth, so a fix lands there and the
-# file is re-copied. Re-doing the copy-time edits by hand each time is how
-# they get forgotten, and a forgotten `alloc::` path is a build error at
-# best. This makes the transform mechanical and reviewable.
+# What this is for
+# ----------------
+# The vendored rgx crates are upstream rgx's crates, transported verbatim:
+# the copy in crates/rgx-core/ is upstream's crates/rgx-core/, byte for byte,
+# and scripts/sync-rgx-upstream.sh puts it there. A verbatim copy has no
+# room for a local edit -- so where rgy must differ from upstream, the
+# difference is a patch, kept under scripts/rgx-local-patches/ and applied
+# on top of the copy.
 #
-# The permitted difference between a upstream source and its rgx copy is exactly
-# what this script applies, and nothing else:
-#   1. `alloc::` -> `std::` (rgx-core is always std; upstream is no_std + alloc)
-#   2. upstream module paths -> rgx-core sibling paths
-# Anything else in the copy is drift, and `scripts/check-drift.ps1` is what
-# should catch it -- so this script must not *introduce* drift.
+# That is the whole content of this directory today, and it is deliberately
+# small: each patch is a bug upstream has not fixed, or a fix upstream has
+# not taken, and each one is a line of divergence that has to be looked at
+# on every sync.
 #
-# -Files takes a comma-separated list, not an array: `pwsh -File` hands
-# arguments to a script as plain strings, so `[string[]]` would receive one
-# argument containing the commas.
+# What this script does NOT do
+# ----------------------------
+# It does not rewrite the copy. The transforms it used to apply are gone,
+# and the reason they were false is worth keeping in the record:
+#
+#   * `alloc::` -> `std::` -- both projects are `#![no_std]` + `alloc` now,
+#     so there is nothing to rewrite.
+#   * module path flattening -- upstream's crates/rgx-core/src/ has the
+#     same layout as this workspace's crates/rgx-core/src/, so there is no
+#     second path to reach a sibling module by.
+#   * lifting visibility -- upstream already declares `pub mod nfa;` and
+#     the rest.
+#   * turning compile-time SIMD gates into runtime dispatch -- upstream
+#     dispatches at runtime now, for the same reason rgy did: a binary
+#     that ships to arbitrary machines cannot assume AVX2.
+#
+# A script that applies transforms nobody needs is a script that will
+# eventually apply one nobody wants. The copy is a copy.
+#
+# The script is idempotent: it derives each patched file from upstream's
+# current content plus the patch, so running it twice changes nothing, and
+# running it after a sync restores a file the sync overwrote.
+#
+# The Linux counterpart is scripts/apply-vendored-edits.sh, and the two are
+# twins: same text, same order, same exit code, on the same input.
+#
+# Exit codes: 0 all patches applied, 1 at least one failed.
+
+[CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)][string]$Files,
-    [switch]$WhatIf
+    [string]$Upstream = "",
+    [switch]$DryRun
 )
 
-# rgx-only divergences from the upstream source, applied after the mechanical
-# rewrites. These are not formatting and not `alloc::` -> `std::`; they are
-# places where the two projects must genuinely differ, and doing them here
-# rather than by hand is what stops a re-copy from silently reverting them.
-#
-# 1. Feature dispatch. upstream gates SIMD at compile time (`target_feature`),
-#    matching b02/simd/mod.rs: a library must not run AVX2 on a CPU without
-#    it. rgx ships one binary to arbitrary machines, so it dispatches at
-#    runtime the way crates/rgx-core/src/memchr.rs does.
-$rgxOnly = @(
-    # The braced import. This cannot live in the table above: the `use`
-    # branch runs `[regex]::Escape($t.from)`, which escapes the braces a
-    # second time and so never matches. A literal Replace is the right tool.
-    @{ from = 'use alloc::string::{String, ToString};'; to = 'use std::string::String;' }
-    # The upstream module tree is private (`mod nfa;`, `pub(crate) fn parse`),
-    # and the rgx copy is flat in `rgx-core/src`, where sibling modules are
-    # reached directly. These two lift the visibility the flattening needs;
-    # without them the copies do not compile.
-    @{ from = 'mod nfa;';      to = 'pub mod nfa;' }
-    @{ from = 'mod vm;';       to = 'pub mod vm;' }
-    @{ from = 'mod regex;';    to = 'pub mod regex;' }
-    @{ from = 'mod syntax;';   to = 'pub mod syntax;' }
-    @{ from = 'mod searcher;'; to = 'pub mod searcher;' }
-    @{ from = 'pub(crate) ';   to = 'pub ' }
-    # Feature dispatch: upstream gates the AVX2 path at compile time (it is a
-    # library, and must not run AVX2 on a CPU without it). rgx ships one
-    # binary to arbitrary machines, so the copy dispatches at runtime. Both
-    # this and the test guards below are re-copy-safe: applying the script
-    # twice is a no-op.
-    @{
-        from = '    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]' + "`n" +
-               '    {' + "`n" +
-               '        // SAFETY: AVX2 is a compile-time guarantee of this build, which is' + "`n" +
-               '        // the precondition `simd_candidates` documents.' + "`n" +
-               '        return unsafe { simd_candidates(mask, hay) };' + "`n" +
-               '    }' + "`n" +
-               '    #[allow(unreachable_code)]' + "`n" +
-               '    scalar_candidates(mask, hay)'
-        to   = '    #[cfg(target_arch = "x86_64")]' + "`n" +
-               '    {' + "`n" +
-               '        if std::arch::is_x86_feature_detected!("avx2") {' + "`n" +
-               '            // SAFETY: guarded by the runtime feature check above, which' + "`n" +
-               '            // is `simd_candidates`''s documented precondition.' + "`n" +
-               '            return unsafe { simd_candidates(mask, hay) };' + "`n" +
-               '        }' + "`n" +
-               '    }' + "`n" +
-               '    scalar_candidates(mask, hay)'
-    }
-    @{
-        from = '#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]' + "`n" + '    #[test]'
-        to   = '#[cfg(target_arch = "x86_64")]' + "`n" + '    #[test]'
-    }
-)
-$rgxTestGuards = @(
-    'simd_matches_scalar_on_random_input',
-    'simd_matches_scalar_on_document_shaped_input',
-    'a_uniform_haystack_agrees',
-    'a_candidate_in_the_high_lane_is_not_lost'
-)
+$ErrorActionPreference = 'Stop'
 
-$transforms = @(
-    # no_std + alloc (upstream) -> std (rgx-core is always std).
-    # Each `from` is the whole token after the `use ` prefix, because the
-    # pattern below anchors on `use` itself. Keeping the prefix in the
-    # pattern and out of the table is what stops a second `use` appearing.
-    @{ from = 'alloc::string::String;';                to = 'std::string::String;' }
-    @{ from = 'alloc::string::ToString;';             to = 'std::string::ToString;' }
-    @{ from = 'alloc::vec::Vec;';                      to = 'std::vec::Vec;' }
-    @{ from = 'alloc::vec;';                           to = 'std::vec;' }
-    @{ from = 'alloc::boxed::Box;';                    to = 'std::boxed::Box;' }
-    @{ from = 'alloc::collections::BTreeMap';          to = 'std::collections::BTreeMap' }
-    # `Box` also appears inline in type position (`alloc::boxed::Box<Ast>`),
-    # where the `use`-anchored form above does not reach.
-    @{ from = '(?m)\balloc::boxed::';                  to = 'std::boxed::' }
-    # `format` is also `use`d as a macro, where the macro path is not a
-    # `use` line in the way the other forms are.
-    @{ from = '(?m)^(\s*use\s+)alloc::format;';        to = '$1std::format;' }
-    # These two are not `use` lines, so they get their own anchored forms.
-    @{ from = '(?m)\balloc::vec!';                     to = 'vec!' }
-    @{ from = '(?m)\balloc::format!';                  to = 'format!' }
-    # upstream module paths -> rgx-core sibling paths. The rgx copies are
-    # FLATTENED into rgx-core/src, so a `crate::b02::rgx::x` or
-    # `super::b02::rgx::x` collapses to the crate root or to `super::`.
-    @{ from = '(?m)^(\s*(?:pub )?use\s+[A-Za-z_][A-Za-z0-9_]*)crate::b02::rgx::'; to = '$1crate::' }
-    @{ from = '(?m)^(\s*(?:pub )?use\s+super::)b02::rgx::';             to = '$1' }
-    @{ from = '(?m)^(\s*(?:pub )?use\s+super::super::)b02::rgx::';     to = '$1' }
-    # The same path outside a `use` (test bodies, inline references).
-    @{ from = 'crate::b02::rgx::';                                     to = 'crate::' }
-    # The upstream module tree is private (`mod nfa;`, `pub(crate) fn parse`),
-    # and the rgx copy is flat in `rgx-core/src`, where sibling modules are
-    # reached directly. These two lift the visibility the flattening needs;
-    # without them the copies do not compile.
-    @{ from = '(?m)^mod (nfa|vm|regex|syntax|searcher);';  to = 'pub mod $1;' }
-    @{ from = 'pub\(crate\) ';                             to = 'pub ' }
-)
+$here = Split-Path -Parent $MyInvocation.MyCommand.Path
+$repo = Split-Path -Parent $here
+Push-Location $repo
+try {
+    if ([string]::IsNullOrWhiteSpace($Upstream)) {
+        # Relative to the repository root, and printed as given, so that the
+        # bash twin prints the same line.
+        $Upstream = "../rgx"
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $Upstream ".git"))) {
+        Write-Host "no upstream checkout at $Upstream"
+        Write-Host "  pass -Upstream <path to an rgx checkout>"
+        exit 1
+    }
+    $upstreamAbs = (Resolve-Path -LiteralPath $Upstream).Path
 
-$changed = 0
-foreach ($f in $Files.Split(',')) {
-    if (-not (Test-Path -LiteralPath $f)) {
-        Write-Error "no such file: $f"
-        continue
+    $patchDir = Join-Path $here "rgx-local-patches"
+    if (-not (Test-Path -LiteralPath $patchDir)) {
+        Write-Host "no patch directory at $patchDir"
+        exit 1
     }
-    # Read as UTF-8 and write as UTF-8 (no BOM). The default encoding under
-    # Windows PowerShell 5.1 is ANSI, which would mangle any non-ASCII byte
-    # in a byte-oriented module -- and a test vector of 0xC3 0xA9 is exactly
-    # the kind of thing these files carry.
-    $c = [IO.File]::ReadAllText($f, [Text.UTF8Encoding]::new($false))
-    $before = $c
-    foreach ($t in $transforms) {
-        # Two shapes: a bare token to swap, matched only in a `use`
-        # position, and a pre-anchored pattern (marked with `(?m)`) used
-        # for the non-`use` forms. A doc comment or string literal that
-        # merely *mentions* `alloc::vec` is quoting the source, and
-        # rewriting it would make the provenance header lie about what the
-        # copy changed.
-        if ($t.from -match '^\(\?m\)') {
-            $c = $c -replace $t.from, $t.to
-        } else {
-            $c = $c -replace "(?m)^(\s*(?:pub )?use\s+)$([regex]::Escape($t.from))", "`$1$($t.to)"
-        }
-    }
-    foreach ($t in $rgxOnly) {
-        $c = $c.Replace($t.from, $t.to)
-    }
-    # The runtime guard a SIMD test needs once the cfg gate is widened. It
-    # has to be injected only where it is absent, or a second run of this
-    # script stacks a second guard into the same function and the file stops
-    # being idempotent -- which is the property that makes the script safe to
-    # re-run at all.
-    foreach ($name in $rgxTestGuards) {
-        $sig = "    fn $name() {"
-        $guard = '        if !std::arch::is_x86_feature_detected!("avx2") {'
-        if ($c.Contains($sig)) {
-            $after = $sig + "`n" + $guard
-            if (-not $c.Contains($after)) {
-                $c = $c.Replace($sig, $sig + "`n" +
-                    $guard + "`n" +
-                    '            return;' + "`n" +
-                    '        }')
+
+    Write-Host "applying rgy's local divergences to the vendored rgx crates"
+    Write-Host "  upstream: $Upstream"
+
+    $applied = 0
+    $unchanged = 0
+    $failed = 0
+
+    $work = Join-Path ([IO.Path]::GetTempPath()) ("rgy-apply-" + [guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Path $work -Force | Out-Null
+    try {
+        $patches = @(Get-ChildItem -LiteralPath $patchDir -Filter "*.patch" -File -Recurse |
+            Sort-Object FullName)
+
+        foreach ($patch in $patches) {
+            $rel = $patch.FullName.Substring($patchDir.Length).TrimStart('\', '/')
+            $rel = $rel.Substring(0, $rel.Length - ".patch".Length)
+            $rel = $rel -replace '\\', '/'
+            $upstreamFile = Join-Path $upstreamAbs ($rel -replace '/', '\')
+            $vendoredFile = Join-Path $repo ($rel -replace '/', '\')
+
+            if (-not (Test-Path -LiteralPath $upstreamFile)) {
+                Write-Host ("  {0,-58} FAILED: upstream no longer has this file" -f $rel)
+                $failed++
+                continue
             }
+
+            # Build the patched file in a scratch tree: upstream's current
+            # content with the patch on top. The result is what the vendored
+            # file must be, so the script does not care whether the vendored
+            # file is currently patched, stale, or missing.
+            #
+            # The base is the upstream COMMIT's blob, not the file in its
+            # working tree: a checkout with core.autocrlf hands out CRLF for
+            # content whose blob is LF, and a patch whose context is LF then
+            # matches nothing. The commit is also what the sync copies from,
+            # so the two agree.
+            $tree = Join-Path $work "tree"
+            if (Test-Path -LiteralPath $tree) { Remove-Item -LiteralPath $tree -Recurse -Force }
+            $target = Join-Path $tree ($rel -replace '/', '\')
+            New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
+            # The blob goes out as raw bytes: a text pipeline would rewrite
+            # the line endings, and the patch's context is LF.
+            $start = New-Object System.Diagnostics.ProcessStartInfo
+            $start.FileName = "git"
+            $start.Arguments = "-C `"$upstreamAbs`" cat-file blob `"HEAD:$rel`""
+            $start.RedirectStandardOutput = $true
+            $start.UseShellExecute = $false
+            $proc = [System.Diagnostics.Process]::Start($start)
+            $out = [System.IO.File]::Create($target)
+            $proc.StandardOutput.BaseStream.CopyTo($out)
+            $out.Close()
+            $proc.WaitForExit()
+            if ($proc.ExitCode -ne 0) {
+                Write-Host ("  {0,-58} FAILED: upstream no longer has this file" -f $rel)
+                $failed++
+                continue
+            }
+
+            Push-Location $tree
+            try {
+                # `core.autocrlf=false` on purpose: the scratch tree is
+                # outside this repository, so git apply would fall back to
+                # the machine's global setting and rewrite the line endings
+                # of the file it writes. A checkout is not a change, and the
+                # copy has to stay what the commit says it is.
+                & git -c core.autocrlf=false apply --check --recount --whitespace=nowarn $patch.FullName 2>&1 | Out-Null
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Host ("  {0,-58} FAILED: the patch does not apply to upstream's current file" -f $rel)
+                    $failed++
+                    continue
+                }
+                & git -c core.autocrlf=false apply --recount --whitespace=nowarn $patch.FullName 2>&1 | Out-Null
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Host ("  {0,-58} FAILED: the patch applied to the check but not to the file" -f $rel)
+                    $failed++
+                    continue
+                }
+            }
+            finally {
+                Pop-Location
+            }
+
+            if ((Test-Path -LiteralPath $vendoredFile) -and
+                ((Get-FileHash -LiteralPath $vendoredFile -Algorithm SHA256).Hash -eq
+                 (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash)) {
+                Write-Host ("  {0,-58} unchanged" -f $rel)
+                $unchanged++
+                continue
+            }
+
+            if ($DryRun) {
+                Write-Host ("  {0,-58} would update" -f $rel)
+            }
+            else {
+                New-Item -ItemType Directory -Path (Split-Path -Parent $vendoredFile) -Force | Out-Null
+                Copy-Item -LiteralPath $target -Destination $vendoredFile -Force
+                Write-Host ("  {0,-58} updated" -f $rel)
+            }
+            $applied++
         }
     }
-    if ($c -ne $before) {
-        $changed++
-        if ($WhatIf) {
-            Write-Host "would rewrite $f"
-        } else {
-            [IO.File]::WriteAllText($f, $c, [Text.UTF8Encoding]::new($false))
-            Write-Host "rewrote $f"
-        }
-    } else {
-        Write-Host "unchanged $f"
+    finally {
+        Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
     }
+
+    Write-Host ""
+    if ($failed -gt 0) {
+        Write-Host "$applied applied, $unchanged unchanged, $failed failed"
+        exit 1
+    }
+    Write-Host "$applied applied, $unchanged unchanged, 0 failed"
+    exit 0
 }
-Write-Host "$changed file(s) differ from the upstream source's shape"
+finally {
+    Pop-Location
+}

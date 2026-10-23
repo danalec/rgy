@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //!
 //! A differential oracle for the searcher, against the `regex` crate (already
 //! a dev-dependency, so this costs nothing new).
@@ -11,10 +13,10 @@
 //! is rgx's own job, so a differential on offsets would mostly re-test the
 //! tokenizer.
 //!
-//! What it does not catch: a defect that reproduces in rgx and in this
-//! file's own offset-to-line mapping, and any divergence between the slice
-//! and reader paths. `tests/cli.rs` is the only end-to-end exercise of the
-//! reader.
+//! Both `search_slice` and `search_reader` (at five chunk sizes) are driven
+//! over the full matrix. What this file still does not catch is a defect that
+//! reproduces identically in rgx and in this file's own offset-to-line
+//! mapping.
 
 use alloc::string::String;
 use alloc::vec::Vec;

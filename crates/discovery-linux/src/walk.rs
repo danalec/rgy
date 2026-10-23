@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! `getdents64` bulk walk: one syscall returns a whole directory block with
 //! name and type already attached (DT_DIR/DT_REG/DT_LNK), so there is no
 //! per-entry directory open — the Linux half of fsearch's getattrlistbulk

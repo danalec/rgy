@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! JSON Value types and the `Arena` that owns their backing storage.
 //!
 //! A parsed JSON value is a `Copy` handle into an [`Arena`]. The arena

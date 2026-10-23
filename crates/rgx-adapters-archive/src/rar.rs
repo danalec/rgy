@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! RAR adapter backed by the pure-Rust `rar-codec` crate (RAR4 + RAR5).
 //!
 //! Members are extracted in-process and recursed into as real archive
@@ -18,7 +20,7 @@ use alloc::vec::Vec;
 
 use core::fmt::Write as _;
 use rar_codec::{Archive, EntryKind, Error as RarError};
-use rgx_core::{bail, Result};
+use rgx_core::{decline, Result};
 use rgx_core::{Adapter, Outcome};
 
 use crate::budget::Stopped;
@@ -42,7 +44,7 @@ impl Adapter for Rar {
         // fall back to lenient parsing so damaged archives still list.
         let archive = match Archive::open(data) {
             Ok(a) => a,
-            Err(RarError::BadMagic) | Err(RarError::Truncated) => bail!("not a RAR file"),
+            Err(RarError::BadMagic) | Err(RarError::Truncated) => decline!("not a RAR file"),
             Err(_) => Archive::open_lenient(data)?,
         };
 
@@ -129,7 +131,7 @@ impl Adapter for Rar {
             files += 1;
         }
         if files == 0 {
-            bail!("no file entries in RAR headers");
+            decline!("no file entries in RAR headers");
         }
         Ok(Outcome::Text(out.into_bytes()))
     }

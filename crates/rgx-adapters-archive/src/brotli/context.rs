@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! RFC 7932 Section 7.1: the literal context ID, from the last two bytes
 //! of the uncompressed stream.
 //!

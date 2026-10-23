@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //!
 //! The failure mode that matters for a searcher is *drift*: a line reported
 //! as two, a context line as a match, a NUL handled differently. These
@@ -2107,7 +2109,7 @@ fn context_around_a_jumped_gap_is_the_right_lines() {
 fn an_inverted_search_never_jumps_and_still_prints_everything() {
     // Under `-v` the NON-matching lines are the output, so a line with no
     // candidate is exactly the line that must be printed. This is the case
-    // `e47ee74` had to fix for the per-BUFFER skip, and a jump that skipped
+    // the per-BUFFER skip had to fix, and a jump that skipped
     // lines here would reintroduce it at a finer granularity: a silently short
     // `-v` that no line-count gate would catch, because every line it does
     // print is a line `grep` prints.

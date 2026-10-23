@@ -101,7 +101,7 @@ single-file pattern shapes by +33% to +114%. Is that a property of the code?
 `9c38d37f…`), same gated protocol (7 rounds, 2 warmups, ±3% floor, count
 gate, `-j1`), same release build flags, on a second host: AMD Ryzen 7 255
 w/ Radeon 780M, CachyOS, `ripgrep 15.2.0`. Results
-([`status-linux-ryzen7-255.md`](status-linux-ryzen7-255.md) §1.1):
+([`status-linux-ryzen7-255.md`](https://github.com/danalec/rgx/blob/main/benchmark/status-linux-ryzen7-255.md) §1.1):
 
 | shape class | Windows 7950X3D | Linux Ryzen 7 255 |
 |---|---|---|
@@ -134,7 +134,7 @@ mean wall-clock for `ParallelBuffered` over memory mapping. Does it travel?
 `fn main`, `-j10`, on the digest-named generated tree (26 packs): mmap is
 slower than `ParallelBuffered` on **every** paired round, by 3–18% (mean
 ≈12%). `serial-buffered` is ~8× slower than either. Full table:
-[`status-linux-ryzen7-255.md`](status-linux-ryzen7-255.md) §3.
+[`status-linux-ryzen7-255.md`](https://github.com/danalec/rgx/blob/main/benchmark/status-linux-ryzen7-255.md) §3.
 
 **Conclusion.** The direction reproduces on two hosts, two corpora and two
 OSes; the magnitude does not. −44.3% is contradicted in magnitude by a

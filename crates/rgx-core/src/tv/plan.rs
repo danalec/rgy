@@ -100,7 +100,7 @@ pub fn narrow(idx: &[u32], manifest: &Manifest, config: &SearchConfig) -> Vec<u3
 }
 
 /// The same split as [`split_owned`], over locators rather than decoded
-/// records — the query path, where no path has been decoded. Returns indices
+/// records - the query path, where no path has been decoded. Returns indices
 /// into `locs`: the ones that reach the worker loop, and the 0-byte ones.
 pub fn split_locs(locs: &[FileLoc], config: &SearchConfig) -> (Vec<u32>, Vec<u32>) {
     let mut active = Vec::with_capacity(locs.len());
@@ -116,6 +116,47 @@ pub fn split_locs(locs: &[FileLoc], config: &SearchConfig) -> (Vec<u32>, Vec<u32
         }
     }
     (active, empty)
+}
+
+/// The pre-plan filter: the one n-gram rule ([`crate::ngram::may_reject`])
+/// asked over the plan's records before a single byte is planned for
+/// reading. A rejected record leaves a hole in the plan, and [`cut_units`]
+/// is free to leave holes unread; a surviving record keeps its whole span
+/// inside a unit, which is the boundary invariant.
+///
+/// Coverage follows the raw-bytes rule ([`crate::ngram::covered_raw_bytes`])
+/// because the pack search reads the record's own bytes: any signature the
+/// format writes covers those. `rollup_ok` is the extraction-fingerprint
+/// half of the rollup trust question. `RGX_ABLATE_EXTENTS` stands the whole
+/// step down - nothing is rejected and the plan reads as it always did -
+/// under the ablation contract: cost may change, answers never do.
+pub fn prune_by_ngram(
+    active: Vec<u32>,
+    locs: &[FileLoc],
+    query: Option<&crate::ngram::NgramSig512>,
+    rollup_ok: bool,
+) -> (Vec<u32>, usize) {
+    if crate::ablate_extents() {
+        return (active, 0);
+    }
+    let Some(q) = query else {
+        return (active, 0);
+    };
+    let mut pruned = 0usize;
+    let mut out = Vec::with_capacity(active.len());
+    for i in active {
+        let f = &locs[i as usize];
+        if crate::ngram::may_reject(
+            &f.ngram,
+            crate::ngram::covered_raw_bytes(f.sig_covers_adapter(), rollup_ok),
+            q,
+        ) {
+            pruned += 1;
+        } else {
+            out.push(i);
+        }
+    }
+    (out, pruned)
 }
 
 #[derive(Clone, Copy)]
@@ -135,6 +176,18 @@ pub struct Unit {
 /// its own: it cannot be cut without breaking the boundary invariant, and
 /// pretending otherwise would make a unit that holds a piece of a file.
 pub const UNIT_BYTES: u32 = 1 << 20;
+
+/// The largest hole between two planned files a unit may span, in bytes.
+///
+/// The hole is bytes belonging to records the plan dropped -- the n-gram
+/// filter's rejects. Below the threshold the bytes are read anyway: one
+/// extent per surviving file would cost more in claims and syscalls than
+/// the skip saves on a pack that is read sequentially. At the threshold
+/// the unit ends and the hole is never paid for. 64 KiB is where a skip
+/// stops being arguable on any disk the store targets: it is four pages,
+/// less than one NVMe request, and a rejected run of small files above it
+/// is exactly the shape the filter's separation leaves behind.
+pub const MAX_EXTENT_GAP: u32 = 64 * 1024;
 
 /// Which packs to read, in what order, and which files each one answers for.
 pub struct PackPlan {
@@ -217,10 +270,15 @@ impl PackPlan {
 /// boundaries, longest unit first.
 ///
 /// The cut is a single pass over the file run: a unit grows until the next
-/// file would take it past the target, and then the file starts the next one.
-/// A file bigger than the target is a unit by itself rather than a cut one
-/// — the loop below cannot split it, and a unit holding part of a file
-/// would report that file twice.
+/// file would take it past the target, and then the file starts the next
+/// one. A file bigger than the target is a unit by itself rather than a cut
+/// one -- the loop below cannot split it, and a unit holding part of a file
+/// would report that file twice. A gap of [`MAX_EXTENT_GAP`] or more
+/// between one file's end and the next file's start also ends the unit:
+/// those bytes are the plan's rejects and reading them is the cost the
+/// sparse read exists to remove. Every file sits whole inside exactly one
+/// unit -- the boundary invariant -- so a cut can lose bytes of a hole and
+/// never bytes of a file.
 pub fn cut_units(files: &[u32], bounds: &[u32], locs: &[FileLoc]) -> Vec<Unit> {
     let mut units: Vec<Unit> = Vec::with_capacity(bounds.len());
     for p in 0..bounds.len().saturating_sub(1) {
@@ -233,11 +291,22 @@ pub fn cut_units(files: &[u32], bounds: &[u32], locs: &[FileLoc]) -> Vec<Unit> {
             while k < to {
                 let f = &locs[files[k] as usize];
                 let f_end = (f.offset + f.length) as u32;
-                // A file that does not fit joins the next unit; a file that is
-                // bigger than a whole unit is one by itself, because there is
-                // no legal cut inside it.
-                if k > first && f_end - start > UNIT_BYTES {
-                    break;
+                if k > first {
+                    // A hole at or past the threshold ends the unit rather
+                    // than being read. `RGX_ABLATE_EXTENTS` spans every
+                    // hole: the ablation's arm reads the whole pack exactly
+                    // as the plan always did.
+                    if !crate::ablate_extents()
+                        && (f.offset as u32).saturating_sub(end) >= MAX_EXTENT_GAP
+                    {
+                        break;
+                    }
+                    // A file that does not fit joins the next unit; a file that is
+                    // bigger than a whole unit is one by itself, because there is
+                    // no legal cut inside it.
+                    if f_end - start > UNIT_BYTES {
+                        break;
+                    }
                 }
                 end = f_end;
                 k += 1;
@@ -253,4 +322,191 @@ pub fn cut_units(files: &[u32], bounds: &[u32], locs: &[FileLoc]) -> Vec<Unit> {
     }
     units.sort_by_key(|u| core::cmp::Reverse(u.len));
     units
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ngram::{build_stored_sig512, query_sig512};
+    use crate::tv::format::FileLoc;
+
+    fn loc(id: u64, offset: u64, length: u64) -> FileLoc {
+        FileLoc::test_loc(id, 0, offset, length, 0)
+    }
+
+    fn with_sig(mut f: FileLoc, text: &[u8]) -> FileLoc {
+        f.ngram = build_stored_sig512(text).into_words();
+        f
+    }
+
+    #[test]
+    fn a_gap_at_the_threshold_ends_the_unit_and_one_under_it_does_not() {
+        let at = u64::from(MAX_EXTENT_GAP);
+        let under = u64::from(MAX_EXTENT_GAP - 1);
+
+        // The hole is the space between the first file's end and the second
+        // file's start: exactly at the threshold it is skipped, one byte
+        // under it the read spans it.
+        let locs = vec![loc(0, 0, 100), loc(1, 100 + at, 50)];
+        let units = cut_units(&[0, 1], &[0, 2], &locs);
+        assert_eq!(
+            units.len(),
+            2,
+            "a hole exactly at MAX_EXTENT_GAP must end the unit, not be read"
+        );
+
+        let locs = vec![loc(0, 0, 100), loc(1, 100 + under, 50)];
+        let units = cut_units(&[0, 1], &[0, 2], &locs);
+        assert_eq!(
+            units.len(),
+            1,
+            "a hole one byte under MAX_EXTENT_GAP must be read with its files"
+        );
+    }
+
+    #[test]
+    fn a_chain_of_small_gaps_collapses_into_one_unit() {
+        // f0 [0,100), f1 [110,210), f2 [220,320): two 10-byte holes.
+        let locs = vec![loc(0, 0, 100), loc(1, 110, 100), loc(2, 220, 100)];
+        let units = cut_units(&[0, 1, 2], &[0, 3], &locs);
+        assert_eq!(units.len(), 1, "small holes merge into one extent");
+        assert_eq!((units[0].start, units[0].len), (0, 320));
+    }
+
+    #[test]
+    fn every_file_sits_whole_inside_exactly_one_unit() {
+        let locs = vec![
+            loc(0, 0, 100),
+            loc(1, 200, 50),
+            loc(2, 100_000, 50),
+            loc(3, 100_100, 10),
+        ];
+        let units = cut_units(&[0, 1, 2, 3], &[0, 4], &locs);
+        for (i, f) in locs.iter().enumerate() {
+            let covering: Vec<&Unit> = units
+                .iter()
+                .filter(|u| (u.first..u.last).contains(&(i as u32)))
+                .collect();
+            assert_eq!(
+                covering.len(),
+                1,
+                "file {i} must be claimed by exactly one unit"
+            );
+            let u = covering[0];
+            let (s, e) = (u.start as u64, (u.start + u.len) as u64);
+            assert!(
+                f.offset >= s && f.offset + f.length <= e,
+                "file {i} must sit whole inside its unit's byte range"
+            );
+        }
+        for u in &units {
+            let (s, e) = (u.start as u64, (u.start + u.len) as u64);
+            assert!(
+                !(s < 250 && e > 100_000),
+                "no unit may span the hole past the threshold"
+            );
+        }
+    }
+
+    #[test]
+    fn the_pre_plan_filter_leaves_holes_the_cut_never_reads() {
+        let q = query_sig512("needle", false).expect("a literal query has a signature");
+        let a = with_sig(loc(0, 0, 100), b"needle at the start");
+        let b = with_sig(loc(1, 100, 70_000), b"nothing to see here at all");
+        let c = with_sig(loc(2, 70_100, 100), b"needle at the end");
+        let locs = vec![a, b, c];
+
+        let (kept, pruned) = prune_by_ngram(vec![0, 1, 2], &locs, Some(&q), true);
+        assert_eq!(
+            pruned, 1,
+            "the record without the needle's grams is rejected"
+        );
+        assert_eq!(kept, vec![0, 2]);
+
+        let units = cut_units(&kept, &[0, 2], &locs);
+        assert_eq!(
+            units.len(),
+            2,
+            "the rejected record's 70,000-byte span is a hole the cut skips"
+        );
+        let read: u64 = units.iter().map(|u| u64::from(u.len)).sum();
+        assert_eq!(
+            read, 200,
+            "only the kept spans are read; the hole is never paid for"
+        );
+    }
+
+    #[test]
+    fn a_small_hole_is_read_rather_than_issued_around() {
+        let q = query_sig512("needle", false).expect("a literal query has a signature");
+        let a = with_sig(loc(0, 0, 100), b"needle at the start");
+        let b = with_sig(loc(1, 100, 1_000), b"nothing to see here at all");
+        let c = with_sig(loc(2, 1_100, 100), b"needle at the end");
+        let locs = vec![a, b, c];
+
+        let (kept, pruned) = prune_by_ngram(vec![0, 1, 2], &locs, Some(&q), true);
+        assert_eq!((kept.as_slice(), pruned), (&[0u32, 2u32][..], 1));
+        let units = cut_units(&kept, &[0, 2], &locs);
+        assert_eq!(
+            units.len(),
+            1,
+            "a hole under the threshold is read with its neighbours: one \
+             extent per surviving file would cost more than the skip saves"
+        );
+    }
+
+    #[test]
+    fn a_rollup_under_a_foreign_fingerprint_is_never_rejected() {
+        let q = query_sig512("needle", false).expect("a literal query has a signature");
+        let plain = with_sig(loc(0, 0, 100), b"nothing to see here at all");
+        let rollup = with_sig(
+            FileLoc::test_loc(1, 0, 100, 100, FileLoc::SIG_COVERS_ADAPTER),
+            b"nothing to see here at all",
+        );
+        let locs = vec![plain, rollup];
+
+        // Without the fingerprint match only the plain record may fall.
+        let (kept, pruned) = prune_by_ngram(vec![0, 1], &locs, Some(&q), false);
+        assert_eq!(pruned, 1);
+        assert_eq!(
+            kept,
+            vec![1],
+            "a rollup the query cannot vouch for must stand unfiltered"
+        );
+
+        // With it, both are ordinary covered records.
+        let (kept, pruned) = prune_by_ngram(vec![0, 1], &locs, Some(&q), true);
+        assert_eq!(pruned, 2);
+        assert!(kept.is_empty());
+    }
+
+    #[test]
+    fn the_ablation_rejects_nothing() {
+        let _guard = crate::ABLATE_EXTENTS_LOCK.lock().unwrap();
+        let q = query_sig512("needle", false).expect("a literal query has a signature");
+        let a = with_sig(loc(0, 0, 100), b"nothing to see here at all");
+        let locs = vec![a];
+
+        let (_, pruned) = prune_by_ngram(vec![0], &locs, Some(&q), true);
+        assert_eq!(pruned, 1);
+
+        crate::set_ablate_extents(true);
+        let (kept, pruned) = prune_by_ngram(vec![0], &locs, Some(&q), true);
+        // The gap rule stands down too: a hole the plan would skip is
+        // spanned, which is what "reads the whole pack as it always did"
+        // means.
+        let hole = vec![loc(0, 0, 100), loc(1, 100 + u64::from(MAX_EXTENT_GAP), 50)];
+        let units = cut_units(&[0, 1], &[0, 2], &hole);
+        crate::set_ablate_extents(false);
+        assert_eq!(
+            pruned, 0,
+            "the ablation's cost is the plan, never the answer"
+        );
+        assert_eq!(kept, vec![0]);
+        assert_eq!(
+            units.len(),
+            1,
+            "under the ablation no hole is skipped, at any size"
+        );
+    }
 }

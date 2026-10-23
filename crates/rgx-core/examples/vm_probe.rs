@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! What one `vm::find_at` costs, per pattern, with no searcher around it —
 //! and, below it, WHAT of that cost is the VM.
 //!

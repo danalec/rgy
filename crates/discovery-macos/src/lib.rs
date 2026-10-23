@@ -1,4 +1,6 @@
-//! macOS discovery backend (`docs/IMPLEMENTATION_PLAN.md` §4.2): fsearch's
+// SPDX-License-Identifier: Apache-2.0
+
+//! macOS discovery backend (`docs/design.md` §2.2): fsearch's
 //! `getattrlistbulk` walk and FSEvents watch, transported verbatim.
 //!
 //! The whole backend is `cfg(target_os = "macos")`; on other hosts this
@@ -10,21 +12,28 @@
 //! a Mac is still what it takes to run it: the walk, the FSEvents stream
 //! and the flags they carry have never been exercised on a real kernel.
 //!
-//! The FSEvents watch is not wired into the daemon yet, and `searchd`'s
-//! `open_watch` says why (the stream is callback-based and directory-
-//! granular, where the `Watch` trait speaks in file-granular records). The
-//! stream and its flag vocabulary are exported here so the adapter that
-//! closes that gap has a surface to build on, and so a caller can name the
-//! `Event` type the stream's channel carries.
+//! The FSEvents watch is a callback feed and the daemon speaks a pull, so
+//! [`feed::FseventsWatch`] is the adapter between the two: it owns the
+//! stream (dropping the stream stops the feed) and turns each pushed batch
+//! into one [`discovery::ChangeBatch`]. Its decisions — which folder an
+//! event means, and which events belong to the indexed tree — are plain
+//! functions over [`event::Event`], so they are tested on every platform
+//! rather than only on a Mac.
 
 #[cfg(target_os = "macos")]
 mod fsevents;
 #[cfg(target_os = "macos")]
 mod walk;
 
-#[cfg(target_os = "macos")]
-pub use fsevents::{
-    Event, HISTORY_DONE, KERNEL_DROPPED, MUST_SCAN_SUBDIRS, USER_DROPPED, current_id, watch,
+pub mod event;
+pub mod feed;
+
+pub use event::{
+    Event, HISTORY_DONE, ITEM_IS_DIR, KERNEL_DROPPED, MUST_SCAN_SUBDIRS, USER_DROPPED,
 };
+pub use feed::{FseventsWatch, Grain, KeepAlive};
+
+#[cfg(target_os = "macos")]
+pub use fsevents::{current_id, watch};
 #[cfg(target_os = "macos")]
 pub use walk::{list_one, scan};

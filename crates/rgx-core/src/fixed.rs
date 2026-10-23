@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! A confirm that is a sequence of byte tests instead of a Pike VM run.
 //!
 //! Answers only whether a match begins at `s`, and only for a pattern that

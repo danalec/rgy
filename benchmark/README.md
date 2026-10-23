@@ -7,16 +7,16 @@ exists in two files is a number that will exist in two versions.
 | Path | What it is |
 | :--- | :--- |
 | [`status.md`](status.md) | The measured tables, the gate results, and what the numbers do not claim. **Windows 7950X3D.** |
-| [`status-linux-ryzen7-255.md`](status-linux-ryzen7-255.md) | The same gated dashboard on a **second host** (Linux, Ryzen 7 255). Where the two hosts agree and where they do not. |
+| [`status-linux-ryzen7-255.md`](https://github.com/danalec/rgx/blob/main/benchmark/status-linux-ryzen7-255.md) | The same gated dashboard on a **second host** (Linux, Ryzen 7 255). Where the two hosts agree and where they do not. |
 | [`tv-transcript.md`](tv-transcript.md) | A/B/C of ripgrep vs rgx (filesystem) vs rgx-tv (pack store) over a 20,028-file tree — runs on **both hosts**. |
 | [`findings.md`](findings.md) | Measurements and defects that shaped the code: walk cost, `--sort path`, `--files` path-as-regex, the prefilter pair, line-walk bookkeeping. |
 | [`optimal-techniques.md`](optimal-techniques.md) | The engineering behind the pack store's streaming. Its −44.3% is **not reproduced** — a second host measures ≈12% in the same direction. |
-| [`diffrig/`](diffrig/) | Byte-for-byte differential harness against `rg`: `cmp.sh` for one case, `fuzz.py` for a pattern × flag matrix, `conpty.py` for Windows console output. |
+| [`diffrig/`](https://github.com/danalec/rgx/tree/main/benchmark/diffrig) | Byte-for-byte differential harness against `rg`: `cmp.sh` for one case, `fuzz.py` for a pattern × flag matrix, `conpty.py` for Windows console output. |
 
 **Two hosts are on file, not one.** The Windows 7950X3D dashboard is
 [`status.md`](status.md) and remains the quoted source of the paper's
 engine-alone figures. The Linux Ryzen 7 255 dashboard is
-[`status-linux-ryzen7-255.md`](status-linux-ryzen7-255.md) and is the check
+[`status-linux-ryzen7-255.md`](https://github.com/danalec/rgx/blob/main/benchmark/status-linux-ryzen7-255.md) and is the check
 on whether those figures travel. They do not: the sign of the engine-alone
 edge flips on six of nine pattern shapes. Pack-store ratios travel in
 direction (the store is faster than both direct paths, exact count parity)
@@ -95,8 +95,8 @@ script's location and `rg` takes an `RG` environment override, then `PATH`.
 
 ## Elsewhere
 
-- **Paper:** [`paper/tesla-valve.tex`](../paper/tesla-valve.tex) — source of
-  the preprint, hosted on Zenodo as
-  [10.5281/zenodo.23318461](https://doi.org/10.5281/zenodo.23318461).
-  Re-render with `cd paper && pdflatex tesla-valve.tex` ×3.
+- **Paper:** the preprint, hosted on Zenodo as
+  [10.5281/zenodo.23453407](https://doi.org/10.5281/zenodo.23453407).
+  Its sources (`paper/tesla-valve.tex`) live in the upstream rgx checkout, not
+  in this repository; re-render them with `cd paper && pdflatex tesla-valve.tex` ×3.
 - **Guide and usage:** [`../README.md`](../README.md)

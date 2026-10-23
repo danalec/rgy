@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Pattern matching: the seam between "what to search for" and "where".
 //!
 //! The trait is the contract a byte-mode engine must satisfy:

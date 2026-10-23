@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! In-house compression codecs.
 //!
 //! **Provenance.** The codec modules here are independent reimplementations
@@ -17,6 +19,15 @@
 //! - `xz` — the XZ container format specification (stream header, blocks,
 //!   index, footer, check types) over the LZMA2 decoder.
 //! - `zstd` — RFC 8878, decoding only.
+//! - `snappy` — Google's Snappy format, decoding only: the preamble and the
+//!   literal/copy element stream. It is here because LevelDB and RocksDB
+//!   compress their blocks with it, and without it their `.ldb`/`.sst` files
+//!   are compressed noise to a search tool.
+//! - `lz4` — the LZ4 block format, decoding only. The `.lz4` file wrapper is
+//!   still not read; the block is, because the blosc frame is made of blocks.
+//! - `blosc` — the frame of c-blosc, decoding only: the header, the table of
+//!   block offsets, the blocks and the byte shuffle. It is here because the
+//!   chunks zarr-python writes by default are blosc frames.
 //!
 //! `error` and `cap` are rgx's own: the error vocabulary the decoders fail
 //! with, and the ceiling on how many bytes one decode may emit. The cap is
@@ -24,27 +35,56 @@
 //! measuring afterwards costs exactly what a compression bomb was built to
 //! cost.
 //!
-//! lz4 is deliberately absent — its frame wrapper is not interop-proven,
-//! only its block format is, so .lz4 files still go through `lz4_flex`.
+//! The `.lz4` file wrapper is deliberately absent — it is not
+//! interop-proven here, so `.lz4` files still go through `lz4_flex`. The
+//! block format is read, because the blosc frame is made of blocks.
 
+#[cfg(feature = "blosc")]
+pub mod blosc;
+#[cfg(feature = "bwt")]
 pub mod bwt;
+#[cfg(feature = "bzip2")]
 pub mod bzip2;
 pub mod cap;
 pub mod crc32;
+#[cfg(feature = "deflate")]
 pub mod deflate;
 pub mod error;
+#[cfg(feature = "gzip")]
 pub mod gzip;
+#[cfg(feature = "huffman")]
 pub mod huffman;
+#[cfg(feature = "lz4")]
+pub mod lz4;
+#[cfg(feature = "lz77")]
 pub mod lz77;
+#[cfg(feature = "lzma")]
 pub mod lzma;
+#[cfg(feature = "snappy")]
+pub mod snappy;
+#[cfg(feature = "xz")]
 pub mod xz;
+#[cfg(feature = "zlib")]
 pub mod zlib;
+#[cfg(feature = "zstd")]
 pub mod zstd;
 
+#[cfg(feature = "blosc")]
+pub use blosc::{BloscDecoder, Codec as BloscCodec};
+#[cfg(feature = "bzip2")]
 pub use bzip2::Bzip2Decoder;
 pub use cap::{Bounded, OutputCap, UNLIMITED};
+#[cfg(feature = "deflate")]
 pub use deflate::DeflateDecoder;
+#[cfg(feature = "gzip")]
 pub use gzip::{GzipError, GzipReader, GzipResult, GzipWriter};
+#[cfg(feature = "lz4")]
+pub use lz4::Lz4Decoder;
+#[cfg(feature = "snappy")]
+pub use snappy::SnappyDecoder;
+#[cfg(feature = "xz")]
 pub use xz::XzReader;
+#[cfg(feature = "zlib")]
 pub use zlib::{ZlibDecoder, ZlibEncoder};
+#[cfg(feature = "zstd")]
 pub use zstd::ZstdDecoder;

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The cost model's arithmetic, on the real corpus, with the prices taken apart.
 //!
 //! ```text

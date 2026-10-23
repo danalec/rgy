@@ -154,6 +154,11 @@ impl<'a> Indexer<'a> {
         Indexer { volume }
     }
 
+    /// The volume this indexer reads.
+    pub fn volume(&self) -> &'a Volume {
+        self.volume
+    }
+
     /// Walk the MFT and collect every indexed name as a [`NameRow`] — the
     /// `discovery::Source` feed for the name index (grouped into DFS
     /// [`discovery::walk::Listing`]s by [`listings_from_rows`]).
@@ -638,34 +643,7 @@ mod tests {
 
     // --- hand-built records for ingest_record -----------------------------
 
-    /// A FILE record with one nameless $FILE_NAME at attrs_offset 0x38, and
-    /// `base_frn` at 0x20 (0 for a base record, the owner's FRN for an
-    /// extension record).
-    fn build_record(base_frn: u64, parent_frn: u64, ns: u8, name: &str) -> Vec<u8> {
-        let name_bytes = name.encode_utf16().count() * 2;
-        let value_len = 66 + name_bytes;
-        let attr_len = 0x18 + value_len;
-        let need = 0x38 + attr_len;
-        let mut rec = vec![0u8; need];
-        rec[0..4].copy_from_slice(b"FILE");
-        rec[0x14..0x16].copy_from_slice(&0x38u16.to_le_bytes()); // attrs_offset
-        rec[0x16..0x18].copy_from_slice(&1u16.to_le_bytes()); // in use
-        rec[0x18..0x1c].copy_from_slice(&(need as u32).to_le_bytes()); // bytes_in_use
-        rec[0x20..0x28].copy_from_slice(&base_frn.to_le_bytes()); // base file reference
-
-        let attr = &mut rec[0x38..];
-        attr[0x00..0x04].copy_from_slice(&ntfs::ATTR_FILE_NAME.to_le_bytes());
-        attr[0x04..0x08].copy_from_slice(&(attr_len as u32).to_le_bytes());
-        // NameLength/NameOffset stay 0: the canonical nameless layout.
-        attr[0x10..0x14].copy_from_slice(&(value_len as u32).to_le_bytes());
-        attr[0x18..0x20].copy_from_slice(&parent_frn.to_le_bytes());
-        attr[0x18 + 64] = (name_bytes / 2) as u8; // FileNameLength, chars
-        attr[0x18 + 65] = ns;
-        for (i, c) in name.encode_utf16().enumerate() {
-            attr[0x18 + 66 + i * 2..0x18 + 68 + i * 2].copy_from_slice(&c.to_le_bytes());
-        }
-        rec
-    }
+    use crate::ntfs::testutil::build_record;
 
     fn ingest_rows(records: &[(u64, Vec<u8>)]) -> (Vec<NameRow>, IndexStats) {
         let volume = crate::volume::Volume::dummy_for_tests();

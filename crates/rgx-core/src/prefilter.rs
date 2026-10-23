@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The scan that consumes a [`NibbleMask`].
 //!
 //! `literal.rs` decides whether a pattern can match; this produces the

@@ -1,2 +1,9 @@
 /target
 /build
+# The release artifacts: the archives the release flow builds, and the
+# digests beside them. They are outputs, not sources.
+/.dist
+# Python's bytecode cache. The parity generator is a script, not a
+# package, and its .pyc is a build output like /target.
+__pycache__/
+*.py[cod]

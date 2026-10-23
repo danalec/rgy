@@ -576,7 +576,7 @@ fn decode_distance(code: usize, reader: &mut BitReader) -> CompressResult<u16> {
         Ok(base)
     }
 }
-#[cfg(test)]
+#[cfg(all(test, feature = "deflate"))]
 mod tests {
     use super::*;
     #[cfg(feature = "std")]
@@ -943,7 +943,7 @@ mod tests {
 
 /// A corrupt or truncated stream is untrusted input: the decoder must
 /// answer with an error or a short read, never a panic.
-#[cfg(test)]
+#[cfg(all(test, feature = "deflate"))]
 mod fuzz {
     use super::*;
 

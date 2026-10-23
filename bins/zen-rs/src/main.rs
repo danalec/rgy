@@ -6,8 +6,8 @@
 //! input and a 64 KiB output buffer, and tails journal deltas via overlapped
 //! reads -- the shape the Win32 USN journal interface documents.
 //!
-//! One on-disk index format: the name index blob (`docs/formats/README.md`,
-//! FSIDX011). A scan builds it from MFT rows; `save` persists it with the
+//! One on-disk index format: the name index blob (`docs/on-disk-formats.md`,
+//! FSIDX012). A scan builds it from MFT rows; `save` persists it with the
 //! root stamp beside it; `load`, `ui`, `search` and `list` reopen it.
 
 // Windows only. This is the NTFS MFT/USN indexer and `discovery-windows` is
@@ -346,14 +346,14 @@ fn cmd_volumes() -> Result<(), String> {
 fn cmd_ui(source: &str) -> Result<(), String> {
     let (idx, root) = load_or_build(source)?;
     let indexed = idx.n;
-    ui::run(Live::new(idx), root, indexed)
+    ui::run(Live::with_root(idx, root.as_bytes()), root, indexed)
 }
 
 #[cfg(windows)]
 fn cmd_search(source: &str, query_str: &str) -> Result<(), String> {
     let (idx, root) = load_or_build(source)?;
     let start = std::time::Instant::now();
-    let matches = search_paths(&Live::new(idx), &root, query_str)?;
+    let matches = search_paths(&Live::with_root(idx, root.as_bytes()), &root, query_str)?;
     let elapsed = start.elapsed();
 
     for path in &matches {
@@ -372,7 +372,7 @@ fn cmd_search_all(query_str: &str) -> Result<(), String> {
     for root in roots {
         eprintln!("\n# {root}");
         let (idx, r) = load_or_build(&root)?;
-        for path in search_paths(&Live::new(idx), &r, query_str)? {
+        for path in search_paths(&Live::with_root(idx, r.as_bytes()), &r, query_str)? {
             println!("{path}");
         }
     }
@@ -418,7 +418,7 @@ fn cmd_tail(volume_path: &str) -> Result<(), String> {
     let volume = Volume::open(volume_path).map_err(|e| e.to_string())?;
     let (idx, _stats) = build_index(&volume)?;
     let before = idx.n;
-    let mut live = Live::new(idx);
+    let mut live = Live::with_root(idx, volume_path.as_bytes());
     let mut watch = seam::UsnWatch::new(Indexer::new(&volume));
 
     let mut rounds = 0u32;

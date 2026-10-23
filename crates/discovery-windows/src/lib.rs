@@ -30,6 +30,7 @@
 
 pub mod indexer;
 pub mod ntfs;
+pub mod paths;
 pub mod seam;
 pub mod volume;
 

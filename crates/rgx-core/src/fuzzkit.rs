@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Deterministic, dependency-free structural fuzzer for byte-slice parsers.
 //!
 //! This is deliberately *not* libFuzzer: it runs inside ordinary `cargo test`

@@ -1,4 +1,4 @@
-# The FreeBSD gate (docs/freebsd-support.md §4, phase 4 / P2.2).
+# The FreeBSD gate (docs/design.md §6).
 #
 # Two layers, matching the plan: the floor is a cross-check that needs no
 # VM (catches cfg and dependency breakage for the FreeBSD target on every
@@ -18,8 +18,18 @@ on:
   pull_request:
 
 jobs:
+  parity:
+    name: the parity matrix is current and claims no gap
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The matrix is a promise, not a picture: a G cell is work required,
+      # and a matrix that is not what its source renders is a matrix that
+      # reads better than it is. Both fail here.
+      - run: python3 scripts/parity-matrix.py --check
+
   freebsd-check:
-    name: floor: cargo check for FreeBSD
+    name: "floor: cargo check for FreeBSD"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -29,7 +39,7 @@ jobs:
       - run: cargo check --workspace --target x86_64-unknown-freebsd
 
   freebsd-suite:
-    name: bar: full suite on a FreeBSD kernel
+    name: "bar: full suite on a FreeBSD kernel"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -54,3 +64,71 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --workspace
       - run: cargo test --workspace --no-fail-fast
+
+  release:
+    name: the release archive on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # The archive the release publishes, built and smoked on this OS.
+      # The test suite is the suite job's business; this one checks the
+      # packaging: that the binaries build, that they answer a real
+      # query, and that the archive carries what it must. The two scripts
+      # are twins -- the same log, the same exit code, the same file list
+      # inside -- and this job is where that is checked on three systems.
+      - name: build the archive (unix)
+        if: runner.os != 'Windows'
+        run: bash scripts/build-release.sh --skip-tests
+      - name: build the archive (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/build-release.ps1 -SkipTests
+      - name: the archive carries the binaries and the documents
+        shell: bash
+        run: |
+          set -eu
+          archive=$(ls .dist/rgy-v*.tar.gz .dist/rgy-v*.zip 2>/dev/null | head -1)
+          if [ -z "$archive" ]; then
+            echo "no archive in .dist/"
+            ls -l .dist/ || true
+            exit 1
+          fi
+          echo "archive: $archive"
+          tar -tf "$archive"
+          for f in searchctl searchd rgy-autostart README.md MANUAL.md FORMATS.md COPYING NOTICE LICENSE-APACHE; do
+            if ! tar -tf "$archive" | grep -q "$f"; then
+              echo "the archive does not carry $f"
+              exit 1
+            fi
+          done
+          # The digest file is what the release publishes beside the
+          # archives: an asset without its digest is an asset nobody can
+          # check.
+          grep -q "$(basename "$archive")" .dist/SHA256SUMS
+      # The publish scripts, exercised on every push: they rewrite the
+      # manifests and the installer pins from the artifacts in .dist/ and
+      # publish nothing. A script that breaks should break here, not on
+      # the day of the release.
+      - name: the manifests, rewritten (nothing published)
+        if: runner.os != 'Windows'
+        run: bash scripts/publish-release.sh --manifests-only --skip-tests
+      - name: the manifests, rewritten (nothing published)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/publish-release.ps1 -ManifestsOnly -SkipTests
+
+  clippy:
+    name: the workspace stays warning-free
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # The release gate's first half (scripts/build-release.sh runs it
+      # too): any warning fails, because a warning in a release is a
+      # thing nobody has read.
+      - run: cargo clippy --workspace --all-targets -- -D warnings

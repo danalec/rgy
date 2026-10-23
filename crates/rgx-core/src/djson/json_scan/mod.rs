@@ -1,49 +1,21 @@
-//! Structural JSON scanner, vendored from upstream `src/b02/json_scan` at 841d589.
-//!
-//! **The name is upstream's, kept on purpose.** The suite this sits in is
-//! `crate::djson`; the scanner inside it is `json_scan`, which is what the
-//! pin in `scripts/vendored-sources.tsv` names and what upstream calls it. An
-//! umbrella name on the module itself would hide the lineage the pin exists
-//! to preserve.
-//!
-//! **Provenance.** upstream is the source of truth. This is a byte-for-byte copy
-//! of that commit's `src/b02/json_scan/{mod,avx2,tests}.rs` with the two
-//! copy-time changes noted on `mod detect` below, and nothing else.
-//!
-//! **The name.** It is called `djson` and it is NOT a JSON parser. It answers
-//! one question -- which bytes of a document are structural, and which are
-//! string delimiters -- as one bit per byte for each, so that a stage-2 parser
-//! walks the two bitsets and never looks at the document again. The `d` is
-//! for "not a `json` yet", which is the honest description: the stage-2 is not
-//! written, and `crate::json` is still the parser the six call sites use.
-//!
-//! **Where the speed is.** Every byte of a document is classified sixteen at a
-//! time on the AVX2 path, and the string state crosses block boundaries in a
-//! carry-less multiply rather than byte by byte.
+// SPDX-License-Identifier: Apache-2.0
 
-//! Stage 1 of a two-stage JSON parser: the structural index.
+//! Structural JSON scanner: stage 1 of a two-stage parser.
 //!
-//! Given a byte slice, produce a bit per byte saying whether that byte is a
-//! **structural position** — one the grammar can act on — and a second bit per
-//! byte saying whether it is a **string delimiter**. Everything a stage-2
-//! parser has to do is walk those two bitsets; nothing else in this module
-//! interprets the document.
+//! It answers one question about a byte slice and nothing else — **which bytes
+//! are structural, and which are string delimiters** — as one bit per byte for
+//! each. A stage-2 parser walks those two bitsets and never looks at the
+//! document again. Nothing in this module interprets JSON syntax, parses a
+//! value, or allocates anything except the two bitsets.
 //!
 //! | bit | set when |
 //! |-----|----------|
-//! | `structural` | the byte is `{ } [ ] : ,` or whitespace **and** it is not inside a string, **or** it is a quote that opens or closes a string |
+//! | `structural` | the byte is `{ } [ ] : ,` or whitespace **and** is not inside a string, **or** it is a quote that opens or closes a string |
 //! | `quote` | the byte is a quote that opens or closes a string |
-//!
-//! A quote that is *escaped* (`\"`) is neither: it is a byte of string
-//! content. That is the whole reason the scanner exists — the quote that
-//! delimits a string and the quote that a `\` makes literal are the same byte,
-//! and only the backslash run in front of them tells them apart. An unescaped
-//! quote outside a string is still a delimiter (it *opens* a string), so the
-//! state is a toggle, not a flag: a lone `"` at offset 0 sets both bits.
 //!
 //! ## The predicate
 //!
-//! For a byte `b` at offset `i`, with `in_string` the state *before* `b`:
+//! For byte `b` at offset `i`, with `in_string` the state *before* `b`:
 //!
 //! ```text
 //! escaped(i)    = (the run of backslashes ending at i-1 has odd length)
@@ -52,54 +24,64 @@
 //! quote(i)      = boundary(i)
 //! ```
 //!
-//! and the state advances by `in_string ^= boundary(i)` plus the backslash
-//! run bookkeeping. [`crate::djson::json_scan::scan_scalar`] is that, one byte at a time, in the
-//! clearest possible form. Everything else here is a faster spelling of it,
-//! and the tests hold all of them to it.
+//! and the state advances by `in_string ^= boundary(i)` plus the backslash-run
+//! bookkeeping. [`scan_scalar`] is that, one byte at a time, in the clearest
+//! form there is. [`scan_swar`] and [`scan_avx2`] are faster spellings of the
+//! same predicate over 64-byte blocks, and `tests` holds all three — plus an
+//! oracle transcribed from RFC 8259 without looking at any of them — against
+//! each other on a corpus chosen to break each of the ways this can go wrong.
 //!
-//! ## Why a union of rectangles, not one lookup pair
+//! The escaped quote is the reason the module exists. The quote that delimits a
+//! string and the quote a `\` makes literal are the same byte, and only the run
+//! of backslashes in front of them tells them apart. Note also that an
+//! unescaped quote outside a string still *opens* one, so the state is a
+//! toggle and not a flag: a lone `"` at offset 0 sets both bits.
 //!
-//! The standard `pshufb` trick ("shufti": one 16-byte table per nibble, ANDed)
-//! is a **rectangle detector** — it selects exactly `{b : b & 0x0F in L,
-//! b >> 4 in H}`, one rectangle of the high-nibble × low-nibble grid. One AND
-//! instead of a chain, but for this byte set **no single rectangle is the
-//! structural set**: `,` (0x2C) and `:` (0x3A) are both structural, so a
-//! rectangle containing them needs low nibbles `C` and `A` lit and rows 2 and 3
-//! selected — and row 2 then drags in `0x2A` (`#`, content) because `A` is lit.
-//! Nor can the two bits be a 4-distinct-class code, which is the same
-//! obstruction from the other side: rows 2 and 3 must be selected and `A` and
-//! `C` lit, while row 2's other members — `"` and `0x2A` — must come out as
-//! their own codes, which the AND cannot give them.
+//! ## Why a union of rectangles and not one shuffle pair
 //!
-//! A *union* of rectangles has no such problem, so that is what this uses:
-//! six of them, one `pshufb` pair each, still a single pass. Each is a byte set
-//! this module can name, generate from a nibble mask, and test exhaustively,
-//! which a single fused pair is not. `struct` is the first five, `quote` the
-//! sixth on its own.
+//! The `pshufb` classification trick — one 16-byte table per nibble, ANDed —
+//! selects exactly `{b : b & 0x0F ∈ L, b >> 4 ∈ H}`, which is one rectangle of
+//! the high-nibble × low-nibble grid. One AND per plane instead of a chain, but
+//! **for this byte set no single rectangle is the structural set**: `,` (0x2C)
+//! and `:` (0x3A) are both structural, so one rectangle holding both must light
+//! low nibbles `C` and `A` and select rows 2 and 3 — and row 2 then drags in
+//! `0x2A` (`#`), which is content. The two bits cannot be a 4-class code
+//! either: that is the same obstruction from the other side, since row 2's
+//! other members `"` and `0x2A` would have to come out as their own codes out
+//! of an AND.
+//!
+//! A *union* of rectangles has no such problem, so this uses six: the five
+//! structural groups and the quote on its own. Each is a byte set this module
+//! can name, generate from a nibble mask, and test exhaustively, which a single
+//! fused pair is not. Still one pass, still six `pshufb` pairs.
 //!
 //! ## Bytes >= 0x80
 //!
-//! No rectangle selects a row above `7`, so UTF-8 lead and continuation bytes
-//! are OTHER by construction and no table index can run past 15 — `b >> 4` is
-//! at most 15 for every `u8`. That is the hazard a hand-rolled nibble table
-//! walks into when it forgets the `pshufb` high-bit rule, or that the high
-//! nibble of `0x8E` is `8`; here it is a property of the tables, and
-//! `tests::hi_nibble_rows_above_7_are_inert` pins it.
+//! No rectangle lights a row above `7`, so UTF-8 lead and continuation bytes
+//! are OTHER by construction. That is not a runtime check — it is a property of
+//! the tables, and `tests::hi_nibble_rows_above_7_are_inert` is what pins it.
+//! It is also the answer to the `pshufb` high-bit rule: the instruction zeroes
+//! any lane whose index has bit 7 set, which is what keeps a hand-rolled
+//! nibble table in bounds when a byte's high nibble is `8`.
+//!
+//! ## The class codes are compared, never masked
+//!
+//! [`CLASS_BACKSLASH`] is `0b11`. Every use of a code in this module is an
+//! equality test, and a single `class & CLASS_STRUCTURAL` would classify every
+//! backslash in the document as structural *and* as a quote, which turns a lone
+//! `\` into a string delimiter.
+//! `tests::class_codes_are_compared_not_masked` is what keeps that true.
 //!
 //! ## Dispatch
 //!
-//! [`crate::djson::json_scan::scan`] checks AVX2 and PCLMULQDQ at runtime and calls the vector path;
-//! everything else lands in [`crate::djson::json_scan::scan_scalar`], which is the same predicate one
-//! byte at a time. Under the `std` feature the check *is*
-//! `is_x86_feature_detected!`; `no_std` builds cannot call that macro (it
-//! lives in `std`, not `core`), so they read CPUID and XGETBV themselves — see
-//! [`crate::djson::json_scan::has_avx2_pclmulqdq`], and the test that holds the two to each other.
-//! The `unsafe` is confined to the `#[target_feature]` functions in the private
-//! `avx2` submodule, each of which documents the check that guards it.
-//! [`crate::djson::json_scan::scan_swar`] is the block-level algebra in portable scalar code: the identical
-//! 64-byte mask pipeline with a shift-chain prefix-XOR instead of the
-//! carry-less multiply, and the tests use it to hold the two prefix-XOR
-//! implementations to each other.
+//! [`scan`] checks AVX2 and PCLMULQDQ at runtime and calls the vector path;
+//! everything else lands in [`scan_scalar`]. Under the `std` feature the check
+//! *is* `is_x86_feature_detected!`; `no_std` builds — the primary target of
+//! this crate — cannot call that macro, so they read CPUID and XGETBV
+//! themselves, and `tests::cpuid_detection_matches_the_std_macro` holds the two
+//! to each other. All `unsafe` is confined to the `#[target_feature]` functions
+//! in the private [`avx2`] module, each of which documents the check that
+//! guards it.
 
 use alloc::vec::Vec;
 
@@ -122,24 +104,19 @@ pub const CLASS_OTHER: u8 = 0;
 pub const CLASS_STRUCTURAL: u8 = 1;
 /// `"`.
 pub const CLASS_QUOTE: u8 = 2;
-/// `\`.
+/// `\`, as `0b11`.
 ///
-/// Not a plane: it is neither structural nor a quote, and two bits have no
-/// room for a fifth class. [`classify16`] spells it as `0b11` in the packed
-/// code so a caller can read one number instead of three masks, but **nothing
-/// outside [`classify16`] may read the codes as bit flags** -- bit 0 of
-/// `CLASS_BACKSLASH` is set, and a `class & CLASS_STRUCTURAL` test classifies
-/// every backslash in the document as structural. Every other use in this
-/// module compares the code for equality, and
-/// `tests::class_codes_are_compared_not_masked` is what keeps it that way.
+/// Two bits have no room for a fifth class, and the backslash is the one that
+/// does not fit: it is neither plane, and it is needed per byte to resolve the
+/// escape parity. [`Classified16::code`] carries all four together so a caller
+/// reads one number instead of three masks. **Nothing may read it as bit
+/// flags** — see the module header.
 pub const CLASS_BACKSLASH: u8 = 3;
 
-/// The 256-entry lookup the scalar path and the tests classify through.
+/// The 256-entry lookup the scalar paths classify through.
 ///
-/// Three codes, compared for equality everywhere except inside
-/// [`classify16`]: bit 0 of the structural plane and bit 1 of the quote plane
-/// are the only two bits the vector path computes, and they cannot be read
-/// back out of this table as a mask (see [`CLASS_BACKSLASH`]).
+/// Every use of a code is equality. See [`CLASS_BACKSLASH`] for why a mask is
+/// not an option here.
 pub const CLASS_TABLE: [u8; 256] = build_class_table();
 
 /// The classification code for one byte.
@@ -170,16 +147,15 @@ const fn build_class_table() -> [u8; 256] {
     table
 }
 
-/// Encode one 16-byte window as a `u32` of two-bit codes: byte `i`'s code
-/// sits at bits `2i..2i+2`.
+/// One 16-byte window, classified three ways at once.
 ///
-/// The whitespace and backslash planes come along beside it, because two bits
-/// cannot carry five classes and the two extra ones are exactly the two the
-/// code cannot distinguish.
+/// The packed code exists because two bits cannot carry five classes; the
+/// whitespace and backslash planes come beside it because those are the two
+/// the code cannot distinguish.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Classified16 {
-    /// Two bits per byte: [`CLASS_OTHER`], [`CLASS_STRUCTURAL`],
-    /// [`CLASS_QUOTE`] or [`CLASS_BACKSLASH`].
+    /// Two bits per byte, byte `i` at bits `2i..2i+2`: [`CLASS_OTHER`],
+    /// [`CLASS_STRUCTURAL`], [`CLASS_QUOTE`] or [`CLASS_BACKSLASH`].
     pub code: u32,
     /// Bit `i` set when byte `i` is whitespace.
     pub whitespace: u16,
@@ -189,15 +165,14 @@ pub struct Classified16 {
 
 /// Classify 16 bytes, two bits per byte.
 ///
-/// The portable reference for [`classify16_avx2`]; the two are compared
-/// window-by-window over all 256 byte values.
+/// The portable reference for the vector path; `tests` compares the two window
+/// by window over all 256 byte values at all 16 offsets.
 #[must_use]
 pub fn classify16(bytes: &[u8; 16]) -> Classified16 {
     let mut out = Classified16::default();
     for (i, &b) in bytes.iter().enumerate() {
-        // Matched, never masked: the packed code of a backslash is `0b11`,
-        // whose low two bits would read as "structural and quote" to any
-        // bitwise test.
+        // Matched, never masked: a backslash packs as 0b11, whose low two
+        // bits would read as "structural and quote" to any bitwise test.
         let packed = match CLASS_TABLE[b as usize] {
             CLASS_BACKSLASH => u32::from(CLASS_BACKSLASH),
             CLASS_QUOTE => u32::from(CLASS_QUOTE),
@@ -218,7 +193,7 @@ pub fn classify16(bytes: &[u8; 16]) -> Classified16 {
 // --- the pshufb rectangles -------------------------------------------------
 
 /// Build the (low-table, high-table) pair for one rectangle of the
-/// high-nibble x low-nibble grid. `lo_set` and `hi_set` are nibble bitmasks.
+/// high-nibble × low-nibble grid, from a bitmask of nibbles for each.
 const fn rect(lo_set: u16, hi_set: u16) -> ([u8; 16], [u8; 16]) {
     let mut lo = [0u8; 16];
     let mut hi = [0u8; 16];
@@ -231,22 +206,32 @@ const fn rect(lo_set: u16, hi_set: u16) -> ([u8; 16], [u8; 16]) {
     (lo, hi)
 }
 
-/// `0x20`.
+/// `0x20`, the space.
 pub(crate) const RECT_SPACE: ([u8; 16], [u8; 16]) = rect(1 << 0x0, 1 << 0x2);
 /// `0x09 0x0A 0x0D` — tab, line feed, carriage return.
 pub(crate) const RECT_CTRL_WS: ([u8; 16], [u8; 16]) =
     rect((1 << 0x9) | (1 << 0xA) | (1 << 0xD), 1 << 0x0);
-/// `0x2C`.
+/// `0x2C`, the comma.
 pub(crate) const RECT_COMMA: ([u8; 16], [u8; 16]) = rect(1 << 0xC, 1 << 0x2);
-/// `0x3A`.
+/// `0x3A`, the colon.
 pub(crate) const RECT_COLON: ([u8; 16], [u8; 16]) = rect(1 << 0xA, 1 << 0x3);
 /// `0x5B 0x5D 0x7B 0x7D` — `[ ] { }`.
+///
+/// The bracket set is why the union exists: `0x5B` and `0x7B` differ in their
+/// *high* nibble, so one rectangle holding both spans two rows, and row 5 then
+/// admits `0x5C` (the backslash) unless row 5 is only lit on low nibbles `B`
+/// and `D`. The low-table half is what pins that down.
 pub(crate) const RECT_BRACKET: ([u8; 16], [u8; 16]) =
     rect((1 << 0xB) | (1 << 0xD), (1 << 0x5) | (1 << 0x7));
-/// `0x22`.
+/// `0x22`, the quote.
 pub(crate) const RECT_QUOTE: ([u8; 16], [u8; 16]) = rect(1 << 0x2, 1 << 0x2);
 
-/// Every rectangle, with the byte values it is supposed to select.
+/// Every rectangle with the byte values it is required to select.
+///
+/// `tests::each_rectangle_selects_exactly_the_bytes_it_documents` and
+/// `tests::the_planes_reconstruct_the_class_table` read this table, so a
+/// rectangle edited without its row here fails on the class plane rather than
+/// silently drifting.
 #[cfg(test)]
 #[allow(clippy::type_complexity)]
 pub(crate) const RECTANGLES: [(&str, ([u8; 16], [u8; 16]), &[u8]); 6] = [
@@ -258,12 +243,12 @@ pub(crate) const RECTANGLES: [(&str, ([u8; 16], [u8; 16]), &[u8]); 6] = [
     ("quote", RECT_QUOTE, &[0x22]),
 ];
 
-/// The bytes one (low-table, high-table) pair selects, computed the way
+/// The 256 bytes one (low-table, high-table) pair selects, computed the way
 /// `pshufb` computes it: `low[b & 0x0F] & high[b >> 4]`.
 ///
-/// The high-nibble index is `b >> 4`, which is at most 15 for every `u8` —
-/// that bound is the reason bytes `>= 0x80` are safe here, and the reason
-/// the tables have no row for them.
+/// The high-nibble index is `b >> 4`, at most 15 for every `u8`. That bound is
+/// why the tables have no row above `7`, and why bytes `>= 0x80` are safe here
+/// at all.
 #[must_use]
 pub const fn rect_bytes((lo, hi): ([u8; 16], [u8; 16])) -> [u8; 256] {
     let mut out = [0u8; 256];
@@ -283,9 +268,10 @@ pub const fn rect_bytes((lo, hi): ([u8; 16], [u8; 16])) -> [u8; 256] {
 /// A dense bit set over a known byte range: bit `i` of word `i / 64` describes
 /// byte `i`.
 ///
-/// The word layout is the input's, not a re-packing: a 64-byte block of input
-/// is one word of output, so the scanner never shifts between the two and the
-/// block loop writes words straight out. Bits past [`BitSet::len`] are zero.
+/// **The word layout is the input's, not a re-packing.** A 64-byte block of
+/// input is one word of output, so the block loops never shift between the two
+/// and `set_word` writes straight into place. Bits past [`BitSet::len`] are
+/// zero, which `tests::lengths_around_the_block_size` pins.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BitSet {
     words: Vec<u64>,
@@ -304,9 +290,10 @@ impl BitSet {
         }
     }
 
-    /// The number of bytes this set describes. This is the *range*, not the
-    /// population: a set over 100 bytes with nothing in it has `len() == 100`
-    /// and `is_empty() == true`.
+    /// The number of bytes this set describes.
+    ///
+    /// This is the *range*, not the population: a set over 100 bytes with
+    /// nothing in it has `len() == 100` and `is_empty() == true`.
     #[must_use]
     pub fn len(&self) -> usize {
         self.len
@@ -314,14 +301,15 @@ impl BitSet {
 
     /// Whether no byte is in the set.
     ///
-    /// "Empty" means no bits set, as it does for any other collection --
-    /// *not* "describes no bytes", which is [`BitSet::len`] being zero.
+    /// "Empty" means no bits set, as for any other collection — *not*
+    /// "describes no bytes", which is [`BitSet::len`] being zero.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         !self.any
     }
 
-    /// Whether byte `i` is in the set. `false` past the end.
+    /// Whether byte `i` is in the set. `false` past the end, and `false` for
+    /// `usize::MAX` without overflowing on the division.
     #[must_use]
     pub fn contains(&self, i: usize) -> bool {
         if i >= self.len {
@@ -360,8 +348,8 @@ impl BitSet {
         self.any = true;
     }
 
-    /// Store a whole 64-byte word of output. Word `k` covers exactly the
-    /// bytes `64k..64k + 64`, so the block loop needs no shifting.
+    /// Store a whole 64-byte word. Word `k` covers exactly bytes
+    /// `64k..64k + 64`, so the block loops need no shifting.
     fn set_word(&mut self, word: usize, w: u64) {
         self.words[word] = w;
         self.any |= w != 0;
@@ -374,12 +362,13 @@ impl BitSet {
 pub struct StructuralIndex {
     /// Structural bytes, delimiters included.
     pub structural: BitSet,
-    /// The quotes that open and close strings, and only those.
+    /// The quotes that open and close strings, and only those — an escaped
+    /// quote is neither a delimiter nor structural.
     pub quote: BitSet,
     /// The length of the scanned input.
     pub len: usize,
-    /// Whether a string was still open at the end of the input. Stage 2
-    /// treats this as a truncated document rather than reaching a terminal.
+    /// Whether a string was still open at the end of the input. Stage 2 reads
+    /// this as a truncated document rather than reaching a terminal.
     pub end_in_string: bool,
 }
 
@@ -399,12 +388,12 @@ impl StructuralIndex {
 // The block algebra
 // ---------------------------------------------------------------------------
 
-/// The three pieces of state that cross a block boundary.
+/// The state that crosses a 64-byte block boundary.
 ///
-/// A quote's meaning depends on a backslash run that can start in one block
-/// and end in another, and the string flag can be set by a quote in the last
-/// byte of a block — so "process 64 bytes independently" is false and these
-/// three bits are what make it true.
+/// "Process 64 bytes independently" is false and these three bits are the
+/// reason: a quote's meaning depends on a backslash run that can start in one
+/// block and end in another, and the string flag can be set by a quote in the
+/// last byte of a block.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Carry {
     /// The input was inside a string when this block starts.
@@ -418,34 +407,30 @@ pub struct Carry {
 /// The whole 64-byte predicate, in masks.
 ///
 /// `structural_raw` is the structural plane (`ws | punctuation`), `quote` the
-/// quote plane, `backslash` the backslash plane — all three one bit per byte,
-/// bit `i` being byte `i`. `prefix` supplies the inclusive prefix-XOR of a
-/// word; the vector path passes a carry-less multiply and [`crate::djson::json_scan::scan_swar`]
-/// passes [`prefix_xor`]. It is a parameter rather than a `cfg` so that both
-/// spellings are monomorphised into the same algebra and the tests can run
-/// the identical code around either.
+/// quote plane, `backslash` the backslash plane — one bit per byte, bit `i`
+/// being byte `i`. The return is one word of structural output and one of
+/// delimiters.
 ///
-/// The two hard steps:
+/// `prefix` supplies the inclusive prefix-XOR. The vector path passes a
+/// carry-less multiply and [`scan_swar`] passes [`prefix_xor`]. It is a
+/// parameter rather than a `cfg` so both spellings are monomorphised into the
+/// identical algebra and the tests can run the same code around either.
 ///
-/// **Escape parity.** `odd` ends up with bit `i` set exactly when byte `i` is
-/// a backslash and the run ending at `i` has odd length — so a quote at `i+1`
-/// is escaped exactly when `odd` is set at `i`, with no lookahead and no need
-/// to know where the run ends. Getting there is a recurrence two bytes at a
-/// time, `odd[i] = start[i] | (b[i] & b[i-1] & odd[i-2])`, because a run's
-/// odd/even alternates with distance from its start. A stride-2 chain like
-/// that cannot be a global prefix-XOR, so it is unrolled by doubling instead:
-/// each step appends the runs reachable through a gate twice as long, and
-/// five steps cover every even distance from 0 to 62, which is every one a
-/// 64-byte block has. The carry enters at the bottom as the two virtual
-/// inputs `odd[-1]` and `odd[-2]` that the recurrence reaches lanes 1 and 0
-/// through.
+/// ## Escape parity
 ///
-/// **String state.** `toggle` is the quotes that are not escaped, and the
-/// in-string state after byte `i` is their inclusive prefix-XOR. Bit 0 of
-/// the result is the state before the block, and the quote at position `i`
-/// is a delimiter exactly where that state changes — one XOR with the word
-/// shifted up by one, and the shift's zero at the bottom is where the carry
-/// goes back in.
+/// `odd` ends up with bit `i` set exactly when byte `i` is a backslash and the
+/// run ending at `i` has odd length. A quote at `i+1` is then escaped exactly
+/// when `odd` is set at `i` — no lookahead, and no need to know where the run
+/// ends, which is the property that makes a block-at-a-time scanner possible at
+/// all.
+///
+/// The recurrence is `odd[i] = start[i] | (b[i] & b[i-1] & odd[i-2])`: a run's
+/// odd/even alternates with distance from its start, so a position two back is
+/// what decides this one. A stride-2 chain is not a global prefix-XOR and
+/// cannot be done with one of those, so it is unrolled by doubling instead —
+/// each step extends the runs reachable through a gate twice as long, and five
+/// steps cover every even distance from 0 to 62, which is every one a 64-byte
+/// block has.
 #[inline]
 pub(crate) fn block_with<F>(
     structural_raw: u64,
@@ -457,22 +442,27 @@ pub(crate) fn block_with<F>(
 where
     F: Fn(u64) -> u64,
 {
-    // --- escapes -------------------------------------------------------
-    // The recurrence is `odd[i] = start[i] | (b[i] & b[i-1] & odd[i-2])`, so
-    // a run crossing the boundary reaches this block through *two* virtual
-    // inputs, not one: `odd[-1]`, which is lane 1's predecessor, and
-    // `odd[-2]`, which is lane 0's. `carry.parity` is the first of them and
-    // its negation the second -- with one exception, which is not an
-    // exception: a run of length 1 has odd parity, so `!parity` is 0, and a
-    // byte at lane 0 then has no virtual `b[-1]` to be reached through
-    // either. Injecting lane 0 alone is the bug an earlier version had, and
-    // it made every block whose second byte was the end of an odd run crossing
-    // the boundary lose one backslash.
+    // --- escape parity -----------------------------------------------------
+    // A run crossing the boundary reaches this block through *two* virtual
+    // inputs, not one: `odd[-1]`, lane 1's predecessor, and `odd[-2]`, lane 0's.
+    // They are `run && parity` and `run && !parity`.
+    //
+    // Injecting lane 0 alone is the bug a shorter version had, and it is not a
+    // rare one: a run of length 1 has odd parity, so `!parity` is 0 and a byte
+    // at lane 0 then has no virtual predecessor to be reached through at all.
+    // Every block whose second byte ended an odd run crossing the boundary
+    // lost one backslash, and only the boundary sweeps found it.
     let open = 0u64.wrapping_sub(u64::from(carry.run));
+    // Bit 0 of `start` is `backslash[0] && !carry.run`, so a run carried in
+    // from the previous block does not look like a fresh start.
     let start = backslash & !((backslash << 1) | u64::from(carry.run));
     let mut odd = start
         | (backslash & open & u64::from(!carry.parity))
         | (backslash & (backslash << 1) & (u64::from(carry.parity) << 1) & open);
+
+    // `gate` marks the positions the recurrence can *reach* through: bit `i`
+    // survives while `i` and `i-1` are both backslashes, then while the four
+    // before that are too, and so on.
     let mut gate = backslash & (backslash << 1);
     odd |= gate & (odd << 2);
     gate &= gate << 2;
@@ -484,36 +474,46 @@ where
     gate &= gate << 16;
     odd |= gate & (odd << 32);
 
-    // `odd` is the escape parity for this block's bytes, but lane 0 has no
-    // byte in front of it in this block: a quote there is escaped by whatever
-    // run is still open from the previous one. That bit is why the carry
-    // holds a parity and not just a flag, and it is the same `carry.run &&
-    // carry.parity` that seeded `odd` above.
+    // Lane 0 has no byte in front of it in this block: a quote there is
+    // escaped by whatever run is still open from the previous one. That is why
+    // the carry holds a parity and not just a flag, and it is the same
+    // `run && parity` that seeded `odd` above.
     let escaped = ((odd << 1) | u64::from(carry.run && carry.parity)) & quote;
     let toggle = quote & !escaped;
 
-    // --- string state --------------------------------------------------
-    let in_string_mask = prefix(toggle) ^ 0u64.wrapping_sub(u64::from(carry.in_string));
-    let boundary = in_string_mask ^ ((in_string_mask << 1) | u64::from(carry.in_string));
-    let quote_mask = boundary & quote;
+    // --- string state ------------------------------------------------------
+    // The inclusive prefix-XOR of the toggles is the in-string state after each
+    // byte, counted from outside. Seeding with the carry's negation is what
+    // makes a block entered inside a string read as inside: bit 0 of the
+    // result is the state *before* the block, and XORing an all-ones word
+    // flips every lane.
+    let in_string = prefix(toggle) ^ 0u64.wrapping_sub(u64::from(carry.in_string));
 
-    // The quote plane is deliberately absent from `structural_raw`: an
-    // escaped quote outside a string would otherwise be reported as
-    // structural, which the byte-at-a-time reference does not do.
-    let structural = (structural_raw & !in_string_mask) | quote_mask;
+    // The delimiters are the toggles themselves. (`in_string[i] ^
+    // in_string[i-1]` recovers `toggle[i]` from the prefix-XOR — the two are
+    // provably equal — and is spelled out in `tests` rather than relied on
+    // here, where it would only cost a shift and a XOR.)
+    //
+    // The quote plane is deliberately absent from `structural_raw`: an escaped
+    // quote outside a string would otherwise come out structural, which the
+    // byte-at-a-time reference does not do.
+    let structural = (structural_raw & !in_string) | toggle;
 
-    carry.in_string = in_string_mask >> 63 == 1;
+    carry.in_string = in_string >> 63 == 1;
     carry.run = backslash >> 63 == 1;
     carry.parity = odd >> 63 == 1;
 
-    (structural, quote_mask)
+    (structural, toggle)
 }
 
 /// Inclusive prefix-XOR: bit `i` of the result is the XOR of bits `0..=i`.
 ///
-/// The carry-less multiply in the `avx2` module computes the same
-/// function in one instruction; this is the portable spelling, and the tests
-/// hold the two to each other on random words.
+/// The carry-less multiply in [`avx2`] computes the same function in one
+/// instruction. This is the portable spelling, and
+/// `tests::clmul_prefix_xor_agrees_with_the_shift_chain` holds the two to each
+/// other word for word — a carry-less multiply with the wrong operand, or
+/// reading the wrong half of its result, is otherwise a silent
+/// one-bit-per-block corruption.
 #[must_use]
 pub fn prefix_xor(x: u64) -> u64 {
     let mut x = x;
@@ -531,6 +531,11 @@ pub fn prefix_xor(x: u64) -> u64 {
 // ---------------------------------------------------------------------------
 
 /// Collects output words and carries the boundary state between blocks.
+///
+/// One builder serves all three paths: the scalar paths call [`Builder::step`]
+/// per byte and the block paths call [`Builder::push_word`]. Nothing here is
+/// cleared between calls, so a `Builder` is single-use — which is also what
+/// `tests::the_scan_agrees_with_itself_across_repetition` would catch.
 pub(crate) struct Builder {
     structural: BitSet,
     quote: BitSet,
@@ -548,15 +553,18 @@ impl Builder {
         }
     }
 
-    /// Store one 64-byte block of output. Word `k` is exactly the byte range    /// `64k..64k + 64`, so no shifting is involved.
+    /// Store one 64-byte block of output. Word `k` is exactly the byte range
+    /// `64k..64k + 64`, so no shifting is involved.
     pub(crate) fn push_word(&mut self, structural: u64, quote: u64) {
         self.structural.set_word(self.next_word, structural);
         self.quote.set_word(self.next_word, quote);
         self.next_word += 1;
     }
 
-    /// The predicate for one byte, in the clearest form there is. This is
-    /// [`crate::djson::json_scan::scan_scalar`]'s body and the tail of every other path.
+    /// The predicate for one byte, in the clearest form there is.
+    ///
+    /// This is [`scan_scalar`]'s body and the tail of every other path, for
+    /// the bytes past the last whole block.
     pub(crate) fn step(&mut self, at: usize, b: u8) {
         let escaped = self.carry.run && self.carry.parity;
         let class = CLASS_TABLE[b as usize];
@@ -600,17 +608,16 @@ impl Builder {
 /// Whether this CPU can run the AVX2 path.
 ///
 /// `is_x86_feature_detected!` lives in `std` and not in `core`, so a `no_std`
-/// build -- which is the *primary* target of this crate -- cannot call it.
-/// Under `std` this is that macro; without it, this is the same test written
-/// out, because the bits it reads are fixed by the architecture:
+/// build — the primary target of this crate — cannot call it. Under `std` this
+/// is that macro; without it, the same test written out, because the bits it
+/// reads are fixed by the architecture:
 ///
-/// * `CPUID.(EAX=7, ECX=0):EBX[5]` -- AVX2.
-/// * `CPUID.(EAX=1):ECX[27]` -- OSXSAVE, and then `XCR0[2:1] == 0b11`.
+/// * `CPUID.(EAX=7, ECX=0):EBX[5]` — AVX2.
+/// * `CPUID.(EAX=1):ECX[27]` — OSXSAVE, and then `XCR0[2:1] == 0b11`.
 ///
 /// The last line is the one a naive check leaves out, and the omission is not
-/// a slow path: on a kernel that does not save the YMM state, an AVX2
-/// instruction traps. `tests::cpuid_detection_matches_the_std_macro` holds
-/// the two implementations to each other.
+/// a slow path: on a kernel that does not save the YMM state an AVX2
+/// instruction traps.
 #[must_use]
 pub fn has_avx2() -> bool {
     #[cfg(target_arch = "x86_64")]
@@ -653,13 +660,11 @@ pub fn has_avx2_pclmulqdq() -> bool {
 
 /// The no_std half of the detection: CPUID and XGETBV, by hand.
 ///
-/// Compiled on every x86_64 build so that the `std` path can be tested
-/// against it rather than trusted.
-///
-/// [Copy-time change.] `dead_code` is allowed here and only here. The module
-/// is meant to exist on every x86_64 build, so in a build without the test
-/// harness -- `cargo build --release` of the lib -- nothing calls it, and
-/// five warnings would stand where the module is the thing that is correct.
+/// Compiled on every x86_64 build so the `std` path can be *tested* against it
+/// rather than trusted. `dead_code` is allowed here and only here: the module
+/// exists on every x86_64 build, so in a build without the test harness
+/// nothing calls it and warnings would stand where the module is the thing
+/// that is correct.
 #[cfg(target_arch = "x86_64")]
 #[allow(dead_code)]
 pub(crate) mod detect {
@@ -670,8 +675,8 @@ pub(crate) mod detect {
     ///
     /// # Safety
     ///
-    /// Requires XSAVE support, which is what `CPUID.1:ECX[27]` (OSXSAVE)
-    /// reports. The caller must have established it.
+    /// Requires XSAVE, which is what `CPUID.1:ECX[27]` (OSXSAVE) reports. The
+    /// caller must have established it.
     #[target_feature(enable = "xsave")]
     pub(crate) unsafe fn xgetbv0() -> u64 {
         // SAFETY: the target feature is this function's contract.
@@ -685,8 +690,8 @@ pub(crate) mod detect {
         unsafe { __cpuid(1) }.ecx & (1 << 1) != 0
     }
 
-    /// `CPUID.(EAX=7, ECX=0):EBX[5]`, and the OS support an AVX2
-    /// instruction needs on top of it.
+    /// `CPUID.(EAX=7, ECX=0):EBX[5]`, plus the OS support an AVX2 instruction
+    /// needs on top of the CPU feature.
     #[allow(unused_unsafe)]
     pub(crate) fn avx2() -> bool {
         let leaf1 = unsafe { __cpuid(1) };
@@ -696,17 +701,16 @@ pub(crate) mod detect {
             return false;
         }
         // SAFETY: OSXSAVE was just read as set, which is the precondition of
-        // `xgetbv0` -- without OSXSAVE the instruction faults, and a CPU that
-        // sets it also supports XSAVE.
+        // `xgetbv0` — without it the instruction faults, and a CPU that sets
+        // it also supports XSAVE.
         let xcr0 = unsafe { xgetbv0() };
         (xcr0 & 0b110) == 0b110
     }
 }
 
-// The two shims the `not(feature = "std")` branch of the detection calls.
-// They are unused in that configuration on x86_64, and used nowhere else, for
-// the same reason `detect` is compiled anyway: both halves ship and only one
-// is live. [Copy-time change.]
+// The two shims the `not(feature = "std")` branch calls. Unused in that
+// configuration on x86_64 and used nowhere else, for the same reason `detect`
+// is compiled anyway: both halves ship, only one is live.
 #[cfg(target_arch = "x86_64")]
 #[allow(dead_code)]
 fn cpu_avx2_bits() -> bool {
@@ -722,7 +726,7 @@ fn cpu_pclmulqdq_bits() -> bool {
 /// Scan `bytes` with the best implementation this CPU admits to.
 ///
 /// The vector path is the AVX2 one; everything else falls back to
-/// [`crate::djson::json_scan::scan_scalar`], which is the same predicate one byte at a time.
+/// [`scan_scalar`], the same predicate one byte at a time.
 #[must_use]
 pub fn scan(bytes: &[u8]) -> StructuralIndex {
     #[cfg(target_arch = "x86_64")]
@@ -736,8 +740,8 @@ pub fn scan(bytes: &[u8]) -> StructuralIndex {
 
 /// The reference: the predicate, one byte at a time.
 ///
-/// The fallback for CPUs without AVX2, and the oracle the vector path and
-/// [`crate::djson::json_scan::scan_swar`] are held to.
+/// The fallback for CPUs without AVX2, and the oracle the other two paths are
+/// held to.
 #[must_use]
 pub fn scan_scalar(bytes: &[u8]) -> StructuralIndex {
     let mut builder = Builder::new(bytes.len());
@@ -747,18 +751,13 @@ pub fn scan_scalar(bytes: &[u8]) -> StructuralIndex {
     builder.finish()
 }
 
-/// The block algebra in portable scalar code: the same 64-byte pipeline as
-/// the vector path, with [`prefix_xor`] where that path has a carry-less
-/// multiply.
+/// The block algebra in portable scalar code: the same 64-byte pipeline as the
+/// vector path, with [`prefix_xor`] where that path has a carry-less multiply.
 ///
-/// It is the honest way to read the vector path without a CPU, and it is how
-/// the two prefix-XOR implementations are compared. It is **not** a fast
-/// path, and deliberately so: its classification still runs one byte at a
-/// time, so all it saves is the per-byte state machine. Measured on this
-/// machine it lands within a few percent of [`crate::djson::json_scan::scan_scalar`] (0.63 GB/s
-/// against 0.54 GB/s, where the vector path does 10.5 GB/s), which is the
-/// whole point of the numbers being in a test: the mask algebra is not where
-/// the time goes, the byte loop is.
+/// **It is not a fast path, deliberately.** Its classification still runs one
+/// byte at a time, so all it saves is the per-byte state machine. That is the
+/// point: it is how the two prefix-XOR implementations are compared, and how
+/// the mask algebra is read on a machine with no AVX2.
 #[must_use]
 pub fn scan_swar(bytes: &[u8]) -> StructuralIndex {
     let mut builder = Builder::new(bytes.len());
@@ -768,8 +767,8 @@ pub fn scan_swar(bytes: &[u8]) -> StructuralIndex {
         let mut quote = 0u64;
         let mut backslash = 0u64;
         for (lane, &b) in bytes[at..at + 64].iter().enumerate() {
-            // Equality, not `& 1` / `& 2`: the codes are an enum, and
-            // `CLASS_BACKSLASH` is `0b11`. See `CLASS_BACKSLASH`.
+            // Equality, never a mask: `CLASS_BACKSLASH` is 0b11 and would
+            // land in two planes at once. See the module header.
             match CLASS_TABLE[b as usize] {
                 CLASS_STRUCTURAL => structural_raw |= 1u64 << lane,
                 CLASS_QUOTE => quote |= 1u64 << lane,
@@ -797,7 +796,7 @@ pub fn scan_swar(bytes: &[u8]) -> StructuralIndex {
 /// Classify 16 bytes with `pshufb`, falling back to [`classify16`] on a CPU
 /// without AVX2.
 ///
-/// The vector counterpart of [`classify16`]; present so the rectangle tables
+/// The vector counterpart of [`classify16`], present so the rectangle tables
 /// can be held against the 256-entry table on a real CPU.
 #[cfg(target_arch = "x86_64")]
 #[must_use]

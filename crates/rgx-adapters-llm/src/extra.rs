@@ -1,16 +1,36 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Extra ML-harness adapters: Jupyter notebooks, Keras v3 archives,
 //! PyTorch checkpoints, generic pickles. See lib.rs for the core formats.
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use rgx_core::decline;
+use rgx_core::Adapter;
+use rgx_core::Outcome;
+use rgx_core::Result;
+
+// Only the keras adapter writes into its report.
+#[cfg(feature = "keras")]
 use core::fmt::Write as _;
+
+// Only the keras adapter reads a member as text.
+#[cfg(feature = "keras")]
 use core::str;
+
+// The keras and torch adapters spend the archive crate's producer budget
+// on the zip they read, so they are the two families that pull that
+// crate in.
+#[cfg(any(feature = "keras", feature = "torch"))]
 use rgx_adapters_archive::budget;
-use rgx_core::{bail, Context, Result};
-use rgx_core::{Adapter, Outcome};
+
+// The keras and torch adapters attach a context to a failure.
+#[cfg(any(feature = "keras", feature = "torch"))]
+use rgx_core::Context;
 
 /// Extract printable ASCII runs (>= 4 chars) from binary pickles — module
 /// paths, tensor/storage names, class names. Bounded output.
+#[cfg(any(feature = "torch", feature = "pickle"))]
 pub(crate) fn printable_strings(data: &[u8], max_out: usize) -> String {
     let mut out = String::new();
     let mut run = Vec::new();
@@ -43,9 +63,10 @@ pub(crate) fn printable_strings(data: &[u8], max_out: usize) -> String {
 /// `RGX_MAX_MEMBER_BYTES` and dropped whatever they excluded without a word.
 /// [`budget::MemberSink`] now carries them and prepends the searchable
 /// truncation note, which reaches the pipeline as an ordinary member.
+#[cfg(any(feature = "keras", feature = "torch"))]
 pub(crate) fn zip_members(data: &[u8]) -> Result<Vec<(String, Vec<u8>)>> {
     if !data.starts_with(b"PK") {
-        bail!("not a zip container");
+        decline!("not a zip container");
     }
     let archive = rgx_core::zip::ZipReader::with_limit(data, budget::budget().bytes)
         .map_err(rgx_core::Error::msg)
@@ -87,6 +108,7 @@ pub(crate) fn zip_members(data: &[u8]) -> Result<Vec<(String, Vec<u8>)>> {
 }
 
 /// The truncation note the sink prepends, if this archive was capped.
+#[cfg(feature = "keras")]
 fn truncation_note(members: &[(String, Vec<u8>)]) -> Option<String> {
     members
         .iter()
@@ -97,7 +119,9 @@ fn truncation_note(members: &[(String, Vec<u8>)]) -> Option<String> {
 /// Keras v3 `.keras` archives: zip with config.json + metadata.json. We
 /// emit those JSON parts (the architecture lives in config.json); weight
 /// blobs stay unread — multi-GB float payloads are not searchable text.
+#[cfg(feature = "keras")]
 pub struct KerasZip;
+#[cfg(feature = "keras")]
 impl Adapter for KerasZip {
     fn name(&self) -> &'static str {
         "keras"
@@ -125,7 +149,7 @@ impl Adapter for KerasZip {
             found += 1;
         }
         if found == 0 && notice.is_none() {
-            bail!("no JSON config in keras archive");
+            decline!("no JSON config in keras archive");
         }
         // A byte budget that stopped the archive is the only answer there is
         // once the JSON is gone: bailing would fall back to a raw search of
@@ -141,13 +165,19 @@ impl Adapter for KerasZip {
 /// `data.pkl` pickle holds the tensor tree (names, shapes via storages);
 /// the legacy format is a raw pickle. Both are mined for printable strings
 /// plus the zip member inventory — never for weight values.
+#[cfg(feature = "torch")]
 pub struct Torch;
+#[cfg(feature = "torch")]
 impl Adapter for Torch {
     fn name(&self) -> &'static str {
         "torch"
     }
     fn extensions(&self) -> &'static [&'static str] {
-        &["pt", "pth", "ptl", "bin"]
+        // `pt2` belongs here, not to Protobuf: a `.pt2` is the same zipped
+        // checkpoint as a `.pt` under another name, so the reader is identical.
+        // Protobuf claimed it first, and a reader that cannot parse the format
+        // prints its refusal as if the file were unreadable.
+        &["pt", "pt2", "pth", "ptl", "bin"]
     }
     fn extract(&self, data: &[u8], _path: &str) -> Result<Outcome> {
         if data.starts_with(b"PK") {
@@ -168,7 +198,7 @@ impl Adapter for Torch {
             }
             let strings = printable_strings(data, 1 << 20);
             if strings.trim().is_empty() {
-                bail!("no readable strings in checkpoint");
+                decline!("no readable strings in checkpoint");
             }
             Ok(Outcome::Text(strings.into_bytes()))
         }
@@ -177,7 +207,9 @@ impl Adapter for Torch {
 
 /// Generic Python pickles (joblib dumps, legacy HF model files without the
 /// torch zip layout, ...): printable-string scan.
+#[cfg(feature = "pickle")]
 pub struct PickleStrings;
+#[cfg(feature = "pickle")]
 impl Adapter for PickleStrings {
     fn name(&self) -> &'static str {
         "pickle"
@@ -187,35 +219,42 @@ impl Adapter for PickleStrings {
     }
     fn extract(&self, data: &[u8], _path: &str) -> Result<Outcome> {
         if data.starts_with(b"PK") {
-            bail!("zip-based pickle belongs to the torch adapter");
+            decline!("zip-based pickle belongs to the torch adapter");
         }
         if !data.starts_with(&[0x80]) {
             return Ok(Outcome::Bail("no PROTO opcode".into()));
         }
         let strings = printable_strings(data, 1 << 20);
         if strings.trim().is_empty() {
-            bail!("no readable strings in pickle");
+            decline!("no readable strings in pickle");
         }
         Ok(Outcome::Text(strings.into_bytes()))
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(feature = "keras", feature = "torch", feature = "pickle")))]
 mod tests {
     use super::*;
+
+    // The tests that change the producer budget take this lock: it is a
+    // process-wide global and the test harness runs in parallel.
+    #[cfg(any(feature = "keras", feature = "torch"))]
     use std::sync::Mutex;
 
     /// The producer budget is a process-wide global (it has to be: see
     /// `rgx_adapters_archive::budget`), and this binary runs its tests in
     /// parallel, so a test that lowers it would otherwise change what the
     /// zip-reading tests next door extract.
+    #[cfg(any(feature = "keras", feature = "torch"))]
     static BUDGET: Mutex<()> = Mutex::new(());
 
+    #[cfg(any(feature = "keras", feature = "torch"))]
     fn locked<R>(f: impl FnOnce() -> R) -> R {
         let _guard = BUDGET.lock().unwrap_or_else(|e| e.into_inner());
         f()
     }
 
+    #[cfg(any(feature = "keras", feature = "torch"))]
     fn under_budget<R>(members: usize, bytes: u64, f: impl FnOnce() -> R) -> R {
         struct Reset;
         impl Drop for Reset {
@@ -230,6 +269,7 @@ mod tests {
         })
     }
 
+    #[cfg(any(feature = "keras", feature = "torch"))]
     fn mini_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
         // stored-entry zip, same builder as the office crate tests
         fn crc32(b: &[u8]) -> u32 {
@@ -290,6 +330,7 @@ mod tests {
         out
     }
 
+    #[cfg(feature = "keras")]
     #[test]
     fn keras_reads_config_json() {
         let zip = mini_zip(&[
@@ -310,6 +351,7 @@ mod tests {
         assert!(!s.contains("HDF"), "weight blob must not leak: {s}");
     }
 
+    #[cfg(feature = "torch")]
     #[test]
     fn torch_zip_lists_members_and_pickle_strings() {
         let pkl =
@@ -340,6 +382,7 @@ mod tests {
     /// (`crates/rgx-core/src/zip.rs:48`) — and its local `.take(1024)`
     /// capped the members with nothing said about it. A capped checkpoint
     /// came back with the weight blobs simply absent.
+    #[cfg(feature = "torch")]
     #[test]
     fn a_checkpoint_zip_the_byte_budget_stops_says_so() {
         let pkl =
@@ -384,6 +427,7 @@ mod tests {
     /// The keras arm renders its members to text, so the note has to be
     /// folded in rather than passed through as a member — and it is the only
     /// answer left once the byte budget has taken the JSON.
+    #[cfg(feature = "keras")]
     #[test]
     fn a_keras_archive_the_byte_budget_stops_says_so() {
         let zip = mini_zip(&[
@@ -411,6 +455,7 @@ mod tests {
         assert!(String::from_utf8(t).unwrap().contains("archive truncated"));
     }
 
+    #[cfg(feature = "torch")]
     #[test]
     fn torch_legacy_pickle_strings() {
         let data = b"\x80\x02cmyapp.model\nZIRCALOYClassifier\nq\x00)\x81q\x01.";
@@ -421,6 +466,7 @@ mod tests {
         assert!(String::from_utf8(t).unwrap().contains("ZIRCALOYClassifier"));
     }
 
+    #[cfg(feature = "pickle")]
     #[test]
     fn pickle_strings_basic() {
         let data = b"\x80\x04\x95\x10\x00\x00\x00\x00\x00\x00\x00\x8c\x0cZIRCALOY_TAG\x94.";
@@ -431,9 +477,11 @@ mod tests {
         assert!(String::from_utf8(t).unwrap().contains("ZIRCALOY_TAG"));
     }
 
+    #[cfg(all(test, any(feature = "keras", feature = "torch", feature = "pickle")))]
     mod fuzz {
         use super::*;
 
+        #[cfg(feature = "keras")]
         #[test]
         fn keras_zip_never_panics_on_mutation() {
             let zip = mini_zip(&[("config.json", br#"{"class_name": "Functional"}"#)]);
@@ -447,6 +495,7 @@ mod tests {
             );
         }
 
+        #[cfg(feature = "torch")]
         #[test]
         fn torch_never_panics_on_mutation() {
             let pkl = b"\x80\x02ctorch._utils\n_rebuild_tensor_v2\nq\x00X\x0c\x00\x00\x00ZIRCALOY_W1q\x01";
@@ -468,6 +517,7 @@ mod tests {
             );
         }
 
+        #[cfg(feature = "pickle")]
         #[test]
         fn pickle_strings_never_panics_on_mutation() {
             let pkl =

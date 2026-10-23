@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! rgx-adapters-inspect: forensic-style binary inspection.
 //!
 //! Always-in-process triage adapter. Never trusts the extension, never
@@ -17,6 +19,10 @@
 //! Everything is heuristic and bail-safe: if nothing is found the
 //! adapter still returns a structural report; if the input is plain
 //! text it bails so the raw path keeps rg binary semantics.
+//!
+//! Every adapter sits behind a Cargo feature of its own, named after the
+//! format it reads, so a binary that names the formats it needs carries
+//! only those. The default build keeps all of them.
 
 #![no_std]
 
@@ -27,17 +33,183 @@ extern crate alloc;
 extern crate std;
 
 use alloc::boxed::Box;
-use alloc::string::{String, ToString};
+#[cfg(any(feature = "inspect", feature = "lnk", feature = "wasm"))]
+use alloc::string::String;
+#[cfg(any(feature = "inspect", feature = "lnk"))]
+use alloc::string::ToString;
 use alloc::vec::Vec;
+#[cfg(any(feature = "inspect", feature = "lnk", feature = "wasm"))]
 use core::fmt::Write as _;
-use rgx_core::{bail, Result};
-use rgx_core::{Adapter, Outcome};
+use rgx_core::Adapter;
+#[cfg(any(feature = "inspect", feature = "lnk", feature = "wasm"))]
+use rgx_core::Outcome;
+#[cfg(any(feature = "inspect", feature = "lnk", feature = "wasm"))]
+use rgx_core::Result;
+#[cfg(any(feature = "lnk", feature = "wasm"))]
+use rgx_core::{bail, decline};
 
+#[cfg(any(feature = "bam", feature = "bcf", feature = "cram", feature = "sam"))]
+mod bioinformatics;
+#[cfg(any(
+    feature = "acis-sab",
+    feature = "dgn",
+    feature = "dwg",
+    feature = "parasolid",
+    feature = "rvt"
+))]
+mod cad;
+#[cfg(feature = "c4")]
+mod cad_c4;
+#[cfg(feature = "cals")]
+mod cad_cals;
+#[cfg(feature = "cgm")]
+mod cad_cgm;
+#[cfg(feature = "dxf")]
+mod cad_dxf;
+#[cfg(feature = "iges")]
+mod cad_iges;
+#[cfg(feature = "plt")]
+mod cad_plt;
+#[cfg(feature = "acis-sat")]
+mod cad_sat;
+#[cfg(feature = "step")]
+mod cad_step;
+#[cfg(feature = "stl")]
+mod cad_stl;
+#[cfg(feature = "compound")]
+mod compound;
+#[cfg(feature = "cram")]
+mod cram_arith;
+#[cfg(feature = "cram")]
+mod cram_fqz;
+#[cfg(feature = "cram")]
+mod cram_rans;
+#[cfg(feature = "cram")]
+mod cram_rans16;
+#[cfg(feature = "cram")]
+mod cram_tokeniser;
+#[cfg(any(
+    feature = "dex",
+    feature = "elf",
+    feature = "macho",
+    feature = "pe",
+    feature = "wasm-meta"
+))]
+mod executables;
+#[cfg(feature = "firebird")]
+mod firebird;
+#[cfg(any(
+    feature = "fasta",
+    feature = "fastq",
+    feature = "gff",
+    feature = "mmcif",
+    feature = "pdb",
+    feature = "vcf"
+))]
+mod flatfiles;
+#[cfg(feature = "isobmff")]
+mod isobmff;
+#[cfg(feature = "bplist")]
+mod plist;
+#[cfg(any(feature = "djvu", feature = "tiff"))]
+mod rasters;
+#[cfg(any(
+    feature = "bufr",
+    feature = "grib",
+    feature = "n5",
+    feature = "root",
+    feature = "segy"
+))]
+mod scientific;
+#[cfg(feature = "x509")]
 mod x509;
+
+#[cfg(feature = "bam")]
+pub use bioinformatics::BamAlign;
+#[cfg(feature = "bcf")]
+pub use bioinformatics::BcfVariants;
+#[cfg(feature = "cram")]
+pub use bioinformatics::CramAlign;
+#[cfg(feature = "sam")]
+pub use bioinformatics::Sam;
+#[cfg(feature = "acis-sab")]
+pub use cad::AcisSab;
+#[cfg(feature = "dgn")]
+pub use cad::Dgn;
+#[cfg(feature = "dwg")]
+pub use cad::Dwg;
+#[cfg(feature = "parasolid")]
+pub use cad::ParasolidXt;
+#[cfg(feature = "rvt")]
+pub use cad::Rvt;
+#[cfg(feature = "c4")]
+pub use cad_c4::C4;
+#[cfg(feature = "cals")]
+pub use cad_cals::Cals;
+#[cfg(feature = "cgm")]
+pub use cad_cgm::Cgm;
+#[cfg(feature = "dxf")]
+pub use cad_dxf::Dxf;
+#[cfg(feature = "iges")]
+pub use cad_iges::Iges;
+#[cfg(feature = "plt")]
+pub use cad_plt::Plt;
+#[cfg(feature = "acis-sat")]
+pub use cad_sat::AcisSat;
+#[cfg(feature = "step")]
+pub use cad_step::Step;
+#[cfg(feature = "stl")]
+pub use cad_stl::Stl;
+#[cfg(feature = "compound")]
+pub use compound::Compound;
+#[cfg(feature = "dex")]
+pub use executables::DexStrings;
+#[cfg(feature = "elf")]
+pub use executables::ElfProvenance;
+#[cfg(feature = "macho")]
+pub use executables::MachOStrings;
+#[cfg(feature = "pe")]
+pub use executables::PeResources;
+#[cfg(feature = "wasm-meta")]
+pub use executables::WasmMeta;
+#[cfg(feature = "firebird")]
+pub use firebird::Firebird;
+#[cfg(feature = "fasta")]
+pub use flatfiles::Fasta;
+#[cfg(feature = "fastq")]
+pub use flatfiles::Fastq;
+#[cfg(feature = "gff")]
+pub use flatfiles::Gff;
+#[cfg(feature = "mmcif")]
+pub use flatfiles::MmCif;
+#[cfg(feature = "pdb")]
+pub use flatfiles::Pdb;
+#[cfg(feature = "vcf")]
+pub use flatfiles::Vcf;
+#[cfg(feature = "isobmff")]
+pub use isobmff::IsoBmff;
+#[cfg(feature = "bplist")]
+pub use plist::BinaryPlist;
+#[cfg(feature = "djvu")]
+pub use rasters::Djvu;
+#[cfg(feature = "tiff")]
+pub use rasters::Tiff;
+#[cfg(feature = "bufr")]
+pub use scientific::Bufr;
+#[cfg(feature = "grib")]
+pub use scientific::Grib;
+#[cfg(feature = "root")]
+pub use scientific::Root;
+#[cfg(feature = "segy")]
+pub use scientific::Segy;
+#[cfg(feature = "n5")]
+pub use scientific::N5;
+#[cfg(feature = "x509")]
 pub use x509::X509Cert;
 
 /// A known binary signature. `scan` marks formats searched for at any
 /// offset (embedded detection); others are only checked at offset 0.
+#[cfg(feature = "inspect")]
 struct Sig {
     magic: &'static [u8],
     name: &'static str,
@@ -46,6 +218,7 @@ struct Sig {
     scan: bool,
 }
 
+#[cfg(feature = "inspect")]
 const SIGS: &[Sig] = &[
     // executables / bytecodes
     Sig {
@@ -361,25 +534,163 @@ const SIGS: &[Sig] = &[
     },
 ];
 
+#[cfg(feature = "inspect")]
 const MAX_FINDINGS: usize = 64;
+#[cfg(feature = "inspect")]
 const MAX_STRINGS_BYTES: usize = 64 * 1024;
+#[cfg(feature = "inspect")]
 const STR_MIN_RUN: usize = 5;
 /// windows at or above this entropy are flagged compressed/encrypted
+#[cfg(feature = "inspect")]
 const ENTROPY_HOT: f64 = 7.5;
 /// only blobs at least this large get entropy triage
+#[cfg(feature = "inspect")]
 const ENTROPY_MIN_SIZE: usize = 16 * 1024;
 
+#[cfg(feature = "inspect")]
 pub struct Inspect;
 /// Adapters provided by this crate.
+///
+/// **Order is the contract.** The registry resolves by extension and the
+/// first matching available adapter wins, so a later entry only ever runs
+/// when every earlier one for that extension has `bail!`ed. Two entries are
+/// ordered against `Inspect` on purpose:
+///
+/// - `PeResources` precedes it, because `Inspect` claims `exe`/`dll`/`sys`/
+///   `drv`/`efi`/`mui`/`ocx`/`cpl` and its generic report carries no version
+///   strings. A carved `.rsrc` cannot yield its leaves at all (the data
+///   entries hold image RVAs and a carve has no section table), so
+///   `PeResources` declines a bare `.rsrc` blob and keeps the tree.
+/// - `WasmMeta` follows `Wasm`, which bails when it finds no readable
+///   sections; the `name`/`producers` payloads are what is left.
 pub fn adapters() -> Vec<Box<dyn Adapter>> {
     vec![
+        #[cfg(feature = "pe")]
+        Box::new(PeResources),
+        #[cfg(feature = "inspect")]
         Box::new(Inspect),
+        #[cfg(feature = "macho")]
+        Box::new(MachOStrings),
+        #[cfg(feature = "elf")]
+        Box::new(ElfProvenance),
+        #[cfg(feature = "dex")]
+        Box::new(DexStrings),
+        #[cfg(feature = "wasm")]
         Box::new(Wasm),
+        #[cfg(feature = "wasm-meta")]
+        Box::new(WasmMeta),
+        #[cfg(feature = "lnk")]
         Box::new(Lnk),
+        #[cfg(feature = "x509")]
         Box::new(X509Cert),
+        #[cfg(feature = "compound")]
+        Box::new(Compound),
+        #[cfg(feature = "bplist")]
+        Box::new(BinaryPlist),
+        #[cfg(feature = "tiff")]
+        Box::new(Tiff),
+        #[cfg(feature = "djvu")]
+        Box::new(Djvu),
+        #[cfg(feature = "isobmff")]
+        Box::new(IsoBmff),
+        #[cfg(feature = "dwg")]
+        Box::new(Dwg),
+        #[cfg(feature = "parasolid")]
+        Box::new(ParasolidXt),
+        #[cfg(feature = "acis-sab")]
+        Box::new(AcisSab),
+        #[cfg(feature = "rvt")]
+        Box::new(Rvt),
+        #[cfg(feature = "dgn")]
+        Box::new(Dgn),
+        // The text CAD formats. These are plain text `rg` already reads, so
+        // they are rendered and not answered: under the default policy the
+        // file's own bytes are the answer and these are not consulted at
+        // all, and under `RGX_ADAPTER_VIEW=render` the rendering is what
+        // gets searched. What each of them buys is an entity's name beside
+        // its values, which is a pattern the file's own bytes cannot hold.
+        //
+        // `.stl` is claimed twice on purpose: the `threed` crate answers
+        // the binary form, which ripgrep cannot read at all, and this one
+        // answers the ASCII form, which ripgrep reads perfectly. A `bail!`
+        // does not end the chain, so the ASCII file reaches the reader that
+        // can render it.
+        #[cfg(feature = "dxf")]
+        Box::new(Dxf),
+        #[cfg(feature = "step")]
+        Box::new(Step),
+        #[cfg(feature = "iges")]
+        Box::new(Iges),
+        #[cfg(feature = "acis-sat")]
+        Box::new(AcisSat),
+        #[cfg(feature = "stl")]
+        Box::new(Stl),
+        // The graphics metafile and the two bilevel rasters. These are
+        // binary: ripgrep reads none of them, so the adapter's answer is
+        // the answer, and the reach is `Reveal`. The metafile's elements
+        // and the rasters' headers carry numbers that are not in the file
+        // as text — a polyline's points, a page's size, a tile count.
+        #[cfg(feature = "cgm")]
+        Box::new(Cgm),
+        #[cfg(feature = "cals")]
+        Box::new(Cals),
+        #[cfg(feature = "c4")]
+        Box::new(C4),
+        // The plotter format. Its bytes are text `rg` already reads, so it
+        // is rendered and not answered, for the same reason as the CAD
+        // formats above. `.plt` is also the extension of a gnuplot script,
+        // so this one declines a file whose stream is not a run of plotter
+        // commands: the gnuplot script falls through to the raw search and
+        // is found there, in its own words.
+        #[cfg(feature = "plt")]
+        Box::new(Plt),
+        #[cfg(feature = "grib")]
+        Box::new(Grib),
+        #[cfg(feature = "bufr")]
+        Box::new(Bufr),
+        #[cfg(feature = "segy")]
+        Box::new(Segy),
+        #[cfg(feature = "root")]
+        Box::new(Root),
+        #[cfg(feature = "n5")]
+        Box::new(N5),
+        // `.fdb`/`.gdb` are claimed by nobody else, so placement is free;
+        // it sits with the other page-structured readers.
+        #[cfg(feature = "firebird")]
+        Box::new(Firebird),
+        #[cfg(feature = "bam")]
+        Box::new(BamAlign),
+        #[cfg(feature = "bcf")]
+        Box::new(BcfVariants),
+        #[cfg(feature = "cram")]
+        Box::new(CramAlign),
+        // `.sam` is claimed only for the compressed form: a plain-text SAM is
+        // declined so the raw path keeps it searchable, and a BGZF one is
+        // inflated because `rg` cannot see its records at all.
+        #[cfg(feature = "sam")]
+        Box::new(Sam),
+        // The flat files of the same family. These are text, so they are
+        // rendered and not answered: under the default policy the file's own
+        // bytes are the answer and these are not consulted, and under
+        // `--view render` the records come out unwrapped and with their
+        // fields separated by spaces. Their extensions are claimed by nobody
+        // else, so the placement is free.
+        #[cfg(feature = "fasta")]
+        Box::new(Fasta),
+        #[cfg(feature = "fastq")]
+        Box::new(Fastq),
+        #[cfg(feature = "vcf")]
+        Box::new(Vcf),
+        #[cfg(feature = "gff")]
+        Box::new(Gff),
+        #[cfg(feature = "pdb")]
+        Box::new(Pdb),
+        #[cfg(feature = "mmcif")]
+        Box::new(MmCif),
     ]
 }
 
+#[cfg(feature = "inspect")]
 impl Adapter for Inspect {
     fn name(&self) -> &'static str {
         "inspect"
@@ -412,6 +723,7 @@ impl Adapter for Inspect {
     }
 }
 
+#[cfg(feature = "inspect")]
 fn inspect(data: &[u8], path: &str) -> Outcome {
     // plain text is the raw path's job — keep rg binary semantics
     if looks_like_text(data) {
@@ -706,6 +1018,7 @@ pub fn magic_classify(data: &[u8]) -> Option<&'static str> {
     None
 }
 
+#[cfg(feature = "inspect")]
 fn looks_like_text(data: &[u8]) -> bool {
     let sample = &data[..data.len().min(4096)];
     if sample.is_empty() {
@@ -721,6 +1034,7 @@ fn looks_like_text(data: &[u8]) -> bool {
     printable as f64 / sample.len() as f64 > 0.95
 }
 
+#[cfg(feature = "inspect")]
 fn classify(data: &[u8]) -> &'static str {
     let sample = &data[..data.len().min(8192)];
     if sample.is_empty() {
@@ -751,6 +1065,7 @@ fn classify(data: &[u8]) -> &'static str {
 
 /// Parse a gzip member header starting at `off`; returns the absolute
 /// offset where the raw deflate stream begins.
+#[cfg(feature = "inspect")]
 fn parse_gzip_header(data: &[u8], off: usize) -> Option<usize> {
     let h = data.get(off..off + 10)?;
     if h[0] != 0x1f || h[1] != 0x8b || h[2] != 8 {
@@ -796,6 +1111,7 @@ fn parse_gzip_header(data: &[u8], off: usize) -> Option<usize> {
 /// `NAN` marks "not computed". `log2` of `c/n` for `c >= 1` and
 /// finite `n` is always finite, so a stored `NAN` can never be
 /// mistaken for a real value.
+#[cfg(feature = "inspect")]
 struct EntropyMemo {
     /// The window length the cached values were computed for. A different `n`
     /// gives different `p`, so the whole table is dropped.
@@ -803,6 +1119,7 @@ struct EntropyMemo {
     vals: alloc::boxed::Box<[f64]>,
 }
 
+#[cfg(feature = "inspect")]
 impl EntropyMemo {
     fn new() -> Self {
         Self {
@@ -840,6 +1157,7 @@ impl EntropyMemo {
     }
 }
 
+#[cfg(feature = "inspect")]
 fn entropy(window: &[u8], memo: &mut EntropyMemo) -> f64 {
     let mut counts = [0u64; 256];
     for &b in window {
@@ -862,10 +1180,12 @@ fn entropy(window: &[u8], memo: &mut EntropyMemo) -> f64 {
 
 /// memmem is SIMD-backed — this helper runs over the whole blob once per
 /// signature in the embedded-structure scan, so the search kernel matters
+#[cfg(feature = "inspect")]
 fn find_subsequence(hay: &[u8], needle: &[u8]) -> Option<usize> {
     rgx_core::memchr::memmem::find(hay, needle)
 }
 
+#[cfg(feature = "inspect")]
 fn describe_outer(sig: &Sig, data: &[u8]) -> String {
     let base = sig.name.to_string();
     match sig.magic {
@@ -923,6 +1243,7 @@ fn describe_outer(sig: &Sig, data: &[u8]) -> String {
     }
 }
 
+#[cfg(feature = "inspect")]
 fn describe_pe(data: &[u8], peoff: usize) -> String {
     // COFF header at peoff+4: machine(2) nsections(2) timestamp(4)…
     let machine = match data
@@ -961,6 +1282,7 @@ fn describe_pe(data: &[u8], peoff: usize) -> String {
     format!("PE {kind} ({machine}), {nsec} sections{ts_str}")
 }
 
+#[cfg(feature = "inspect")]
 fn describe_embedded(sig: &Sig, data: &[u8], off: usize) -> String {
     match sig.magic {
         b"\x89PNG\r\n\x1a\n" => {
@@ -1011,6 +1333,7 @@ fn describe_embedded(sig: &Sig, data: &[u8], off: usize) -> String {
 /// the end of the file, so `MAX_FINDINGS` of them means 64 near-whole-file
 /// copies allocated and held live at once. Checking the length after
 /// `to_vec()` would bound the retention and still pay every allocation.
+#[cfg(feature = "inspect")]
 fn carve_bounded(sig: &Sig, data: &[u8], off: usize, room: usize) -> Option<Vec<u8>> {
     let (start, end) = carve_span(sig, data, off)?;
     let span = end.checked_sub(start)?;
@@ -1023,6 +1346,7 @@ fn carve_bounded(sig: &Sig, data: &[u8], off: usize, room: usize) -> Option<Vec<
 /// The byte range an embedded structure occupies, without copying it.
 /// Only formats with a cheap, reliable end marker are carved; everything else
 /// is report-only.
+#[cfg(feature = "inspect")]
 fn carve_span(sig: &Sig, data: &[u8], off: usize) -> Option<(usize, usize)> {
     match sig.ext {
         // ZIP: find the EOCD record scanning backwards from the end
@@ -1088,6 +1412,7 @@ fn carve_span(sig: &Sig, data: &[u8], off: usize) -> Option<(usize, usize)> {
 }
 
 /// ASCII + UTF-16LE/BE string runs, concatenated and capped.
+#[cfg(feature = "inspect")]
 fn extract_strings(data: &[u8], cap: usize) -> String {
     let mut out = String::new();
     let emit = |s: &str, out: &mut String| {
@@ -1183,7 +1508,9 @@ fn extract_strings(data: &[u8], cap: usize) -> String {
 /// wants — import module/name pairs, export names with their kind, custom
 /// section names (the "name" section carries function names). No decoding
 /// of function bodies: names are the greppable payload.
+#[cfg(feature = "wasm")]
 pub struct Wasm;
+#[cfg(feature = "wasm")]
 impl Adapter for Wasm {
     fn name(&self) -> &'static str {
         "wasm"
@@ -1193,7 +1520,7 @@ impl Adapter for Wasm {
     }
     fn extract(&self, data: &[u8], _path: &str) -> Result<Outcome> {
         if data.len() < 8 || &data[0..4] != b"\0asm" {
-            bail!("not a wasm module (bad magic)");
+            decline!("not a wasm module (bad magic)");
         }
         let version = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
         if version != 1 {
@@ -1330,6 +1657,7 @@ impl Adapter for Wasm {
 
 /// LEB128 unsigned integer, at most `max_bits`; returns None on overflow,
 /// truncation or excessive length. `p` advances only on success.
+#[cfg(feature = "wasm")]
 fn leb(data: &[u8], p: &mut usize, max_bits: u32) -> Option<u64> {
     let mut v: u64 = 0;
     let mut shift = 0u32;
@@ -1348,6 +1676,7 @@ fn leb(data: &[u8], p: &mut usize, max_bits: u32) -> Option<u64> {
 }
 
 /// LEB128 length-prefixed string.
+#[cfg(feature = "wasm")]
 fn leb_str(data: &[u8], p: &mut usize) -> Option<String> {
     let n = leb(data, p, 32)?;
     if n > 4096 {
@@ -1363,6 +1692,7 @@ fn leb_str(data: &[u8], p: &mut usize) -> Option<String> {
 }
 
 /// limits: flags byte then min (and optional max) LEB.
+#[cfg(feature = "wasm")]
 fn limits(data: &[u8], p: &mut usize) -> bool {
     let Some(flags) = data.get(*p).copied() else {
         return false;
@@ -1379,34 +1709,48 @@ fn limits(data: &[u8], p: &mut usize) -> bool {
 
 // ---------- Windows Shell Link (.lnk) ----------
 
+#[cfg(feature = "lnk")]
 const LNK_CLSID: [u8; 16] = [
     0x01, 0x14, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46,
 ];
+#[cfg(feature = "lnk")]
 const LNK_HAS_ID_LIST: u32 = 0x01;
+#[cfg(feature = "lnk")]
 const LNK_HAS_LINK_INFO: u32 = 0x02;
+#[cfg(feature = "lnk")]
 const LNK_HAS_NAME: u32 = 0x04;
+#[cfg(feature = "lnk")]
 const LNK_HAS_RELPATH: u32 = 0x08;
+#[cfg(feature = "lnk")]
 const LNK_HAS_WORKDIR: u32 = 0x10;
+#[cfg(feature = "lnk")]
 const LNK_HAS_ARGS: u32 = 0x20;
+#[cfg(feature = "lnk")]
 const LNK_HAS_ICONLOC: u32 = 0x40;
+#[cfg(feature = "lnk")]
 const LNK_IS_UNICODE: u32 = 0x80;
 
+#[cfg(feature = "lnk")]
 fn rd_u16(b: &[u8], o: usize) -> u16 {
     u16::from_le_bytes([b[o], b[o + 1]])
 }
+#[cfg(feature = "lnk")]
 fn rd_u32(b: &[u8], o: usize) -> u32 {
     u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
 }
+#[cfg(feature = "lnk")]
 fn rd_u64(b: &[u8], o: usize) -> u64 {
     let mut v = [0u8; 8];
     v.copy_from_slice(&b[o..o + 8]);
     u64::from_le_bytes(v)
 }
 
+#[cfg(feature = "lnk")]
 fn filetime_to_unix(ft: u64) -> u64 {
     ft.saturating_sub(11_644_473_600_000_000_000) / 10_000_000
 }
 
+#[cfg(feature = "lnk")]
 fn lnk_string(data: &[u8], pos: &mut usize, unicode: bool) -> Result<String> {
     if *pos + 2 > data.len() {
         bail!("truncated .lnk string count");
@@ -1438,7 +1782,9 @@ fn lnk_string(data: &[u8], pos: &mut usize, unicode: bool) -> Result<String> {
 /// Windows Shell Link (shortcut): decode the header, string sections and
 /// LinkInfo so jump-list and Recent-Items binaries become greppable —
 /// target path, arguments, working directory and timestamps.
+#[cfg(feature = "lnk")]
 pub struct Lnk;
+#[cfg(feature = "lnk")]
 impl Adapter for Lnk {
     fn name(&self) -> &'static str {
         "lnk"
@@ -1448,13 +1794,13 @@ impl Adapter for Lnk {
     }
     fn extract(&self, data: &[u8], _path: &str) -> Result<Outcome> {
         if data.len() < 76 {
-            bail!("shorter than the .lnk header");
+            decline!("shorter than the .lnk header");
         }
         if rd_u32(data, 0) != 0x4C {
-            bail!("not a Shell Link (header size != 0x4C)");
+            decline!("not a Shell Link (header size != 0x4C)");
         }
         if data[4..20] != LNK_CLSID {
-            bail!("not a Shell Link (bad CLSID)");
+            decline!("not a Shell Link (bad CLSID)");
         }
         let link_flags = rd_u32(data, 20);
         let unicode = link_flags & LNK_IS_UNICODE != 0;
@@ -1528,9 +1874,11 @@ impl Adapter for Lnk {
 }
 
 #[cfg(test)]
+#[cfg(any(feature = "inspect", feature = "lnk", feature = "wasm"))]
 mod tests {
     use super::*;
 
+    #[cfg(feature = "lnk")]
     fn lnk_header(link_flags: u32) -> Vec<u8> {
         let mut d = Vec::new();
         d.extend_from_slice(&0x4Cu32.to_le_bytes());
@@ -1547,6 +1895,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "lnk")]
     fn lnk_decodes_unicode_sections() {
         let flags = LNK_HAS_NAME | LNK_HAS_ARGS | LNK_IS_UNICODE;
         let mut d = lnk_header(flags);
@@ -1568,6 +1917,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "lnk")]
     fn lnk_decodes_local_target() {
         let flags = LNK_HAS_LINK_INFO;
         let mut d = lnk_header(flags);
@@ -1589,6 +1939,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "lnk")]
     fn lnk_rejects_garbage() {
         assert!(Lnk.extract(&[0u8; 100], "x.lnk").is_err());
         let mut d = lnk_header(0);
@@ -1600,6 +1951,7 @@ mod tests {
     /// blob made the EOCD read go past EOF. Extract must decline the carve,
     /// never panic.
     #[test]
+    #[cfg(feature = "inspect")]
     fn zip_carve_declares_tail_signature() {
         let mut data = b"MZ".to_vec();
         data.extend_from_slice(&[0u8; 60]);
@@ -1615,6 +1967,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "inspect")]
     fn fake_pe() -> Vec<u8> {
         let mut v = vec![0u8; 0x400];
         v[0] = b'M';
@@ -1629,6 +1982,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "inspect")]
     fn identifies_pe_with_details() {
         let out = inspect(&fake_pe(), "app.exe");
         let Outcome::Text(t) = out else {
@@ -1641,6 +1995,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "inspect")]
     fn text_bails_to_raw() {
         let t = b"just some plain text with no binary at all\n".to_vec();
         let Outcome::Bail(_) = inspect(&t, "notes.bin") else {
@@ -1649,6 +2004,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "inspect")]
     fn utf16_strings_extracted() {
         // "Hidden" encoded UTF-16LE
         let mut v = vec![0u8; 64];
@@ -1666,6 +2022,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "inspect")]
     fn embedded_png_reported_with_dimensions() {
         let mut png = vec![0u8; 64];
         png[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
@@ -1686,6 +2043,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "inspect")]
     fn embedded_zip_carved_and_recurse_ready() {
         // minimal real zip built by hand: one stored entry "note.txt" = "hello"
         let content = b"hello";
@@ -1756,6 +2114,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "inspect")]
     fn embedded_gzip_carved_via_inflate() {
         let gz = rgx_core::compress::gzip::GzipWriter::new()
             .encode(b"embedded gzip payload secret-treasure");
@@ -1784,6 +2143,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "inspect")]
     fn entropy_flags_packed_region() {
         // deterministic xorshift "random" middle, zeros elsewhere
         let mut blob = vec![0u8; 32 * 1024];
@@ -1806,6 +2166,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "inspect")]
     fn classification_high_entropy_blob() {
         let mut x = 0xdeadbeefu32;
         let mut blob = vec![0u8; 8192];
@@ -1823,6 +2184,7 @@ mod tests {
 
     /// tiny but complete wasm module: header + a "name" custom section +
     /// an export section with one function. LEB sizes < 128, single byte.
+    #[cfg(feature = "wasm")]
     fn wasm_module() -> Vec<u8> {
         let mut m = b"\0asm\x01\0\0\0".to_vec();
         // custom section (id 0): name "name"
@@ -1844,6 +2206,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "wasm")]
     fn wasm_exports_and_custom_sections() {
         let out = Wasm.extract(&wasm_module(), "m.wasm").unwrap();
         let Outcome::Text(t) = out else {
@@ -1856,11 +2219,13 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "wasm")]
     fn wasm_rejects_bad_version() {
         let bad = b"\0asm\x02\0\0\0";
         assert!(Wasm.extract(bad, "m.wasm").is_err());
     }
 
+    #[cfg(feature = "inspect")]
     fn crc32(data: &[u8]) -> u32 {
         let mut crc = 0xFFFF_FFFFu32;
         for &b in data {
@@ -1876,9 +2241,11 @@ mod tests {
         !crc
     }
 
+    #[cfg(any(feature = "inspect", feature = "wasm"))]
     mod fuzz {
         use super::*;
 
+        #[cfg(feature = "inspect")]
         fn png_blob() -> Vec<u8> {
             let mut png = vec![0u8; 64];
             png[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
@@ -1889,6 +2256,7 @@ mod tests {
             blob
         }
 
+        #[cfg(feature = "inspect")]
         fn gzip_blob() -> Vec<u8> {
             let gz = rgx_core::compress::gzip::GzipWriter::new()
                 .encode(b"embedded gzip payload secret-treasure");
@@ -1898,6 +2266,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg(feature = "inspect")]
         fn inspect_never_panics_on_mutation() {
             rgx_core::fuzzkit::assert_never_panics(
                 vec![
@@ -1916,6 +2285,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg(feature = "wasm")]
         fn wasm_never_panics_on_mutation() {
             rgx_core::fuzzkit::assert_never_panics(
                 vec![
@@ -1994,6 +2364,7 @@ mod classify_tests {
 /// sees a `Ctx`, so `MemberSink` was not reachable from this crate and nothing
 /// bounded it.
 #[test]
+#[cfg(feature = "inspect")]
 fn carved_members_stay_inside_the_carve_budget() {
     // One file containing many zip signatures, each of which would carve to
     // the SAME final EOCD — so every carve is the whole tail of the file.

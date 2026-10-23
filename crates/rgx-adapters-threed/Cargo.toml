@@ -2,8 +2,30 @@
 name = "rgx-adapters-threed"
 version = "0.1.0"
 edition = "2021"
+authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
 description = "rgx adapters: 3D model formats (glb, stl, ply, fbx, pcd, las, vtk, obj)"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
+readme = "README.md"
+keywords = ["las", "laz", "gltf", "ply", "stl"]
+categories = ["parser-implementations", "encoding"]
+repository = "https://github.com/danalec/rgx"
 
 [dependencies]
-rgx-core = { path = "../rgx-core" }
+rgx-core = { path = "../rgx-core", version = "0.1.0" }
+
+[features]
+# One feature per adapter, in the order `adapters()` returns them. The
+# default is the whole crate: a binary that names the formats it needs
+# builds with `--no-default-features --features <name>`.
+default = ["glb", "stl", "ply", "fbx", "pcd", "las", "vtk", "blend", "threeds", "nifti", "mrc"]
+glb = []
+stl = []
+ply = []
+fbx = []
+pcd = []
+las = []
+vtk = []
+blend = []
+threeds = []
+nifti = []
+mrc = []

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Persisting a built name index across processes.
 //!
 //! [`Index::save`] writes the blob and [`Index::load`] maps it back, but the
@@ -8,17 +10,60 @@
 //! So every saved index gets a `<index>.meta` sidecar naming the root it was
 //! built from. A load whose sidecar is missing, unreadable, or names another
 //! root is reported as a plain miss and the caller rebuilds; it is never
-//! trusted. The index file is also never silently promoted past its
-//! [`max_age`], because the portable walk has no change feed to tell a fresh
-//! tree from a stale one.
+//! trusted. The index file is also never silently promoted past its age
+//! limit, because the portable walk has no change feed to tell a fresh tree
+//! from a stale one: the limit defaults to [`DEFAULT_MAX_AGE`], and a caller
+//! that passes its own limit overrides it.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::name_index::Index;
 
+/// How old a saved index may be before it is rebuilt instead of reused.
+///
+/// Thirty minutes. Long enough that a daemon restart does not walk the tree
+/// again, short enough that the snapshot it answers from is not "yesterday".
+/// The CLI's help text already advertised this window ("rebuild an index
+/// older than 30m/2h/7d"), so this is the value the text implies -- and the
+/// text is not the reason: a saved index is a snapshot, and a snapshot served
+/// without saying how old it is is how a search ends up answering "no such
+/// file" for a file created yesterday.
+pub const DEFAULT_MAX_AGE: Duration = Duration::from_secs(30 * 60);
+
 fn unix(d: Duration) -> u64 {
     d.as_secs()
+}
+
+/// Is the index built at `built_at` (unix seconds) too old to reuse at `now`?
+///
+/// The whole staleness policy as one pure function of (built, now, limit),
+/// so it can be tested without a filesystem and so the two programs that
+/// share it cannot disagree:
+///
+/// * `None` -- the default limit, [`DEFAULT_MAX_AGE`]. This case used to mean
+///   "no limit at all", which is why an index of any age was served silently:
+///   a limit only existed if the caller passed one, and neither did.
+/// * `Some(ZERO)` -- never reuse. This is what `--max-age 0` means.
+/// * `Some(d)` -- reuse while the index is younger than `d`.
+///
+/// `>=`, not `>`: `--max-age 0` reads as "never reuse", and a stamp written
+/// this same second is otherwise younger than zero seconds.
+pub fn is_stale(built_at: u64, now: u64, max_age: Option<Duration>) -> bool {
+    let limit = max_age.unwrap_or(DEFAULT_MAX_AGE);
+    now.saturating_sub(built_at) >= unix(limit)
+}
+
+/// An age in the words a person would use. "86400s old" is a number; "1d
+/// old" is an answer, and the answer is what a reader of the daemon's
+/// startup log is after.
+pub fn age_text(age: u64) -> String {
+    match age {
+        0..=59 => format!("{age}s"),
+        60..=3_599 => format!("{}m", age / 60),
+        3_600..=86_399 => format!("{}h", age / 3_600),
+        _ => format!("{}d", age / 86_400),
+    }
 }
 
 fn now_unix() -> u64 {
@@ -93,7 +138,7 @@ impl std::fmt::Display for Miss {
             }
             Miss::TooOld { built } => {
                 let age = now_unix().saturating_sub(*built);
-                write!(f, "index is {age}s old")
+                write!(f, "index is {} old", age_text(age))
             }
             Miss::BadIndex => write!(f, "index blob would not load"),
         }
@@ -105,7 +150,8 @@ impl std::fmt::Display for Miss {
 /// Either the index, or the reason there is none — the caller is expected to
 /// rebuild on `Err`, and can say why. `max_age` is the caller's staleness
 /// policy: the portable walk has no change feed, so freshness is a decision,
-/// not something this can infer. A zero `max_age` always rebuilds.
+/// not something this can infer. `None` means the default limit
+/// ([`DEFAULT_MAX_AGE`]); a zero `max_age` always rebuilds.
 pub fn load_for(root: &Path, index: &Path, max_age: Option<Duration>) -> Result<Index, Miss> {
     let want = canon(root).to_string_lossy().into_owned();
     let meta = match std::fs::read_to_string(stamp_path(index)) {
@@ -136,12 +182,14 @@ pub fn load_for(root: &Path, index: &Path, max_age: Option<Duration>) -> Result<
     if saved != want {
         return Err(Miss::WrongRoot { saved, want });
     }
-    if let (Some(built), Some(max_age)) = (built, max_age) {
-        // `>=`, not `>`: `--max-age 0` reads as "never reuse", and a stamp
-        // written this same second is otherwise younger than zero seconds.
-        if now_unix().saturating_sub(built) >= unix(max_age) {
-            return Err(Miss::TooOld { built });
-        }
+    // An index with no build stamp cannot be dated, and an index that cannot
+    // be dated cannot be judged fresh: it is refused rather than served on
+    // trust. (A stamp written by this program always carries one.)
+    let Some(built) = built else {
+        return Err(Miss::NoStamp);
+    };
+    if is_stale(built, now_unix(), max_age) {
+        return Err(Miss::TooOld { built });
     }
 
     // The sidecar checked out, so a blob that will not map is corruption,
@@ -269,6 +317,78 @@ mod tests {
         // Zero tolerance means "never reuse", even for a same-second stamp.
         assert!(matches!(outcome(&dir, &idx_path, Some(Duration::from_secs(0))), Err(Miss::TooOld { .. })));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The staleness policy, as the one pure function it is written as.
+    ///
+    /// The three cases are the three the programs can ask for: the default
+    /// limit when the caller passes none, "never reuse" for `--max-age 0`,
+    /// and the caller's own limit when it passes one.
+    #[test]
+    fn the_age_policy_is_one_function_of_built_now_and_limit() {
+        let now = 1_000_000;
+        let fresh = now - 60;
+        let old = now - DEFAULT_MAX_AGE.as_secs() - 60;
+
+        // No limit from the caller means the default limit, not "no limit":
+        // this is the case that used to serve an index of any age.
+        assert!(!is_stale(fresh, now, None), "a fresh index is not stale");
+        assert!(is_stale(old, now, None), "the default limit must expire an old index");
+
+        // `--max-age 0` never reuses, not even a same-second index.
+        assert!(is_stale(now, now, Some(Duration::ZERO)), "zero means never reuse");
+        assert!(is_stale(now - 1, now, Some(Duration::ZERO)), "zero means never reuse");
+
+        // An explicit limit wins over the default, in both directions.
+        assert!(!is_stale(old, now, Some(Duration::from_secs(7 * 86_400))), "an explicit limit longer than the default must win");
+        assert!(is_stale(fresh, now, Some(Duration::from_secs(30))), "an explicit limit shorter than the default must win");
+        // And the boundary is the limit itself: an index exactly at the
+        // limit is rebuilt.
+        assert!(is_stale(now - 3600, now, Some(Duration::from_secs(3600))));
+        assert!(!is_stale(now - 3599, now, Some(Duration::from_secs(3600))));
+    }
+
+    /// The default limit, at the level the programs see it: an index older
+    /// than it is refused, a younger one is served.
+    ///
+    /// The stamp is written by hand rather than by `save` so the age is
+    /// exact -- a saved index is a second old, and the default limit is
+    /// half an hour.
+    #[test]
+    fn an_index_older_than_the_default_limit_is_not_reused() {
+        let dir = tree("default-age");
+        let idx_path = dir.join("cache.idx");
+        save(&build(&dir), &dir, &idx_path).expect("save");
+
+        // Age the stamp past the default limit.
+        let mut meta_name = idx_path.as_os_str().to_os_string();
+        meta_name.push(".meta");
+        let meta = PathBuf::from(meta_name);
+        let text = std::fs::read_to_string(&meta).expect("sidecar");
+        let old = now_unix() - DEFAULT_MAX_AGE.as_secs() - 60;
+        let aged = text.lines().map(|l| if l.starts_with("built ") { format!("built {old}") } else { l.to_string() }).collect::<Vec<_>>().join("\n");
+        std::fs::write(&meta, aged).expect("age the stamp");
+
+        // The default limit refuses it...
+        assert!(matches!(outcome(&dir, &idx_path, None), Err(Miss::TooOld { .. })));
+        // ...an explicit longer limit accepts it...
+        assert!(outcome(&dir, &idx_path, Some(Duration::from_secs(7 * 86_400))).is_ok());
+        // ...and `--max-age 0` refuses it whatever its age.
+        assert!(matches!(outcome(&dir, &idx_path, Some(Duration::ZERO)), Err(Miss::TooOld { .. })));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The refusal says how old the index is, in words a person reads: the
+    /// reason a rebuild happened has to reach the user, and "index is 86400s
+    /// old" is a number, not an answer.
+    #[test]
+    fn the_refusal_says_how_old_the_index_is() {
+        let built = now_unix() - 3 * 3_600;
+        assert_eq!(Miss::TooOld { built }.to_string(), format!("index is {} old", age_text(3 * 3_600)));
+        assert_eq!(age_text(45), "45s");
+        assert_eq!(age_text(12 * 60), "12m");
+        assert_eq!(age_text(3 * 3_600), "3h");
+        assert_eq!(age_text(2 * 86_400), "2d");
     }
 
     #[test]

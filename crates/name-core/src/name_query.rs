@@ -1,12 +1,18 @@
+// SPDX-License-Identifier: MIT
+//
+// Transported from fsearch (https://github.com/noahdunnagan/fsearch), MIT
+// licensed, Copyright (c) 2026 Noah Dunnagan. Its notice is in
+// LICENSE-MIT-FSEARCH and in the repository's NOTICE.
 //! Name search query: parse, filter, match, and the scalar ranker.
 //!
 //! Transported from fsearch query.rs (parser + scalar scorer half). The
 //! SIMD Searcher/NameCache/top-k half is PR #6 and lands later; this
 //! module carries everything Query::match_path needs.
 //!
-//! Merged query syntax (docs/IMPLEMENTATION_PLAN.md 4.1): fsearch's token modes
+//! Merged query syntax (docs/design.md §2.1): fsearch's token modes
 //! on top of zen-rs's filter vocabulary.
 
+use crate::fold;
 use crate::live::Live;
 use crate::name_index::{BM_DOUBLE, BM_FIRST, BM_SECOND, BM_START, CLASSES, Index, ZONE, Zone, char_bit, start_bit};
 use discovery::walk::{FLAG_HIDDEN, KIND_DIR, KIND_FILE, KIND_LINK};
@@ -178,14 +184,22 @@ impl Query {
         // terms stay fsearch tokens (the name engine wins, the filter
         // vocabulary is layered on top).
         if t.contains('*') || t.contains('?') {
-            self.globs.push((negate, t.bytes().map(|b| b.to_ascii_lowercase()).collect()));
+            // The pattern is folded and lowercased: it is matched against
+            // the folded path (docs/design.md 6.6, rule 2).
+            let pattern = fold::fold(t.as_bytes());
+            self.globs.push((negate, pattern.iter().map(|&b| b.to_ascii_lowercase()).collect()));
             return;
         }
         // Positive tokens are tracked in a u8 bitset.
         if t.is_empty() || (!negate && self.tokens.iter().filter(|t| !t.negate).count() >= 8) {
             return;
         }
-        let text: Vec<u8> = t.bytes().map(|b| b.to_ascii_lowercase()).collect();
+        // The token is folded before it is compared: a query typed in NFC
+        // has to match a name the filesystem stored in NFD (parity row
+        // 1.12). The case-fold stays where it is -- the bytes are compared
+        // case-insensitively -- so only the normalization happens here.
+        let folded = fold::fold(t.as_bytes());
+        let text: Vec<u8> = folded.iter().map(|&b| b.to_ascii_lowercase()).collect();
         let mask = text.iter().fold(0, |m, &b| m | char_bit(b));
         let (loose, start) = if takes_typos(&text, mode) { (mask & !char_bit(text[0]), start_bit(text[0])) } else { (0, 0) };
         self.tokens.push(Token { text, mask, mode, negate, loose, start });
@@ -194,7 +208,11 @@ impl Query {
     /// Apply filter `k:v`; false if `k` is not a filter name.
     pub fn filter(&mut self, k: &str, v: &str, home: &str) -> Result<bool, String> {
         match k {
-            "ext" => self.exts.extend(v.split(',').map(|e| e.trim_start_matches('.').to_ascii_lowercase().into_bytes())),
+            "ext" => self.exts.extend(v.split(',').map(|e| {
+                // The extension is folded and lowercased: it is compared
+                // against the folded name (docs/design.md 6.6, rule 2).
+                fold::fold(e.trim_start_matches('.').as_bytes()).iter().map(|&b| b.to_ascii_lowercase()).collect()
+            })),
             "type" => {
                 for t in v.split(',') {
                     // zen-rs `type:` takes the kind words and its
@@ -247,7 +265,10 @@ impl Query {
             "in" | "dir" => {
                 // `dir:` is zen-rs's name for the scope filter.
                 let p = v.strip_prefix('~').map_or(v.to_string(), |r| format!("{home}{r}"));
-                self.scope = Some(real_path(p).trim_end_matches('/').as_bytes().to_vec());
+                // The scope is folded: it is compared against the folded
+                // path, so both sides have to be in the same form.
+                let scope = real_path(p).trim_end_matches('/').as_bytes().to_vec();
+                self.scope = Some(fold::fold(&scope).into_owned());
             }
             "size" => {
                 self.size = range(v, parse_size)?;
@@ -308,6 +329,12 @@ impl Query {
         if self.never {
             return None;
         }
+        // Every comparison runs on the fold of the path (docs/design.md
+        // 6.6, rule 2): a name typed in NFC has to match one the
+        // filesystem stored in NFD. The path the caller holds is the one
+        // that is displayed and opened; this is the view for comparison.
+        let folded = fold::fold(path);
+        let path = &folded[..];
         // `type:link` is orthogonal to kind (zen-rs): a reparse
         // point / symlink. On fsearch's walk the symlink kind carries it;
         // a combined `type:dir type:link` needs a backend reparse flag and
@@ -347,7 +374,7 @@ impl Query {
         // A hit needs some token in its own name; most paths fail here,
         // before the folders are looked at.
         let mut pos = self.tokens.iter().filter(|t| !t.negate).peekable();
-        let m = crate::name_index::name_mask(name);
+        let m = crate::name_index::mask_of(name);
         if pos.peek().is_some() && !pos.any(|t| t.fits(m) && token_score(name, None, m, t).is_some()) {
             return None;
         }
@@ -382,6 +409,10 @@ impl Query {
     /// How the folders of a path (`/a/b` for `/a/b/name`) match the tokens:
     /// the best score per positive token, and whether a negated one hits.
     pub fn dir_match(&self, dirs: &[u8]) -> DirMatch {
+        // The folders are folded: they are compared against the folded
+        // token, so both sides have to be in the same form.
+        let folded = fold::fold(dirs);
+        let dirs = &folded[..];
         let comps = || dirs.split(|&b| b == b'/').filter(|c| !c.is_empty());
         let mut d = DirMatch { negated: false, best: [None; 8] };
         d.negated = self.tokens.iter().any(|t| t.negate && comps().any(|c| token_matches(c, t)));
@@ -1608,12 +1639,15 @@ impl<'a> TokenBits<'a> {
 /// What `score_names` holds for name `k`, scored on its own (from its mask
 /// rather than the bitmaps): the same hit, or None for the same names.
 fn name_hit(idx: &Index, q: &Query, pos: &[&Token], neg: &[&Token], re: Option<&regex::bytes::Regex>, k: u32) -> Option<NameHit> {
-    let name = idx.uname(k);
-    let m = crate::name_index::name_mask(name);
-    let mut h = NameHit { score: 0, bits: 0, flags: name_flags(name), best: [0; 4] };
+    // The name is folded for the comparison: the index keeps the bytes the
+    // filesystem gave, and a query typed in NFC has to match one stored in
+    // NFD (parity row 1.12).
+    let (name, wide) = idx.uname_folded(k);
+    let m = crate::name_index::mask_of(&name);
+    let mut h = NameHit { score: 0, bits: 0, flags: name_flags(&name), best: [0; 4] };
     for (t, tok) in pos.iter().enumerate() {
         if tok.fits(m)
-            && let Some(s) = token_score(name, idx.uname_wide(k), m, tok)
+            && let Some(s) = token_score(&name, wide, m, tok)
         {
             h.bits |= 1 << t;
             let s16 = s.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
@@ -1623,13 +1657,13 @@ fn name_hit(idx: &Index, q: &Query, pos: &[&Token], neg: &[&Token], re: Option<&
             }
         }
     }
-    if neg.iter().any(|t| token_matches(name, t)) {
+    if neg.iter().any(|t| token_matches(&name, t)) {
         h.flags |= NF_NEG;
     }
     let ok = (pos.is_empty() || h.bits != 0)
         && h.flags & NF_NEG == 0
-        && (q.exts.is_empty() || ext_ok(name, &q.exts))
-        && re.is_none_or(|re| re.is_match(name));
+        && (q.exts.is_empty() || ext_ok(&name, &q.exts))
+        && re.is_none_or(|re| re.is_match(&name));
     if ok {
         h.flags |= NF_OK;
     }
@@ -1796,6 +1830,12 @@ fn par_each<S, T: Send>(n: usize, state: impl Fn() -> S + Sync, f: impl Fn(&mut 
     let out = Cells::new((0..n).map(|_| None));
     let next = AtomicUsize::new(0);
     let work = || {
+        // The scan is interactive work: the worker takes the platform's
+        // priority before it takes any entries. On Linux that is the
+        // approximation of MMCSS (affinity plus nice), a no-op where the
+        // platform has its own mechanism, and once per thread -- a setup
+        // cost, never a per-entry one.
+        crate::scan_priority::apply();
         let mut st = state();
         loop {
             let i = next.fetch_add(1, Relaxed);
@@ -2296,15 +2336,19 @@ impl Searcher<'_> {
         // on its entries.
         let score = |k: u32, (_, clean, typo): (u64, u64, u64), re: Option<&regex::bytes::Regex>| -> Option<Cand> {
             let (w, i) = (k as usize / 64, k % 64);
-            let name = idx.uname(k);
+            // The name is folded: a query typed in NFC has to match a name
+            // the filesystem stored in NFD (parity row 1.12).
+            let (name, wide) = idx.uname_folded(k);
             let spaced = (space[0][w] | space[1][w]) >> i & 1 != 0;
-            let s = token_score(name, idx.uname_wide(k), t.known_mask(clean >> i & 1 != 0, typo >> i & 1 != 0, spaced), t)?;
-            if !(q.exts.is_empty() || ext_ok(name, &q.exts)) || re.is_some_and(|re| !re.is_match(name)) || neg.iter().any(|t| token_matches(name, t))
+            let s = token_score(&name, wide, t.known_mask(clean >> i & 1 != 0, typo >> i & 1 != 0, spaced), t)?;
+            if !(q.exts.is_empty() || ext_ok(&name, &q.exts))
+                || re.is_some_and(|re| !re.is_match(&name))
+                || neg.iter().any(|t| token_matches(&name, t))
             {
                 return None;
             }
             let score = s.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-            let flags = name_flags(name) | NF_OK;
+            let flags = name_flags(&name) | NF_OK;
             Some(Cand { bound: score as i32 + prior[k as usize] as i32 + tweak(flags), k, score, flags })
         };
         // The cheap bound: 24 per char + 8 (16 less if the token starts with
@@ -2347,7 +2391,8 @@ impl Searcher<'_> {
                 k = dp[k as usize];
             };
             for &k in chain.iter().rev() {
-                out = out || neg.iter().any(|t| token_matches(idx.uname(en[de[k as usize] as usize]), t));
+                let (name, _) = idx.uname_folded(en[de[k as usize] as usize]);
+                out = out || neg.iter().any(|t| token_matches(&name, t));
                 cache.insert(k, out);
             }
             out
@@ -2642,7 +2687,8 @@ impl Searcher<'_> {
                         m &= m - 1;
                         let k = w * 64 + i as usize;
                         let known = pos[t].known_mask(clean >> i & 1 != 0, typo >> i & 1 != 0, spaced(w, i));
-                        if token_score(idx.uname(k as u32), idx.uname_wide(k as u32), known, pos[t]).is_none() {
+                        let (name, wide) = idx.uname_folded(k as u32);
+                        if token_score(&name, wide, known, pos[t]).is_none() {
                             continue;
                         }
                         let mut n = 0;
@@ -2856,18 +2902,20 @@ impl Searcher<'_> {
         // match.
         let score_one =
             |k: usize, i: u32, per: &[Pair], j: usize, spaced: bool, re: Option<&regex::bytes::Regex>, ok_entries: &mut usize| -> Option<NameHit> {
-                let name = idx.uname(k as u32);
+                // The name is folded: a query typed in NFC has to match a
+                // name the filesystem stored in NFD (parity row 1.12).
+                let (name, wide) = idx.uname_folded(k as u32);
                 let (w, bit) = (k / 64, |x: u64| x >> i & 1 != 0);
                 // A filter alone reads no name for its flags.
                 let flags = match pos.is_empty() {
                     true => (if bit(dot[w]) { NF_DOT } else { 0 }) | (if bit(app[w]) { NF_APP } else { 0 }),
-                    false => name_flags(name),
+                    false => name_flags(&name),
                 };
                 let mut h = NameHit { score: 0, bits: 0, flags, best: [0; 4] };
                 for (t, tok) in pos.iter().enumerate() {
                     let (fits, clean, typo) = per[t].0[j];
                     if bit(fits)
-                        && let Some(s) = token_score(name, idx.uname_wide(k as u32), tok.known_mask(bit(clean), bit(typo), spaced), tok)
+                        && let Some(s) = token_score(&name, wide, tok.known_mask(bit(clean), bit(typo), spaced), tok)
                     {
                         h.bits |= 1 << t;
                         let s16 = s.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
@@ -2877,16 +2925,16 @@ impl Searcher<'_> {
                         }
                     }
                 }
-                if neg.iter().zip(&per[pos.len()..]).any(|(t, p)| bit(p.0[j].0) && token_matches(name, t)) {
+                if neg.iter().zip(&per[pos.len()..]).any(|(t, p)| bit(p.0[j].0) && token_matches(&name, t)) {
                     h.flags |= NF_NEG;
                 }
                 // As a file match it must hit a token and pass name filters;
                 // as a folder on someone's path, the raw token bits matter.
                 let ok = (pos.is_empty() || h.bits != 0)
                     && h.flags & NF_NEG == 0
-                    && (q.exts.is_empty() || ext_ok_k(k, name))
-                    && tails.as_ref().is_none_or(|t| t.iter().any(|t| ends_with_fold(name, t)))
-                    && re.is_none_or(|re| re.is_match(name));
+                    && (q.exts.is_empty() || ext_ok_k(k, &name))
+                    && tails.as_ref().is_none_or(|t| t.iter().any(|t| ends_with_fold(&name, t)))
+                    && re.is_none_or(|re| re.is_match(&name));
                 if ok {
                     h.flags |= NF_OK;
                     *ok_entries += (ne_off[k + 1] - ne_off[k]) as usize;
@@ -3133,13 +3181,18 @@ impl Scan<'_> {
             // applies the same `re:` + glob rules; this entry path used to
             // skip the globs entirely, so `*walk.rs` returned every name).
             idx.path(i, pbuf);
+            // The path is folded for the comparison: the path that is
+            // displayed and opened is the original one (docs/design.md
+            // 6.6, rule 2).
+            let folded = fold::fold(pbuf);
+            let path = &folded[..];
             if let Some(re) = re
-                && !re.is_match(pbuf)
+                && !re.is_match(path)
             {
                 return None;
             }
             for (neg, pat) in &q.globs {
-                if *neg == glob_match(pat, pbuf) {
+                if *neg == glob_match(pat, path) {
                     return None;
                 }
             }

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Tests for the structural scanner.
 //!
 //! The load-bearing idea here is that there are **three** implementations of
@@ -1199,7 +1201,7 @@ fn the_scan_agrees_with_itself_across_repetition() {
 /// quoted, and `#[ignore]`d so that a test run is not a benchmark run.
 ///
 /// ```text
-/// cargo test -p upstream --release --features std --lib b02::json_scan \
+/// cargo test --release --lib json_scan --features std \
 ///     -- --ignored --nocapture --test-threads=1
 /// ```
 #[cfg(feature = "std")]

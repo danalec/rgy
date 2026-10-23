@@ -8,33 +8,65 @@
     of that can notice that a file was copied on Monday and that the
     upstream changed it on Tuesday.
 
-    This asks the other half: for each file in scripts/vendored-sources.tsv,
-    has the upstream changed the recorded source since the recorded pin?
-    The comparison is upstream-against-upstream -- `git log <pin>..HEAD -- <source>` --
-    so copy-time rewrites (alloc:: to std::, testdata paths, narrowed
-    imports) never enter into it and there is nothing to normalise. What
-    comes back is a list of commits the copy has not seen, by name.
+    This asks the other half: for each row in scripts/vendored-sources.tsv,
+    has the upstream moved past the commit that row was taken from?
 
-    A row pinned with `-` is counted as a failure. A manifest that quietly
-    leaves a file out, or pins it to a guess, is worse than one that says
-    it has not looked: the first one reads as "nothing to do here".
+    The manifest has two kinds of row, and they drift in different ways.
+
+      tree -- a vendored crate, copied whole from upstream. The question
+              is whether upstream has touched that tree since the pin. Two
+              answers are needed, not one: which commits upstream made, and
+              which files those commits touched. The second is the
+              actionable one -- it names the files to look at. A tree that
+              upstream has not moved is fine, and says so by saying
+              nothing.
+
+      patch -- a divergence from upstream, kept as a patch under
+              scripts/rgx-local-patches/. Two things can be wrong with it,
+              and both are drift:
+
+                * the patch no longer applies to upstream's current content
+                  of the file. Upstream moved and the patch did not, so the
+                  next sync would copy upstream's file and silently drop
+                  the fix. That is reported loudly, because a patch that
+                  stops applying is a fix that stops existing.
+
+                * the file in this tree is not what upstream's file plus
+                  the patch produces. The copy and the patch disagree about
+                  what the divergence is, so one of the two is wrong.
+
+    A row whose pin is not a commit in the upstream checkout is UNPINNED
+    and counts as a failure. A manifest that quietly leaves a row out, or
+    pins it to a guess, is worse than one that admits it has not looked:
+    the first one reads as "nothing to do here".
+
+    The upstream checkout is a read-only input. Nothing in this repository
+    is written, and nothing in the upstream is written either.
+
+    The old -Pin mode is gone. The manifest used to be written by hand, one
+    hash per file, and a hand-written hash is a check that passes over
+    drift; -Pin picked the hash mechanically instead. The manifest is
+    generated now (scripts/sync-rgx-upstream.sh writes the pin for every
+    row when it copies the trees), so the pin column is the generator's to
+    write: the sync takes the whole vendoring from one commit, and a
+    per-row pin would say something the generator does not. Re-pin by
+    running the sync.
+
+    This script and scripts/check-drift.sh are twins: the same questions,
+    the same words, the same bytes. Write-Host is not used for the report
+    because it ends a line with CRLF and lets the host decide the colour,
+    and the bash twin has no host to ask -- so the escapes and the newline
+    are written here, and both scripts write the same ones.
 
 .PARAMETER Upstream
     Path to a git checkout of the upstream source. Required. It is a
-    local, read-only input -- passing it does not make rgx depend on the
-    upstream, and nothing in any manifest changes.
-
-.PARAMETER Pin
-    Re-pin one row to the upstream commit its content best matches, chosen
-    mechanically. Requires -Upstream. Use this instead of writing a hash by
-    hand; a hand-picked pin is a check that passes over drift.
-
-.PARAMETER For
-    The rgx path of a single row to re-pin. Only meaningful with -Pin.
+    local, read-only input -- passing it does not make rgy depend on
+    the upstream, and nothing in any manifest changes.
 
 .EXAMPLE
-    powershell -File scripts/check-drift.ps1 -Upstream ~/memchr
-    Lists, per vendored file, the upstream commits it has not seen.
+    powershell -File scripts/check-drift.ps1 -Upstream ../rgx
+    Lists, per vendored row, what upstream has moved that the copy has
+    not seen.
 
     Run from anywhere; the script re-roots itself from $PSScriptRoot.
     Exits 1 on any drift or any unpinned row, 0 otherwise.
@@ -43,170 +75,302 @@
 param(
     [string]$Upstream = "",
     [switch]$Pin,
-    [string]$For = ""
+    [string]$For = "",
+    [switch]$Help
 )
 
 $ErrorActionPreference = 'Stop'
+# git is asked questions whose answer is sometimes "no" -- does this pin
+# resolve? -- and a native command that exits non-zero must not throw just
+# because it did. PowerShell 7.4 made that the default; undo it here.
+if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
+    $PSNativeCommandUseErrorActionPreference = $false
+}
+
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $repoRoot
 
+# --- the report --------------------------------------------------------------
+#
+# The bash twin writes the same escapes and the same LF endings, so the two
+# can be compared byte for byte and not only word for word. The report
+# goes to stdout; the complaints go to stderr, in both scripts.
+$script:Esc = [string][char]27
+$script:Colors = @{
+    Red    = "$($script:Esc)[31m"
+    Green  = "$($script:Esc)[32m"
+    Yellow = "$($script:Esc)[33m"
+    Cyan   = "$($script:Esc)[36m"
+}
+try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
+
+function Write-Report([string]$text = '', [string]$color = '') {
+    if ($color -and $script:Colors.ContainsKey($color)) {
+        [Console]::Out.Write($script:Colors[$color] + $text + "$($script:Esc)[0m`n")
+    } else {
+        [Console]::Out.Write($text + "`n")
+    }
+}
+
+function Write-Complaint([string]$text = '') {
+    [Console]::Error.Write($script:Colors['Red'] + $text + "$($script:Esc)[0m`n")
+}
+
+# usage -- what the two scripts are for, in the same words in both.
+function Write-Usage {
+    Write-Report "check-drift --upstream <path to an upstream checkout>"
+    Write-Report ""
+    Write-Report "Reports vendored code that has fallen behind its upstream source:"
+    Write-Report "for each row in scripts/vendored-sources.tsv, has the upstream moved"
+    Write-Report "past the commit that row was taken from? Exits 1 on any drift or any"
+    Write-Report "unpinned row, 0 otherwise."
+}
+
+if ($Help) {
+    Write-Usage
+    exit 0
+}
+
+# An argument this script does not know is an error, not something to
+# ignore: the bash twin says so too, and a check that quietly ignores half
+# its command line is a check that ran something else.
+if ($args.Count -gt 0) {
+    Write-Complaint "unknown argument: $($args[0])"
+    exit 1
+}
+
 $manifestPath = Join-Path $PSScriptRoot 'vendored-sources.tsv'
 if (-not (Test-Path $manifestPath)) {
-    Write-Host "no manifest at $manifestPath" -ForegroundColor Red
+    Write-Complaint "no manifest at $manifestPath"
+    exit 1
+}
+
+if ($Pin -or $For) {
+    Write-Complaint "--pin is gone: the pin column is written by scripts/sync-rgx-upstream.sh,"
+    Write-Complaint "which pins every row to the commit the whole sync was taken from."
+    Write-Complaint "Re-pin by running the sync."
     exit 1
 }
 
 if (-not $Upstream) {
-    Write-Host "no -Upstream path given; this check needs a local upstream checkout to ask" -ForegroundColor Red
-    Write-Host "  example: powershell -File scripts/check-drift.ps1 -Upstream ~/memchr" -ForegroundColor Red
+    Write-Complaint "no -Upstream path given; this check needs a local upstream checkout to ask"
+    Write-Complaint "  example: scripts/check-drift.ps1 --upstream ../rgx"
+    Write-Complaint "          scripts/check-drift.sh --upstream ../rgx"
     exit 1
 }
-$Upstream = (Resolve-Path -LiteralPath $Upstream).Path
-if (-not (Test-Path (Join-Path $Upstream '.git'))) {
-    Write-Host "$Upstream is not a git checkout" -ForegroundColor Red
+if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+    Write-Complaint "git not found; this check asks git about the upstream"
+    exit 1
+}
+$upstreamDir = (Resolve-Path -LiteralPath $Upstream).Path
+if (-not (Test-Path (Join-Path $upstreamDir '.git'))) {
+    Write-Complaint "$upstreamDir is not a git checkout"
     exit 1
 }
 
-# The rows are the manifest minus comments and blank lines. Field 3 is the
-# pin; '-' means nobody has established one.
-$rows = @()
-foreach ($line in Get-Content -LiteralPath $manifestPath) {
-    if ($line.Trim() -eq '' -or $line.StartsWith('#')) { continue }
-    $f = $line -split "`t"
-    if ($f.Count -lt 2) { continue }
-    $note = ''
-    if ($f.Count -ge 4) { $note = $f[3] }
-    $rows += [pscustomobject]@{
-        Rgx     = $f[0].Trim()
-        Source  = $f[1].Trim()
-        Commit  = $(if ($f.Count -ge 3) { $f[2].Trim() } else { '-' })
-        Note    = $note
+# --- git, asked a question ---------------------------------------------------
+#
+# The answer is the output lines; $script:GitExit is the exit code, because
+# "no such commit" is an answer and not a crash. A helper keeps the calls
+# below one line each, which matters here: the check is a list of
+# questions about other people's commits, and each one has to read like
+# the question it asks.
+function Invoke-Git {
+    param([string[]]$GitArgs)
+    $out = & git @GitArgs 2>$null
+    $script:GitExit = $LASTEXITCODE
+    $lines = @()
+    foreach ($l in @($out)) {
+        if ($null -eq $l) { continue }
+        $t = [string]$l
+        if ($t -eq '') { continue }
+        $lines += $t
     }
+    return $lines
 }
 
 # A pin that does not resolve reads as "zero commits behind" -- `git log`
-# fails, the error is swallowed, and the row goes green having been checked
-# against nothing. Resolve the commit first and say so when it is not real.
+# fails, the error is swallowed, and the row goes green having been
+# checked against nothing. Resolve the commit first and say so when it is
+# not real.
 function Test-UpstreamCommit([string]$commit) {
-    & git -C $Upstream rev-parse --verify -q "$commit^{commit}" *> $null
-    return ($LASTEXITCODE -eq 0)
+    $out = Invoke-Git @('-C', $upstreamDir, 'rev-parse', '--verify', '-q', "$commit^{commit}")
+    return ($script:GitExit -eq 0 -and $out.Count -gt 0)
 }
 
-function Get-UpstreamLog([string]$commit, [string]$source) {
-    $out = & git -C $Upstream log --oneline "$commit..HEAD" -- $source 2>$null
-    if ($LASTEXITCODE -ne 0) { return @() }
-    return @($out | Where-Object { $_.Trim() -ne '' })
+# The commits upstream made under a path since the pin.
+function Get-UpstreamLog([string]$commit, [string]$path) {
+    return Invoke-Git @('-C', $upstreamDir, 'log', '--oneline', '--no-color', "$commit..HEAD", '--', $path)
 }
 
-# The upstream commit whose blob is closest to this rgx file.
+# The files those commits touched. This is the actionable half of the
+# answer: the commits say what upstream did, the files say where to look.
+function Get-UpstreamChangedFiles([string]$commit, [string]$path) {
+    return Invoke-Git @('-C', $upstreamDir, 'diff', '--name-only', '--no-color', "$commit..HEAD", '--', $path)
+}
+
+# A copy with the carriage returns taken out.
 #
-# Closest, not identical: the copies are edited at copy time, so an exact
-# match is not available and an exact-match requirement would pin nothing.
-# Get-Content normalises line endings on both sides, so a CRLF checkout
-# does not read as a thousand-line difference. Reads committed state only,
-# so a dirty working tree -- which is the normal case here -- cannot
-# move the answer.
-function Find-BestCommit([string]$rgxPath, [string]$source) {
-    $target = Join-Path $repoRoot $rgxPath
-    if (-not (Test-Path $target)) { return $null }
-    $mine = @(Get-Content -LiteralPath $target)
-
-    $best = $null
-    $bestScore = [int]::MaxValue
-    $commits = & git -C $Upstream log --format=%H -- $source 2>$null
-    foreach ($c in $commits) {
-        $blob = @(& git -C $Upstream show "${c}:$source" 2>$null)
-        if ($LASTEXITCODE -ne 0 -or $blob.Count -eq 0) { continue }
-        $score = @(Compare-Object -ReferenceObject $mine -DifferenceObject $blob).Count
-        if ($score -lt $bestScore) { $bestScore = $score; $best = $c.Substring(0, 7) }
-    }
-    if ($null -eq $best) { return $null }
-    return [pscustomobject]@{ Commit = $best; Score = $bestScore }
+# A checkout is not a change: the same source is CRLF on one machine and LF
+# on another, and a patch that applies to one has to apply to the other.
+# The bytes are moved through Latin-1 so that what comes out is what went
+# in, minus the CRs -- no encoding is decoded and another one invented.
+function Write-Normalized([string]$src, [string]$dst) {
+    $latin = [System.Text.Encoding]::GetEncoding(28591)
+    $text = $latin.GetString([System.IO.File]::ReadAllBytes($src))
+    $text = $text.Replace("`r", "")
+    [System.IO.File]::WriteAllBytes($dst, $latin.GetBytes($text))
 }
 
-# How far a copy may sit from an upstream commit and still be pinned by matching.
+# Does the patch still apply to upstream's current content of the file?
 #
-# Some vendored files are deliberately reduced ports -- a decoder with no
-# encoder, a couple of functions out of a larger module. For those, "the
-# commit whose blob is closest" is still a perfectly good match to the
-# wrong question, and it will hand back the commit that created the file
-# with a confident number attached. A tool that is confidently wrong about
-# the one file you just fixed is worse than one that declines.
+# The test is run against a copy of upstream's file in a scratch
+# directory, because that is the question the next sync will ask: the sync
+# copies upstream's file over the one here and then applies the patch on
+# top. A patch that no longer applies means upstream changed the file and
+# the patch was not re-derived -- the next sync would take upstream's
+# version and drop the fix without saying anything.
 #
-# Past this many differing lines, refuse and say so. Those rows get pinned
-# by hand with a reason in the note column.
-$script:MaxPinDistance = 150
+# Returns 'ok', 'no-upstream-file', 'no-copy', 'does-not-apply' or
+# 'mismatch'.
+function Test-PatchRow([string]$patchRel, [string]$upstreamRel) {
+    $upFile = Join-Path $upstreamDir $upstreamRel
+    if (-not (Test-Path -LiteralPath $upFile)) { return 'no-upstream-file' }
+    $myFile = Join-Path $repoRoot $upstreamRel
+    if (-not (Test-Path -LiteralPath $myFile)) { return 'no-copy' }
 
-Write-Host "checking vendored drift against upstream at $Upstream" -ForegroundColor Cyan
+    $work = Join-Path ([System.IO.Path]::GetTempPath()) ("rgy-drift-" + [guid]::NewGuid().ToString("N"))
+    [void](New-Item -ItemType Directory -Path $work)
+    try {
+        $target = Join-Path $work $upstreamRel
+        [void](New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force)
+        Write-Normalized $upFile $target
+        $patchCopy = Join-Path $work 'rgy.patch'
+        Write-Normalized (Join-Path $repoRoot $patchRel) $patchCopy
 
-# --- re-pin one row -------------------------------------------------------
-if ($Pin) {
-    if (-not $For) { Write-Host "-Pin needs -For <rgx path>" -ForegroundColor Red; exit 1 }
-    $row = $rows | Where-Object { $_.Rgx -eq $For }
-    if ($null -eq $row) { Write-Host "no manifest row for $For" -ForegroundColor Red; exit 1 }
-    $best = Find-BestCommit $row.Rgx $row.Source
-    if ($null -eq $best) { Write-Host "could not match $For against any upstream commit" -ForegroundColor Red; exit 1 }
-    if ($best.Score -gt $MaxPinDistance) {
-        Write-Host "  $For is $($best.Score) lines from the closest upstream commit ($($best.Commit))" -ForegroundColor Yellow
-        Write-Host "  that is a reduced port, not a copy: matching cannot say which commit it came from." -ForegroundColor Yellow
-        Write-Host "  pin it by hand and put the reason in the note column." -ForegroundColor Yellow
-        exit 1
+        # git apply, in the scratch directory: the patch's paths are the
+        # repository's paths, and the file it names is the copy of
+        # upstream's file sitting next to it.
+        & git -C $work apply --recount --whitespace=nowarn 'rgy.patch' 2>$null
+        if ($LASTEXITCODE -ne 0) { return 'does-not-apply' }
+
+        # The copy and the patch have to agree about what the divergence
+        # is. Compare the patched upstream file with the file here.
+        #
+        # Both sides are normalised, including the patched one: git apply
+        # writes the file back with the line endings the checkout's own
+        # rules say, and a checkout is not a change.
+        $patched = Join-Path $work 'rgy-patched'
+        Write-Normalized $target $patched
+        $mine = Join-Path $work 'rgy-mine'
+        Write-Normalized $myFile $mine
+        $a = Invoke-Git @('hash-object', '--no-filters', '--', $patched)
+        $b = Invoke-Git @('hash-object', '--no-filters', '--', $mine)
+        if ($a.Count -eq 0 -or $b.Count -eq 0 -or $a[0] -ne $b[0]) { return 'mismatch' }
+        return 'ok'
     }
-    $behind = Get-UpstreamLog $best.Commit $row.Source
-    Write-Host "  $For matches upstream $($best.Commit) ($($best.Score) differing lines)"
-    if ($behind.Count -gt 0) {
-        Write-Host "  and is behind $($behind.Count) upstream commit(s):" -ForegroundColor Yellow
-        foreach ($l in $behind) { Write-Host "    $l" -ForegroundColor Yellow }
-    } else {
-        Write-Host "  and is up to date with that source" -ForegroundColor Green
+    finally {
+        [System.IO.Directory]::Delete($work, $true)
     }
-    Write-Host ""
-    Write-Host "pin it with:" -ForegroundColor Cyan
-    Write-Host "  $For`t$($row.Source)`t$($best.Commit)" -ForegroundColor Cyan
-    exit 0
 }
 
-# --- the check ------------------------------------------------------------
-$drifted = New-Object System.Collections.Generic.List[string]
-$unpinned = New-Object System.Collections.Generic.List[string]
+# --- the manifest ------------------------------------------------------------
+#
+# Five tab-separated columns: rgx_path, upstream path, pin, kind, note.
+# The rows are the manifest minus its comments and blank lines. A row that
+# does not have four columns cannot say what kind of row it is, and the
+# manifest is generated, so a malformed one is a bug in the generator
+# rather than something to report here.
+$rows = @()
+foreach ($line in Get-Content -LiteralPath $manifestPath -Encoding UTF8) {
+    if ($line.Trim() -eq '' -or $line.StartsWith('#')) { continue }
+    $f = $line -split "`t"
+    if ($f.Count -lt 4) { continue }
+    $rows += [pscustomobject]@{
+        Rgx      = $f[0].Trim()
+        Upstream = $f[1].Trim()
+        Pin      = $f[2].Trim()
+        Kind     = $f[3].Trim()
+        Note     = $(if ($f.Count -ge 5) { $f[4].Trim() } else { '' })
+    }
+}
+
+Write-Report "checking vendored drift against upstream at $upstreamDir" 'Cyan'
+
+# --- the check ---------------------------------------------------------------
+$total = $rows.Count
 $checked = 0
+$drifted = 0
+$unpinned = 0
+$unpinnedRows = @()
 
-Write-Host "`n[1/1] vendored files against their upstream source" -ForegroundColor Cyan
+Write-Report "" ''
+Write-Report "[1/1] vendored trees and patches against their upstream source" 'Cyan'
+
 foreach ($r in $rows) {
-    if (-not (Test-Path (Join-Path $repoRoot $r.Rgx))) {
-        Write-Host "  FAIL: $($r.Rgx): listed in the manifest but not in the tree" -ForegroundColor Red
-        $drifted.Add("$($r.Rgx): missing from the tree")
+    if (-not (Test-Path -LiteralPath (Join-Path $repoRoot $r.Rgx))) {
+        Write-Report "  FAIL: $($r.Rgx): listed in the manifest but not in the tree" 'Red'
+        $drifted++
         continue
     }
-    if ($r.Commit -eq '-' -or $r.Commit -eq '') {
-        $unpinned.Add($r.Rgx)
+    if ($r.Pin -eq '' -or $r.Pin -eq '-') {
+        Write-Report "  UNPINNED: $($r.Rgx): no sync point recorded (the pin is `"$($r.Pin)`")" 'Yellow'
+        $unpinned++
+        $unpinnedRows += $r.Rgx
         continue
     }
-    if (-not (Test-UpstreamCommit $r.Commit)) {
-        $drifted.Add("$($r.Rgx): pin $($r.Commit) does not resolve in upstream")
-        Write-Host "  FAIL: $($r.Rgx): pin $($r.Commit) is not an upstream commit" -ForegroundColor Red
+    if (-not (Test-UpstreamCommit $r.Pin)) {
+        Write-Report "  UNPINNED: $($r.Rgx): pin $($r.Pin) is not a commit in the upstream checkout" 'Yellow'
+        $unpinned++
+        $unpinnedRows += $r.Rgx
         continue
     }
+
     $checked++
-    $behind = Get-UpstreamLog $r.Commit $r.Source
-    if ($behind.Count -gt 0) {
-        $drifted.Add("$($r.Rgx) (pinned $($r.Commit), $($behind.Count) upstream commit(s) behind)")
-        Write-Host "  FAIL: $($r.Rgx) is behind $($r.Source) since $($r.Commit):" -ForegroundColor Red
-        foreach ($l in $behind) { Write-Host "    $l" -ForegroundColor Red }
+    switch ($r.Kind) {
+        'tree' {
+            $commits = Get-UpstreamLog $r.Pin $r.Upstream
+            if ($commits.Count -gt 0) {
+                $drifted++
+                Write-Report "  FAIL: $($r.Rgx): upstream has moved since $($r.Pin) ($($commits.Count) commit(s)):" 'Red'
+                foreach ($c in $commits) { Write-Report "    $c" 'Red' }
+                $files = Get-UpstreamChangedFiles $r.Pin $r.Upstream
+                if ($files.Count -gt 0) {
+                    Write-Report "    changed files:" 'Red'
+                    foreach ($f in $files) { Write-Report "      $f" 'Red' }
+                }
+            }
+        }
+        'patch' {
+            $verdict = Test-PatchRow $r.Rgx $r.Upstream
+            if ($verdict -ne 'ok') {
+                $drifted++
+                switch ($verdict) {
+                    'no-upstream-file' { Write-Report "  FAIL: $($r.Rgx): upstream has no $($r.Upstream)" 'Red' }
+                    'no-copy'         { Write-Report "  FAIL: $($r.Rgx): the patched file $($r.Upstream) is not in the tree" 'Red' }
+                    'does-not-apply'  { Write-Report "  FAIL: $($r.Rgx): the patch no longer applies to upstream's current content of $($r.Upstream)" 'Red' }
+                    'mismatch'        { Write-Report "  FAIL: $($r.Rgx): the copy does not match upstream's current content plus the patch" 'Red' }
+                }
+            }
+        }
+        default {
+            $drifted++
+            Write-Report "  FAIL: $($r.Rgx): unknown kind `"$($r.Kind)`"" 'Red'
+        }
     }
 }
 
-if ($unpinned.Count -gt 0) {
-    Write-Host "  $($unpinned.Count) row(s) have no recorded sync point:" -ForegroundColor Yellow
-    foreach ($u in $unpinned) { Write-Host "    - $u" -ForegroundColor Yellow }
-    Write-Host "    pin one with: -Pin -For <path>" -ForegroundColor Yellow
+if ($unpinnedRows.Count -gt 0) {
+    Write-Report "  $($unpinnedRows.Count) row(s) have no recorded sync point:" 'Yellow'
+    foreach ($u in $unpinnedRows) { Write-Report "    - $u" 'Yellow' }
+    Write-Report "    pin one with: scripts/sync-rgx-upstream.sh --upstream <path>" 'Yellow'
 }
 
-Write-Host ""
-if ($unpinned.Count -gt 0 -or $drifted.Count -gt 0) {
-    $n = $drifted.Count + $unpinned.Count
-    Write-Host "vendored drift: $n outstanding ($($drifted.Count) drifted, $($unpinned.Count) unpinned)" -ForegroundColor Red
+Write-Report "" ''
+if ($unpinned -gt 0 -or $drifted -gt 0) {
+    $n = $drifted + $unpinned
+    Write-Report "vendored drift: $n outstanding ($drifted drifted, $unpinned unpinned); $checked of $total row(s) checked" 'Red'
     exit 1
 }
-Write-Host "ok: $checked vendored file(s) match the upstream source they were taken from" -ForegroundColor Green
+Write-Report "ok: $total row(s) checked, no drift" 'Green'
 exit 0

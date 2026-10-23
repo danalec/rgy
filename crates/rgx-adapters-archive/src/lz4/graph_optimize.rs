@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Graph-theoretic hash and chain-walking primitives used by the LZ4
 //! encoder: Paley-inspired quadratic-residue mixing for the hash tables,
 //! and a FlipPredictor-style scoring function for chain walking.
@@ -920,7 +922,7 @@ fn cross_similarity(left: &[u8], right: &[u8]) -> f64 {
     }
 
     // Vendored note: the upstream sources are no_std-friendly and reach for
-    // a b01::libm shim; rgx is std, so these are the f64 methods of the
+    // a libm shim; rgx is std, so these are the f64 methods of the
     // same name.
     let denom = f64::sqrt(nl * nr);
     if denom > 0.0 {

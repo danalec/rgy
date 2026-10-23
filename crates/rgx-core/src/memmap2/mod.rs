@@ -1,5 +1,12 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Independent reimplementation of `memmap2-rs` upstream commit f16835d (v0.9.0).
 //! Written from the upstream source to understand the public API; no verbatim copies.
+//!
+//! Upstream: `RazrFalcon/memmap2-rs`, Copyright 2015 Dan Burkert and
+//! 2020 Yevhenii Reizner. Upstream's work is used here under Apache-2.0, the
+//! option it offered, and no upstream source file is in this tree. The
+//! provenance is recorded in `NOTICE` and in `scripts/vendored-sources.tsv`.
 
 #![allow(clippy::all)]
 #![allow(clippy::missing_safety_doc)]

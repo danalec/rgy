@@ -1,5 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! JSON-lines protocol types shared by `searchd`, stdio, and `searchctl`
-//! (`docs/IMPLEMENTATION_PLAN.md` §3/§4.4).
+//! (`docs/design.md` §2.4).
 //!
 //! One request per line in, one response per line out — identical over
 //! named pipe (Windows), UDS (Unix), and stdio. Hand-rolled encode/decode:
@@ -18,6 +20,40 @@ pub enum Request {
     Status,
 }
 
+/// How the index caught up after the last restart.
+///
+/// Two values, and the difference is the point (`docs/design.md` §3, rule 5
+/// — "live-feed honesty"). The field carries what the daemon *did*, not what
+/// the platform could have done:
+///
+/// * `replayed` — the daemon resumed the OS's journal at the watermark the
+///   index carries and applied the changes that happened while it was off
+///   (the USN journal on Windows, the FSEvents event id on macOS);
+/// * `relisted` — it did not: the tree was walked again and diffed, either
+///   because that is the only way this platform can catch up (inotify on
+///   Linux, kqueue on FreeBSD) or because the journal no longer reaches
+///   back to the watermark.
+///
+/// A string rather than a bool: "did it catch up" is not the question a
+/// reader has — "replayed or relisted" is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CatchUp {
+    /// The journal was resumed; the changes since the watermark were applied.
+    Replayed,
+    /// The tree was walked again and diffed; there was no journal to resume.
+    Relisted,
+}
+
+impl CatchUp {
+    /// The wire spelling. These two strings are the contract.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CatchUp::Replayed => "replayed",
+            CatchUp::Relisted => "relisted",
+        }
+    }
+}
+
 /// A response line.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Response {
@@ -25,8 +61,16 @@ pub enum Response {
     Hits { hits: Vec<Hit>, took_us: u64 },
     /// `{"op":"done","count":…}` — terminator for a hit stream.
     Done { count: usize },
-    /// `{"op":"status","docs":…,"event_id":…}`.
-    Status { docs: usize, event_id: u64 },
+    /// `{"op":"status","docs":…,"event_id":…,"catch_up":…}`.
+    ///
+    /// `catch_up` is additive: a reader that does not know the field keeps
+    /// working, and the field is what tells a replayed catch-up from a
+    /// relisted one (`docs/design.md` §3, rule 5).
+    Status {
+        docs: usize,
+        event_id: u64,
+        catch_up: CatchUp,
+    },
     /// `{"op":"grep-files","files":[…],"took_us":…}` — content matches.
     GrepFiles { files: Vec<GrepFile>, took_us: u64 },
     /// `{"op":"error","message":…}` — the request failed; the stream lives.
@@ -104,8 +148,15 @@ impl Response {
                 )
             }
             Response::Done { count } => format!(r#"{{"op":"done","count":{count}}}"#),
-            Response::Status { docs, event_id } => {
-                format!(r#"{{"op":"status","docs":{docs},"event_id":{event_id}}}"#)
+            Response::Status {
+                docs,
+                event_id,
+                catch_up,
+            } => {
+                format!(
+                    r#"{{"op":"status","docs":{docs},"event_id":{event_id},"catch_up":"{}"}}"#,
+                    catch_up.as_str()
+                )
             }
             Response::GrepFiles { files, took_us } => {
                 let items: Vec<String> = files
@@ -344,10 +395,21 @@ mod tests {
         assert_eq!(
             Response::Status {
                 docs: 3,
-                event_id: 9
+                event_id: 9,
+                catch_up: CatchUp::Relisted,
             }
             .to_json(),
-            r#"{"op":"status","docs":3,"event_id":9}"#
+            r#"{"op":"status","docs":3,"event_id":9,"catch_up":"relisted"}"#
+        );
+        // The other value, spelled the way `docs/design.md` §3 spells it.
+        assert_eq!(
+            Response::Status {
+                docs: 3,
+                event_id: 9,
+                catch_up: CatchUp::Replayed,
+            }
+            .to_json(),
+            r#"{"op":"status","docs":3,"event_id":9,"catch_up":"replayed"}"#
         );
         assert_eq!(
             Response::GrepFiles {
@@ -374,6 +436,15 @@ mod tests {
             .to_json(),
             r#"{"op":"warning","message":"w"}"#
         );
+    }
+
+    /// The catch-up value is a string with exactly two spellings, and they
+    /// are the ones `docs/design.md` §3 uses: a journal-backed platform
+    /// "replayed", a journal-less one "relisted".
+    #[test]
+    fn the_catch_up_spellings_are_the_two_the_design_doc_uses() {
+        assert_eq!(CatchUp::Replayed.as_str(), "replayed");
+        assert_eq!(CatchUp::Relisted.as_str(), "relisted");
     }
 
     #[test]

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Lazy (on-demand) JSON views over the Stage-1 structural index.
 //!
 //! [`super::index_parser`] walks the same index to materialise a whole

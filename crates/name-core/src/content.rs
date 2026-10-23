@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+//
+// Transported from fsearch (https://github.com/noahdunnagan/fsearch), MIT
+// licensed, Copyright (c) 2026 Noah Dunnagan. Its notice is in
+// LICENSE-MIT-FSEARCH and in the repository's NOTICE.
 //! Content search: a trigram index over the user's text files.
 //!
 //! Segments are immutable, mmap'd files: a doc table, and the contents first
@@ -20,9 +25,10 @@
 use crate::live::{Live, join};
 use crate::name_index::{Blob, HDR, as_bytes, fields, header, layout, sec};
 use crate::name_query::{GrepMode, Query, fold};
+use crate::placeholder;
 use discovery::walk::KIND_FILE;
 use rayon::prelude::*;
-// Per-file confirmation runs on the rgx engine (docs/IMPLEMENTATION_PLAN.md
+// Per-file confirmation runs on the rgx engine (docs/design.md §2.3
 // 4.3: literal/hybrid/fixed/VM + SIMD prefilter replace memchr/regex
 // verify). regex_syntax stays for plan()'s HIR; the regex crate remains
 // only as the fallback for patterns rgx's parser refuses (4.4 keeps it
@@ -1906,7 +1912,7 @@ impl Content {
         // rank those first, and the rest only if reading gets that far.
         let t = std::time::Instant::now();
         let best = take_best(&mut per);
-        let (mut r, done) = verify_from(g, best.len(), filt.limit, READERS, t, |i| path(&best[i]));
+        let (mut r, done) = verify_from(g, best.len(), filt.limit, READERS, t, |i| path(&best[i]), &placeholder::attributes);
         if r.files.len() < filt.limit && done == best.len() && best.len() < total {
             // Then the next best few thousand, and the others only if
             // reading gets past those too.
@@ -1924,9 +1930,11 @@ impl Content {
                 if at > 0 {
                     rest[at..].par_sort_unstable();
                 }
-                let (more, done) = verify_from(g, end - at, filt.limit - r.files.len(), READERS, t, |i| path(&rest[at + i]));
+                let (more, done) =
+                    verify_from(g, end - at, filt.limit - r.files.len(), READERS, t, |i| path(&rest[at + i]), &placeholder::attributes);
                 r.files.extend(more.files);
                 r.read += more.read;
+                r.skipped.extend(more.skipped);
                 r.complete = more.complete;
                 if r.files.len() >= filt.limit || done < end - at {
                     break;
@@ -2604,6 +2612,33 @@ pub struct GrepResult {
     pub read: usize,
     /// False if the time budget ran out before every candidate was read.
     pub complete: bool,
+    /// The files that were not read, and why.
+    pub skipped: Vec<Skipped>,
+}
+
+/// A file the search did not read, and why.
+///
+/// The reason is the part that makes it actionable: "skipped" alone leaves
+/// the user guessing whether the file was empty, locked, or never there.
+pub struct Skipped {
+    /// The file's path, as the index spells it.
+    pub path: Vec<u8>,
+    /// Why it was not read.
+    pub reason: &'static str,
+}
+
+/// Say on the standard error what was not read, and why.
+///
+/// A file skipped for a reason nobody can see is a file the user believes
+/// was searched. The CLI and the daemon do not carry the skipped list in
+/// their own output -- the daemon's protocol has no field for it -- so this
+/// note is where the user sees it: the count, the reason, and the first
+/// path. One line, so a whole OneDrive tree of placeholders does not bury
+/// the results.
+fn note_skipped(skipped: &[Skipped]) {
+    let Some(first) = skipped.first() else { return };
+    let n = skipped.len();
+    eprintln!("rgy: skipped {n} file{} — {} (first: {})", if n == 1 { "" } else { "s" }, first.reason, String::from_utf8_lossy(&first.path));
 }
 
 /// Threads reading candidates (the searching one and helpers): file opens on
@@ -2668,12 +2703,25 @@ pub struct FileMatches {
 /// the next unread candidate, so the files read are always a prefix of the
 /// ranking and reading stops as soon as the `limit`th match is in.
 pub fn verify(g: &Grep, paths: &[impl AsRef<[u8]> + Sync], limit: usize) -> GrepResult {
-    verify_from(g, paths.len(), limit, SCAN_READERS, std::time::Instant::now(), |i| Some(paths[i].as_ref())).0
+    let r = verify_paths(g, paths, limit);
+    // The daemon's protocol has no field for the skipped files, so the note
+    // on the standard error is where the user learns that a file was left
+    // unread -- and why.
+    note_skipped(&r.skipped);
+    r
+}
+
+/// `verify` over the paths, with the platform's attributes and without the
+/// note: the note belongs to whoever owns the whole search.
+fn verify_paths(g: &Grep, paths: &[impl AsRef<[u8]> + Sync], limit: usize) -> GrepResult {
+    verify_from(g, paths.len(), limit, SCAN_READERS, std::time::Instant::now(), |i| Some(paths[i].as_ref()), &placeholder::attributes).0
 }
 
 /// `verify` over `n` candidates with `readers` threads, `path(i)` giving the
 /// i-th, or None if the index already rules it out; the budget counts from
-/// `t`. Also returns how many candidates it got through.
+/// `t`. `attrs` says what a file's attributes are -- the platform's answer,
+/// or a test's stand-in for it. Also returns how many candidates it got
+/// through.
 fn verify_from<'a>(
     g: &Grep,
     n: usize,
@@ -2681,10 +2729,12 @@ fn verify_from<'a>(
     readers: usize,
     t: std::time::Instant,
     path: impl Fn(usize) -> Option<&'a [u8]> + Sync,
+    attrs: &Attrs<'_>,
 ) -> (GrepResult, usize) {
     use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
     let (next, found, read) = (AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0));
     let hits = std::sync::Mutex::new(Vec::new());
+    let skipped = std::sync::Mutex::new(Vec::new());
     let work = || {
         while found.load(Relaxed) < limit && g.budget.is_none_or(|b| t.elapsed() <= b) {
             let i = next.fetch_add(1, Relaxed);
@@ -2693,9 +2743,16 @@ fn verify_from<'a>(
             }
             let Some(p) = path(i) else { continue };
             read.fetch_add(1, Relaxed);
-            if let Some(m) = match_file(g, p) {
-                found.fetch_add(1, Relaxed);
-                hits.lock().unwrap().push((i, m));
+            match match_file(g, p, attrs) {
+                Outcome::Match(m) => {
+                    found.fetch_add(1, Relaxed);
+                    hits.lock().unwrap().push((i, m));
+                }
+                Outcome::NoMatch => {}
+                // Not on this disk: it is reported, never read.
+                Outcome::Placeholder => {
+                    skipped.lock().unwrap().push(Skipped { path: p.to_vec(), reason: placeholder::PLACEHOLDER_REASON });
+                }
             }
         }
         // Don't sit on a big file's worth of buffer between searches.
@@ -2709,9 +2766,13 @@ fn verify_from<'a>(
     let mut hits = hits.into_inner().unwrap();
     hits.sort_unstable_by_key(|h| h.0);
     hits.truncate(limit);
+    let mut skipped = skipped.into_inner().unwrap();
+    // The lanes finish in whatever order they finish in; the report is
+    // sorted so the same tree always answers the same way.
+    skipped.sort_by(|a, b| a.path.cmp(&b.path));
     let done = next.into_inner().min(n);
     let complete = done == n || hits.len() >= limit;
-    (GrepResult { files: hits.into_iter().map(|h| h.1).collect(), candidates: n, read: read.into_inner(), complete }, done)
+    (GrepResult { files: hits.into_iter().map(|h| h.1).collect(), candidates: n, read: read.into_inner(), complete, skipped }, done)
 }
 
 thread_local! {
@@ -2721,19 +2782,38 @@ thread_local! {
     static READ_BUF: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-fn match_file(g: &Grep, path: &[u8]) -> Option<FileMatches> {
+/// What reading one candidate came to.
+enum Outcome {
+    /// It holds a match.
+    Match(FileMatches),
+    /// It was read, and it holds none.
+    NoMatch,
+    /// It was not read: it is a cloud placeholder, and reading it would
+    /// download it.
+    Placeholder,
+}
+
+fn match_file(g: &Grep, path: &[u8], attrs: &Attrs<'_>) -> Outcome {
     READ_BUF.with_borrow_mut(|buf| {
         use std::io::Read;
         buf.clear();
-        open_regular(path)?.take(MAX_FILE * 4).read_to_end(buf).ok()?;
+        let (file, _size) = match open_sized_with(path, attrs) {
+            Open::File(f, size) => (f, size),
+            // A placeholder is never opened: the open is the download.
+            Open::Placeholder => return Outcome::Placeholder,
+            Open::Unreadable => return Outcome::NoMatch,
+        };
+        if file.take(MAX_FILE * 4).read_to_end(buf).ok().is_none() {
+            return Outcome::NoMatch;
+        }
         if memchr::memchr(0, &buf[..buf.len().min(8192)]).is_some() {
-            return None;
+            return Outcome::NoMatch;
         }
         let lines = match g.literal.as_ref().filter(|l| !l.needs_regex(buf)) {
             Some(l) => lines_at(g, buf, l.starts(buf)),
             None => lines_at(g, buf, g.re().starts(buf).into_iter()),
         };
-        (!lines.is_empty()).then(|| FileMatches { path: path.to_vec(), lines })
+        if lines.is_empty() { Outcome::NoMatch } else { Outcome::Match(FileMatches { path: path.to_vec(), lines }) }
     })
 }
 
@@ -3442,20 +3522,30 @@ pub fn answer(g: &Grep, q: &Query, root: &[u8], live: &Live, home: &[u8], index:
     // index doc outside it never leaks in. Then read the rest.
     let mut r = index.search(g, q);
     r.files.retain(|f| covered.contains(&f.path));
-    let rest = verify(g, &bare, limit.saturating_sub(r.files.len()));
+    // `verify_paths`, not `verify`: the note belongs to this search, which
+    // owns both halves of it, so it is written once and says everything.
+    let rest = verify_paths(g, &bare, limit.saturating_sub(r.files.len()));
     r.files.extend(rest.files);
     r.read += rest.read;
+    r.skipped.extend(rest.skipped);
     r.candidates = paths.len();
     r.complete = r.files.len() < limit && rest.complete;
+    // What was not read, and why: the CLI does not carry the list itself,
+    // so the note is where the user sees it.
+    note_skipped(&r.skipped);
     r
 }
 
 /// Open a path for reading only if it is a regular file, never blocking:
-/// O_NONBLOCK keeps a FIFO from hanging open(), and the read threads'
+/// O_NONBLOCK keeps a FIFO from hanging open(), the read threads'
 /// "don't materialize dataless files" policy keeps iCloud placeholders from
-/// being downloaded just because we searched.
+/// being downloaded just because we searched, and a cloud placeholder is
+/// refused outright: on Windows the open is the download.
 pub fn open_regular(path: &[u8]) -> Option<std::fs::File> {
-    open_sized(path).map(|(f, _)| f)
+    match open_sized(path) {
+        Open::File(f, _) => Some(f),
+        Open::Placeholder | Open::Unreadable => None,
+    }
 }
 
 /// `open()` flags that keep a FIFO from hanging and refuse a symlink final
@@ -3500,40 +3590,78 @@ mod open_flags {
     pub const O_NOFOLLOW: i32 = 0;
 }
 
+/// Where a file's attributes come from: the platform's answer, or a test's
+/// stand-in for it. The seam exists because the recall attributes cannot be
+/// set on a real file -- only a cloud filter driver sets them -- so the
+/// refusal has to be exercised with an answer the test supplies.
+type Attrs<'a> = dyn Fn(&[u8]) -> Option<u32> + Sync + 'a;
+
+/// What opening a path for reading came to.
+enum Open {
+    /// The file, and its size.
+    File(std::fs::File, u64),
+    /// A cloud placeholder: reading it would download it, so it is not read.
+    Placeholder,
+    /// Not a regular file, or unreadable.
+    Unreadable,
+}
+
 /// `open_regular`, and the file's size.
-fn open_sized(path: &[u8]) -> Option<(std::fs::File, u64)> {
+fn open_sized(path: &[u8]) -> Open {
+    open_sized_with(path, &placeholder::attributes)
+}
+
+/// `open_sized`, with the attributes asked of `attrs` rather than of the
+/// platform.
+///
+/// A cloud placeholder is never opened: the open is the download. The
+/// attributes are a question about the directory entry, so asking costs one
+/// metadata call and fetches nothing.
+fn open_sized_with(path: &[u8], attrs: &Attrs<'_>) -> Open {
+    if attrs(path).is_some_and(placeholder::is_placeholder) {
+        return Open::Placeholder;
+    }
     #[cfg(unix)]
     let f = {
         use std::os::unix::ffi::OsStrExt;
         use std::os::unix::fs::OpenOptionsExt;
-        std::fs::OpenOptions::new()
+        match std::fs::OpenOptions::new()
             .read(true)
             .custom_flags(open_flags::O_NONBLOCK | open_flags::O_NOFOLLOW)
             .open(std::ffi::OsStr::from_bytes(path))
-            .ok()?
+        {
+            Ok(f) => f,
+            Err(_) => return Open::Unreadable,
+        }
     };
     #[cfg(not(unix))]
     let f = {
         // No unix FIFOs to hang on and no O_NOFOLLOW in std; the is_file
         // check below is the guard against opening a symlink target's dir.
-        let p = std::path::Path::new(std::str::from_utf8(path).ok()?);
-        std::fs::OpenOptions::new().read(true).open(p).ok()?
+        let Ok(p) = std::str::from_utf8(path) else { return Open::Unreadable };
+        match std::fs::OpenOptions::new().read(true).open(std::path::Path::new(p)) {
+            Ok(f) => f,
+            Err(_) => return Open::Unreadable,
+        }
     };
-    let m = f.metadata().ok()?;
-    m.is_file().then_some((f, m.len()))
+    let Ok(m) = f.metadata() else { return Open::Unreadable };
+    if !m.is_file() {
+        return Open::Unreadable;
+    }
+    Open::File(f, m.len())
 }
 
-/// P0.1 acceptance (`docs/freebsd-support.md`): a FIFO under the scan root
+/// P0.1 acceptance (`docs/design.md` §3): a FIFO under the scan root
 /// must not hang `open()`. `O_NONBLOCK` turns the hang into `ENXIO` when no
-/// writer exists, so `open_sized` answers `None` — promptly. A regression to
-/// the zero-flags arm turns this test into a hang instead of a failure.
+/// writer exists, so `open_sized` answers `Unreadable` — promptly. A regression
+/// to the zero-flags arm turns this test into a hang instead of a failure.
 ///
 /// Runs wherever the flag arm is active (linux/macos/freebsd); on the
 /// unverified BSDs the arm is deliberately zero, so the test stays out.
 #[cfg(test)]
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
 mod open_flags_tests {
-    use super::open_sized;
+    use super::{Open, open_sized};
     use std::os::unix::ffi::OsStrExt;
 
     // mkfifo(3), declared rather than pulled from libc — name-core carries
@@ -3557,7 +3685,88 @@ mod open_flags_tests {
         let r = unsafe { mkfifo(c.as_ptr(), 0o600) };
         assert_eq!(r, 0, "mkfifo must succeed");
         // No writer exists: ENXIO — not a block — is the pass condition.
-        assert!(open_sized(c.as_bytes()).is_none(), "a writerless FIFO must answer None, not hang or claim a size");
+        assert!(matches!(open_sized(c.as_bytes()), Open::Unreadable), "a writerless FIFO must answer Unreadable, not hang or claim a size");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// A cloud placeholder is never opened, and a file that is really on the
+/// disk is read exactly as before (parity row 1.7).
+///
+/// The recall attributes cannot be set on a real file -- only a cloud
+/// filter driver sets them, and a program may not -- so the file on disk
+/// here is an ordinary one and the attributes come from a stand-in. What
+/// is under test is the refusal and the report, not the filesystem.
+#[cfg(test)]
+mod placeholder_tests {
+    use super::{Grep, Open, open_ahead_with, open_sized, open_sized_with, placeholder, verify_from};
+    use crate::name_query::GrepMode;
+
+    /// A file with a needle in it, and its path as the tree spells paths.
+    fn temp_file(tag: &str) -> (std::path::PathBuf, Vec<u8>) {
+        let dir = std::env::temp_dir().join(format!("rgy_ph_{}_{}", std::process::id(), tag));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("doc.txt");
+        std::fs::write(&p, b"a needle in here\n").unwrap();
+        (dir, p.to_string_lossy().into_owned().into_bytes())
+    }
+
+    /// The attributes of a placeholder: "fetch me from the cloud before you
+    /// read me".
+    fn recall() -> impl Fn(&[u8]) -> Option<u32> + Sync {
+        |_| Some(placeholder::FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS)
+    }
+
+    #[test]
+    fn a_placeholder_is_not_opened() {
+        let (dir, p) = temp_file("open");
+        assert!(
+            matches!(open_sized_with(&p, &recall()), Open::Placeholder),
+            "a placeholder must be refused before the open, not opened and found empty"
+        );
+        // The same file, asked the real question, opens as usual.
+        assert!(matches!(open_sized(&p), Open::File(..)), "an ordinary file must still open");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_index_build_does_not_open_a_placeholder_either() {
+        let (dir, p) = temp_file("build");
+        assert!(open_ahead_with(&p, &recall()).is_none(), "the build reads every candidate file: that read is a download too");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_placeholder_is_skipped_and_the_skip_says_why() {
+        let (dir, p) = temp_file("skip");
+        let g = Grep::new("needle", GrepMode::Literal).unwrap();
+        let (r, _) = verify_from(&g, 1, 10, 1, std::time::Instant::now(), |_| Some(&p[..]), &recall());
+        assert!(r.files.is_empty(), "the file was not read, so it cannot have matched");
+        assert_eq!(r.skipped.len(), 1, "the skip must be reported, not swallowed");
+        assert_eq!(r.skipped[0].path, p, "the skip must name the file");
+        let reason = r.skipped[0].reason;
+        assert!(reason.contains("cloud placeholder"), "the reason must name the thing: {reason}");
+        assert!(reason.contains("download"), "the reason must say what reading it would have done: {reason}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_ordinary_file_is_read_and_matched_as_before() {
+        let (dir, p) = temp_file("normal");
+        let g = Grep::new("needle", GrepMode::Literal).unwrap();
+        let (r, _) = verify_from(&g, 1, 10, 1, std::time::Instant::now(), |_| Some(&p[..]), &placeholder::attributes);
+        assert_eq!(r.files.len(), 1, "an ordinary file is still read, and still matches");
+        assert!(r.skipped.is_empty(), "an ordinary file is not skipped");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The attributes are asked of the platform, not guessed: a file on the
+    /// disk has no recall bit, on any platform.
+    #[test]
+    fn a_file_on_the_disk_is_not_a_placeholder() {
+        let (dir, p) = temp_file("real");
+        assert!(!placeholder::is_placeholder_path(&p), "a real file must not be mistaken for a placeholder");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
@@ -3565,7 +3774,18 @@ mod open_flags_tests {
 /// `open_regular` for a file about to be indexed, telling the kernel to
 /// start reading it now (as much as indexing reads).
 fn open_ahead(path: &[u8]) -> Option<std::fs::File> {
-    let (f, len) = open_sized(path)?;
+    open_ahead_with(path, &placeholder::attributes)
+}
+
+/// `open_ahead`, with the attributes asked of `attrs` rather than of the
+/// platform.
+fn open_ahead_with(path: &[u8], attrs: &Attrs<'_>) -> Option<std::fs::File> {
+    let (f, len) = match open_sized_with(path, attrs) {
+        Open::File(f, len) => (f, len),
+        // A placeholder is not opened here either: the index build reads
+        // every candidate file, and that read is a download too.
+        Open::Placeholder | Open::Unreadable => return None,
+    };
     // macOS F_RDADVISE: tell the kernel to start reading now. Elsewhere the
     // plain open is the whole story. Declared inline (no libc dep).
     #[cfg(target_os = "macos")]
@@ -3811,7 +4031,7 @@ mod grep_pipeline_tests {
         std::fs::write(dir.join("edit.rs"), b"fn before() {}\n").unwrap();
         let root = dir.to_string_lossy().into_owned().into_bytes();
         let src = PortableSource::new(root.clone(), 2);
-        let mut live = Live::new(Index::build(src.enumerate().unwrap(), 0, 1, b"/"));
+        let mut live = Live::with_root(Index::build(src.enumerate().unwrap(), 0, 1, b"/"), &root);
         let idx = dir.join("index");
         let mut content = Content::open(idx.clone());
         let docs = wanted(&live, b"", b"/", true, &root);
@@ -3840,13 +4060,16 @@ mod grep_pipeline_tests {
     /// The other half of the loop: a deleted file must not leak its content
     /// through a query after `apply_dir` + `sync`.
     ///
-    /// `Live::apply` cannot kill the name index's base entry for an on-disk
-    /// path (the base holds root-relative paths, the overlay on-disk ones), so
-    /// a deleted file can linger as a live base doc. `Content::covers` catches
-    /// it: `lstat` finds nothing, the file is not covered by the index, and it
-    /// goes to the scan, which reads it as absent. The query path (`answer`)
-    /// therefore returns nothing; this pins that so the raw index's stale doc
-    /// can never become a wrong answer.
+    /// Two things have to happen for the file to stop answering: the name
+    /// index has to stop holding it, and the content index has to stop
+    /// holding its text. The Live kills the base's entry — it knows which
+    /// tree the base was built from, so it can cross between the base's
+    /// root-relative paths and the overlay's openable ones — and
+    /// `Content::covers` is the net under both: `lstat` finds nothing, the
+    /// file is not covered by the index, and it goes to the scan, which reads
+    /// it as absent. The query path (`answer`) therefore returns nothing;
+    /// this pins that so the raw index's stale doc can never become a wrong
+    /// answer.
     #[test]
     fn apply_dir_and_sync_drop_a_deleted_file_from_the_query_path() {
         let dir = std::env::temp_dir().join(format!("rgy_del_{}", std::process::id()));
@@ -3855,7 +4078,7 @@ mod grep_pipeline_tests {
         std::fs::write(dir.join("gone.rs"), b"fn vanish() {}\n").unwrap();
         let root = dir.to_string_lossy().into_owned().into_bytes();
         let src = PortableSource::new(root.clone(), 2);
-        let mut live = Live::new(Index::build(src.enumerate().unwrap(), 0, 1, b"/"));
+        let mut live = Live::with_root(Index::build(src.enumerate().unwrap(), 0, 1, b"/"), &root);
         let idx = dir.join("index");
         let mut content = Content::open(idx.clone());
         let docs = wanted(&live, b"", b"/", true, &root);
@@ -3893,7 +4116,7 @@ mod grep_pipeline_tests {
         std::fs::write(dir.join("edit.rs"), b"fn before() {}\n").unwrap();
         let root = dir.to_string_lossy().into_owned().into_bytes();
         let src = PortableSource::new(root.clone(), 2);
-        let mut live = Live::new(Index::build(src.enumerate().unwrap(), 0, 1, b"/"));
+        let mut live = Live::with_root(Index::build(src.enumerate().unwrap(), 0, 1, b"/"), &root);
         let idx = dir.join("index");
         let mut content = Content::open(idx.clone());
         let docs = wanted(&live, b"", b"/", true, &root);
@@ -3946,7 +4169,7 @@ mod grep_pipeline_tests {
         std::fs::write(dir.join("edit.rs"), b"fn before() {}\n").unwrap();
         let root = dir.to_string_lossy().into_owned().into_bytes();
         let src = PortableSource::new(root.clone(), 2);
-        let mut live = Live::new(Index::build(src.enumerate().unwrap(), 0, 1, b"/"));
+        let mut live = Live::with_root(Index::build(src.enumerate().unwrap(), 0, 1, b"/"), &root);
         let idx = dir.join("index");
         let mut content = Content::open(idx.clone());
         let docs = wanted(&live, b"", b"/", true, &root);

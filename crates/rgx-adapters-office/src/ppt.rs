@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Binary PowerPoint (.ppt, PowerPoint 97-2003) text extraction.
 //!
 //! The file is an OLE CFB with two streams: `Current User` (points at the
@@ -9,15 +11,17 @@
 //! truncated files), a validated linear scan over the stream recovers the
 //! same atoms at the cost of document order.
 //!
-//! Canonical full implementation: `upstream::b01::io::binary::ppt`
-//! (structured atoms with offsets/kinds + provenance flags).
+//! A reduced port of the PPT reader of the `io` project by Dan Gohman,
+//! whose work is used here under Apache-2.0: the structured atoms with
+//! their offsets/kinds and provenance flags are what this reader walks, and
+//! it flattens them to text. See `NOTICE`.
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::vec::Vec;
 use rgx_core::cfb::Cfb;
 use rgx_core::Outcome;
-use rgx_core::{bail, Context, Result};
+use rgx_core::{decline, Context, Result};
 
 #[cfg(test)]
 #[allow(unused_imports)]
@@ -69,7 +73,7 @@ pub fn extract_text(data: &[u8]) -> Result<String> {
     let cfb = Cfb::parse(data)?;
     let ppt = cfb
         .stream("PowerPoint Document")
-        .context("no PowerPoint Document stream")?;
+        .decline_context("no PowerPoint Document stream")?;
     let mut out = String::new();
 
     if let Some(user) = cfb.stream("Current User") {
@@ -79,7 +83,7 @@ pub fn extract_text(data: &[u8]) -> Result<String> {
         linear_scan(&ppt, &mut out);
     }
     if out.trim().is_empty() {
-        bail!("no text atoms in PowerPoint Document stream");
+        decline!("no text atoms in PowerPoint Document stream");
     }
     if out.len() > MAX_TEXT {
         out.truncate(MAX_TEXT);
@@ -321,19 +325,14 @@ fn mostly_text(s: &str) -> bool {
     ok * 2 >= s.chars().count()
 }
 
-/// cp1252 high-half mapping (0x80..=0x9F); the rest is Latin-1 identity.
+/// The character one byte stands for in cp1252 (0x80..=0x9F mapped, the
+/// rest Latin-1).
+///
+/// The table is the shared one in `rgx-core`, generated from the reference
+/// implementation: a hand-written copy of 32 characters is a transcription
+/// error waiting to happen.
 fn cp1252(b: u8) -> char {
-    const HI: [char; 32] = [
-        '\u{20AC}', '\u{0081}', '\u{201A}', '\u{0192}', '\u{201E}', '\u{2026}', '\u{2020}',
-        '\u{2021}', '\u{02C6}', '\u{2030}', '\u{0160}', '\u{2039}', '\u{0152}', '\u{008D}',
-        '\u{017D}', '\u{008F}', '\u{0090}', '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}',
-        '\u{2022}', '\u{2013}', '\u{2014}', '\u{02DC}', '\u{2122}', '\u{0161}', '\u{203A}',
-        '\u{0153}', '\u{009D}', '\u{017E}', '\u{0178}',
-    ];
-    match b {
-        0x80..=0x9F => HI[(b - 0x80) as usize],
-        _ => b as char,
-    }
+    rgx_core::charset::windows_1252_char(b)
 }
 
 // ---------------------------------------------------------------------------

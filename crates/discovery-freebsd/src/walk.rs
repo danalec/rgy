@@ -1,4 +1,6 @@
-//! `getdirentries` bulk walk (docs/freebsd-support.md P1.2): one syscall
+// SPDX-License-Identifier: Apache-2.0
+
+//! `getdirentries` bulk walk (docs/design.md §2.2): one syscall
 //! returns a whole directory block with name and type already attached
 //! (`d_type` in the dirent), so there is no per-entry directory open — the
 //! FreeBSD shape of the Linux `getdents64` walk, and closer to it than to
@@ -100,7 +102,8 @@ fn list_dir(path: &Path) -> Option<Listing> {
             // linux_dirent64 was a fixed layout; a FreeBSD dirent is not,
             // so the stride comes from the row itself and every field
             // offset comes from `libc::dirent` above.
-            let reclen = u16::from_ne_bytes([buf[off + OFF_RECLEN], buf[off + OFF_RECLEN + 1]]) as usize;
+            let reclen =
+                u16::from_ne_bytes([buf[off + OFF_RECLEN], buf[off + OFF_RECLEN + 1]]) as usize;
             if reclen <= OFF_NAME || off + reclen > n as usize {
                 break;
             }

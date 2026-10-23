@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The density estimator, measured against the density.
 //!
 //! ```text

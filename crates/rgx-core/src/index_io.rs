@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! On-disk format for the token index, written to `.ugi` files by
 //! `rgx --index-build <dir>` and read back by `rgx --index <dir>`.
 //!

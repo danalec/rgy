@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Archive & decompression adapters, all in-process.
 
 #![no_std]
@@ -9,19 +11,56 @@ extern crate alloc;
 extern crate std;
 
 use alloc::boxed::Box;
-use alloc::string::{String, ToString};
+#[cfg(any(feature = "cpio", feature = "decompress"))]
+use alloc::string::String;
+#[cfg(any(feature = "cpio", feature = "decompress", feature = "tar"))]
+use alloc::string::ToString;
 use alloc::vec::Vec;
-#[cfg(feature = "std")]
+#[cfg(feature = "cpio")]
 use core::str;
-use rgx_core::{Adapter, Outcome};
-use rgx_core::{Context, Result};
+#[cfg(feature = "decompress")]
+use rgx_core::decline;
+use rgx_core::Adapter;
+#[cfg(any(feature = "cpio", feature = "sevenz", feature = "zip"))]
+use rgx_core::Context;
+#[cfg(any(
+    feature = "cpio",
+    feature = "decompress",
+    feature = "sevenz",
+    feature = "tar",
+    feature = "zip"
+))]
+use rgx_core::Outcome;
+#[cfg(any(
+    feature = "cpio",
+    feature = "decompress",
+    feature = "sevenz",
+    feature = "tar",
+    feature = "zip"
+))]
+use rgx_core::Result;
 
+#[cfg(feature = "std")]
 pub mod budget;
 // `pub` so `examples/decomp_bench.rs` can reach the codecs directly --
 // the adapter surface is the registry, and a bench that went through it
 // would measure the pipeline instead of the decoder.
+#[cfg(feature = "borg")]
+mod borg;
+#[cfg(any(
+    feature = "borg",
+    feature = "decompress",
+    feature = "pgdump",
+    feature = "squashfs"
+))]
 pub mod lz4;
+#[cfg(feature = "borg")]
+mod msgpack;
+#[cfg(feature = "pgdump")]
+mod pgdump;
+#[cfg(feature = "rar")]
 mod rar;
+#[cfg(feature = "tar")]
 mod tar;
 // Vendored from the 7-Zip project and kept byte-identical for easy
 // re-sync, so it carries the full encoder side (7z write path) that rgx
@@ -37,26 +76,98 @@ mod tar;
     unused_variables,
     unused_assignments
 )]
+#[cfg(feature = "sevenz")]
 pub mod sevenz;
 // In-house RFC 7932 decoder: stream header, meta-block headers, block
 // switching, context maps, the command alphabet, backward references, and
 // the static dictionary with its 121 word transformations. Verified
 // against reference-CLI vectors in `crate::tests::oracle`; coverage of
 // the corpus is in `crate::brotli::coverage`.
+#[cfg(feature = "ar")]
 pub mod ar;
+#[cfg(any(feature = "git-bundle", feature = "svn-dump"))]
+pub mod backups;
+#[cfg(feature = "decompress")]
 pub mod brotli;
+#[cfg(feature = "git-pack")]
 pub mod git_pack;
+#[cfg(any(
+    feature = "applefs",
+    feature = "erofs",
+    feature = "iso9660",
+    feature = "qcow2",
+    feature = "raw-image",
+    feature = "vdi",
+    feature = "vhd",
+    feature = "vhdx",
+    feature = "vmdk",
+    feature = "wim"
+))]
+pub mod images;
+#[cfg(feature = "squashfs")]
+pub mod squashfs;
 
 pub fn adapters() -> Vec<Box<dyn Adapter>> {
     vec![
+        #[cfg(feature = "zip")]
         Box::new(Zip),
+        #[cfg(feature = "sevenz")]
         Box::new(SevenZ),
+        #[cfg(feature = "tar")]
         Box::new(Tar),
+        #[cfg(feature = "cpio")]
         Box::new(Cpio),
+        #[cfg(feature = "ar")]
         Box::new(ar::Ar),
+        #[cfg(feature = "git-pack")]
         Box::new(git_pack::GitPack),
+        #[cfg(feature = "git-bundle")]
+        Box::new(backups::GitBundle),
+        #[cfg(feature = "decompress")]
         Box::new(Decompress),
+        #[cfg(feature = "rar")]
         Box::new(rar::Rar),
+        #[cfg(feature = "svn-dump")]
+        Box::new(backups::SvnDump),
+        // `.dump` is claimed by the Subversion dump too. The two magic
+        // numbers are disjoint -- a Subversion dump starts with
+        // "SVN-fs-dump-format-version:" and a PostgreSQL custom archive
+        // with "PGDMP" -- so whichever runs first declines the other's
+        // file.
+        #[cfg(feature = "pgdump")]
+        Box::new(pgdump::PgDump),
+        // A borg segment names nothing: it is `data/0/2`, with no extension
+        // and no dot in its name. It is the one adapter that claims a file
+        // by its first bytes instead of by what it is called, so it goes
+        // last: the name is the stronger claim, and the magic only speaks
+        // when the name is silent.
+        #[cfg(feature = "borg")]
+        Box::new(borg::Borg),
+        // Images last among the containers: each one declines with `bail!`
+        // on a magic it does not own, so `.img` reaches the raw-dump
+        // dispatch only after the real archives have declined it.
+        #[cfg(feature = "iso9660")]
+        Box::new(images::Iso9660),
+        #[cfg(feature = "squashfs")]
+        Box::new(squashfs::Squashfs),
+        #[cfg(feature = "wim")]
+        Box::new(images::Wim),
+        #[cfg(feature = "vhd")]
+        Box::new(images::Vhd),
+        #[cfg(feature = "vhdx")]
+        Box::new(images::Vhdx),
+        #[cfg(feature = "qcow2")]
+        Box::new(images::Qcow2),
+        #[cfg(feature = "vmdk")]
+        Box::new(images::Vmdk),
+        #[cfg(feature = "vdi")]
+        Box::new(images::Vdi),
+        #[cfg(feature = "erofs")]
+        Box::new(images::Erofs),
+        #[cfg(feature = "applefs")]
+        Box::new(images::AppleFs),
+        #[cfg(feature = "raw-image")]
+        Box::new(images::RawImage),
     ]
 }
 
@@ -64,6 +175,7 @@ pub fn adapters() -> Vec<Box<dyn Adapter>> {
 /// Member names are always relative to the archive: only the final path
 /// segment is kept, so nested carving shows `bundle/carved-0x2a1` instead
 /// of re-embedding the full parent path.
+#[cfg(feature = "decompress")]
 fn strip_suffix(path: &str, suffix: &str) -> String {
     let file = path.rsplit('/').next().unwrap_or(path);
     let stem = file.strip_suffix(suffix).unwrap_or(file);
@@ -74,16 +186,35 @@ fn strip_suffix(path: &str, suffix: &str) -> String {
     }
 }
 
+#[cfg(feature = "zip")]
 pub struct Zip;
+#[cfg(feature = "zip")]
 impl Adapter for Zip {
     fn name(&self) -> &'static str {
         "zip"
     }
+    /// Package formats that are ZIP archives under a different extension.
+    /// None of them carries a second container: a `.gem`, a `.nupkg` and a
+    /// `.crate` are all a plain central directory with their own manifest
+    /// inside, so claiming them here is what makes the manifest — the one
+    /// file anyone greps a package for — searchable.
+    ///
+    /// `e57` is on this list for the same reason and not for the same
+    /// reason: an ASME E57 point cloud is a ZIP whose `header.xml` carries
+    /// the scan description and whose members carry the coordinates. Reading
+    /// it as a ZIP is strictly more searchable than any header parser, since
+    /// the XML *is* the document.
     fn extensions(&self) -> &'static [&'static str] {
         &[
             "zip", "zipx", "jar", "xpi", "kra", "snagx", "3mf", "usdz", "cbz", "apk", "aar", "war",
             "ear", "ipa", "whl", "egg", "kmz", "sketch", "pages", "numbers", "key", "pk3", "pk4",
-            "crx", "msix", "appx", "snb", "wsb",
+            "crx", "msix", "appx", "snb", "wsb", "gem", "nupkg", "crate", "e57",
+            // UOF (GB/T 20916) is XML in a compressed container, "similar to
+            // OpenDocument and Office Open XML" -- a ZIP package, so unzipping
+            // is strictly more searchable than reading any header. `.uot` is
+            // the text template, `.uos` the spreadsheet, `.uop` the
+            // presentation; `.uof` is the generic package.
+            "uof", "uot", "uos", "uop",
         ]
     }
     fn extract(&self, data: &[u8], _path: &str) -> Result<Outcome> {
@@ -96,7 +227,7 @@ impl Adapter for Zip {
         // ignore both.
         let archive = rgx_core::zip::ZipReader::with_limit(data, budget::budget().bytes)
             .map_err(rgx_core::Error::msg)
-            .context("not a zip archive")?;
+            .decline_context("not a zip archive")?;
         let mut sink = budget::MemberSink::new();
         sink.declare(archive.list().len());
         for (i, entry) in archive.list().iter().enumerate() {
@@ -129,7 +260,9 @@ impl Adapter for Zip {
     }
 }
 
+#[cfg(feature = "sevenz")]
 pub struct SevenZ;
+#[cfg(feature = "sevenz")]
 impl Adapter for SevenZ {
     fn name(&self) -> &'static str {
         "7z"
@@ -138,9 +271,23 @@ impl Adapter for SevenZ {
         &["7z", "cb7"]
     }
     fn extract(&self, data: &[u8], _path: &str) -> Result<Outcome> {
-        let archive = sevenz::SevenzArchive::parse(data).context("not a 7z archive")?;
+        let archive = sevenz::SevenzArchive::parse(data).decline_context("not a 7z archive")?;
         let mut sink = budget::MemberSink::new();
         sink.declare(archive.files().len());
+        // **One folder decoded at most once.** Entries are contiguous by
+        // folder in a 7z, so a single slot that is replaced whenever the
+        // folder index moves turns "decode the whole folder for every file"
+        // into "decode it once per folder". The old per-file re-decode was
+        // quadratic in files-per-folder, and the fix is worth 8% of the
+        // adapter's time on the corpus that has it -- most of that time is
+        // the expansion itself, not the redundancy.
+        //
+        // A cache of every folder would fix the time and break the memory
+        // bound -- it would hold the entire unpacked archive at once, which
+        // is precisely what the member budget and `OutputCap` exist to
+        // prevent. One slot keeps the peak at a single folder, the same as
+        // the per-file decode it replaces.
+        let mut decoded: Option<(usize, Vec<u8>)> = None;
         for (i, entry) in archive.files().iter().enumerate() {
             if entry.is_directory {
                 continue;
@@ -148,7 +295,14 @@ impl Adapter for SevenZ {
             if !sink.reserve(entry.size) {
                 break;
             }
-            let bytes = archive.extract(i)?;
+            let Some((folder_idx, sub_idx)) = archive.stream_of(i) else {
+                continue;
+            };
+            if decoded.as_ref().map(|(f, _)| *f) != Some(folder_idx) {
+                decoded = Some((folder_idx, archive.folder_output(folder_idx)?));
+            }
+            let (_, folder_out) = decoded.as_ref().expect("just populated");
+            let bytes = archive.substream_bytes(folder_idx, sub_idx, folder_out)?;
             if !sink.push(entry.name.clone(), bytes) {
                 break;
             }
@@ -157,7 +311,9 @@ impl Adapter for SevenZ {
     }
 }
 
+#[cfg(feature = "tar")]
 pub struct Tar;
+#[cfg(feature = "tar")]
 impl Adapter for Tar {
     fn name(&self) -> &'static str {
         "tar"
@@ -196,7 +352,9 @@ impl Adapter for Tar {
 }
 
 /// cpio "newc" (SVR4) format: 6-byte magic "070701"/"070702".
+#[cfg(feature = "cpio")]
 pub struct Cpio;
+#[cfg(feature = "cpio")]
 impl Adapter for Cpio {
     fn name(&self) -> &'static str {
         "cpio"
@@ -206,7 +364,7 @@ impl Adapter for Cpio {
     }
     fn extract(&self, data: &[u8], _path: &str) -> Result<Outcome> {
         if data.len() < 6 || !(data.starts_with(b"070701") || data.starts_with(b"070702")) {
-            rgx_core::bail!("not a newc cpio archive");
+            rgx_core::decline!("not a newc cpio archive");
         }
         let hex = |b: &[u8]| -> Result<u64> {
             let s = str::from_utf8(b).context("cpio header not ascii")?;
@@ -247,7 +405,9 @@ impl Adapter for Cpio {
 
 /// Single-file decompressors; the decompressed stream is re-matched by
 /// extension (`.tar.gz` keeps unpacking into `.tar`).
+#[cfg(feature = "decompress")]
 pub struct Decompress;
+#[cfg(feature = "decompress")]
 impl Adapter for Decompress {
     fn name(&self) -> &'static str {
         "decompress"
@@ -265,6 +425,50 @@ impl Adapter for Decompress {
     fn extract(&self, data: &[u8], path: &str) -> Result<Outcome> {
         let limit = budget::budget().bytes;
         let ext = rgx_core::extension_of(path);
+        // "Not the format its name promises" is a `bail!`, not an empty
+        // decode. Every branch below reaches its decoder through a
+        // `?`, and a decoder handed bytes it does not recognise has two
+        // honest answers: an error, or -- for the streaming ones -- *nothing
+        // at all*. `GzipReader::decode_bounded` walks
+        // `while pos < len && is_gzip(rest)`, so a text file named `.gz`
+        // leaves the loop unentered and returns `Ok` carrying zero bytes.
+        // `Ok(Outcome::Members([(inner, [])]))` then hands the pipeline a
+        // member with an empty payload, the recursion into it finds no
+        // extension and emits nothing, and the file the walk found becomes
+        // unsearchable: rgx reports no match and no reason, which is the
+        // exact shape the rga #151 lesson is about, reached through the
+        // decoder instead of the pipeline.
+        //
+        // The magic is checked here, at the adapter boundary, rather than
+        // inside the codecs: `decode_bounded` is also called by the forensic
+        // carver on an *embedded* stream it has already located, where the
+        // magic is what found it and re-checking would be noise. Brotli is
+        // absent from this table because RFC 7932 defines no magic — a
+        // `.br` file cannot be recognised before it is decoded, so that one
+        // is decided by the decoder's own error instead.
+        let recognised = match &*ext {
+            "gz" | "tgz" | "taz" => rgx_core::compress::gzip::GzipReader::is_gzip(data),
+            "bz2" | "tbz2" | "tbz" | "tb2" | "bz" | "bzip2" => data.starts_with(b"BZh"),
+            "xz" | "txz" | "lzma" | "tlz" => xz_or_lzma(data),
+            "zst" | "zstd" | "tzst" => zstd_framed(data),
+            "lz4" => {
+                // `decode_auto` accepts two containers: the frame magic and
+                // the deprecated `lz4 -l` one, and the decoder already
+                // publishes the latter's predicate.
+                data.starts_with(&[0x04, 0x22, 0x4D, 0x18]) || lz4::Lz4Decoder::is_legacy(data)
+            }
+            // "z": 0x1f 0x9d is Unix `compress` LZW, which the branch below
+            // names explicitly; everything else is zlib framing, whose first
+            // byte carries the compression method and CMF/FLG validity.
+            "z" | "tz2" | "tpz" | "als" => data.starts_with(&[0x1f, 0x9d]) || zlib_framed(data),
+            // brotli (RFC 7932) defines no magic, so there is nothing to
+            // check before decoding and the decoder's own error decides.
+            "br" => true,
+            _ => true,
+        };
+        if !recognised {
+            decline!("not a {ext} stream: the bytes do not carry that format's magic");
+        }
         let (inner, bytes, declared, capped) = match &*ext {
             "gz" | "tgz" | "taz" => {
                 let b = rgx_core::compress::gzip::GzipReader::decode_bounded(data, limit)?;
@@ -331,7 +535,6 @@ impl Adapter for Decompress {
                 let stem = strip_suffix(path, if ext == "tzst" { ".tzst" } else { ".zst" });
                 let in_house =
                     rgx_core::compress::zstd::ZstdDecoder::new().decode_bounded(data, limit);
-                #[cfg(feature = "std")]
                 let (bytes, declared, capped) = match in_house {
                     Ok(b) => (b.bytes, b.declared, b.capped),
                     Err(rgx_core::compress::error::CompressError::UnsupportedFormat(why)) => {
@@ -347,16 +550,6 @@ impl Adapter for Decompress {
                             .flatten()
                             .filter(|n| *n != zstd::zstd_safe::CONTENTSIZE_UNKNOWN);
                         (bytes, declared, capped)
-                    }
-                    Err(e) => return Err(rgx_core::Error::msg(e).context("zstd frame")),
-                };
-                #[cfg(not(feature = "std"))]
-                let (bytes, declared, capped) = match in_house {
-                    Ok(b) => (b.bytes, b.declared, b.capped),
-                    Err(rgx_core::compress::error::CompressError::UnsupportedFormat(why)) => {
-                        // Dictionary-ID frames need libzstd; with std off the
-                        // caller has rejected those shapes by opting out.
-                        return Err(rgx_core::Error::msg(format!("zstd: {why}")));
                     }
                     Err(e) => return Err(rgx_core::Error::msg(e).context("zstd frame")),
                 };
@@ -384,8 +577,21 @@ impl Adapter for Decompress {
                 (strip_suffix(path, ".br"), b.bytes, b.declared, b.capped)
             }
             "z" | "tz2" | "tpz" | "als" => {
-                // No LZW library is bundled; try raw zlib framing as a
-                // pragmatic fallback for `gzip`-compatible .Z.
+                // Unix `compress` writes the LZW magic 1f 9d; zlib framing
+                // starts 78 xx. An LZW stream is a genuine `.Z` -- the
+                // extension this branch claims -- and no LZW decoder is
+                // bundled, so name that. Letting the zlib attempt run and
+                // fail produced a file with nothing searchable and nothing
+                // on stderr, indistinguishable from "no match": the user
+                // who named `.z` got no answer and no reason.
+                if data.starts_with(&[0x1f, 0x9d]) {
+                    return Err(rgx_core::Error::msg(
+                        "LZW-compressed .Z: the registry claims .z but only zlib \
+                         framing is decoded, and no LZW decoder is bundled",
+                    ));
+                }
+                // Otherwise treat it as zlib framing, which is what the
+                // gzip-compatible producers of these suffixes emit.
                 let b = rgx_core::compress::zlib::ZlibDecoder::new().decode_bounded(data, limit)?;
                 (
                     strip_suffix(path, &format!(".{ext}")),
@@ -405,10 +611,59 @@ impl Adapter for Decompress {
     }
 }
 
+/// zstd (RFC 8878): a frame magic, or a skippable frame, which is a valid
+/// stream start in its own right and which the decoder skips rather than
+/// decodes. Checking only the frame magic would decline a skippable-frame
+/// file the branch above exists to read.
+#[cfg(feature = "decompress")]
+fn zstd_framed(data: &[u8]) -> bool {
+    let Some(head) = data.get(0..4) else {
+        return false;
+    };
+    let magic = u32::from_le_bytes([head[0], head[1], head[2], head[3]]);
+    magic == rgx_core::compress::zstd::MAGIC || (magic & 0xFFFF_FFF0) == 0x184D_2A50
+}
+
+/// XZ and legacy `.lzma` share the extension list above but not the magic:
+/// an XZ container is the 6-byte stream header `FD 37 7A 58 5A 00`, while
+/// `.lzma` is the FORMAT_ALONE stream, whose first byte is the properties
+/// byte and which has no signature at all. Checking only the XZ magic would
+/// decline every `.lzma` file the `.lzma` branch exists to read.
+#[cfg(feature = "decompress")]
+fn xz_or_lzma(data: &[u8]) -> bool {
+    if data.starts_with(&[0xFD, b'7', b'z', b'X', b'Z', 0x00]) {
+        return true;
+    }
+    // FORMAT_ALONE: props <= 224, dict size a power of two in the low 3
+    // bytes, then a little-endian u64 dictionary size. The props bound plus
+    // the dictionary-shape test is what separates it from arbitrary bytes,
+    // and it is the same shape the LzmaDecoder itself accepts.
+    match data {
+        [props, d0, d1, d2, rest @ ..] if *props <= 225 && rest.len() >= 8 => {
+            let dict = u32::from_le_bytes([*d0, *d1, *d2, 0]);
+            dict != 0 && dict.is_power_of_two()
+        }
+        _ => false,
+    }
+}
+
+/// zlib framing (RFC 1950): CMF's low nibble is the compression method (8
+/// for deflate) and `(CMF << 8 | FLG) % 31 == 0` is the header check. The
+/// divisibility test is what makes this a format check rather than a guess
+/// at the first byte.
+#[cfg(feature = "decompress")]
+fn zlib_framed(data: &[u8]) -> bool {
+    match data {
+        [cmf, flg, ..] if cmf & 0x0F == 8 => (u16::from(*cmf) << 8 | u16::from(*flg)) % 31 == 0,
+        _ => false,
+    }
+}
+
 /// A decode the byte budget stopped, as the note plus what it did produce.
 /// The decoded prefix is kept: the first `limit` bytes of a bomb are
 /// ordinary content, and a search that found nothing in them is a different
 /// answer from a search that was never run.
+#[cfg(feature = "decompress")]
 fn truncated(inner: String, bytes: Vec<u8>, declared: Option<u64>, limit: u64) -> Outcome {
     let emitted = bytes.len() as u64;
     let note = budget::decompression_note(emitted, limit, declared);
@@ -421,7 +676,7 @@ fn truncated(inner: String, bytes: Vec<u8>, declared: Option<u64>, limit: u64) -
 /// stream that filled the budget exactly from one that went past it, which
 /// is the difference between "decoded whole" and "stopped here" when the
 /// real size is not declared anywhere.
-#[cfg(feature = "std")]
+#[cfg(feature = "decompress")]
 fn stream_bounded<R: std::io::Read>(
     make: impl FnOnce() -> std::io::Result<R>,
     limit: u64,
@@ -437,13 +692,28 @@ fn stream_bounded<R: std::io::Read>(
     Ok(true)
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(
+        feature = "cpio",
+        feature = "decompress",
+        feature = "tar",
+        feature = "sevenz",
+        feature = "zip"
+    )
+))]
 mod tests {
     use super::*;
+    #[cfg(any(feature = "decompress", feature = "sevenz", feature = "zip"))]
+    use alloc::string::String;
+    #[cfg(any(feature = "decompress", feature = "sevenz", feature = "zip"))]
+    use rgx_core::Outcome;
+    #[cfg(feature = "decompress")]
     use std::eprintln;
 
     /// The in-house XZ container and the legacy FORMAT_ALONE `.lzma`
     /// stream, both produced by liblzma via python.
+    #[cfg(feature = "decompress")]
     #[test]
     fn xz_and_lzma_decompress() {
         use crate::budget::testing::locked;
@@ -475,6 +745,7 @@ mod tests {
     /// 19 and 22 (including `--long`), and `klauspost/compress`, a Go
     /// implementation that is not a binding to libzstd. rgx-core has no
     /// encoder, so every frame here is output this project did not produce.
+    #[cfg(feature = "decompress")]
     #[test]
     fn every_reference_zstd_frame_decodes() {
         use crate::budget::testing::locked;
@@ -618,7 +889,6 @@ mod tests {
                     .unwrap_or_else(|e| panic!("{label}: {e:?}"));
                 assert!(!b.capped, "{label}");
                 assert_eq!(b.bytes, *want, "{label}");
-                #[cfg(feature = "std")]
                 assert_eq!(
                     b.bytes,
                     zstd::stream::decode_all(*frame).expect(label),
@@ -632,6 +902,7 @@ mod tests {
     /// frames neither of them produced: a corpus of inputs encoded at every
     /// level the `zstd` crate offers, plus mutations of a real frame that
     /// either decode to the same bytes or are refused by both.
+    #[cfg(feature = "decompress")]
     #[test]
     fn the_in_house_decoder_agrees_with_the_zstd_crate() {
         use crate::budget::testing::locked;
@@ -717,6 +988,7 @@ mod tests {
 
     /// Concatenated frames decode to the concatenation, and a skippable
     /// frame between them is skipped rather than read as data (§3.1.2).
+    #[cfg(feature = "decompress")]
     #[test]
     fn concatenated_and_skippable_zstd_frames() {
         use crate::budget::testing::locked;
@@ -756,6 +1028,7 @@ mod tests {
     /// what makes this a test of the fallback rather than of the refusal:
     /// the in-house path alone renders as `zstd frame: ...` and would fail
     /// the prefix check.
+    #[cfg(feature = "decompress")]
     #[test]
     fn a_dictionary_frame_falls_back_and_is_still_not_decoded() {
         use crate::budget::testing::locked;
@@ -786,6 +1059,7 @@ mod tests {
     /// The RLE_Literals_Block shape (RFC 8878 §3.1.1.3.1.3) that no encoder
     /// in the reference corpus produces, hand-built and checked against
     /// libzstd, so "libzstd accepts it" is the evidence that it is real.
+    #[cfg(feature = "decompress")]
     #[test]
     fn libzstd_agrees_on_the_hand_built_rle_literals_frame() {
         use crate::budget::testing::locked;
@@ -810,6 +1084,7 @@ mod tests {
 
     /// A `.zst` that the byte budget has to stop, which is the one the
     /// frame header can answer before a single byte expands.
+    #[cfg(feature = "decompress")]
     #[test]
     fn a_declared_bomb_stops_at_the_byte_budget() {
         const LIMIT: u64 = 1 << 20;
@@ -840,6 +1115,7 @@ mod tests {
     /// malformed file. Hand-built because no reference encoder will make one
     /// at this ratio, and it is not evidence about any real `.zst` -- the
     /// fixtures above are.
+    #[cfg(feature = "decompress")]
     fn bzst_of_runs(total: u32) -> Vec<u8> {
         let mut frame = vec![0x28, 0xb5, 0x2f, 0xfd, 0xa0];
         frame.extend_from_slice(&total.to_le_bytes());
@@ -865,6 +1141,7 @@ mod tests {
     /// this walks each fixture's block, literals and sequence headers and
     /// requires the corpus really to exercise every shape listed below, so a
     /// fixture set that stops covering one cannot leave the claim standing.
+    #[cfg(feature = "decompress")]
     #[test]
     fn the_zstd_corpus_exercises_every_shape_claimed() {
         #[derive(Default)]
@@ -1159,6 +1436,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "decompress")]
     #[test]
     fn gz_becomes_inner_name() {
         let gz = rgx_core::compress::gzip::GzipWriter::new().encode(b"payload");
@@ -1177,6 +1455,7 @@ mod tests {
     /// of the decoder in isolation, or a change to the call site could swap
     /// in something these fixtures never tested. Provenance and the full
     /// vector list are in `testdata/lz4_README.md`.
+    #[cfg(feature = "decompress")]
     #[test]
     fn lz4_reference_frame_through_the_adapter() {
         let cases: [(&[u8], &[u8], &str); 4] = [
@@ -1218,6 +1497,7 @@ mod tests {
     /// Seward release), not by anything in this repository. A round trip
     /// through our own encoder would prove nothing: it passes just as
     /// happily against a broken implementation.
+    #[cfg(feature = "decompress")]
     mod oracle {
         use super::*;
 
@@ -1271,6 +1551,7 @@ mod tests {
     ///
     /// Provenance, the full vector list and the exact commands are in
     /// `testdata/brotli_README.md`.
+    #[cfg(feature = "decompress")]
     mod brotli_oracle {
         use super::*;
         use crate::brotli::coverage as cov;
@@ -1578,6 +1859,7 @@ mod tests {
     /// The decompression budget: a stream that expands past the byte
     /// budget stops where the cap is, says so in a member the pipeline
     /// searches, and a stream under the cap is not touched.
+    #[cfg(feature = "decompress")]
     mod bounded_output {
         use super::*;
         use crate::budget::testing::{locked, under_budget};
@@ -1898,9 +2180,14 @@ mod tests {
         }
     }
 
+    #[cfg(any(feature = "zip", feature = "sevenz"))]
     mod budgeted_members {
         use super::*;
-        use crate::budget::testing::{locked, under_budget};
+        #[cfg(feature = "zip")]
+        use crate::budget::testing::locked;
+        #[cfg(any(feature = "sevenz", feature = "zip"))]
+        use crate::budget::testing::under_budget;
+        #[cfg(feature = "zip")]
         use crate::budget::TRUNCATION_MEMBER;
 
         /// A zip with `count` stored members named `f00000.txt`...; the last
@@ -1908,6 +2195,7 @@ mod tests {
         /// still come back. Hand-written because there is no zip writer
         /// in-tree; past 65535 entries the 32-bit EOCD saturates and the
         /// zip64 records are where `rgx_core::zip` reads the real count.
+        #[cfg(feature = "zip")]
         fn stored_zip(count: usize) -> Vec<u8> {
             let entries: Vec<(String, &[u8])> = (0..count)
                 .map(|i| {
@@ -1925,6 +2213,7 @@ mod tests {
 
         /// The same, with `count` directory entries ahead of `files` real
         /// ones — a container announcing far more entries than it holds.
+        #[cfg(feature = "zip")]
         fn zip_of_dirs_then_files(dirs: usize, files: usize) -> Vec<u8> {
             let mut entries: Vec<(&str, &[u8], bool)> = (0..dirs)
                 .map(|i| {
@@ -1946,6 +2235,7 @@ mod tests {
             zip_of(&entries)
         }
 
+        #[cfg(feature = "zip")]
         fn zip_of(entries: &[(&str, &[u8], bool)]) -> Vec<u8> {
             let mut out = Vec::with_capacity(entries.len() * 100);
             let mut central = Vec::with_capacity(entries.len() * 80);
@@ -2011,6 +2301,7 @@ mod tests {
             out
         }
 
+        #[cfg(all(feature = "zip", feature = "tar"))]
         fn tar_of(count: usize) -> Vec<u8> {
             let mut w = tar::TarWriter::new();
             for i in 0..count {
@@ -2025,6 +2316,13 @@ mod tests {
         }
 
         /// newc archive, as `Cpio` reads it.
+        #[cfg(all(
+            feature = "zip",
+            feature = "tar",
+            feature = "cpio",
+            feature = "rar",
+            feature = "sevenz"
+        ))]
         fn cpio_of(count: usize) -> Vec<u8> {
             let mut out = Vec::new();
             for i in 0..count {
@@ -2072,6 +2370,7 @@ mod tests {
             out
         }
 
+        #[cfg(any(feature = "zip", feature = "sevenz"))]
         fn members(out: Outcome) -> Vec<(String, Vec<u8>)> {
             let Outcome::Members(m) = out else {
                 panic!("expected members")
@@ -2079,10 +2378,12 @@ mod tests {
             m
         }
 
+        #[cfg(feature = "zip")]
         fn names(m: &[(String, Vec<u8>)]) -> Vec<&str> {
             m.iter().map(|(n, _)| n.as_str()).collect()
         }
 
+        #[cfg(all(feature = "zip", feature = "tar"))]
         fn truncated(m: &[(String, Vec<u8>)]) -> bool {
             names(m).contains(&TRUNCATION_MEMBER)
         }
@@ -2092,6 +2393,7 @@ mod tests {
         /// without iterating the whole list -- `ZipReader::extract`
         /// scans the entry list by name on every call, which is
         /// quadratic against the declared count.
+        #[cfg(feature = "zip")]
         #[test]
         fn zip_member_bomb_is_capped_in_the_producer() {
             let zip = stored_zip(65_537);
@@ -2119,6 +2421,7 @@ mod tests {
 
         /// The other half of the bargain: an archive the budget was sized
         /// for still comes back whole, with no notice.
+        #[cfg(all(feature = "zip", feature = "tar"))]
         #[test]
         fn legit_multi_thousand_member_archives_are_not_truncated() {
             let zip = stored_zip(3_000);
@@ -2138,6 +2441,13 @@ mod tests {
         /// Every producer stops at the same budget, and each says so. There
         /// is no 7z writer in-tree, so the 7z arm runs on a reference
         /// three-file archive instead of a synthesised bomb.
+        #[cfg(all(
+            feature = "zip",
+            feature = "tar",
+            feature = "cpio",
+            feature = "rar",
+            feature = "sevenz"
+        ))]
         #[test]
         fn every_producer_stops_at_the_member_budget() {
             under_budget(3, 1 << 20, || {
@@ -2188,6 +2498,113 @@ mod tests {
             });
         }
 
+        // ── 7z: folders after the first ──────────────────────────────
+
+        #[cfg(feature = "sevenz")]
+        const MULTIFOLDER: &[u8] = include_bytes!("../testdata/sevenz_multifolder.7z");
+
+        /// The fixture must actually have more than one folder, or every
+        /// test below passes for the wrong reason -- the defect they pin is
+        /// specific to a folder past the first, and a single-folder fixture
+        /// cannot exercise it at all.
+        #[cfg(feature = "sevenz")]
+        #[test]
+        fn the_multifolder_fixture_really_holds_several_folders() {
+            let arc = sevenz::SevenzArchive::parse(MULTIFOLDER).expect("parse");
+            assert!(
+                arc.folder_count() > 1,
+                "fixture has {} folder(s); it cannot pin a per-folder bug",
+                arc.folder_count()
+            );
+        }
+
+        /// A file past the first folder used to decode the FIRST folder's
+        /// packed bytes through its own coder chain, so every such file came
+        /// back as a CRC mismatch and the whole archive failed to open.
+        ///
+        /// The assertion is that it opens AND that the members are not all
+        /// the same bytes: an archive that "opened" by handing folder 0 to
+        /// every entry would satisfy a bare `.is_ok()`.
+        #[cfg(feature = "sevenz")]
+        #[test]
+        fn a_multifolder_archive_reads_the_folders_past_the_first() {
+            let arc = sevenz::SevenzArchive::parse(MULTIFOLDER).expect("parse");
+            let mut payloads: Vec<Vec<u8>> = Vec::new();
+            for i in 0..arc.files().len() {
+                if arc.files()[i].is_directory {
+                    continue;
+                }
+                payloads.push(arc.extract(i).expect("every member decodes"));
+            }
+            assert!(payloads.len() > arc.folder_count());
+            let distinct: std::collections::BTreeSet<&[u8]> =
+                payloads.iter().map(|p| p.as_slice()).collect();
+            assert!(
+                distinct.len() > 1,
+                "all {} members decoded to the same bytes; the folders are not \
+                 being told apart",
+                payloads.len()
+            );
+        }
+
+        /// One decode per folder, not one per file.
+        ///
+        /// The adapter held a decoded folder and re-decoded it for every
+        /// file in it, so the cost was files-per-folder times the folder's
+        /// decode. Counting decodes is the only assertion that holds on any
+        /// machine; a timing assertion would be a flaky proxy for the same
+        /// contract.
+        #[cfg(feature = "sevenz")]
+        #[test]
+        fn a_folder_is_decoded_once_however_many_files_it_holds() {
+            let arc = sevenz::SevenzArchive::parse(MULTIFOLDER).expect("parse");
+            let folders = arc.folder_count();
+
+            sevenz::take_folder_decodes();
+            let _ = under_budget(64, 1 << 30, || {
+                members(SevenZ.extract(MULTIFOLDER, "m.7z").unwrap())
+            });
+            let decodes = sevenz::take_folder_decodes();
+
+            // Diagnostics for the failure message: which folder each entry
+            // lives in. Contiguity is what a one-slot cache needs, and the
+            // sequence is what makes a re-decode explainable.
+            let seq: Vec<Option<usize>> = (0..arc.files().len())
+                .map(|i| {
+                    let f = &arc.files()[i];
+                    if f.is_directory {
+                        None
+                    } else {
+                        arc.stream_of(i).map(|(folder, _)| folder)
+                    }
+                })
+                .collect();
+            let files = seq.iter().filter(|s| s.is_some()).count();
+
+            // One decode per data folder. The +1 is the encoded header,
+            // which `parse` decodes before any of this runs and which has
+            // its own folder -- it is not a data folder and does not
+            // thrash.
+            assert!(
+                decodes <= folders + 1,
+                "{decodes} folder decodes for {folders} folders: {seq:?}"
+            );
+            // The contract this whole test exists for: strictly fewer
+            // decodes than files. The per-file version decoded once per
+            // entry, so it scored files+1 here and failed.
+            assert!(
+                decodes < files,
+                "{decodes} decodes for {files} files: the per-file re-decode is back: {seq:?}"
+            );
+        }
+
+        #[cfg(all(
+            feature = "zip",
+            feature = "tar",
+            feature = "cpio",
+            feature = "rar",
+            feature = "sevenz"
+        ))]
         fn rar_of(count: usize) -> Vec<u8> {
             use rar_codec::ArchiveBuilder;
             let mut w = ArchiveBuilder::new();
@@ -2200,6 +2617,7 @@ mod tests {
 
         /// A member that does not fit the byte budget is not decoded, and
         /// the notice names the byte budget rather than the count.
+        #[cfg(feature = "zip")]
         #[test]
         fn a_member_that_does_not_fit_the_byte_budget_is_not_decoded() {
             under_budget(4096, 4, || {
@@ -2226,6 +2644,7 @@ mod tests {
         /// `ZipReader::extract` re-scans the central directory for every
         /// name, so without a scan ceiling that scales with the
         /// declared count.
+        #[cfg(feature = "zip")]
         #[test]
         fn an_archive_whose_entries_all_fail_to_decode_stops_looking() {
             let count = 20_000;
@@ -2248,6 +2667,7 @@ mod tests {
         /// and holds a handful of real ones: entries rgx does not expand
         /// (directories) must not eat the budget, and the archive is not
         /// reported as truncated.
+        #[cfg(feature = "zip")]
         #[test]
         fn directory_entries_do_not_consume_the_member_budget() {
             let z = zip_of_dirs_then_files(3_000, 2);
@@ -2256,9 +2676,16 @@ mod tests {
         }
     }
 
+    #[cfg(any(
+        feature = "zip",
+        feature = "tar",
+        feature = "cpio",
+        feature = "decompress"
+    ))]
     mod fuzz {
         use super::*;
 
+        #[cfg(feature = "zip")]
         pub(super) fn crc32(b: &[u8]) -> u32 {
             let mut crc = 0xFFFF_FFFFu32;
             for &byte in b {
@@ -2275,6 +2702,7 @@ mod tests {
         }
 
         /// one stored entry "note.txt" = "hello", local header + CDR + EOCD
+        #[cfg(feature = "zip")]
         fn stored_zip() -> Vec<u8> {
             let content = b"hello";
             let name = b"note.txt";
@@ -2316,6 +2744,7 @@ mod tests {
         }
 
         /// one-file ustar archive: "hi.txt" (2 bytes) + zero blocks
+        #[cfg(feature = "tar")]
         fn mini_tar() -> Vec<u8> {
             let mut h = vec![0u8; 512];
             h[0..6].copy_from_slice(b"hi.txt");
@@ -2331,6 +2760,7 @@ mod tests {
         }
 
         /// newc cpio: one file "a.txt" = "ZIRCALOY" + trailer
+        #[cfg(feature = "cpio")]
         fn mini_cpio() -> Vec<u8> {
             let data = b"ZIRCALOY";
             let name = b"a.txt\0";
@@ -2376,10 +2806,12 @@ mod tests {
             h
         }
 
+        #[cfg(feature = "decompress")]
         fn gz_payload() -> Vec<u8> {
             rgx_core::compress::gzip::GzipWriter::new().encode(b"payload")
         }
 
+        #[cfg(feature = "zip")]
         #[test]
         fn zip_never_panics_on_mutation() {
             rgx_core::fuzzkit::assert_never_panics(
@@ -2396,6 +2828,7 @@ mod tests {
             );
         }
 
+        #[cfg(feature = "tar")]
         #[test]
         fn tar_never_panics_on_mutation() {
             rgx_core::fuzzkit::assert_never_panics(
@@ -2412,6 +2845,7 @@ mod tests {
             );
         }
 
+        #[cfg(feature = "cpio")]
         #[test]
         fn cpio_never_panics_on_mutation() {
             rgx_core::fuzzkit::assert_never_panics(
@@ -2428,6 +2862,7 @@ mod tests {
             );
         }
 
+        #[cfg(feature = "decompress")]
         #[test]
         fn decompress_never_panics_on_mutation() {
             rgx_core::fuzzkit::assert_never_panics(
@@ -2451,6 +2886,7 @@ mod tests {
         /// window, block types past their category, lengths that overrun
         /// the meta-block. The seeds are real streams, so the mutations
         /// land on real headers.
+        #[cfg(feature = "decompress")]
         #[test]
         fn brotli_never_panics_on_mutation() {
             rgx_core::fuzzkit::assert_never_panics(

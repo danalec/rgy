@@ -1,16 +1,20 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Legacy binary `.xls` (BIFF5/8): the `Workbook` stream inside the CFB
 //! container holds a globals substream (BoundSheet8 directory + shared
 //! string table) followed by one worksheet substream per sheet. We walk
 //! the record chain and emit resolved cells (`A1: value`), the same shape
 //! the xlsx path produces. Nothing else in the file is decoded.
 //!
-//! Canonical full implementation: `upstream::b01::io::binary::xls`
-//! (typed cell grid + shared string table per sheet).
+//! A reduced port of the XLS reader of the `io` project by Dan Gohman,
+//! whose work is used here under Apache-2.0: the typed cell grid and the
+//! shared string table per sheet are the shape it walks, and it flattens
+//! them to text. See `NOTICE`.
 
 use alloc::borrow::Cow;
 use alloc::string::String;
 use alloc::vec::Vec;
-use rgx_core::{bail, Context, Result};
+use rgx_core::{decline, Context, Result};
 use rgx_core::{Adapter, Outcome};
 
 #[cfg(test)]
@@ -117,7 +121,14 @@ impl<'a> ChainReader<'a> {
                     .collect();
                 out.push_str(&String::from_utf16_lossy(&units));
             } else {
-                out.push_str(&String::from_utf8_lossy(bytes));
+                // A narrow BIFF8 string is the compressed Unicode form:
+                // a byte below 0x80 is ASCII and a byte above it is
+                // Latin-1. It is not UTF-8, and reading it as such replaced
+                // the accented characters with U+FFFD.
+                out.push_str(
+                    &String::from_utf8(rgx_core::charset::decode(rgx_core::charset::LATIN1, bytes))
+                        .unwrap_or_default(),
+                );
             }
             self.pos += take * unit;
             got += take;
@@ -252,9 +263,9 @@ pub fn extract_text(data: &[u8]) -> Result<String> {
     let wb = cfb
         .stream("Workbook")
         .or_else(|| cfb.stream("Book"))
-        .context("no Workbook stream")?;
+        .decline_context("no Workbook stream")?;
     if wb.len() < 4 || u16_at(&wb, 0) != Some(REC_BOF) {
-        bail!("Workbook stream does not start with BOF");
+        decline!("Workbook stream does not start with BOF");
     }
 
     // Pass 1: directory (BoundSheet8) + shared strings (SST + CONTINUE).
@@ -286,11 +297,13 @@ pub fn extract_text(data: &[u8]) -> Result<String> {
                             .collect();
                         String::from_utf16_lossy(&units)
                     } else {
-                        String::from_utf8_lossy(
+                        // The narrow form of a BIFF8 string is Latin-1.
+                        String::from_utf8(rgx_core::charset::decode(
+                            rgx_core::charset::LATIN1,
                             wb.get(start..start + cch.min(end.saturating_sub(start)))
                                 .unwrap_or(&[]),
-                        )
-                        .into_owned()
+                        ))
+                        .unwrap_or_default()
                     };
                     sheets.push((off, name));
                 }
@@ -317,7 +330,7 @@ pub fn extract_text(data: &[u8]) -> Result<String> {
     }
 
     if sheets.is_empty() {
-        bail!("no BoundSheet8 records (not a BIFF workbook?)");
+        decline!("no BoundSheet8 records (not a BIFF workbook?)");
     }
 
     // Pass 2: worksheet substreams → cells. A sheet's records live at the
@@ -378,7 +391,18 @@ pub fn extract_text(data: &[u8]) -> Result<String> {
                     {
                         let avail = b.len().saturating_sub(8);
                         let v = if avail >= cch && avail < cch + 1 {
-                            String::from_utf8_lossy(&b[8..8 + cch])
+                            // BIFF5 strings are cp1252, and the format says
+                            // so in the record itself. Reading them as UTF-8
+                            // does not read them differently -- it replaces
+                            // every byte above 0x7F with U+FFFD, and the
+                            // character is gone.
+                            Cow::Owned(
+                                String::from_utf8(rgx_core::charset::decode(
+                                    rgx_core::charset::WINDOWS_1252,
+                                    &b[8..8 + cch],
+                                ))
+                                .unwrap_or_default(),
+                            )
                         } else {
                             match b.get(8) {
                                 Some(&grbit) => {
@@ -395,7 +419,18 @@ pub fn extract_text(data: &[u8]) -> Result<String> {
                                             .collect();
                                         Cow::Owned(String::from_utf16_lossy(&units))
                                     } else {
-                                        Cow::Borrowed(core::str::from_utf8(bytes).unwrap_or(""))
+                                        // BIFF8's compressed Unicode form: a
+                                        // byte below 0x80 is ASCII and a byte
+                                        // above it is Latin-1. The string is
+                                        // not UTF-8, and reading it as such
+                                        // dropped the whole cell.
+                                        Cow::Owned(
+                                            String::from_utf8(rgx_core::charset::decode(
+                                                rgx_core::charset::LATIN1,
+                                                bytes,
+                                            ))
+                                            .unwrap_or_default(),
+                                        )
                                     }
                                 }
                                 None => Cow::Borrowed(""),
@@ -529,7 +564,7 @@ pub fn extract_text(data: &[u8]) -> Result<String> {
         }
     }
     if out.trim().is_empty() {
-        bail!("no cells in workbook");
+        decline!("no cells in workbook");
     }
     Ok(out)
 }

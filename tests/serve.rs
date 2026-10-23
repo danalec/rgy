@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! End-to-end tests for `searchd`: JSON-lines protocol over stdio and the
 //! rgx `--serve` argv-array front. Each case feeds stdin and closes it, so
 //! a hang would show up as a test timeout rather than a silent pass.
@@ -82,6 +84,131 @@ fn malformed_request_errors_and_does_not_hang() {
     assert!(
         out.contains("\"op\":\"status\""),
         "the daemon must keep serving after a bad line; got {out}"
+    );
+}
+
+/// The status answer must say *how* the index caught up after the last
+/// restart, and the answer is what this process did — not what the platform
+/// could have done (`docs/design.md` §3, rule 5). A daemon that walked the
+/// tree says "relisted"; a daemon that resumed the change journal at the
+/// saved watermark says "replayed".
+///
+/// The field is the whole point of the answer — a reader that cannot tell
+/// "replayed" from "relisted" cannot tell a caught-up index from a relisted
+/// one.
+#[test]
+fn the_status_answer_says_how_the_index_caught_up() {
+    let dir = fixture_dir("dstatus");
+    text_tree(&dir);
+    let root = dir.to_str().unwrap();
+    let cache = shared_cache_dir("dstatus");
+    let index = cache.join("d.idx");
+    let index_arg = index.to_str().unwrap();
+
+    // First start: there is no index to resume, so the daemon walks the
+    // tree. That is a relist, whatever the platform could have replayed.
+    let (code, out, err) = run_stdin(
+        &searchd(),
+        &["--root", root, "--index", index_arg],
+        "{\"op\":\"status\"}\n",
+    );
+    assert_eq!(code, 0, "stderr={err}");
+    assert!(
+        out.contains("\"catch_up\":\"relisted\""),
+        "a daemon that walked the tree must say so; got {out}"
+    );
+    // And it must still be the status answer the protocol promises.
+    assert!(
+        out.contains("\"op\":\"status\"") && out.contains("\"docs\":"),
+        "the status frame must keep its shape; got {out}"
+    );
+
+    // Second start: the saved index carries the change-feed position it is
+    // current as of. Where the platform's journal still covers it, the
+    // daemon resumes there and replays the backlog; where there is no
+    // journal to resume from, the tree is walked again. Either way the
+    // answer has to match what the daemon actually did.
+    let (code, out, err) = run_stdin(
+        &searchd(),
+        &["--root", root, "--index", index_arg],
+        "{\"op\":\"status\"}\n",
+    );
+    assert_eq!(code, 0, "stderr={err}");
+    let replayed = err.contains("resuming the change journal");
+    let want = if replayed { "replayed" } else { "relisted" };
+    assert!(
+        out.contains(&format!("\"catch_up\":\"{want}\"")),
+        "the status answer must match what the daemon did ({want}); got {out}, stderr={err}"
+    );
+}
+
+/// An index older than the default limit is not served: the daemon rebuilds
+/// it, and says how old the index it refused was — a snapshot of unknown age
+/// is how a search answers "no such file" for a file that exists.
+#[test]
+fn a_daemon_refuses_an_index_older_than_the_default_limit() {
+    let dir = fixture_dir("dold");
+    text_tree(&dir);
+    let root = dir.to_str().unwrap();
+    let cache = shared_cache_dir("dold");
+    let index = cache.join("d.idx");
+    let index_arg = index.to_str().unwrap();
+    let req = r#"{"op":"search","q":"hello","limit":10}"#;
+
+    // First start: build the index and save it.
+    let (code, out, err) = run_stdin(
+        &searchd(),
+        &["--root", root, "--index", index_arg],
+        &format!("{req}\n"),
+    );
+    assert_eq!(code, 0, "stderr={err}");
+    assert!(
+        out.contains("hello.txt"),
+        "the first start must answer; got {out}"
+    );
+
+    // Age the sidecar past the default limit (30 minutes).
+    let mut meta = index.as_os_str().to_os_string();
+    meta.push(".meta");
+    let meta = std::path::PathBuf::from(meta);
+    let stamp = std::fs::read_to_string(&meta).expect("sidecar");
+    let old = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        - 31 * 60;
+    let aged = stamp
+        .lines()
+        .map(|l| {
+            if l.starts_with("built ") {
+                format!("built {old}")
+            } else {
+                l.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&meta, aged).expect("age the stamp");
+
+    // Second start: the index is past the limit, so it is rebuilt and the
+    // reason says how old it was.
+    let (code, out, err) = run_stdin(
+        &searchd(),
+        &["--root", root, "--index", index_arg],
+        &format!("{req}\n"),
+    );
+    assert_eq!(code, 0, "stderr={err}");
+    assert!(
+        err.contains("rebuilding"),
+        "an index past the limit must be rebuilt, not served; stderr={err}"
+    );
+    assert!(
+        err.contains("31m old"),
+        "the refusal must say how old the index was; stderr={err}"
+    );
+    assert!(
+        out.contains("hello.txt"),
+        "the rebuilt index must still answer; got {out}"
     );
 }
 
@@ -322,5 +449,33 @@ fn a_second_daemon_start_reuses_the_saved_index() {
     assert!(
         out.contains("hello.txt"),
         "a reused index must still answer correctly; got {out}"
+    );
+}
+
+// --- console encoding --------------------------------------------------------
+
+/// The protocol stream keeps its raw UTF-8 bytes (parity row 4.7).
+///
+/// The daemon's stdout is a machine channel: the client reads the bytes
+/// and decodes them itself. The console's code page is for rendering on a
+/// terminal, and it must not touch what a client receives -- a `?` where
+/// the accent was would be a wrong answer, not a cosmetic one.
+#[test]
+fn the_protocol_stream_keeps_the_utf8_bytes() {
+    let dir = fixture_dir("dutf8");
+    let name = "ação-nota.txt";
+    std::fs::write(dir.join(name), "needle\n").unwrap();
+    let root = dir.to_str().unwrap();
+
+    let req = r#"{"op":"search","q":"nota","limit":10}"#;
+    let (code, out, err) = run_stdin(&searchd(), &["--root", root], &format!("{req}\n"));
+    assert_eq!(code, 0, "stderr={err}");
+    assert!(
+        out.contains(name),
+        "the hit path must reach the client as UTF-8: {out}"
+    );
+    assert!(
+        !out.contains('?'),
+        "the accent must not become a question mark: {out}"
     );
 }

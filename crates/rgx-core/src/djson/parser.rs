@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! JSON Parser - RFC 8259 compliant.
 //!
 //! Parsing delegates to [`super::index_parser`], which walks the

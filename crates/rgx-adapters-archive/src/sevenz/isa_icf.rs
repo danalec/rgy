@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Stand-in for the `isa-l_icf` encoder the vendored 7-Zip sources import.
 //!
 //! **This is not ISA-L.** It is an Intel library with an x86-64 assembly core,

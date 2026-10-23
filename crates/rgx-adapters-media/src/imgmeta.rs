@@ -1,14 +1,22 @@
-//! GIF and BMP metadata, hand-rolled (ported from upstream `io::binary::gif`
-//! and `io::binary::bmp`). Only headers and comment text are read — pixel
+// SPDX-License-Identifier: Apache-2.0
+
+//! GIF and BMP metadata, hand-rolled (covering what `io::binary::gif`
+//! and `io::binary::bmp` cover). Only headers and comment text are read — pixel
 //! data is never decoded.
 
+#[cfg(any(feature = "gif", feature = "bmp"))]
 use alloc::string::String;
+#[cfg(feature = "gif")]
 use alloc::vec::Vec;
-use rgx_core::{bail, Result};
+#[cfg(any(feature = "gif", feature = "bmp"))]
+use rgx_core::{bail, decline, Result};
+#[cfg(any(feature = "gif", feature = "bmp"))]
 use rgx_core::{Adapter, Outcome};
 
 /// GIF87a/GIF89a: logical-screen descriptor + comment extensions.
+#[cfg(feature = "gif")]
 pub struct Gif;
+#[cfg(feature = "gif")]
 impl Adapter for Gif {
     fn name(&self) -> &'static str {
         "gif"
@@ -37,6 +45,7 @@ impl Adapter for Gif {
     }
 }
 
+#[cfg(feature = "gif")]
 struct GifMeta {
     version: &'static str,
     width: u16,
@@ -46,14 +55,15 @@ struct GifMeta {
     comments: Vec<String>,
 }
 
+#[cfg(feature = "gif")]
 fn gif_meta(data: &[u8]) -> Result<GifMeta> {
     if data.len() < 13 {
-        bail!("fewer bytes than a GIF header");
+        decline!("fewer bytes than a GIF header");
     }
     let version = match &data[..6] {
         b"GIF87a" => "GIF87a",
         b"GIF89a" => "GIF89a",
-        _ => bail!("not a GIF (bad signature)"),
+        _ => decline!("not a GIF (bad signature)"),
     };
     let width = u16::from_le_bytes([data[6], data[7]]);
     let height = u16::from_le_bytes([data[8], data[9]]);
@@ -142,6 +152,7 @@ fn gif_meta(data: &[u8]) -> Result<GifMeta> {
     Ok(meta)
 }
 
+#[cfg(feature = "gif")]
 fn read_sub_blocks(data: &[u8], mut pos: usize) -> Result<(String, usize)> {
     let mut out = Vec::new();
     loop {
@@ -164,6 +175,7 @@ fn read_sub_blocks(data: &[u8], mut pos: usize) -> Result<(String, usize)> {
     Ok((String::from_utf8_lossy(&out).into_owned(), pos))
 }
 
+#[cfg(feature = "gif")]
 fn skip_sub_blocks(data: &[u8], mut pos: usize) -> Result<usize> {
     loop {
         let Some(&size) = data.get(pos) else {
@@ -183,7 +195,9 @@ fn skip_sub_blocks(data: &[u8], mut pos: usize) -> Result<usize> {
 }
 
 /// BMP: BITMAPFILEHEADER + BITMAPINFOHEADER/CORE/V4/V5 fields.
+#[cfg(feature = "bmp")]
 pub struct Bmp;
+#[cfg(feature = "bmp")]
 impl Adapter for Bmp {
     fn name(&self) -> &'static str {
         "bmp"
@@ -193,7 +207,7 @@ impl Adapter for Bmp {
     }
     fn extract(&self, data: &[u8], _path: &str) -> Result<Outcome> {
         if data.len() < 26 || &data[0..2] != b"BM" {
-            bail!("not a BMP (bad signature)");
+            decline!("not a BMP (bad signature)");
         }
         let pixel_offset = u32::from_le_bytes([data[10], data[11], data[12], data[13]]);
         let dib_size = u32::from_le_bytes([data[14], data[15], data[16], data[17]]);
@@ -238,6 +252,7 @@ impl Adapter for Bmp {
     }
 }
 
+#[cfg(feature = "bmp")]
 fn bmp_compression_name(c: u32) -> &'static str {
     match c {
         0 => "none",
@@ -257,7 +272,10 @@ fn bmp_compression_name(c: u32) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(any(feature = "gif", feature = "bmp"))]
+    use alloc::vec::Vec;
 
+    #[cfg(feature = "gif")]
     fn mini_gif() -> Vec<u8> {
         let mut v = Vec::new();
         v.extend_from_slice(b"GIF89a");
@@ -275,6 +293,7 @@ mod tests {
         v
     }
 
+    #[cfg(feature = "bmp")]
     fn mini_bmp() -> Vec<u8> {
         let mut v = Vec::new();
         v.extend_from_slice(b"BM");
@@ -293,6 +312,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "gif")]
     fn gif_header_and_comment() {
         match Gif.extract(&mini_gif(), "a.gif").unwrap() {
             Outcome::Text(t) => {
@@ -307,12 +327,14 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "gif")]
     fn gif_rejects_non_gif() {
         assert!(Gif.extract(b"NOTGIF1234567890", "a.gif").is_err());
         assert!(Gif.extract(b"", "a.gif").is_err());
     }
 
     #[test]
+    #[cfg(feature = "bmp")]
     fn bmp_info_header() {
         match Bmp.extract(&mini_bmp(), "a.bmp").unwrap() {
             Outcome::Text(t) => {
@@ -328,6 +350,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "bmp")]
     fn bmp_top_down_negative_height() {
         let mut v = mini_bmp();
         v[22..26].copy_from_slice(&(-480i32).to_le_bytes());
@@ -342,6 +365,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "bmp")]
     fn bmp_core_header() {
         let mut v = Vec::new();
         v.extend_from_slice(b"BM");
@@ -368,6 +392,7 @@ mod tests {
         use super::*;
 
         #[test]
+        #[cfg(feature = "gif")]
         fn gif_never_panics_on_mutation() {
             rgx_core::fuzzkit::assert_never_panics(
                 vec![
@@ -384,6 +409,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg(feature = "bmp")]
         fn bmp_never_panics_on_mutation() {
             rgx_core::fuzzkit::assert_never_panics(
                 vec![

@@ -229,6 +229,10 @@ pub fn compact_store(store_dir: &Path, min_waste: f64) -> io::Result<Option<Comp
         generation: manifest.generation + 1,
         timestamp_secs: now_secs(),
         corpus: manifest.corpus,
+        // Compaction drops records; it does not re-sign them. The head's
+        // extraction fingerprint describes the surviving rollups exactly as
+        // it described them before, so it travels unchanged.
+        extract_fp: manifest.extract_fp,
         root_path: manifest.root_path.clone(),
         packs: new_packs.clone(),
         files: new_files,

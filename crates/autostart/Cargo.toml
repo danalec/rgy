@@ -1,0 +1,18 @@
+[package]
+name = "autostart"
+version = "0.1.0"
+edition = "2024"
+authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
+description = "Registering the rgy search daemon to start at login, per platform (parity row 4.13)"
+license = "Apache-2.0"
+
+[[bin]]
+name = "rgy-autostart"
+path = "src/main.rs"
+
+# No dependencies on purpose. The platform calls are `schtasks` and `reg`
+# on Windows, `systemctl` and the filesystem on Linux, and a plist file on
+# macOS: every one of them is either a file this crate writes or a command
+# the platform already ships. A binding would add a dependency the tree
+# does not have today, and the owner decides that, not this crate.
+[dependencies]

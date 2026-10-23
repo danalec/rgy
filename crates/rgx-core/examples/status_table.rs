@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The two tables of `benchmark/status.md` §2, from one command, with a gate on
 //! every row that can refuse to print a speed.
 //!

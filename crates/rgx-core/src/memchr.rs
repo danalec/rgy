@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Re-export of the upstream `memchr` crate as an in-tree module.
 //!
 //! `memmem::Finder::find_iter` returns `Matches` whose

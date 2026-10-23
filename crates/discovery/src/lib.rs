@@ -1,4 +1,6 @@
-//! The platform discovery seam (`docs/IMPLEMENTATION_PLAN.md` §4.2).
+// SPDX-License-Identifier: Apache-2.0
+
+//! The platform discovery seam (`docs/design.md` §2.2).
 //!
 //! `Source` enumerates the filesystem as DFS directory blocks; `Watch`
 //! delivers change batches, or [`ChangeBatch::Rescan`] when the feed loses
@@ -88,6 +90,16 @@ pub trait Watch {
     /// The next batch of live changes. [`ChangeBatch::Rescan`] means the
     /// feed lost history and the caller must rebuild from a [`Source`].
     fn next_batch(&mut self) -> Result<ChangeBatch, String>;
+
+    /// Where the feed is in the change history, when it keeps such a place:
+    /// the id the records delivered so far run up to. It is what a later
+    /// run resumes from, so it is the watermark an index carries.
+    ///
+    /// `None` where the platform keeps no history to resume (inotify,
+    /// kqueue): there is no position to name, and nothing to replay.
+    fn position(&self) -> Option<u64> {
+        None
+    }
 }
 
 pub mod interrupt;

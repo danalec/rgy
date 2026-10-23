@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Counters for the packed-mask first stage and its confirm.
 //!
 //! `docs/research/BEYOND-SOTA.md` §8 puts this first for a reason: frequency-aware bucket

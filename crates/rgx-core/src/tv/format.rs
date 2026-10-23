@@ -38,7 +38,18 @@ pub const FORMAT_VERSION: u32 = 1;
 /// file with a NUL at byte 4,000 as text and answered for it while both
 /// reference engines suppressed it, so a v2 catalog is a different question
 /// and is refused with its version named.
-pub const MANIFEST_VERSION: u32 = 4;
+///
+/// v5 redefined a file record's `ngram` field: it is no longer the signature
+/// of the file's own text alone but the OR rollup over that text plus every
+/// unit and `[rgx: ...]` note the adapter pipeline can hand a searcher, and
+/// flag bit [`FileLoc::SIG_COVERS_ADAPTER`] says so per record. The head
+/// gained [`ManifestHead::extract_fp`], the fingerprint of the extraction
+/// context those rollups were computed under: a query whose own context
+/// differs is not covered by them and must not be filtered on them. A v4
+/// store's `ngram` answers a different question -- raw text only -- so its
+/// records cannot be read as rollups and the catalog is refused with its
+/// version named.
+pub const MANIFEST_VERSION: u32 = 5;
 /// Default target pack size (16 MiB).
 pub const DEFAULT_PACK_SIZE: u64 = 16 * 1024 * 1024;
 
@@ -145,22 +156,57 @@ pub struct FileLoc {
     /// cannot hold the needle; `true` proves nothing and costs a search.
     /// All-zero is "unknown" (an archive member, an empty file) and never
     /// rejects; see [`crate::ngram::NgramSig512::contains_query`].
+    ///
+    /// On a record flagged [`Self::SIG_COVERS_ADAPTER`] this is the OR
+    /// rollup over the record's own text **and** every unit and `[rgx: ...]`
+    /// note the adapter pipeline can produce for it -- the whole text a
+    /// searcher may ever see for the file. Without the flag it covers the
+    /// record's own text only, and a search that runs the adapter pipeline
+    /// (which sees units the raw signature never covered) must stand the
+    /// filter down on it.
     pub ngram: [u64; 8],
     flags: u8,
 }
 
 impl FileLoc {
+    /// Flag bit 1: the record is 0 bytes. A 0-byte record carries no
+    /// payload and an all-zero signature; an empty file still matches a
+    /// pattern that can match nothing.
+    pub const FLAG_EMPTY: u8 = 1;
+    /// Flag bit 2: the record is superseded by a later generation.
+    pub const FLAG_DELETED: u8 = 2;
+    /// Flag bit 4: the stored bytes are binary under the build's rule
+    /// (`encoding::is_binary` over the whole file).
+    pub const FLAG_BINARY: u8 = 4;
+    /// Flag bit 8: the stored `ngram` is the adapter rollup -- the OR over
+    /// the record's own text and every unit/error note
+    /// [`crate::process`] can hand a searcher for it. Set on every record
+    /// a rollup-signing build produces; it is the per-record half of the
+    /// trust question whose other half is
+    /// [`ManifestHead::extract_fp`]: a filter may reject an
+    /// adapter-claimed file only when the record says the rollup covers
+    /// the units *and* the query's extraction context matches the one the
+    /// rollup was computed under. When either answer is missing, stand
+    /// down -- pruning is an optimisation, a lost match is a lie.
+    pub const SIG_COVERS_ADAPTER: u8 = 8;
+
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.flags & 1 != 0
+        self.flags & Self::FLAG_EMPTY != 0
     }
     #[inline]
     pub fn is_deleted(&self) -> bool {
-        self.flags & 2 != 0
+        self.flags & Self::FLAG_DELETED != 0
     }
     #[inline]
     pub fn is_binary(&self) -> bool {
-        self.flags & 4 != 0
+        self.flags & Self::FLAG_BINARY != 0
+    }
+    /// Whether the stored [`ngram`](Self::ngram) is the adapter rollup.
+    /// See [`Self::SIG_COVERS_ADAPTER`] for what that obliges a filter to.
+    #[inline]
+    pub fn sig_covers_adapter(&self) -> bool {
+        self.flags & Self::SIG_COVERS_ADAPTER != 0
     }
 }
 
@@ -178,6 +224,9 @@ pub struct FileRecord {
     pub is_empty: bool,
     pub is_deleted: bool,
     pub is_binary: bool,
+    /// Whether the stored `ngram` is the adapter rollup; see
+    /// [`FileLoc::SIG_COVERS_ADAPTER`].
+    pub sig_covers_adapter: bool,
     /// The file's 512-bit n-gram signature; see [`FileLoc::ngram`].
     pub ngram: [u64; 8],
 }
@@ -190,6 +239,29 @@ pub struct FileRecord {
 /// returns — so a corrupt manifest is still an error and never a wrong
 /// result; the work done ahead of the check is work nobody sees if it
 /// fails.
+/// Little-endian u64 assembled by shift. The slice is exactly 8 bytes, so the
+/// only bounds check is the caller's `take`. Faster than
+/// `u64::from_le_bytes(slice.try_into().unwrap())`, which re-checks the length
+/// per field, and it is what makes the manifest parse cost less than the CRC
+/// that gates it.
+#[inline]
+fn u64_le(b: &[u8]) -> u64 {
+    (b[0] as u64)
+        | ((b[1] as u64) << 8)
+        | ((b[2] as u64) << 16)
+        | ((b[3] as u64) << 24)
+        | ((b[4] as u64) << 32)
+        | ((b[5] as u64) << 40)
+        | ((b[6] as u64) << 48)
+        | ((b[7] as u64) << 56)
+}
+
+/// Little-endian u32 assembled by shift. See [`u64_le`].
+#[inline]
+fn u32_le(b: &[u8]) -> u32 {
+    (b[0] as u32) | ((b[1] as u32) << 8) | ((b[2] as u32) << 16) | ((b[3] as u32) << 24)
+}
+
 pub struct RawManifest {
     bytes: Vec<u8>,
     payload_len: usize,
@@ -212,6 +284,17 @@ pub struct ManifestHead {
     /// store contains. An update that would answer a different question must
     /// refuse rather than tombstone everything the answer excluded.
     pub corpus: u64,
+    /// Fingerprint of the extraction context every rollup signature in this
+    /// catalog was computed under: the pipeline [`crate::Ctx`], the
+    /// producer-side member budget, the active adapter policy and the
+    /// adapter chain in registration order (names, declared versions,
+    /// availability). A query computes its own fingerprint the same way and
+    /// may n-gram filter an adapter-claimed file only when the two agree --
+    /// a rollup signed for units other than the query's pipeline will
+    /// produce covers neither side and must stand down. `0` means "not
+    /// stated", which admits no filter on [`FileLoc::SIG_COVERS_ADAPTER`]
+    /// records.
+    pub extract_fp: u64,
     pub root_path: String,
     pub packs: Vec<PackRecord>,
     /// Offset into the raw buffer where the file records begin.
@@ -333,6 +416,7 @@ impl RawManifest {
         let generation = c.u64()?;
         let timestamp_secs = c.u64()?;
         let corpus = c.u64()?;
+        let extract_fp = c.u64()?;
         let root_path = c.string()?;
 
         let pack_count = c.u32()? as usize;
@@ -356,6 +440,7 @@ impl RawManifest {
             generation,
             timestamp_secs,
             corpus,
+            extract_fp,
             root_path,
             packs,
             files_at: c.position(),
@@ -382,22 +467,28 @@ impl RawManifest {
             ));
         }
         let mut locs = Vec::with_capacity(file_count);
+        // One bounds check per field was costing more than the fields: twelve
+        // `try_into().unwrap()` conversions per record over 20,000 records is
+        // 240,000 runtime length checks, and the whole parse measured 59 MB/s
+        // against a CRC32 that runs at ~1 GB/s on the same bytes. Assembling
+        // the integers by shift keeps one bounds check per `take` and none per
+        // byte; the layout is unchanged and so is the answer.
         for _ in 0..file_count {
             let hdr = c.take(12)?;
-            let file_id = u64::from_le_bytes(hdr[..8].try_into().unwrap());
-            let path_len = u32::from_le_bytes(hdr[8..12].try_into().unwrap()) as usize;
+            let file_id = u64_le(&hdr[0..8]);
+            let path_len = u32_le(&hdr[8..12]) as usize;
             let path_at = c.position();
             c.take(path_len)?;
-            let trailer = c.take(101)?;
-            let pack_id = u32::from_le_bytes(trailer[..4].try_into().unwrap());
-            let offset = u64::from_le_bytes(trailer[4..12].try_into().unwrap());
-            let length = u64::from_le_bytes(trailer[12..20].try_into().unwrap());
+            let t = c.take(101)?;
+            let pack_id = u32_le(&t[0..4]);
+            let offset = u64_le(&t[4..12]);
+            let length = u64_le(&t[12..20]);
             let mut ngram = [0u64; 8];
             for (i, w) in ngram.iter_mut().enumerate() {
                 let s = 36 + i * 8;
-                *w = u64::from_le_bytes(trailer[s..s + 8].try_into().unwrap());
+                *w = u64_le(&t[s..s + 8]);
             }
-            let flags = trailer[100];
+            let flags = t[100];
             locs.push(FileLoc {
                 file_id,
                 pack_id,
@@ -461,6 +552,7 @@ impl RawManifest {
         let generation = c.u64()?;
         let timestamp_secs = c.u64()?;
         let corpus = c.u64()?;
+        let extract_fp = c.u64()?;
         let root_path = c.string()?;
 
         let pack_count = c.u32()? as usize;
@@ -506,9 +598,10 @@ impl RawManifest {
                 mtime_secs,
                 mtime_nanos,
                 crc32,
-                is_empty: flags & 1 != 0,
-                is_deleted: flags & 2 != 0,
-                is_binary: flags & 4 != 0,
+                is_empty: flags & FileLoc::FLAG_EMPTY != 0,
+                is_deleted: flags & FileLoc::FLAG_DELETED != 0,
+                is_binary: flags & FileLoc::FLAG_BINARY != 0,
+                sig_covers_adapter: flags & FileLoc::SIG_COVERS_ADAPTER != 0,
                 ngram,
             });
         }
@@ -517,6 +610,7 @@ impl RawManifest {
             generation,
             timestamp_secs,
             corpus,
+            extract_fp,
             root_path,
             packs,
             files,
@@ -525,7 +619,7 @@ impl RawManifest {
 }
 
 /// Smallest byte count that can hold a header, a pack table and a checksum.
-const MIN_MANIFEST_LEN: usize = 8 + 4 + 8 + 8 + 8 + 4 + 4 + 8 + 4;
+const MIN_MANIFEST_LEN: usize = 8 + 4 + 8 + 8 + 8 + 8 + 4 + 4 + 8 + 4;
 
 /// The corpus manifest versioned catalog.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -535,6 +629,9 @@ pub struct Manifest {
     /// Fingerprint of the walk configuration that decided which files belong to
     /// this store. An update carrying a different one is refused.
     pub corpus: u64,
+    /// Fingerprint of the extraction context the rollup signatures were
+    /// computed under; see [`ManifestHead::extract_fp`].
+    pub extract_fp: u64,
     pub root_path: String,
     pub packs: Vec<PackRecord>,
     pub files: Vec<FileRecord>,
@@ -560,6 +657,7 @@ impl Manifest {
             generation,
             timestamp_secs,
             corpus,
+            extract_fp: 0,
             root_path,
             packs: Vec::new(),
             files: Vec::new(),
@@ -576,6 +674,7 @@ impl Manifest {
         buf.extend_from_slice(&self.generation.to_le_bytes());
         buf.extend_from_slice(&self.timestamp_secs.to_le_bytes());
         buf.extend_from_slice(&self.corpus.to_le_bytes());
+        buf.extend_from_slice(&self.extract_fp.to_le_bytes());
 
         // Root path
         let root_bytes = self.root_path.as_bytes();
@@ -610,9 +709,18 @@ impl Manifest {
             for w in f.ngram {
                 buf.extend_from_slice(&w.to_le_bytes());
             }
-            let flags: u8 = (if f.is_empty { 1 } else { 0 })
-                | (if f.is_deleted { 2 } else { 0 })
-                | (if f.is_binary { 4 } else { 0 });
+            let flags: u8 = (if f.is_empty { FileLoc::FLAG_EMPTY } else { 0 })
+                | (if f.is_deleted {
+                    FileLoc::FLAG_DELETED
+                } else {
+                    0
+                })
+                | (if f.is_binary { FileLoc::FLAG_BINARY } else { 0 })
+                | (if f.sig_covers_adapter {
+                    FileLoc::SIG_COVERS_ADAPTER
+                } else {
+                    0
+                });
             buf.extend_from_slice(&[flags]);
         }
 
@@ -621,5 +729,131 @@ impl Manifest {
         buf.extend_from_slice(&checksum.to_le_bytes());
 
         buf
+    }
+}
+
+#[cfg(test)]
+impl FileLoc {
+    /// A locator for tests that need one without a manifest to decode.
+    /// `flags` is the raw byte the trailer carries, so a test can set
+    /// [`Self::SIG_COVERS_ADAPTER`] the way a build does.
+    pub(crate) fn test_loc(
+        file_id: u64,
+        pack_id: u32,
+        offset: u64,
+        length: u64,
+        flags: u8,
+    ) -> FileLoc {
+        FileLoc {
+            file_id,
+            pack_id,
+            offset,
+            length,
+            path_at: 0,
+            path_len: 0,
+            ngram: [0; 8],
+            flags,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::string::ToString;
+
+    fn record(id: u64, path: &str, rollup: bool, ngram: [u64; 8]) -> FileRecord {
+        FileRecord {
+            file_id: id,
+            rel_path: path.to_string(),
+            pack_id: 0,
+            offset: id * 10,
+            length: 10,
+            mtime_secs: 1_700_000_000,
+            mtime_nanos: 5,
+            crc32: 7,
+            is_empty: false,
+            is_deleted: id == 9,
+            is_binary: id == 1,
+            sig_covers_adapter: rollup,
+            ngram,
+        }
+    }
+
+    fn sample() -> Manifest {
+        let mut m =
+            Manifest::with_corpus_at("/srv/corpus".to_string(), 3, 0xdead_beef, 1_700_000_001);
+        m.extract_fp = 0x0123_4567_89ab_cdef;
+        m.packs.push(PackRecord {
+            pack_id: 0,
+            filename: "p00000.tvp".to_string(),
+            file_count: 2,
+            content_len: 123,
+            content_crc32: 456,
+        });
+        let mut sig = [0u64; 8];
+        sig[0] = 1;
+        sig[7] = u64::MAX;
+        m.files.push(record(0, "a.txt", true, sig));
+        m.files.push(record(1, "b.bin", true, [9; 8]));
+        m.files.push(record(2, "c.txt", false, [3; 8]));
+        m
+    }
+
+    /// A v5 catalog carries the extraction fingerprint and the rollup flag
+    /// through encode, decode and scan unchanged -- the three read the same
+    /// bytes and must not disagree about what a record claims its `ngram`
+    /// covers.
+    #[test]
+    fn a_v5_manifest_round_trips_the_extraction_fingerprint_and_the_rollup_flag() {
+        let m = sample();
+        let bytes = m.encode();
+        let raw = RawManifest::from_bytes(bytes).expect("the encoded bytes parse");
+        assert_eq!(raw.head().expect("head").extract_fp, 0x0123_4567_89ab_cdef);
+
+        let decoded = raw.decode().expect("decode");
+        assert_eq!(decoded, m);
+        assert_eq!(decoded.extract_fp, m.extract_fp);
+        assert!(decoded.files[0].sig_covers_adapter);
+        assert!(decoded.files[1].sig_covers_adapter);
+        assert!(!decoded.files[2].sig_covers_adapter);
+
+        let (head, locs) = raw.scan().expect("scan");
+        assert_eq!(head.extract_fp, 0x0123_4567_89ab_cdef);
+        assert!(locs[0].sig_covers_adapter());
+        assert!(locs[1].sig_covers_adapter());
+        assert!(!locs[2].sig_covers_adapter());
+        // The flag survives the fixed-size projection exactly as decode saw it.
+        assert_eq!(locs[0].flags, FileLoc::SIG_COVERS_ADAPTER);
+        assert_eq!(locs[2].flags, 0);
+    }
+
+    /// A store written before v5 stored raw-text signatures where v5 reads
+    /// rollups: its `ngram` answers a different question, so every read path
+    /// refuses it and names the version it found.
+    #[test]
+    fn a_v4_store_is_refused_with_its_version_named() {
+        let bytes = sample().encode();
+        let mut v4 = bytes.clone();
+        v4[8..12].copy_from_slice(&4u32.to_le_bytes());
+        let payload_len = v4.len() - 4;
+        let crc = crate::compress::crc32::crc32(&v4[..payload_len]);
+        v4[payload_len..].copy_from_slice(&crc.to_le_bytes());
+
+        let raw = RawManifest::from_bytes(v4).expect("the patched bytes still parse");
+        for err in [
+            raw.head().expect_err("head refuses").to_string(),
+            raw.scan().expect_err("scan refuses").to_string(),
+            raw.decode().expect_err("decode refuses").to_string(),
+        ] {
+            assert!(
+                err.contains("unsupported manifest version 4"),
+                "the refusal must name version 4, got: {err}"
+            );
+            assert!(
+                err.contains("reads 5"),
+                "the refusal names this build, got: {err}"
+            );
+        }
     }
 }

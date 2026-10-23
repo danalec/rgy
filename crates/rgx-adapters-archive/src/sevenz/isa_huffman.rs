@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! `CompressionLevel` under the `isa_huffman` name the vendored sources use.
 //!
 //! The vendored `sevenz/deflate.rs` imports

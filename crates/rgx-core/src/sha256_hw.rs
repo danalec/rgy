@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! SHA-256 hardware acceleration: Intel SHA-NI on x86_64.
 //!
 //! The kernel is real and byte-exact against the scalar block function. It

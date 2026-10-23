@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Reference SHA-256.
 //!
 //! A *known-good* second implementation carried alongside `sha256` to

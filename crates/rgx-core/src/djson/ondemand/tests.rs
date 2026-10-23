@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Differential oracle: the lazy walk against the Arena parser.
 //!
 //! The two walks share the Stage-1 scanner and nothing else. This

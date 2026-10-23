@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Parallel whole-disk enumeration with getattrlistbulk(2).
 //!
 //! One syscall returns hundreds of entries with name, type, size, mtime and

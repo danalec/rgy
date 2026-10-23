@@ -127,7 +127,7 @@ fn fold8(mix: u64) -> u64 {
         ^ STEP[0][((mix >> 56) & 0xFF) as usize]
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "xz"))]
 mod tests {
     use alloc::vec::Vec;
 

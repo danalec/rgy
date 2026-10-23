@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Stage 2 of the djson two-stage parser: walks the structural index and
 //! populates an [`Arena`].
 //!

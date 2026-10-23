@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Where the wall clock goes when `rgx` searches a real corpus, split at the
 //! boundaries the pipeline actually has.
 //!

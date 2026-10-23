@@ -1713,7 +1713,7 @@ pub fn frame_content_size(data: &[u8]) -> Option<u64> {
     Some(v)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "zstd"))]
 mod tests {
     use super::*;
     use alloc::vec;

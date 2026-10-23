@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Everything-Rs Index (`.eri`) — an NTFS path index rendered as one
 //! path per line.
 //!
@@ -41,7 +43,7 @@
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use rgx_core::{bail, Result};
+use rgx_core::{bail, decline, Result};
 use rgx_core::{Adapter, Outcome};
 
 const ERI_MAGIC: &[u8; 4] = b"ERI1";
@@ -158,7 +160,7 @@ fn scan(data: &[u8]) -> Result<Vec<u8>> {
 /// production always passes [`MAX_OUT`].
 fn scan_capped(data: &[u8], cap: usize) -> Result<Vec<u8>> {
     if data.len() < 4 || &data[0..4] != ERI_MAGIC {
-        bail!("not an ERI index (bad magic)");
+        decline!("not an ERI index (bad magic)");
     }
     let version = u32le(data, 4)?;
     if version != ERI_VERSION {

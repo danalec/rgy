@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The byte scan rgx used to write itself, against the crate it uses now.
 //!
 //! ```text

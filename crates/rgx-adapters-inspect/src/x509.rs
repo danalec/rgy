@@ -1,11 +1,14 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! X.509 certificate metadata (PEM/DER), hand-rolled: minimal DER TLV
-//! walker plus a reduced port of upstream `b02::crypto::tls::x509`. Only
-//! structural parsing — no signature verification.
+//! walker plus a reduced port of the X.509 reader of the `io` project by
+//! Dan Gohman, whose work is used here under Apache-2.0. Only
+//! structural parsing — no signature verification. See `NOTICE`.
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt::Write as _;
-use rgx_core::{bail, Result};
+use rgx_core::{bail, decline, Result};
 use rgx_core::{Adapter, Outcome};
 
 /// X.509 certificates: PEM (`-----BEGIN CERTIFICATE-----`) or raw DER.
@@ -39,6 +42,15 @@ impl Adapter for X509Cert {
         let der = if data.starts_with(b"-----BEGIN") {
             pem_to_der(data)?
         } else {
+            // A DER certificate is a SEQUENCE, so it opens with 0x30. A file
+            // that does not is not a certificate at all — a decline, so the
+            // bytes are searched raw instead of earning a note that says
+            // "overruns buffer" about a file that was never DER. A file
+            // that *does* open with 0x30 and then overruns is a corrupt
+            // certificate, and that is worth reporting.
+            if !data.first().is_some_and(|b| *b == 0x30) {
+                decline!("not a DER certificate (does not open with a SEQUENCE)");
+            }
             data.to_vec()
         };
         let text = describe_cert(&der)?;
@@ -61,7 +73,7 @@ fn pem_to_der(data: &[u8]) -> Result<Vec<u8>> {
         .ok_or_else(|| rgx_core::anyhow!("malformed PEM begin line"))?;
     let label = text[after_begin..after_begin + rel_end].trim().to_string();
     if !label.ends_with("CERTIFICATE") {
-        bail!("PEM block is {label}, not a certificate");
+        decline!("PEM block is {label}, not a certificate");
     }
     let body_start = after_begin + rel_end + "-----".len();
     let end_marker = format!("-----END {label}-----");
@@ -260,7 +272,7 @@ fn describe_cert(der: &[u8]) -> Result<String> {
     let mut top = DerIter::new(der);
     let cert = top.next().ok_or_else(|| rgx_core::anyhow!("empty DER"))??;
     if cert.tag != 0x30 {
-        bail!("not a DER SEQUENCE (tag {:#x})", cert.tag);
+        decline!("not a DER SEQUENCE (tag {:#x})", cert.tag);
     }
     let mut cert_fields = DerIter::new(cert.value);
 

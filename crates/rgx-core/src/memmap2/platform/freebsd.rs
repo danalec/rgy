@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Independent reimplementation of memmap2-rs FreeBSD side.
 //!
 //! Structurally the `macos.rs` implementation — `mmap(2)` with `MAP_SHARED` /

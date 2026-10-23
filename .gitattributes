@@ -38,3 +38,10 @@
 *.sh text eol=lf
 *.tsv text eol=lf
 *.ps1 text eol=lf
+
+# The local patches, byte for byte. `git apply` matches the context lines of
+# a patch against the file it is applied to, and a checkout that rewrote the
+# line endings would leave every context line ending in a CR that the file
+# does not have: the patch would apply to nothing. The patches are LF and
+# have to stay LF.
+scripts/rgx-local-patches/** -text

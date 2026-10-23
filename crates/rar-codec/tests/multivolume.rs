@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Multivolume (split) RAR5 reassembly against a real RARLAB archive.
 //!
 //! `src/read.rs` has synthetic volume tests for both RAR formats; these are

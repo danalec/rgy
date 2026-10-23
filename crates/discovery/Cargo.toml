@@ -2,8 +2,9 @@
 name = "discovery"
 version = "0.1.0"
 edition = "2021"
+authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
 description = "Platform discovery seam (Source/Watch) and the shared change vocabulary"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
 
 [dependencies]
 # The portable walk fans directory reads across a pool; `scan_sequential`

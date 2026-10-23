@@ -20,6 +20,36 @@ use super::deflate::DeflateDecoder;
 use super::error::{CompressError, CompressResult};
 use super::lzma::{LzmaDecoder, LzmaProps};
 
+// ── Test instrumentation ─────────────────────────────────────────────────
+
+// Folder decodes performed on the current thread.
+//
+// The contract this pins is "one decode per folder, however many files the
+// folder holds" -- the thing a per-file extract violates silently, with no
+// wrong answer to catch it. A timing assertion cannot hold on a shared CI
+// box, and a global counter would make the test depend on which unrelated
+// cases run alongside it, so this is thread-local and count-based.
+#[cfg(test)]
+std::thread_local! {
+    static FOLDER_DECODES: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+#[inline]
+fn count_decode() {
+    FOLDER_DECODES.with(|c| c.set(c.get() + 1));
+}
+
+#[cfg(not(test))]
+#[inline]
+fn count_decode() {}
+
+/// Folder decodes since the last [`take_folder_decodes`].
+#[cfg(test)]
+pub(crate) fn take_folder_decodes() -> usize {
+    FOLDER_DECODES.with(|c| c.take())
+}
+
 // ── Format constants ────────────────────────────────────────────────────
 
 const K_END: u8 = 0x00;
@@ -96,6 +126,19 @@ struct SevenzFolder {
     coders: Vec<SevenzCoder>,
     bind_pairs: Vec<(u64, u64)>,
     packed_streams: Vec<u64>,
+    /// Index of this folder's first packed stream in the archive's global
+    /// pack-stream list.
+    ///
+    /// **Folders own consecutive pack streams, so this is the only thing
+    /// that tells folder N where its compressed bytes live.** 7z stores one
+    /// packed stream per folder by default, which is why an implementation
+    /// that assumes "the pack stream is always number 0" passes every
+    /// single-folder archive it is given and corrupts everything after the
+    /// first in a multi-folder one -- the decoded bytes are folder 0's,
+    /// re-run through folder N's coder chain, and the sub-stream CRC turns
+    /// that into `CRC mismatch` instead of wrong text. `pack_offsets` holds
+    /// the matching byte offset; both are computed once, in `parse`.
+    pack_start_index: usize,
     /// Unpack size per coder output stream, in global output order.
     unpack_sizes: Vec<u64>,
     /// Total folder output size (main coder output).
@@ -296,7 +339,6 @@ impl<'a> SevenzArchive<'a> {
             }
             let decoded = Self::decode_folder_bytes(
                 &enc.folders[0],
-                &enc.pack_sizes,
                 &data[pack_start as usize..pack_end as usize],
                 enc.folders[0].unpack_size,
             )?;
@@ -340,55 +382,126 @@ impl<'a> SevenzArchive<'a> {
         &self.files
     }
 
-    /// Unpack one entry by index.  Directories and empty files yield an
-    /// empty buffer.
-    pub fn extract(&self, index: usize) -> CompressResult<Vec<u8>> {
-        let file = self
-            .files
-            .get(index)
-            .ok_or(CompressError::InvalidFormat("file index out of range"))?;
-        let Some((folder_idx, sub_idx)) = file.stream else {
-            return Ok(Vec::new());
-        };
-        let folder = &self.folders[folder_idx];
-        let pack_start = SIGNATURE_HEADER_SIZE as u64 + self.pack_pos;
-        let pack_area_end = pack_start
-            .checked_add(
-                self.pack_sizes
-                    .iter()
-                    .fold(0u64, |a, &b| a.saturating_add(b)),
-            )
+    /// How many folders the archive holds -- one decoder run each, at most.
+    pub fn folder_count(&self) -> usize {
+        self.folders.len()
+    }
+
+    /// `(folder, sub-stream)` holding the entry's payload, if it has one.
+    pub fn stream_of(&self, index: usize) -> Option<(usize, usize)> {
+        self.files.get(index).and_then(|f| f.stream)
+    }
+
+    /// The pack area: every folder's packed stream, concatenated in order.
+    fn pack_area(&self) -> CompressResult<&[u8]> {
+        let start = SIGNATURE_HEADER_SIZE as u64 + self.pack_pos;
+        let total = self
+            .pack_sizes
+            .iter()
+            .try_fold(0u64, |a, &b| a.checked_add(b))
+            .ok_or(CompressError::InvalidFormat("pack size overflow"))?;
+        let end = start
+            .checked_add(total)
             .ok_or(CompressError::InvalidFormat("pack offset overflow"))?;
-        if pack_area_end > self.data.len() as u64 {
+        if end > self.data.len() as u64 {
             return Err(CompressError::UnexpectedEof);
         }
-        let pack_area = &self.data[pack_start as usize..pack_area_end as usize];
-        let out =
-            Self::decode_folder_bytes(folder, &self.pack_sizes, pack_area, folder.unpack_size)?;
+        Ok(&self.data[start as usize..end as usize])
+    }
 
-        // Split into sub-streams and verify per-sub-stream CRCs.
+    /// One folder's packed bytes, addressed by that folder's own index into
+    /// the global pack tables.
+    fn folder_packed(&self, folder_idx: usize) -> CompressResult<&[u8]> {
+        let folder = self
+            .folders
+            .get(folder_idx)
+            .ok_or(CompressError::InvalidFormat("folder index out of range"))?;
+        if folder.packed_streams.len() != 1 {
+            return Err(CompressError::Unsupported("multi-pack-stream folders"));
+        }
+        let pi = folder.pack_start_index;
+        let off = usize::try_from(self.pack_offsets[pi])
+            .map_err(|_| CompressError::InvalidFormat("pack offset out of range"))?;
+        let len = usize::try_from(self.pack_sizes[pi])
+            .map_err(|_| CompressError::InvalidFormat("pack size out of range"))?;
+        let area = self.pack_area()?;
+        let end = off
+            .checked_add(len)
+            .ok_or(CompressError::InvalidFormat("pack offset overflow"))?;
+        area.get(off..end).ok_or(CompressError::UnexpectedEof)
+    }
+
+    /// Decode a folder's full output.
+    ///
+    /// **Callers that walk many entries must hold the result and reuse it**
+    /// -- this is the expensive call. See the adapter: one decode per folder,
+    /// not one per file.
+    pub fn folder_output(&self, folder_idx: usize) -> CompressResult<Vec<u8>> {
+        let unpack_size = self
+            .folders
+            .get(folder_idx)
+            .ok_or(CompressError::InvalidFormat("folder index out of range"))?
+            .unpack_size;
+        Self::decode_folder_bytes(
+            &self.folders[folder_idx],
+            self.folder_packed(folder_idx)?,
+            unpack_size,
+        )
+    }
+
+    /// One file's bytes, carved out of a folder output decoded earlier.
+    ///
+    /// Verifies every sub-stream CRC up to and including the one returned --
+    /// the same coverage a per-file decode gave, so a corrupt entry is still
+    /// refused rather than searched.
+    pub fn substream_bytes(
+        &self,
+        folder_idx: usize,
+        sub_idx: usize,
+        folder_out: &[u8],
+    ) -> CompressResult<Vec<u8>> {
+        let folder = self
+            .folders
+            .get(folder_idx)
+            .ok_or(CompressError::InvalidFormat("folder index out of range"))?;
         let mut out_pos = 0usize;
         for (i, &(size, crc)) in folder.substreams.iter().enumerate() {
             let end = out_pos
-                .checked_add(size as usize)
+                .checked_add(
+                    usize::try_from(size)
+                        .map_err(|_| CompressError::CorruptedData("substream size out of range"))?,
+                )
                 .ok_or(CompressError::CorruptedData("substream size overflow"))?;
-            if end > out.len() {
+            if end > folder_out.len() {
                 return Err(CompressError::CorruptedData(
                     "substream exceeds folder output",
                 ));
             }
             if let Some(expected) = crc {
-                let actual = crc32(&out[out_pos..end]);
+                let actual = crc32(&folder_out[out_pos..end]);
                 if actual != expected {
                     return Err(CompressError::CrcMismatch { expected, actual });
                 }
             }
             if i == sub_idx {
-                return Ok(out[out_pos..end].to_vec());
+                return Ok(folder_out[out_pos..end].to_vec());
             }
             out_pos = end;
         }
         Err(CompressError::CorruptedData("substream index out of range"))
+    }
+
+    /// Unpack one entry by index.  Directories and empty files yield an
+    /// empty buffer.
+    ///
+    /// Decodes the entry's whole folder, so a caller extracting many entries
+    /// should prefer `folder_output` + `substream_bytes`.
+    pub fn extract(&self, index: usize) -> CompressResult<Vec<u8>> {
+        let Some((folder_idx, sub_idx)) = self.stream_of(index) else {
+            return Ok(Vec::new());
+        };
+        let out = self.folder_output(folder_idx)?;
+        self.substream_bytes(folder_idx, sub_idx, &out)
     }
 
     /// Find an entry by exact name.
@@ -552,7 +665,14 @@ impl<'a> SevenzArchive<'a> {
         // Resolve per-folder sub-stream (size, crc) lists.
         let mut sub_size_iter = sub_sizes.iter().copied();
         let mut sub_crc_iter = sub_crcs.map(|v| v.into_iter());
+        // Pack streams are handed to folders in order, so folder N's packed
+        // bytes start after every folder before it has taken its share. Done
+        // here, once, because resolving it per file is what made every entry
+        // past the first folder decode the wrong bytes.
+        let mut next_pack = 0usize;
         for (i, folder) in folders.iter_mut().enumerate() {
+            folder.pack_start_index = next_pack;
+            next_pack += folder.packed_streams.len();
             folder.unpack_size = folder.main_unpack_size();
             let n = num_unpack_stream.as_ref().map(|v| v[i]).unwrap_or(1).max(1);
             if n == 1 {
@@ -692,6 +812,7 @@ impl<'a> SevenzArchive<'a> {
             coders,
             bind_pairs,
             packed_streams,
+            pack_start_index: 0,
             unpack_sizes: Vec::new(),
             unpack_size: 0,
             substreams: Vec::new(),
@@ -850,12 +971,19 @@ impl<'a> SevenzArchive<'a> {
     // ── Decoding ────────────────────────────────────────────────────
 
     /// Decode one folder to its full output buffer.
+    ///
+    /// `packed` is THIS folder's own packed stream, already sliced out of the
+    /// pack area by the caller. The decoder takes the bytes rather than the
+    /// archive's pack tables because the tables are where the wrong-index bug
+    /// lived: a decoder that resolves "my packed stream" from a shared list
+    /// cannot forget to apply the folder's own offset, whereas one handed the
+    /// right bytes has no choice to make.
     fn decode_folder_bytes(
         folder: &SevenzFolder,
-        pack_sizes: &[u64],
-        pack_area: &[u8],
+        packed: &[u8],
         expected_size: u64,
     ) -> CompressResult<Vec<u8>> {
+        count_decode();
         if folder.coders.is_empty() {
             if expected_size == 0 {
                 return Ok(Vec::new());
@@ -882,11 +1010,7 @@ impl<'a> SevenzArchive<'a> {
         if folder.packed_streams.len() != 1 {
             return Err(CompressError::Unsupported("multi-pack-stream folders"));
         }
-        let pack_len = pack_sizes[0] as usize;
-        if pack_len > pack_area.len() {
-            return Err(CompressError::UnexpectedEof);
-        }
-        let mut data = pack_area[..pack_len].to_vec();
+        let mut data = packed.to_vec();
 
         // Global output-stream base per coder.
         let mut out_base = Vec::with_capacity(folder.coders.len());
@@ -1239,6 +1363,25 @@ mod tests {
         assert_eq!(arc.files()[0].name, "empty.txt");
         assert!(!arc.files()[0].is_directory);
         assert_eq!(arc.extract(0).expect("extract"), Vec::<u8>::new());
+    }
+
+    /// The multifolder fixture is a 4,400x expansion: 24 KB on disk, 107 MB
+    /// declared across its two folders (64 MB and 43 MB). Decoding runs at
+    /// ~1.3 GB/s, so the folders themselves are cheap -- the cost of this
+    /// archive is the extraction and the search over what it expands to, not
+    /// the coder chain. Pinned because it is the file the per-folder decode
+    /// fix is measured on, and because a reader that stops expanding early
+    /// would make both numbers smaller for the wrong reason.
+    #[test]
+    fn the_multifolder_fixture_declares_the_expansion_the_folder_fix_is_measured_on() {
+        let arc = SevenzArchive::parse(include_bytes!("../../testdata/sevenz_multifolder.7z"))
+            .expect("parse");
+        let declared: u64 = arc.folders.iter().map(|f| f.unpack_size).sum();
+        assert_eq!(
+            declared, 107_415_075,
+            "fixture changed; re-measure before trusting a timing"
+        );
+        assert!(declared > 64 << 20 && declared < 128 << 20);
     }
 
     #[test]

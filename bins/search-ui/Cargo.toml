@@ -2,11 +2,14 @@
 name = "search-ui"
 version = "0.1.0"
 edition = "2024"
+authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
 description = "Terminal search UI (from zen-rs ui.rs; sparkline latency view)"
 license = "Apache-2.0"
 
 [dependencies]
 name-core = { path = "../../crates/name-core" }
+# The console's UTF-8 code page (parity row 4.7).
+engine = { path = "../../crates/engine" }
 crossterm = "0.28.1"
 
 [dev-dependencies]

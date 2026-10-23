@@ -1,82 +1,197 @@
-//! Licensing invariant for the Apache-2.0-only trees.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Licensing invariant.
 //!
-//! `COPYING` splits this workspace by what the code does: the Zen components
-//! and the Tesla Valve pack store are Apache-2.0 only, everything else is
-//! MIT OR Apache-2.0. Where a whole crate is Apache-only — `zen-rs`,
-//! `search-ui`, `discovery-windows` - its manifest says so. Where the
-//! Apache-only code is a subsystem inside a dual-licensed crate - every file
-//! under `rgx-core`'s `tv`, `tv_runtime` and `bin/rgx-tv.rs` - the per-file
-//! header is the whole signal, because `rgx-core` has to publish
-//! `MIT OR Apache-2.0` for the remainder sitting beside it.
+//! `COPYING` splits this workspace in two: the product and the end-to-end
+//! harness are Apache-2.0, and the tooling around them is MIT OR
+//! Apache-2.0. The vendored rgx crates are Apache-2.0 as well, because they
+//! are upstream rgx's files under upstream's licence and this project does
+//! not relicense somebody else's work.
 //!
-//! One file without the header makes `COPYING` false and nothing else
-//! notices: `rgx-core/src/tv_runtime/compact.rs` shipped exactly that way in
-//! `rgx` and was then transported here with the header still missing.
+//! The signal is the per-file header, and the check is that the header is
+//! the FIRST line of the file — a licence stated in the middle of a file is
+//! a licence nobody reads. One file without the header makes `COPYING`
+//! false and nothing else notices: `rgx-core/src/tv_runtime/compact.rs`
+//! shipped exactly that way in `rgx` and was then transported here with the
+//! header still missing.
+//!
+//! Three rules, and each one has bitten this repository before:
+//!
+//!   1. The product's files say Apache-2.0 and nothing else. The README
+//!      said so for a long time while `COPYING` said MIT OR Apache-2.0
+//!      for the same files — two documents, two answers, and the audit
+//!      that should have caught it only looked at the Zen trees.
+//!   2. The vendored trees say Apache-2.0 too. They are upstream rgx's
+//!      files under upstream's licence, and upstream offers Apache-2.0 and
+//!      no other option. The composed expressions are still on the allowed
+//!      list, so that a file carrying one is a report rather than a build
+//!      failure — but there is not one.
+//!   3. A vendored file may not claim the MIT option. Upstream offers
+//!      Apache-2.0 and no other, so a vendored file that says "MIT OR
+//!      Apache-2.0" makes a promise about terms this project cannot grant
+//!      on upstream's behalf.
 
 use std::path::Path;
 use std::process::Command;
 
-/// Paths `COPYING` licenses under the Apache License 2.0 only. A prefix
-/// ending in `/` names a tree; anything else is matched as a path prefix.
-const APACHE_ONLY: &[&str] = &[
-    "bins/zen-rs/",
-    "bins/search-ui/",
+/// The product: Apache-2.0, and only Apache-2.0.
+const PRODUCT: &[&str] = &[
+    "crates/name-core/",
+    "crates/discovery/",
     "crates/discovery-windows/",
-    "crates/rgx-core/src/tv/",
-    "crates/rgx-core/src/tv_runtime/",
-    "crates/rgx-core/src/bin/rgx-tv.rs",
+    "crates/discovery-linux/",
+    "crates/discovery-macos/",
+    "crates/discovery-freebsd/",
+    "crates/discovery-dispatch/",
+    "crates/engine/",
+    "crates/proto/",
+    "crates/autostart/",
+    "bins/searchctl/",
+    "bins/searchd/",
+    "bins/search-ui/",
+    "bins/zen-rs/",
 ];
 
-/// The header each of those files must carry. The crate manifests are not
-/// audited here: they carry the SPDX identifier in their `license` field,
-/// which is the machine-readable form for a package.
-const SPDX: &str = "SPDX-License-Identifier: Apache-2.0";
+/// The vendored rgx crates: upstream's own files, under upstream's terms.
+const VENDORED: &[&str] = &[
+    "crates/rgx-core/",
+    "crates/rar-codec/",
+    "crates/rgx-adapters-archive/",
+    "crates/rgx-adapters-docs/",
+    "crates/rgx-adapters-inspect/",
+    "crates/rgx-adapters-llm/",
+    "crates/rgx-adapters-mail/",
+    "crates/rgx-adapters-media/",
+    "crates/rgx-adapters-office/",
+    "crates/rgx-adapters-pdf/",
+    "crates/rgx-adapters-tabular/",
+    "crates/rgx-adapters-threed/",
+];
 
-/// Every source file under an Apache-2.0-only path must carry its
-/// `SPDX-License-Identifier: Apache-2.0` header.
+/// The harness: Apache-2.0, like the product.
+const HARNESS: &[&str] = &["tests/"];
+
+const APACHE: &str = "// SPDX-License-Identifier: Apache-2.0";
+const MIT_OR_APACHE: &str = concat!("// SPDX-License-Identifier: MIT OR ", "Apache-2.0");
+const MIT: &str = "// SPDX-License-Identifier: MIT";
+
+/// Files inside an Apache-2.0 tree that carry a licence of their own.
 ///
-/// Skipped when `git` is missing or the tree is not a work tree, so it cannot
-/// become a spurious failure somewhere else.
-#[test]
-fn every_apache_only_source_file_carries_its_spdx_header() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("the e2e harness sits in a workspace subdirectory");
+/// A file that arrives under one licence does not change licence because it
+/// moved: these three came from `fsearch`, which is MIT, and the MIT
+/// notice travels with them. The list is explicit rather than a pattern,
+/// so that a fourth file claiming MIT has to be added here on purpose, and
+/// so that a file that stops being MIT fails the audit instead of quietly
+/// keeping its exception.
+const PRODUCT_EXCEPTIONS: &[(&str, &str)] = &[
+    ("crates/name-core/src/content.rs", MIT),
+    ("crates/name-core/src/name_index.rs", MIT),
+    ("crates/name-core/src/name_query.rs", MIT),
+];
+
+/// The licence expressions a vendored file may carry.
+///
+/// Upstream offers Apache-2.0 and nothing else, and the five files whose
+/// layout was learned from a third-party implementation say the same: a
+/// layout is knowledge, not code, and the code that encodes it was written
+/// for the project. `NOTICE` records where that knowledge came from; no
+/// second licence composes into these files.
+///
+/// The composed expressions are listed here anyway, so that a file that
+/// still carries one is not a build failure but a report: the audit would
+/// rather say that the tree is not uniform than that it is wrong.
+const VENDORED_ALLOWED: &[&str] = &[
+    APACHE,
+    "// SPDX-License-Identifier: Apache-2.0 AND MIT",
+    "// SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause",
+    "// SPDX-License-Identifier: Apache-2.0 AND BSD-2-Clause AND BSD-3-Clause",
+    "// SPDX-License-Identifier: Apache-2.0 AND OLDAP-2.8",
+    "// SPDX-License-Identifier: Apache-2.0 AND PostgreSQL",
+];
+
+/// Every Rust file the workspace tracks, relative to the workspace root.
+///
+/// The list comes from git rather than from a directory walk, so the audit
+/// sees what the repository holds and not what the checkout happens to
+/// have on disk.
+fn tracked_files(root: &Path) -> Option<Vec<String>> {
     let Ok(listed) = Command::new("git")
         .args(["ls-files", "-z"])
         .current_dir(root)
         .output()
     else {
         eprintln!("git unavailable; skipping the SPDX audit");
-        return;
+        return None;
     };
     if !listed.status.success() {
         eprintln!("not a git work tree; skipping the SPDX audit");
-        return;
+        return None;
     }
-
-    let files: Vec<&str> = std::str::from_utf8(&listed.stdout)
+    let files: Vec<String> = std::str::from_utf8(&listed.stdout)
         .expect("git ls-files emits utf-8")
         .split('\0')
         .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
         .collect();
     assert!(!files.is_empty(), "git ls-files returned nothing");
+    Some(files)
+}
+
+fn under(rel: &str, roots: &[&str]) -> bool {
+    roots.iter().any(|p| rel.starts_with(p))
+}
+
+/// The first line of a tracked file, or `None` when it cannot be read.
+fn first_line(root: &Path, rel: &str) -> Option<String> {
+    let text = std::fs::read_to_string(root.join(rel)).ok()?;
+    text.lines().next().map(|l| l.to_string())
+}
+
+/// Every source file must carry the licence its tree is licensed under, and
+/// it must be the first line of the file.
+#[test]
+fn every_source_file_carries_the_licence_its_tree_is_licensed_under() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("the e2e harness sits in a workspace subdirectory");
+    let Some(files) = tracked_files(root) else {
+        return;
+    };
 
     let mut audited = 0usize;
-    let mut unmarked = Vec::new();
+    let mut wrong = Vec::new();
     for rel in &files {
-        if !rel.ends_with(".rs") || !APACHE_ONLY.iter().any(|p| rel.starts_with(p)) {
+        if !rel.ends_with(".rs") {
             continue;
         }
+        let (expected, why): (&[&str], &str) = if under(rel, PRODUCT) {
+            let exception = PRODUCT_EXCEPTIONS.iter().find(|(path, _)| path == rel);
+            match exception {
+                Some((_, expression)) => (
+                    &[*expression][..],
+                    "the file keeps the licence it arrived with",
+                ),
+                None => (&[APACHE], "the product is Apache-2.0"),
+            }
+        } else if under(rel, VENDORED) {
+            (
+                VENDORED_ALLOWED,
+                "a vendored tree carries upstream's licence",
+            )
+        } else if under(rel, HARNESS) {
+            (&[APACHE], "the harness is Apache-2.0, like the product")
+        } else {
+            // The tooling under scripts/, tools/ and benchmark/ carries no
+            // SPDX header: it is not Rust, and its licence is in COPYING.
+            continue;
+        };
         audited += 1;
-        let Ok(text) = std::fs::read_to_string(root.join(rel)) else {
-            // An unreadable file is not an answer, and reporting it as
-            // unmarked would blame the license rather than the filesystem.
+        let Some(first) = first_line(root, rel) else {
             eprintln!("cannot read {rel}; skipping it in the SPDX audit");
             continue;
         };
-        if !text.contains(SPDX) {
-            unmarked.push(rel.to_string());
+        if !expected.contains(&first.as_str()) {
+            wrong.push(format!("{rel}: first line is {first:?} ({why})"));
         }
     }
 
@@ -84,12 +199,100 @@ fn every_apache_only_source_file_carries_its_spdx_header() {
     // actually looked at something instead of passing on an empty match.
     assert!(
         audited > 0,
-        "the SPDX audit matched no source file at all; the APACHE_ONLY path list is stale"
+        "the SPDX audit matched no source file at all; the path lists are stale"
     );
     assert!(
-        unmarked.is_empty(),
-        "these files sit under a path COPYING licenses Apache-2.0 only but carry no \
-         {SPDX} header, so COPYING's claim about them is false:\n{}",
-        unmarked.join("\n")
+        wrong.is_empty(),
+        "these files do not start with the licence expression their tree is licensed \
+         under, so COPYING's claim about them is false:\n{}",
+        wrong.join("\n")
     );
+}
+
+/// A vendored file may not claim the MIT option.
+#[test]
+fn the_vendored_trees_do_not_claim_the_mit_option() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("the e2e harness sits in a workspace subdirectory");
+    let Some(files) = tracked_files(root) else {
+        return;
+    };
+
+    let mut audited = 0usize;
+    let mut retired = Vec::new();
+    for rel in &files {
+        if !rel.ends_with(".rs") || !under(rel, VENDORED) {
+            continue;
+        }
+        audited += 1;
+        let Ok(text) = std::fs::read_to_string(root.join(rel)) else {
+            eprintln!("cannot read {rel}; skipping it in the SPDX audit");
+            continue;
+        };
+        if text.contains(MIT_OR_APACHE) {
+            retired.push(rel.to_string());
+        }
+    }
+
+    assert!(
+        audited > 0,
+        "the MIT-option audit matched no vendored source file at all; the VENDORED \
+         path list is stale"
+    );
+    assert!(
+        retired.is_empty(),
+        "these vendored files still name a licence the upstream project does not \
+         offer ({MIT_OR_APACHE}), which this project cannot grant on its behalf:\n{}",
+        retired.join("\n")
+    );
+}
+
+/// Every exception has to be an exception still.
+///
+/// An exception list rots quietly: the file is renamed, or it changes its
+/// licence, and the list keeps granting it a licence the file no longer
+/// carries. This checks both halves — that the file is still there, and
+/// that it still says what the list says it says.
+#[test]
+fn every_licence_exception_is_an_exception_still() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("the e2e harness sits in a workspace subdirectory");
+
+    for (rel, expression) in PRODUCT_EXCEPTIONS {
+        let path = root.join(rel);
+        assert!(
+            path.exists(),
+            "{rel} is listed as a licence exception but the file is gone; the exception \
+             list is stale"
+        );
+        let first = first_line(root, rel)
+            .unwrap_or_else(|| panic!("cannot read {rel}; the exception list cannot be checked"));
+        assert_eq!(
+            first, *expression,
+            "{rel} is listed as a licence exception for {expression}, but its first line \
+             says {first:?}. Either the file changed its licence or the list is stale."
+        );
+    }
+}
+
+/// The two licence claims in `COPYING` have to name the same trees the
+/// audit checks. A `COPYING` that says "Apache-2.0" about a tree whose
+/// files say otherwise is a false statement, and this is the check that
+/// keeps the document and the headers in step.
+#[test]
+fn copying_names_every_tree_the_audit_checks() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("the e2e harness sits in a workspace subdirectory");
+    let copying = std::fs::read_to_string(root.join("COPYING")).expect("COPYING exists");
+
+    for tree in PRODUCT.iter().chain(VENDORED.iter()) {
+        let name = tree.trim_end_matches('/');
+        assert!(
+            copying.contains(name),
+            "COPYING does not mention {name}, but the audit licenses that tree"
+        );
+    }
 }

@@ -2,8 +2,9 @@
 name = "searchctl"
 version = "0.1.0"
 edition = "2024"
+authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
 description = "The merged name-search CLI (fsearch ergonomics + zen-rs filters)"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
 
 [[bin]]
 name = "searchctl"
@@ -11,8 +12,10 @@ path = "src/main.rs"
 
 [dependencies]
 discovery = { path = "../../crates/discovery" }
-# The platform walk selector (docs/freebsd-support.md P2.1).
+# The platform walk selector (docs/design.md §2.2).
 discovery-dispatch = { path = "../../crates/discovery-dispatch" }
+# The console's UTF-8 code page (parity row 4.7).
+engine = { path = "../../crates/engine" }
 name-core = { path = "../../crates/name-core" }
 # One allocator story (plan 4.4).
 mimalloc = { version = "0.1", default-features = false }

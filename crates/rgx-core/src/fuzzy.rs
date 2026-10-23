@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Exact k-edit-distance literal search as a bounded relaxation.
 //!
 //! Finds every start position whose best window is within `k` unit-cost

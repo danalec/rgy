@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! PST/OST adapter: Outlook Personal Storage Table and Offline Storage
 //! Table files become searchable text (folder tree, message metadata,
 //! bodies).
@@ -28,6 +30,11 @@ const PAGE_TRAILER_ANSI: usize = 12;
 const BLOCK_TRAILER_UNICODE: usize = 16;
 const BLOCK_TRAILER_ANSI: usize = 12;
 const MAX_BLOCK_CB: usize = 8192;
+/// `rgentries` is the entry array of a BTPAGE, and the four header bytes sit
+/// at its end ([MS-PST] 2.2.2.7.7.1): Unicode body 496 = 488 + 4 + 4 spare,
+/// ANSI body 500 = 496 + 4.
+const RGENTRIES_UNICODE: usize = 488;
+const RGENTRIES_ANSI: usize = 496;
 
 const PT_I32: u16 = 0x0003;
 const PT_BOOL: u16 = 0x000B;
@@ -37,7 +44,6 @@ const PT_TIME: u16 = 0x0040;
 const NID_ROOT_FOLDER: u32 = 0x122;
 const NID_TYPE_NORMAL_FOLDER: u32 = 0x02;
 const NID_TYPE_SEARCH_FOLDER: u32 = 0x03;
-const NID_TYPE_HIERARCHY_TABLE: u32 = 0x0D;
 const NID_TYPE_CONTENTS_TABLE: u32 = 0x0E;
 
 const PROP_SUBJECT: u16 = 0x0037;
@@ -115,7 +121,7 @@ static KEY_DATA: [u8; 768] = [
     108, 249, 236,
 ];
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PstErr {
     Sig,
     Version,
@@ -125,13 +131,29 @@ enum PstErr {
 
 impl fmt::Display for PstErr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The adapter claims .ost as well as .pst, and the two containers share
+        // the NDB layer, so a note that says only "PST" misfiles half of what
+        // this code reads.
         match self {
-            Self::Sig => write!(f, "not a PST file (bad magic)"),
-            Self::Version => write!(f, "unsupported PST version"),
-            Self::Corrupt(m) => write!(f, "corrupt PST structure: {m}"),
-            Self::NotFound(m) => write!(f, "not found in PST: {m}"),
+            Self::Sig => write!(f, "not a PST/OST file (bad magic)"),
+            Self::Version => write!(f, "unsupported PST/OST version"),
+            Self::Corrupt(m) => write!(f, "corrupt PST/OST structure: {m}"),
+            Self::NotFound(m) => write!(f, "not found in PST/OST: {m}"),
         }
     }
+}
+
+/// Turn a `PstErr` into an `rgx_core::Error`.
+///
+/// `PstErr::Sig` is a **decline**: the bytes do not carry the `!BDN` magic,
+/// so the file is not a PST or an OST and this adapter is not its reader.
+/// The other variants are failures — the container is the right one and
+/// something in it did not hold up — and they are worth a note.
+fn pst_error(e: PstErr) -> rgx_core::Error {
+    if matches!(e, PstErr::Sig) {
+        return rgx_core::Error::decline(e.to_string());
+    }
+    rgx_core::anyhow!(e)
 }
 #[cfg(feature = "std")]
 impl std::error::Error for PstErr {}
@@ -180,6 +202,40 @@ struct NodeRec {
     bid_data: u64,
     bid_sub: u64,
 }
+
+/// One NBTENTRY, laid out as [MS-PST] 2.2.2.7.8 records it: the node's own
+/// NID, the BID of its data blocks, the BID of its subnode block, and the
+/// NID of the folder it hangs from. That last field is the only parent link a
+/// real store populates — measured across all four sample PSTs, EVERY
+/// `bidSub` in the NBT is zero, so a walk that follows subnode lists has
+/// nothing to follow: it reaches the root folder, finds no display name in
+/// it and no children, and reports an empty mailbox. The spec notes the
+/// field is "not interpreted by any structure defined at the NDB Layer",
+/// which is why it goes unread — the NDB wants no hierarchy, only the
+/// Messaging Layer does.
+struct NbtNode {
+    nid: u32,
+    rec: NodeRec,
+    nid_parent: u32,
+}
+
+/// The folder walk's mutable state. Bundled because the recursion is the only
+/// writer of any of it, and threading eight parameters through a function that
+/// calls itself is a worse read than a struct with named fields.
+struct Walk<'a> {
+    nodes: &'a [NbtNode],
+    children: &'a [(u32, Vec<u32>)],
+    depth: u32,
+    seen: Vec<u32>,
+    out: String,
+    found: bool,
+}
+
+/// The offset from a folder's NID to its Contents Table's NID. Measured, not
+/// assumed: 0x8022 carries 0x802E, 0x8042 carries 0x804E, 0x8062 carries
+/// 0x806E, and the hierarchy tables sit at +0x0B with the receive tables at
+/// +0x0D in every one of them.
+const CONTENTS_TABLE_OFFSET: u32 = 0x0C;
 
 struct Heap {
     blocks: Vec<Vec<u8>>,
@@ -238,21 +294,36 @@ struct Pst<'a> {
     data: &'a [u8],
     unicode: bool,
     crypt: u8,
+    /// The last page the allocation map claims. Both B-tree roots of a valid
+    /// store live below it; a BREF above it names a page the store says it
+    /// never allocated.
+    ib_amap_last: u64,
     nbt_root: (u64, u64),
     bbt_root: (u64, u64),
 }
 
 impl<'a> Pst<'a> {
     fn parse(data: &'a [u8]) -> PstResult<Self> {
-        if data.len() < PAGE_SIZE || u32le(data, 0) != 0x2142_444E {
+        // dwMagic is the literal byte sequence "{ 0x21, 0x42, 0x44, 0x4E }"
+        // ([MS-PST] 2.2.2.6) -- NOT the number 0x2142444E read little-endian,
+        // which is that same ASCII read big-endian and is therefore a value no
+        // writer ever puts on disk. Every real store was refused here.
+        if data.len() < PAGE_SIZE || data[0..4] != [0x21, 0x42, 0x44, 0x4E] {
             return Err(PstErr::Sig);
         }
-        if u16le(data, 8) != 0x4D53 {
-            return Err(PstErr::Sig);
-        }
+        // wMagicClient is what separates the two containers of the format:
+        // 0x4D53 ("SM") is a personal store, 0x4F53 ("SO") an offline store.
+        let _ost = match u16le(data, 8) {
+            0x4D53 => false,
+            0x4F53 => true,
+            _ => return Err(PstErr::Sig),
+        };
+        // wVer is 14/15 for ANSI and ">= 23" for Unicode; 37 marks a store
+        // written with Windows Information Protection. Matching 23 exactly
+        // refused the Outlook 2013 offline store, whose wVer is 36.
         let unicode = match u16le(data, 10) {
             14 | 15 => false,
-            23 => true,
+            v if v >= 23 => true,
             _ => return Err(PstErr::Version),
         };
         if data.len() < 514 {
@@ -266,27 +337,36 @@ impl<'a> Pst<'a> {
         if root_off + 40 > data.len() {
             return Err(PstErr::Corrupt("header truncated"));
         }
+        // ROOT ([MS-PST] 2.2.2.5) opens with dwReserved, so every field after it
+        // sits 4 bytes later than a layout that forgets the reserved word:
+        // Unicode (72 bytes) +4 ibFileEof, +12 ibAMapLast, +20 cbAMapFree,
+        // +28 cbPMapFree, +36 BREFNBT, +52 BREFBBT, +68 fAMapValid.
+        // A BREF is { bid, ib } ([MS-PST] 2.2.2.4) -- the BID is the btree
+        // key, the IB the page's byte offset. Reading the pair the other way
+        // round hands a BID to page() as an offset.
         let (nbt_root, bbt_root) = if unicode {
             (
-                (u64le(data, root_off + 32), u64le(data, root_off + 40)),
-                (u64le(data, root_off + 48), u64le(data, root_off + 56)),
+                (u64le(data, root_off + 36), u64le(data, root_off + 44)),
+                (u64le(data, root_off + 52), u64le(data, root_off + 60)),
             )
         } else {
             (
                 (
-                    u32le(data, root_off + 16) as u64,
                     u32le(data, root_off + 20) as u64,
+                    u32le(data, root_off + 24) as u64,
                 ),
                 (
-                    u32le(data, root_off + 24) as u64,
                     u32le(data, root_off + 28) as u64,
+                    u32le(data, root_off + 32) as u64,
                 ),
             )
         };
+        let ib_amap_last = u64le(data, root_off + 12);
         Ok(Self {
             data,
             unicode,
             crypt,
+            ib_amap_last,
             nbt_root,
             bbt_root,
         })
@@ -316,20 +396,32 @@ impl<'a> Pst<'a> {
         let page = &self.data[ib..ib + PAGE_SIZE];
         let tsize = self.page_trailer();
         let body = &page[..PAGE_SIZE - tsize];
-        if body.len() < 8 {
+        // BTPAGE ([MS-PST] 2.2.2.7.7.1) puts rgentries first and the four
+        // header bytes at ITS END: cEnt, cEntMax, cbEnt, cLevel. Reading them
+        // off the front is not an off-by-one but a different structure, and the
+        // first eight bytes of the body are the first btkey -- so `cb_ent` came
+        // from a key's high bytes and read 0 on every real page, which is the
+        // "zero page entry size" the adapter reported.
+        let rg = if self.unicode {
+            RGENTRIES_UNICODE
+        } else {
+            RGENTRIES_ANSI
+        };
+        if body.len() < rg + 4 {
             return Err(PstErr::Corrupt("page header truncated"));
         }
-        let c_ent = body[0] as usize;
-        let cb_ent = body[2] as usize;
-        let ptype = page[PAGE_SIZE - tsize];
+        let c_ent = body[rg] as usize;
+        let cb_ent = body[rg + 2] as usize;
+        let level = body[rg + 3];
         if cb_ent == 0 {
             return Err(PstErr::Corrupt("zero page entry size"));
         }
-        let entries = &body[8..];
+        let ptype = page[PAGE_SIZE - tsize];
+        let entries = &body[..rg];
         if c_ent * cb_ent > entries.len() {
             return Err(PstErr::Corrupt("page entries out of range"));
         }
-        Ok((body[3], &entries[..c_ent * cb_ent], cb_ent, ptype))
+        Ok((level, &entries[..c_ent * cb_ent], cb_ent, ptype))
     }
 
     fn entry_key(&self, entries: &[u8], i: usize, cb_ent: usize) -> u64 {
@@ -342,7 +434,10 @@ impl<'a> Pst<'a> {
     }
 
     fn btree_leaf_page(&self, root: (u64, u64), key: u64, ptype: u8) -> PstResult<u64> {
-        let mut cur = root.0;
+        // root.1 is the BREF's IB: the byte offset of the btree root page. root.0
+        // is its BID, a key, and handing that to page() reads a page from the
+        // middle of the header.
+        let mut cur = root.1;
         for _ in 0..32 {
             let (level, entries, cb_ent, got) = self.page(cur)?;
             if got != ptype {
@@ -362,7 +457,11 @@ impl<'a> Pst<'a> {
                 }
             }
             let i = pick.ok_or(PstErr::NotFound("btree path"))?;
-            let o = i * cb_ent + key_size;
+            // A BTENTRY is btkey followed by a BREF ([MS-PST] 2.2.2.7.7.2),
+            // and the child page is at the BREF's IB -- its second half. Reading
+            // the BID instead walks the tree by key into the middle of a data
+            // block, which is where "page out of range" came from.
+            let o = i * cb_ent + key_size + if self.unicode { 8 } else { 4 };
             cur = if self.unicode {
                 u64le(entries, o)
             } else {
@@ -559,6 +658,103 @@ impl<'a> Pst<'a> {
         self.subnodes(rec.bid_sub, 0)
     }
 
+    /// Every node in the NBT, read once. The alternative — a btree descent per
+    /// node — turns one pass over the store into one pass per folder, on a
+    /// structure that is a flat list of NIDs the walk is going to join anyway.
+    ///
+    /// The tree's own failure is returned rather than swallowed. An unreadable
+    /// page used to end the descent and leave an empty list, which the walk then
+    /// reported as a missing node: "not found in PST: node" names one absent
+    /// NID when the truth is that the node database is absent altogether. A
+    /// store whose ROOT BREF points into free space — an offline store whose
+    /// cached folders were dropped, which is the whole shape of the only public
+    /// .ost — has exactly that shape, and it deserves to say so.
+    ///
+    /// A page that fails BELOW the root is tolerated: a tree with one unreadable
+    /// subtree still has a mailbox worth searching, and refusing the whole file
+    /// over it would trade a partial answer for none.
+    fn nbt_nodes(&self) -> PstResult<Vec<NbtNode>> {
+        let mut out = Vec::new();
+        let mut seen = Vec::new();
+        let mut first_err = None;
+        self.collect_nodes(self.nbt_root.1, &mut seen, &mut out, 0, &mut first_err);
+        if out.is_empty() {
+            // Root above ibAMapLast is a stronger statement than the page error:
+            // the store's own allocation map says that page was never written.
+            // The one public .ost is in exactly this state -- BREFNBT.ib 577,536
+            // and BREFBBT.ib 413,696 against ibAMapLast 139,264 -- which is what
+            // a cached store is left as once its folders are dropped. Only ever
+            // reached once the tree has already yielded nothing, so it sharpens
+            // the note and never refuses a store that could be read.
+            if self.nbt_root.1 >= self.ib_amap_last {
+                return Err(PstErr::Corrupt(
+                    "node B-tree root lies past ibAMapLast: no node database is allocated",
+                ));
+            }
+            if let Some(e) = first_err {
+                return Err(e);
+            }
+        }
+        Ok(out)
+    }
+
+    fn collect_nodes(
+        &self,
+        ib: u64,
+        seen: &mut Vec<u64>,
+        out: &mut Vec<NbtNode>,
+        depth: u32,
+        first_err: &mut Option<PstErr>,
+    ) {
+        if depth > 32 || seen.contains(&ib) {
+            return;
+        }
+        seen.push(ib);
+        let (level, entries, cb_ent, _) = match self.page(ib) {
+            Ok(v) => v,
+            Err(e) => {
+                if first_err.is_none() {
+                    *first_err = Some(e);
+                }
+                return;
+            }
+        };
+        let key_size = if self.unicode { 8 } else { 4 };
+        for i in 0..entries.len() / cb_ent {
+            let o = i * cb_ent;
+            if level == 0 {
+                let (nid, bid_data, bid_sub, nid_parent) = if self.unicode {
+                    (
+                        u64le(entries, o) as u32,
+                        u64le(entries, o + 8),
+                        u64le(entries, o + 16),
+                        u32le(entries, o + 24),
+                    )
+                } else {
+                    (
+                        u32le(entries, o),
+                        u32le(entries, o + 4) as u64,
+                        u32le(entries, o + 8) as u64,
+                        u32le(entries, o + 12),
+                    )
+                };
+                out.push(NbtNode {
+                    nid,
+                    rec: NodeRec { bid_data, bid_sub },
+                    nid_parent,
+                });
+            } else {
+                let o = o + key_size + if self.unicode { 8 } else { 4 };
+                let child = if self.unicode {
+                    u64le(entries, o)
+                } else {
+                    u32le(entries, o) as u64
+                };
+                self.collect_nodes(child, seen, out, depth + 1, first_err);
+            }
+        }
+    }
+
     fn bth_entries(&self, heap: &Heap, hid_user_root: u32) -> PstResult<Vec<(u64, Vec<u8>)>> {
         let header = heap
             .item(hid_user_root)
@@ -709,55 +905,59 @@ impl<'a> Pst<'a> {
             .collect())
     }
 
-    fn folder_text(
-        &self,
-        nid: u32,
-        depth: u32,
-        seen: &mut Vec<u32>,
-        out: &mut String,
-    ) -> PstResult<()> {
-        if depth > 64 || seen.contains(&nid) {
+    fn folder_text(&self, walk: &mut Walk<'_>, nid: u32) -> PstResult<()> {
+        if walk.depth > 64 || walk.seen.contains(&nid) {
             return Err(PstErr::Corrupt("folder cycle"));
         }
-        seen.push(nid);
-        let rec = self.node(nid)?;
+        walk.seen.push(nid);
+        let rec = walk
+            .nodes
+            .iter()
+            .find(|n| n.nid == nid)
+            .map(|n| n.rec)
+            .ok_or(PstErr::NotFound("node"))?;
         let props = self.read_pc_rec(&rec)?;
         let name = props
             .iter()
             .find(|(id, _)| *id == PROP_DISPLAY_NAME)
             .and_then(|(_, v)| v.text())
             .unwrap_or_default();
-        let _ = writeln!(out, "{}[folder] {}", "  ".repeat(depth as usize), name);
-        let mut content_tables = Vec::new();
-        for (snid, sbid, sbs) in self.subnode_map(&rec)? {
-            let table_rec = NodeRec {
-                bid_data: sbid,
-                bid_sub: sbs,
-            };
-            match snid & 0x1F {
-                NID_TYPE_HIERARCHY_TABLE => {
-                    if let Ok(child_nids) = self.read_table_row_ids(&table_rec) {
-                        for child_nid in child_nids {
-                            if child_nid & 0x1F == NID_TYPE_NORMAL_FOLDER
-                                || child_nid & 0x1F == NID_TYPE_SEARCH_FOLDER
-                            {
-                                let _ = self.folder_text(child_nid, depth + 1, seen, out);
-                            }
+        // A nameless node still gets walked -- the root folder's own PC has no
+        // display name in any of the four stores -- but it does not get a
+        // line. "[folder] " with nothing after it reads as a folder that was
+        // opened and found empty, which is a different claim from "this node
+        // has no name".
+        if !name.is_empty() {
+            let _ = writeln!(
+                walk.out,
+                "{}[folder] {}",
+                "  ".repeat(walk.depth as usize),
+                name
+            );
+            walk.found = true;
+        }
+        // The contents table is a sibling NID, not a subnode. The subnode
+        // list that would have named it is the zero this walk had just proved
+        // unreadable, so the association has to come from the NID instead.
+        if let Some(table) = walk.nodes.iter().find(|n| {
+            n.nid == nid.wrapping_add(CONTENTS_TABLE_OFFSET)
+                && n.nid & 0x1F == NID_TYPE_CONTENTS_TABLE
+        }) {
+            if let Ok(msg_nids) = self.read_table_row_ids(&table.rec) {
+                for mnid in msg_nids {
+                    if let Ok(text) = self.message_text(mnid) {
+                        if !text.is_empty() {
+                            walk.found = true;
+                            walk.out.push_str(&text);
                         }
                     }
                 }
-                NID_TYPE_CONTENTS_TABLE => content_tables.push(table_rec),
-                _ => {}
             }
         }
-        for table in content_tables {
-            if let Ok(msg_nids) = self.read_table_row_ids(&table) {
-                for mnid in msg_nids {
-                    if let Ok(text) = self.message_text(mnid) {
-                        out.push_str(&text);
-                    }
-                }
-            }
+        for child in subfolders(walk.children, nid) {
+            walk.depth += 1;
+            let _ = self.folder_text(walk, *child);
+            walk.depth -= 1;
         }
         Ok(())
     }
@@ -825,6 +1025,40 @@ impl<'a> Pst<'a> {
     }
 }
 
+/// `nid_parent` -> the folder NIDs naming it as their parent, each list in
+/// NID order so a walk is reproducible. A node whose `nidParent` equals its
+/// own NID is the root naming itself, and joining it to its own child list
+/// would make the walk a cycle, so it is dropped.
+fn folder_children(nodes: &[NbtNode]) -> Vec<(u32, Vec<u32>)> {
+    let mut out: Vec<(u32, Vec<u32>)> = Vec::new();
+    for n in nodes {
+        let ty = n.nid & 0x1F;
+        if ty != NID_TYPE_NORMAL_FOLDER && ty != NID_TYPE_SEARCH_FOLDER {
+            continue;
+        }
+        if n.nid_parent == 0 || n.nid_parent == n.nid {
+            continue;
+        }
+        match out.iter_mut().find(|(parent, _)| *parent == n.nid_parent) {
+            Some((_, kids)) => kids.push(n.nid),
+            None => out.push((n.nid_parent, vec![n.nid])),
+        }
+    }
+    for (_, kids) in out.iter_mut() {
+        kids.sort_unstable();
+    }
+    out.sort_by_key(|(parent, _)| *parent);
+    out
+}
+
+fn subfolders(children: &[(u32, Vec<u32>)], parent: u32) -> &[u32] {
+    children
+        .iter()
+        .find(|(p, _)| *p == parent)
+        .map(|(_, kids)| kids.as_slice())
+        .unwrap_or(&[])
+}
+
 fn decode_utf16_until_nul(data: &[u8]) -> String {
     let mut units = Vec::with_capacity(data.len() / 2);
     let mut p = 0;
@@ -870,12 +1104,29 @@ impl Adapter for PstAdapter {
         &["pst", "ost"]
     }
     fn extract(&self, data: &[u8], _path: &str) -> Result<Outcome> {
-        let pst = Pst::parse(data).map_err(|e| rgx_core::anyhow!(e))?;
-        let mut out = String::new();
-        pst.folder_text(NID_ROOT_FOLDER, 0, &mut Vec::new(), &mut out)
-            .map_err(|e| rgx_core::anyhow!(e))?;
-        if out.trim().is_empty() {
-            bail!("no folders or messages found in PST/OST");
+        let pst = Pst::parse(data).map_err(pst_error)?;
+        let nodes = pst.nbt_nodes().map_err(pst_error)?;
+        let children = folder_children(&nodes);
+        let mut walk = Walk {
+            nodes: &nodes,
+            children: &children,
+            depth: 0,
+            seen: Vec::new(),
+            out: String::new(),
+            found: false,
+        };
+        pst.folder_text(&mut walk, NID_ROOT_FOLDER)
+            .map_err(pst_error)?;
+        let found = walk.found;
+        let out = walk.out;
+        // The test is "did we read anything", not "did we write anything": a
+        // walk that reaches the root folder and finds no property in it still
+        // writes the label line, and printing "[folder] " with a blank name is
+        // the SILENT failure mode — the user cannot tell the file was opened
+        // and emptied. Declining falls back to the raw search, which at least
+        // answers with the file's own bytes.
+        if !found {
+            bail!("PST/OST structure reached but no folder or message was readable");
         }
         Ok(Outcome::Text(out.into_bytes()))
     }
@@ -969,12 +1220,26 @@ mod tests {
         t
     }
 
+    /// The four BTPAGE header bytes sit at the END of rgentries, not the front
+    /// ([MS-PST] 2.2.2.7.7.1). Writing them at offset 0 is what let this fixture
+    /// and the reader agree on a layout no real store uses.
+    fn bt_page_header(page: &mut [u8], c_ent: u8, c_ent_max: u8, cb_ent: u8, c_level: u8) {
+        let rg = RGENTRIES_UNICODE;
+        page[rg] = c_ent;
+        page[rg + 1] = c_ent_max;
+        page[rg + 2] = cb_ent;
+        page[rg + 3] = c_level;
+    }
+
     fn build_fixture(crypt: u8) -> Vec<u8> {
+        // The root folder's PC carries no display name, exactly as every real
+        // store's does -- the label of the mailbox is the string of the child
+        // folder, one level down. It keeps one real property, because the BTH
+        // still needs its leaf page even when there is nothing to look up.
         let root_folder_pc = heap_block(
             &[
                 bth_header(2, 6, 0, hid(0, 2)),
-                pc_leaf_record(PROP_DISPLAY_NAME, PT_UNICODE, hid(0, 3)),
-                utf16z("Root Mailbox"),
+                pc_leaf_record(0x360A, PT_BOOL, 1),
             ],
             0xBC,
             hid(0, 1),
@@ -1003,17 +1268,19 @@ mod tests {
         row.extend_from_slice(&[0; 4]);
         row.push(0x80);
         let contents_tc = heap_block(&[tcinfo_one_col(hid(0, 2)), row], 0x7C, hid(0, 1));
-
-        let ctc_nid = nid(5, NID_TYPE_CONTENTS_TABLE);
-        let mut sl = vec![0x02u8, 0x00, 0x01, 0x00];
-        sl.extend_from_slice(&0u32.to_le_bytes());
-        sl.extend_from_slice(&(ctc_nid as u64).to_le_bytes());
-        sl.extend_from_slice(&bid(8, false).to_le_bytes());
-        sl.extend_from_slice(&0u64.to_le_bytes());
+        let child_folder_pc = heap_block(
+            &[
+                bth_header(2, 6, 0, hid(0, 2)),
+                pc_leaf_record(PROP_DISPLAY_NAME, PT_UNICODE, hid(0, 3)),
+                utf16z("Inbox"),
+            ],
+            0xBC,
+            hid(0, 1),
+        );
 
         let mut ext_blocks: Vec<(Vec<u8>, bool)> = vec![
             (root_folder_pc, false),
-            (sl, true),
+            (child_folder_pc, false),
             (message_pc, false),
             (contents_tc, false),
         ];
@@ -1032,8 +1299,13 @@ mod tests {
         // Blocks are 64-aligned; reserve 256 bytes per block slot.
         let block_offsets = [2048usize, 2304, 2560, 2816];
         let mut data = vec![0u8; 4096];
-        data[0..4].copy_from_slice(&0x2142_444Eu32.to_le_bytes());
-        data[8..10].copy_from_slice(&0x4D53u16.to_le_bytes());
+        // The bytes the spec names, not the little-endian reading of the number
+        // that spells them: the parser and this fixture once shared the second
+        // form, which made the test agree with a parser no real file could pass.
+        data[0..4].copy_from_slice(&[0x21, 0x42, 0x44, 0x4E]);
+        // crypt == 1 builds the offline store: 0x4F53 ("SO"), not 0x4D53 ("SM").
+        data[8..10]
+            .copy_from_slice(&(if crypt == 1 { 0x4F53u16 } else { 0x4D53u16 }).to_le_bytes());
         data[10..12].copy_from_slice(&23u16.to_le_bytes());
         data[12..14].copy_from_slice(&19u16.to_le_bytes());
         data[14] = 1;
@@ -1041,52 +1313,63 @@ mod tests {
         data[512] = 0x80;
         data[513] = crypt;
         let file_size = data.len() as u64;
-        data[180..188].copy_from_slice(&file_size.to_le_bytes());
-        data[212..220].copy_from_slice(&1024u64.to_le_bytes());
-        data[220..228].copy_from_slice(&bid(1, false).to_le_bytes());
-        data[228..236].copy_from_slice(&1536u64.to_le_bytes());
-        data[236..244].copy_from_slice(&bid(2, false).to_le_bytes());
+        // ibFileEof sits at ROOT+4, behind dwReserved.
+        data[184..192].copy_from_slice(&file_size.to_le_bytes());
+        // ibAMapLast at ROOT+12: the last allocated page. Both btree roots sit
+        // below it, as in every real store -- a fixture that left it zero would
+        // make the reader call its own tree unallocated.
+        data[192..200].copy_from_slice(&file_size.to_le_bytes());
+        // BREFNBT and BREFBBT are { bid, ib }; the IB is the page offset.
+        data[216..224].copy_from_slice(&bid(1, false).to_le_bytes());
+        data[224..232].copy_from_slice(&1024u64.to_le_bytes());
+        data[232..240].copy_from_slice(&bid(2, false).to_le_bytes());
+        data[240..248].copy_from_slice(&1536u64.to_le_bytes());
+        data[248] = 2; // fAMapValid = VALID_AMAP2
 
+        // Every bidSub is ZERO here, because every bidSub is zero in the four real
+        // stores measured: the folder's hierarchy and its contents table are
+        // both named by NID, not by a subnode list. A fixture that gave the
+        // root folder a subnode block would agree with a reader no real file
+        // can satisfy -- which is exactly how this defect survived.
+        let child_folder = nid(7, NID_TYPE_NORMAL_FOLDER);
+        let ctc_nid = child_folder.wrapping_add(CONTENTS_TABLE_OFFSET);
         let mut page = vec![0u8; PAGE_SIZE];
-        page[0] = 2;
-        page[1] = 15;
-        page[2] = 32;
-        page[3] = 0;
-        for (i, (n, bd, bs)) in [
-            (NID_ROOT_FOLDER, bid(4, false), bid(5, true)),
-            (nid(8, 0x04), bid(6, false), 0u64),
+        for (i, (n, bd, parent)) in [
+            (NID_ROOT_FOLDER, bid(4, false), NID_ROOT_FOLDER),
+            (child_folder, bid(5, false), NID_ROOT_FOLDER),
+            (ctc_nid, bid(7, false), 0u32),
+            (nid(8, 0x04), bid(6, false), 0u32),
         ]
         .into_iter()
         .enumerate()
         {
-            let o = 8 + i * 32;
+            let o = i * 32;
             page[o..o + 8].copy_from_slice(&(n as u64).to_le_bytes());
             page[o + 8..o + 16].copy_from_slice(&bd.to_le_bytes());
-            page[o + 16..o + 24].copy_from_slice(&bs.to_le_bytes());
+            page[o + 16..o + 24].copy_from_slice(&0u64.to_le_bytes());
+            page[o + 24..o + 28].copy_from_slice(&parent.to_le_bytes());
         }
+        bt_page_header(&mut page, 4, 4, 32, 0);
         page[496] = 0x81;
         page[497] = 0x81;
         page[504..512].copy_from_slice(&bid(1, false).to_le_bytes());
         data[1024..1536].copy_from_slice(&page);
 
         let mut page = vec![0u8; PAGE_SIZE];
-        page[0] = 4;
-        page[1] = 20;
-        page[2] = 24;
-        page[3] = 0;
         for (i, (((idx, internal), (content, _)), off)) in
-            [(4u64, false), (5, true), (6, false), (8, false)]
+            [(4u64, false), (5, false), (6, false), (7, false)]
                 .into_iter()
                 .zip(ext_blocks.iter())
                 .zip(block_offsets)
                 .enumerate()
         {
-            let o = 8 + i * 24;
+            let o = i * 24;
             page[o..o + 8].copy_from_slice(&bid(idx, internal).to_le_bytes());
             page[o + 8..o + 16].copy_from_slice(&(off as u64).to_le_bytes());
             page[o + 16..o + 18].copy_from_slice(&(content.len() as u16).to_le_bytes());
             page[o + 18..o + 20].copy_from_slice(&1u16.to_le_bytes());
         }
+        bt_page_header(&mut page, 4, 4, 24, 0);
         page[496] = 0x80;
         page[497] = 0x80;
         page[504..512].copy_from_slice(&bid(2, false).to_le_bytes());
@@ -1107,10 +1390,37 @@ mod tests {
             panic!("text")
         };
         let s = String::from_utf8_lossy(&t);
-        assert!(s.contains("[folder] Root Mailbox"), "{s}");
+        assert!(s.contains("[folder] Inbox"), "{s}");
         assert!(s.contains("subject: Quarterly report"), "{s}");
         assert!(s.contains("from: alice@example.com"), "{s}");
         assert!(s.contains("Hello Bob, the report is attached."), "{s}");
+    }
+
+    /// The regression this fixture exists for: every `bidSub` in it is zero,
+    /// as in all four real stores, so the walk can only reach the child folder
+    /// through NBTENTRY's `nidParent`. The previous fixture gave the root a
+    /// subnode block and therefore agreed with a reader no real file can
+    /// satisfy — which is how a mailbox with forty folders read as empty.
+    #[test]
+    fn a_store_with_no_subnode_blocks_still_yields_its_folders() {
+        let data = build_fixture(0);
+        // The NBT page starts at 1024 and NBTENTRY is 32 bytes; bidSub of the
+        // first entry sits at +16. Asserting it here is the point: a fixture
+        // that quietly grew a subnode block would stop testing anything.
+        assert!(
+            data[1024 + 16..1024 + 24].iter().all(|&b| b == 0),
+            "the fixture must leave every bidSub zero, like every real store"
+        );
+        let out = PstAdapter.extract(&data, "mail.pst").unwrap();
+        let Outcome::Text(t) = out else {
+            panic!("text")
+        };
+        let s = String::from_utf8_lossy(&t);
+        assert_eq!(s.matches("[folder]").count(), 1, "only Inbox is named: {s}");
+        assert!(
+            !s.contains("[folder] \n"),
+            "a nameless node must not print a line: {s}"
+        );
     }
 
     #[test]
@@ -1127,5 +1437,78 @@ mod tests {
     #[test]
     fn test_pst_adapter_rejects_garbage() {
         assert!(PstAdapter.extract(&[0u8; 4096], "x.pst").is_err());
+    }
+
+    /// The node database is absent, and the note has to say THAT. `collect_nodes`
+    /// used to drop the page error and leave an empty list, which the walk then
+    /// reported as `not found in PST: node` — one absent NID named as the
+    /// failure when the whole NBT was what was missing. It is the shape an
+    /// offline store is left in once its cached folders are dropped, and the
+    /// only public .ost has ROOT's BREF pointing exactly there.
+    #[test]
+    fn an_unreadable_nbt_root_names_the_tree_not_a_missing_node() {
+        let mut data = build_fixture(0);
+        // Control: untouched, the same bytes read the mailbox. Without this the
+        // test would also pass against a reader that refuses every store.
+        let Outcome::Text(good) = PstAdapter.extract(&data, "mail.pst").unwrap() else {
+            panic!("text")
+        };
+        assert!(
+            String::from_utf8_lossy(&good).contains("[folder] Inbox"),
+            "the readable store must still answer"
+        );
+
+        // ROOT's BREFNBT.ib is 1024 and still points there, but that page is now
+        // free space: cbEnt reads 0 and the tree cannot be entered.
+        data[1024..1536].fill(0);
+        let Err(err) = PstAdapter.extract(&data, "cache.ost") else {
+            panic!("a store with no node database must decline, not answer")
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("zero page entry size"),
+            "the note must name the unreadable node database, got: {msg}"
+        );
+        assert!(
+            !msg.contains("not found in PST/OST: node"),
+            "a missing node is a different claim from a missing tree, got: {msg}"
+        );
+    }
+
+    /// The shape the only public .ost actually has. Its ROOT is intact and its
+    /// header passes every check, but BREFNBT.ib and BREFBBT.ib both sit ABOVE
+    /// ibAMapLast -- the allocation map's own statement that those pages were
+    /// never written. Saying "the store has no node database" is the truth;
+    /// saying "node not found" would name one absent NID out of an absent tree.
+    #[test]
+    fn a_root_past_the_allocation_map_reports_no_node_database() {
+        let mut data = build_fixture(0);
+        // Control FIRST: shrink the allocated region so BREFNBT.ib of 1024 is
+        // past it while the tree there stays byte-for-byte readable. The note
+        // must not fire -- "past ibAMapLast" sharpens a failure, it never
+        // refuses a store that could have been read.
+        data[192..200].copy_from_slice(&512u64.to_le_bytes());
+        let Outcome::Text(good) = PstAdapter.extract(&data, "cache.ost").unwrap() else {
+            panic!("text")
+        };
+        assert!(
+            String::from_utf8_lossy(&good).contains("[folder] Inbox"),
+            "a readable tree is still read when its BREF sits past ibAMapLast"
+        );
+
+        // Now the real .ost shape: the tree is gone as well.
+        data[1024..1536].fill(0);
+        let Err(err) = PstAdapter.extract(&data, "cache.ost") else {
+            panic!("a store with no allocated tree must decline, not answer")
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("past ibAMapLast"),
+            "the note must name the missing allocation, got: {msg}"
+        );
+        assert!(
+            msg.contains("no node database is allocated"),
+            "the note must name the missing tree, got: {msg}"
+        );
     }
 }

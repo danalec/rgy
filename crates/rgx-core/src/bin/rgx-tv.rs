@@ -41,7 +41,7 @@ fn parse_size(s: &str) -> Result<u64, String> {
 fn print_usage() {
     eprintln!(
         "\
-rgx-tv: Tesla Valve aggregated pack search engine
+rgx-tv: prepared-pack storage search engine
 
 USAGE:
     rgx-tv build <root> --store <dir> [options]

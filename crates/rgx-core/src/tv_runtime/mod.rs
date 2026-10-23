@@ -19,8 +19,8 @@ pub mod store;
 pub mod update;
 
 pub use builder::{
-    build_or_update_store_with_extractor, build_store, build_store_with_extractor, walk_root,
-    BuildConfig, BuildStats, PreExtractor, StoreAction,
+    build_or_update_store_with_extractor, build_store, build_store_with_extractor, member_rel,
+    walk_root, BuildConfig, BuildStats, PreExtractor, StoreAction, UnitSigner,
 };
 pub use compact::{compact_store, compact_store_if_worth_it, CompactStats};
 pub use format::{
@@ -30,13 +30,13 @@ pub use format::{
 };
 pub use inspect::{inspect_store, StoreReport};
 pub use searcher::{
-    default_threads, search_store, search_store_pooled, smt_level, stale_files, stale_in,
-    threads_for, Engine, SearchStats, StageTimes,
+    default_threads, owner_rel, search_store, search_store_pooled, smt_level, stale_files,
+    stale_in, stale_list_in, threads_for, Engine, SearchStats, StageTimes,
 };
 pub use store::{
     MappedStore, PoolCounters, PoolLimits, PoolStats, StoreSnapshot, DEFAULT_MAX_MAPPED_BYTES,
 };
-pub use update::{update_store, UpdateStats};
+pub use update::{update_store, update_store_with, UpdateStats};
 // The query vocabulary (`EngineMode`, `ReadMode`, `SearchConfig`, `Unmap`)
 // lives under `crate::tv::query` (the `tv` feature, no_std + alloc).
 // Re-export it here so callers of the runtime see one module.

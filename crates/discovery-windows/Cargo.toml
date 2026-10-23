@@ -2,6 +2,7 @@
 name = "discovery-windows"
 version = "0.1.0"
 edition = "2024"
+authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
 description = "Windows discovery backend: NTFS MFT streaming + USN journal (from zen-rs)"
 license = "Apache-2.0"
 

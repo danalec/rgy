@@ -286,7 +286,7 @@ impl Default for ZlibDecoder {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "zlib"))]
 mod tests {
     use super::*;
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Decomposing the in-house engine's time on DENSE input, piece by piece.
 //!
 //! ```text

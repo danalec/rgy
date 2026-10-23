@@ -1,6 +1,8 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Independent reimplementation of memmap2-rs fallback path.
 //!
-//! This is the only platform module that is not compiled on any OS rgy
+//! This is the only platform module that is not compiled on any OS this crate
 //! currently targets, so it had never been type-checked until someone tried
 //! a target that falls through to it. It was wrong in two ways: `Vec` is not
 //! in the prelude of this crate (`no_std + alloc`), and it re-implemented

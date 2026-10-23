@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! PDF document parser (full version). The sibling `rgx-adapters-pdf` adapter
 //! is positional scan + Flate/ASCII85 only — this module is the full reader:
 //! classic and stream xref tables, `ObjStm`, the full filter zoo, page-tree
@@ -9,8 +11,10 @@
 //! A font whose codes cannot be placed is *reported* via
 //! `Extraction::undecodable`, never guessed at — `lib.rs` turns that into one
 //! `[rgx: pdf: …]` line beside the text that did decode. `/Encrypt` is
-//! detected and returned as `PdfError::Encrypted`; image XObjects and
-//! decryption itself are out of scope.
+//! detected and returned as `PdfError::Encrypted`; decryption itself is
+//! out of scope. Image XObjects are not part of *text* extraction, but the
+//! JPEG ones are reachable through [`jpeg_pages`] — a scanned page has no
+//! text layer, so its picture is the whole content.
 //!
 //! ## Filters
 //!
@@ -34,6 +38,10 @@ use core::fmt::Write as _;
 use core::iter;
 use core::str;
 
+use crate::fax;
+use crate::jbig2;
+use crate::security::Security;
+
 /// Everything that can go wrong reading a PDF.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PdfError {
@@ -41,6 +49,11 @@ pub enum PdfError {
     BadMagic,
     /// Trailer carries `/Encrypt` — text is locked.
     Encrypted,
+    /// Encrypted with a scheme, or under a password, this reader does not
+    /// implement. The message names the reason, because "encrypted" and
+    /// "encrypted with a password I will not guess" are different answers
+    /// for whoever is holding the file.
+    Security(&'static str),
     /// Structurally invalid input (message says where).
     Parse(&'static str),
 }
@@ -50,6 +63,7 @@ impl fmt::Display for PdfError {
         match self {
             Self::BadMagic => write!(f, "not a PDF file (bad magic)"),
             Self::Encrypted => write!(f, "pdf is encrypted"),
+            Self::Security(m) => write!(f, "pdf encryption: {m}"),
             Self::Parse(m) => write!(f, "parse error: {m}"),
         }
     }
@@ -631,7 +645,10 @@ pub enum PdfObject {
 }
 
 impl PdfObject {
-    fn dict_get<'a>(dict: &'a [(String, PdfObject)], key: &str) -> Option<&'a PdfObject> {
+    pub(crate) fn dict_get<'a>(
+        dict: &'a [(String, PdfObject)],
+        key: &str,
+    ) -> Option<&'a PdfObject> {
         dict.iter().find(|(k, _)| k == key).map(|(_, v)| v)
     }
 
@@ -657,7 +674,7 @@ impl PdfObject {
         }
     }
 
-    fn as_dict(&self) -> Option<&[(String, PdfObject)]> {
+    pub(crate) fn as_dict(&self) -> Option<&[(String, PdfObject)]> {
         match self {
             Self::Dict(d) => Some(d),
             Self::Stream { dict, .. } => Some(dict),
@@ -1218,6 +1235,16 @@ struct DecodeParms {
     bpc: i64,
     columns: i64,
     early_change: i64,
+    /// `/K` for `/CCITTFaxDecode`: 0 is Group 4, -1 is Group 3, and a
+    /// positive value is a 1D-row count within mixed-coded 2D rows.
+    k: i64,
+    /// `/Rows`; 0 and "absent" both mean the height the dictionary states.
+    rows: i64,
+    /// `/BlackIs1`. PDF's default is `false`, so the default here is too and
+    /// reading an absent entry as `true` inverts every scan in the corpus.
+    black_is_1: i64,
+    /// `/EncodedByteAlign`.
+    byte_align: i64,
 }
 
 fn parms_from_dict(dict: &[(String, PdfObject)]) -> DecodeParms {
@@ -1227,6 +1254,10 @@ fn parms_from_dict(dict: &[(String, PdfObject)]) -> DecodeParms {
             .unwrap_or(d)
     };
     DecodeParms {
+        k: get("K", 0),
+        rows: get("Rows", 0),
+        black_is_1: get("BlackIs1", 0),
+        byte_align: get("EncodedByteAlign", 0),
         predictor: get("Predictor", 1),
         colors: get("Colors", 1),
         bpc: get("BitsPerComponent", 8),
@@ -1474,6 +1505,9 @@ pub struct PdfDocument<'a> {
     entries: BTreeMap<u32, XrefEntry>,
     trailer: Vec<(String, PdfObject)>,
     cache: RefCell<BTreeMap<u32, PdfObject>>,
+    /// `Some` only for a document the standard security handler could open
+    /// and prove. Every byte that reaches the searcher has been through it.
+    sec: Option<Security>,
 }
 
 impl<'a> PdfDocument<'a> {
@@ -1531,16 +1565,50 @@ impl<'a> PdfDocument<'a> {
         if entries.is_empty() {
             return Self::parse_bruteforce(data);
         }
-        let doc = Self {
+        let mut doc = Self {
             data,
             entries,
             trailer: trailer_merged,
             cache: RefCell::new(BTreeMap::new()),
+            sec: None,
         };
-        if doc.is_encrypted() {
-            return Err(PdfError::Encrypted);
-        }
+        doc.init_security()?;
         Ok(doc)
+    }
+
+    /// Work out how this document is encrypted, if at all.
+    ///
+    /// The order matters and is not negotiable: the `/ID` must be read before
+    /// anything that consults the key, because the key is derived *from* it.
+    /// A document whose `/Encrypt` names a scheme this crate does not
+    /// implement, or whose user password is not empty, comes back as an
+    /// `Err` — which the adapter turns into a bail, leaving the raw bytes
+    /// searchable. That is the honest outcome: the alternative is a page of
+    /// decrypted-looking noise that nobody can distinguish from text.
+    fn init_security(&mut self) -> PdfResult<()> {
+        let enc_obj = match PdfObject::dict_get(&self.trailer, "Encrypt") {
+            Some(e) => e.clone(),
+            None => return Ok(()),
+        };
+        let enc_dict = match self.deref(&enc_obj) {
+            Some(PdfObject::Dict(d)) => d,
+            // A trailer pointing at something that is not a dictionary is
+            // still an encrypted document, and the pipeline's answer for it
+            // is the same as for one it cannot decrypt.
+            _ => return Err(PdfError::Encrypted),
+        };
+
+        // `/ID` is `[<hex> <hex>]`; only the first element feeds the key.
+        let id: Vec<u8> = match PdfObject::dict_get(&self.trailer, "ID") {
+            Some(PdfObject::Array(a)) => match a.first() {
+                Some(PdfObject::String(b)) => b.clone(),
+                _ => Vec::new(),
+            },
+            _ => Vec::new(),
+        };
+
+        self.sec = Some(Security::new(&enc_dict, &id).map_err(PdfError::from)?);
+        Ok(())
     }
 
     /// Fallback for files without a usable xref: positional object scan
@@ -1597,11 +1665,8 @@ impl<'a> PdfDocument<'a> {
             entries,
             trailer: Vec::new(),
             cache: RefCell::new(BTreeMap::new()),
+            sec: None,
         })
-    }
-
-    fn is_encrypted(&self) -> bool {
-        PdfObject::dict_get(&self.trailer, "Encrypt").is_some()
     }
 
     /// Resolve an indirect object (through the cache, through ObjStm).
@@ -1637,6 +1702,101 @@ impl<'a> PdfDocument<'a> {
         match obj {
             PdfObject::Ref(n, _) => self.resolve(*n),
             other => Some(other.clone()),
+        }
+    }
+
+    /// True when this document was opened through a proved key, as opposed
+    /// to simply not carrying an `/Encrypt` dictionary. The test corpus needs
+    /// to tell those apart: a document that never needed a key and a document
+    /// whose key was derived and checked are not the same evidence.
+    #[cfg(test)]
+    pub fn is_encrypted_open(&self) -> bool {
+        self.sec.is_some()
+    }
+
+    /// The generation number of an object, which the per-object key mixes in
+    /// alongside the object number.
+    ///
+    /// The cross-reference table is the authority, not the `Ref` token: the
+    /// token carries the generation the *writer* had when the reference was
+    /// written, and the two disagree in exactly the incremental-update case
+    /// that a real corpus contains.
+    ///
+    /// An object inside an object stream has generation 0 by definition —
+    /// `/ObjStm` entries are not independently addressable generations.
+    fn gen_of(&self, num: u32) -> u16 {
+        match self.entries.get(&num) {
+            Some(e) if e.kind == 1 => e.f3 as u16,
+            _ => 0,
+        }
+    }
+
+    /// Decrypt and fully decode one stream object.
+    ///
+    /// The two steps are inseparable from a caller's point of view and the
+    /// order is fixed: the writer compressed, then encrypted, so the reader
+    /// decrypts, then decompresses. Getting this backwards produces a stream
+    /// that fails to inflate, which is at least loud — but only because the
+    /// wrong order is not the one that produces plausible output.
+    pub(crate) fn decode_stream(&self, obj: &PdfObject) -> Option<Vec<u8>> {
+        // A direct stream carries no object number of its own unless it was
+        // written as one, in which case `/Length` and `/Filter` are all we
+        // need and there is nothing to decrypt with.
+        let num = match obj {
+            PdfObject::Ref(n, _) => *n,
+            PdfObject::Stream { .. } => return self.decode_direct_stream(obj),
+            _ => return None,
+        };
+        let PdfObject::Stream { dict, raw } = self.resolve(num)? else {
+            return None;
+        };
+        let plain = self.stream_ciphertext(obj, &raw)?;
+        decode_stream_data(&dict, &plain)
+    }
+
+    /// Undo the encryption on a stream's stored bytes, leaving any `/Filter`
+    /// chain alone. `raw` is the value the object resolved to, passed in so
+    /// callers that already have it do not resolve twice.
+    ///
+    /// Returns `None` when the bytes cannot be decrypted — a wrong-length
+    /// AES ciphertext, say. Skipping that one object is the right answer:
+    /// the page loses a stream, and the document still reports what it can
+    /// actually read.
+    fn stream_ciphertext(&self, obj: &PdfObject, raw: &[u8]) -> Option<Vec<u8>> {
+        let Some(sec) = &self.sec else {
+            return Some(raw.to_vec());
+        };
+        let PdfObject::Ref(num, _) = obj else {
+            // A stream reached without a reference has no object number, and
+            // the per-object key is built from one. It cannot have come from
+            // an encrypted document, so this is the raw bytes unchanged.
+            return Some(raw.to_vec());
+        };
+        sec.decrypt_stream(*num, self.gen_of(*num), raw)
+    }
+
+    fn decode_direct_stream(&self, obj: &PdfObject) -> Option<Vec<u8>> {
+        let PdfObject::Stream { dict, raw } = obj else {
+            return None;
+        };
+        decode_stream_data(dict, raw)
+    }
+
+    /// The file key this document opened with, for tests that check the
+    /// derivation against a reference implementation's own number.
+    #[cfg(test)]
+    pub(crate) fn security_key(&self) -> Vec<u8> {
+        self.sec.as_ref().map(|s| s.key.clone()).unwrap_or_default()
+    }
+
+    /// Decrypt a string that belongs to object `num`'s dictionary, or return
+    /// it untouched when the document is not encrypted.
+    fn decrypt_string_of(&self, num: u32, bytes: &[u8]) -> Vec<u8> {
+        match &self.sec {
+            Some(sec) => sec
+                .decrypt_string(num, self.gen_of(num), bytes)
+                .unwrap_or_else(|| bytes.to_vec()),
+            None => bytes.to_vec(),
         }
     }
 
@@ -1699,7 +1859,7 @@ impl PdfDocument<'_> {
     /// Collect `(page_dict, resources)` in document order by walking the
     /// page tree from the trailer's `/Root`, carrying inherited
     /// `/Resources` down the recursion.
-    fn collect_pages(&self) -> Vec<(PdfObject, PdfObject)> {
+    pub(crate) fn collect_pages(&self) -> Vec<(PdfObject, PdfObject)> {
         let mut pages = Vec::new();
         let Some(root_ref) = PdfObject::dict_get(&self.trailer, "Root") else {
             return pages;
@@ -2317,10 +2477,8 @@ impl FontDecoder {
         // ToUnicode CMap
         let mut cmap_table: BTreeMap<u32, String> = BTreeMap::new();
         if let Some(tu) = PdfObject::dict_get(font_dict, "ToUnicode") {
-            if let Some(PdfObject::Stream { dict, raw }) = doc.deref(tu) {
-                if let Some(decoded) = decode_stream_data(&dict, &raw) {
-                    cmap_table = CMap::parse(&decoded).map;
-                }
+            if let Some(decoded) = doc.decode_stream(tu) {
+                cmap_table = CMap::parse(&decoded).map;
             }
         }
         // For 1-byte fonts (which dominate the corpus), a 256-entry
@@ -2480,7 +2638,12 @@ enum CTok<'a> {
     Op(&'a str),
 }
 
-/// Tokenize a content stream into operands/operators (strings raw).
+/// Tokenize a content stream into operands/operators.
+///
+/// The bytes arrive already decrypted: a content stream is a single object
+/// encrypted as a whole, so the `(…)` literals lifted out of it are
+/// plaintext. Running them back through the cipher is the classic way to
+/// turn a correctly-decrypted page into noise.
 fn content_tokens<'a>(content: &'a [u8]) -> Vec<CTok<'a>> {
     let mut toks = Vec::new();
     let mut i = 0usize;
@@ -2579,17 +2742,64 @@ fn content_tokens<'a>(content: &'a [u8]) -> Vec<CTok<'a>> {
     toks
 }
 
-/// Extract text from one decoded content stream using the page's fonts.
-/// Returns how many shown strings named a font `/Resources` did not define.
+/// The text runs of one page, counted by how they were painted.
+///
+/// The rendering mode is part of the text state, which the page
+/// initialises, so a page's mode starts at 0 -- fill, the visible one --
+/// and only a `Tr` operator moves it.
+///
+/// A **run** is one text-showing OPERATOR (`Tj`, `TJ`, `'` or `"`) that
+/// carried a string. The three strings of one `TJ` array are one run,
+/// because the array is one show operation: a note that counted the
+/// strings would report a number the page does not have, and the count
+/// exists to be compared with the number of operations a reader can
+/// point at.
+#[derive(Debug, Default, Clone, Copy)]
+struct PageRuns {
+    /// Text-showing operators that carried a string.
+    total: usize,
+    /// The ones drawn in a mode that paints nothing.
+    invisible: usize,
+    /// The invisible ones that put at least one character in the text.
+    invisible_text: usize,
+}
+
+impl PageRuns {
+    /// Count one text-showing operation, and whether it put anything in
+    /// the text.
+    fn note(&mut self, mode: i32, put_text: bool) {
+        self.total += 1;
+        if !mode_paints(mode) {
+            self.invisible += 1;
+            if put_text {
+                self.invisible_text += 1;
+            }
+        }
+    }
+}
+
+/// Whether a rendering mode puts ink on the page.
+///
+/// `3 Tr` and `7 Tr` are the two modes that neither fill nor stroke the
+/// glyphs: the text is positioned and measured, and nothing is painted.
+/// A producer lays a text layer over a scan with them, so the page reads
+/// as a picture while the text is still in the file -- which is why the
+/// reader has to know the mode was there at all.
+fn mode_paints(mode: i32) -> bool {
+    !matches!(mode, 3 | 7)
+}
+
+/// Extract text from one page's decoded content stream using the page's
+/// fonts. Returns how many shown strings named a font `/Resources` did not
+/// define.
 fn extract_content_text(
     content: &[u8],
     fonts: &BTreeMap<String, FontDecoder>,
     out: &mut String,
+    runs: &mut PageRuns,
 ) -> usize {
-    let toks = content_tokens(content);
-    let mut operands: Vec<&CTok<'_>> = Vec::new();
     let mut cur_font: Option<&FontDecoder> = None;
-    let mut missing = 0usize;
+    let mut shown = false;
     // Whether a glyph has been shown since the last line break. A number in
     // a `TJ` array is the adjustment between the glyph shown last and the
     // one shown next, and those two are routinely in *different* arrays:
@@ -2598,7 +2808,34 @@ fn extract_content_text(
     // space at the head of the second array. Requiring a string to have
     // been seen in the *same* array lost it, and the paper came out as
     // "theTesla". Reset on a line break, because a new line is a new line.
-    let mut shown = false;
+    extract_one(
+        content_tokens(content),
+        &mut cur_font,
+        &mut shown,
+        fonts,
+        out,
+        runs,
+    )
+}
+
+/// The token walk proper, kept separate so the caller above reads as a
+/// statement of what it does rather than a hundred lines of nesting.
+fn extract_one<'f>(
+    toks: Vec<CTok<'_>>,
+    cur_font: &mut Option<&'f FontDecoder>,
+    shown: &mut bool,
+    fonts: &'f BTreeMap<String, FontDecoder>,
+    out: &mut String,
+    runs: &mut PageRuns,
+) -> usize {
+    let mut operands: Vec<&CTok<'_>> = Vec::new();
+    let mut missing = 0usize;
+    // The text rendering mode, part of the text state: `Tr` sets it and
+    // it stays set until another `Tr` says otherwise. `BT`/`ET` open and
+    // close a text OBJECT, not the text state, so they do not reset it,
+    // and the state itself is initialised with the page -- so the mode
+    // starts at 0, the visible one, for every page.
+    let mut render_mode: i32 = 0;
     for t in &toks {
         match t {
             CTok::Op(op) => {
@@ -2616,39 +2853,61 @@ fn extract_content_text(
                         if let Some(CTok::Name(name)) =
                             operands.iter().rev().find(|o| matches!(o, CTok::Name(_)))
                         {
-                            cur_font = fonts.get(name.as_str());
+                            *cur_font = fonts.get(name.as_str());
                             if cur_font.is_none() {
                                 missing += 1;
                             }
                         }
                     }
+                    "Tr" => {
+                        // "3 Tr" → the glyphs are positioned and measured
+                        // but no ink goes on the page. The mode is kept
+                        // because the page looks different from one drawn
+                        // with `0 Tr`, and the reader has to be able to
+                        // say so.
+                        if let Some(CTok::Num(v)) = operands.last() {
+                            render_mode = *v as i32;
+                        }
+                    }
                     "Tj" => {
                         if let Some(CTok::Str(b)) = operands.last() {
-                            show_string(b, cur_font, out);
-                            shown = true;
+                            let put = show_string(b, *cur_font, out);
+                            *shown = true;
+                            runs.note(render_mode, put);
                         }
                     }
                     "'" | "\"" => {
                         out.push('\n');
-                        shown = false;
+                        *shown = false;
                         if let Some(CTok::Str(b)) = operands.last() {
-                            show_string(b, cur_font, out);
-                            shown = true;
+                            let put = show_string(b, *cur_font, out);
+                            *shown = true;
+                            runs.note(render_mode, put);
                         }
                     }
                     "TJ" => {
                         // array: strings with kerning numbers between them
+                        let mut put = false;
                         for o in operands.iter() {
                             match o {
                                 CTok::Str(b) => {
-                                    show_string(b, cur_font, out);
-                                    shown = true;
+                                    put |= show_string(b, *cur_font, out);
+                                    *shown = true;
                                 }
-                                CTok::Num(v) if *v <= -120.0 && shown => {
+                                CTok::Num(v) if *v <= -120.0 && *shown => {
                                     out.push(' ');
                                 }
                                 _ => {}
                             }
+                        }
+                        // One run for the whole array: the operator is one
+                        // show operation, whatever the array holds. A run is
+                        // counted when the array carried a string at all,
+                        // even when the string decoded to nothing -- the
+                        // producer drew text there, and that is the fact the
+                        // note is about.
+                        if operands.iter().any(|o| matches!(o, CTok::Str(_))) {
+                            runs.note(render_mode, put);
                         }
                     }
                     "Td" | "TD" => {
@@ -2663,18 +2922,18 @@ fn extract_content_text(
                         if let [tx, ty] = nums[..] {
                             if ty.abs() > 1.0 {
                                 out.push('\n');
-                                shown = false;
+                                *shown = false;
                             } else if tx.abs() > 1.0 {
                                 out.push(' ');
                             }
                         } else {
                             out.push('\n');
-                            shown = false;
+                            *shown = false;
                         }
                     }
                     "T*" | "BT" | "ET" | "Tm" => {
                         out.push('\n');
-                        shown = false;
+                        *shown = false;
                     }
                     _ => {}
                 }
@@ -2690,9 +2949,18 @@ fn extract_content_text(
 /// the page's `/Resources` did not define: the bytes are character codes of
 /// an encoding nobody named, so they are dropped rather than read as
 /// Latin-1, and `extract_content_text` counts the selection for the report.
-fn show_string(bytes: &[u8], font: Option<&FontDecoder>, out: &mut String) {
-    if let Some(f) = font {
-        out.push_str(&f.decode(bytes));
+///
+/// Returns whether anything at all reached the text, so the caller can tell
+/// a run that made it into the output from one that decoded to nothing.
+fn show_string(bytes: &[u8], font: Option<&FontDecoder>, out: &mut String) -> bool {
+    match font {
+        Some(f) => {
+            let decoded = f.decode(bytes);
+            let put = !decoded.is_empty();
+            out.push_str(&decoded);
+            put
+        }
+        None => false,
     }
 }
 
@@ -2733,6 +3001,41 @@ impl FontReport {
     }
 }
 
+/// How the document's text was painted, counted over the whole file.
+///
+/// The rendering mode is not decoration: text drawn with `3 Tr` is not on
+/// the page, so a reader that answers the same for a page drawn with
+/// `0 Tr` and the same page drawn with `3 Tr` cannot tell a text page
+/// from a blank one. The count is what lets the adapter say which of the
+/// two it found.
+#[derive(Debug, Default, Clone)]
+pub struct RunReport {
+    /// Text-showing operators that carried a string, over the document.
+    pub total: usize,
+    /// The ones drawn in a mode that paints nothing.
+    pub invisible: usize,
+    /// The invisible ones that put at least one character in the text.
+    pub invisible_text: usize,
+    /// Pages that carried at least one invisible run.
+    pub pages_with_invisible: usize,
+}
+
+impl RunReport {
+    /// True when at least one text run was drawn in a mode that paints
+    /// nothing.
+    pub fn has_invisible(&self) -> bool {
+        self.invisible > 0
+    }
+
+    /// True when the document's whole text layer is invisible: every
+    /// text-showing operation happened in a mode that paints nothing, so
+    /// the pages show no text at all and what the file holds is a picture
+    /// with words under it.
+    pub fn is_entirely_invisible(&self) -> bool {
+        self.total > 0 && self.invisible == self.total
+    }
+}
+
 /// A document's text plus the fonts that text had to leave out. The note is
 /// data, not a rendered string, so that the adapter owns the wording — the
 /// same split `metadata()` leaves to `lib.rs`.
@@ -2749,12 +3052,28 @@ pub struct Extraction {
     /// twelve pages is counted twelve times, because that is how many times
     /// it was left out of the text — so the note has to say which it is.
     pub pages: usize,
+    /// How the text was painted.
+    pub runs: RunReport,
 }
 
 impl Extraction {
     /// True when some font contributed nothing and the reader can say why.
     pub fn is_partial(&self) -> bool {
         !self.undecodable.is_empty() || self.missing_fonts > 0
+    }
+
+    /// True when at least one text run was drawn in a mode that paints
+    /// nothing.
+    pub fn has_invisible_runs(&self) -> bool {
+        self.runs.has_invisible()
+    }
+
+    /// True when the document's whole text layer is invisible: every
+    /// text-showing operation happened in a mode that paints nothing, so
+    /// the pages show no text at all and what the file holds is a picture
+    /// with words under it.
+    pub fn is_entirely_invisible(&self) -> bool {
+        self.runs.is_entirely_invisible()
     }
 }
 
@@ -2770,11 +3089,37 @@ impl PdfDocument<'_> {
     /// `report` accumulates rather than being returned, so that a caller
     /// walking twelve pages can name a font once instead of twelve times,
     /// and so that a caller reading one page cannot forget to look.
+    ///
+    /// The plain form is the one a single page is read with; the walk
+    /// over a whole document wants the rendering modes of the text as
+    /// well, and gets them from `page_text_with_runs`. Without the
+    /// attribute, `cargo clippy --all-targets` flags this one as dead in
+    /// the lib-only build.
+    #[allow(dead_code)]
     pub fn page_text(&self, idx: usize, report: &mut FontReport) -> Option<String> {
+        self.page_text_with_runs(idx, report, &mut RunReport::default())
+    }
+
+    /// One page's text, and how that text was painted.
+    ///
+    /// The rendering modes are counted here, inside the one walk over the
+    /// content stream, because the mode is part of the text state: it is
+    /// only known while the stream is being read, and a second pass would
+    /// have to walk it again to learn the same thing.
+    pub fn page_text_with_runs(
+        &self,
+        idx: usize,
+        report: &mut FontReport,
+        runs: &mut RunReport,
+    ) -> Option<String> {
         let pages = self.collect_pages();
         let (page, resources) = pages.get(idx)?;
         let dict = page.as_dict()?;
         let contents = PdfObject::dict_get(dict, "Contents")?;
+        // Each element of an array `/Contents` is decrypted under its own
+        // object key, so the streams are decoded one at a time and only
+        // then joined. Joining first would apply a single key to bytes
+        // belonging to several objects.
         let mut content = Vec::new();
         match contents {
             PdfObject::Array(items) => {
@@ -2792,7 +3137,18 @@ impl PdfDocument<'_> {
             report.note_font(f.source);
         }
         let mut out = String::new();
-        report.missing += extract_content_text(&content, &fonts, &mut out);
+        let mut page_runs = PageRuns::default();
+        report.missing += extract_content_text(&content, &fonts, &mut out, &mut page_runs);
+        // The page counters are folded in before the emptiness check: a
+        // page whose text decoded to nothing still ran its text-showing
+        // operators, and a run that painted nothing is the fact the note
+        // is about.
+        runs.total += page_runs.total;
+        runs.invisible += page_runs.invisible;
+        runs.invisible_text += page_runs.invisible_text;
+        if page_runs.invisible > 0 {
+            runs.pages_with_invisible += 1;
+        }
         if out.trim().is_empty() {
             None
         } else {
@@ -2800,11 +3156,131 @@ impl PdfDocument<'_> {
         }
     }
 
-    fn push_stream_bytes(&self, obj: &PdfObject, out: &mut Vec<u8>) {
-        let Some(PdfObject::Stream { dict, raw }) = self.deref(obj) else {
-            return;
+    /// The images drawn on one page.
+    ///
+    /// Only `/DCTDecode` images come back as something an OCR engine can be
+    /// handed: that filter *is* JPEG, so the stored bytes already are an
+    /// image and undoing it would destroy it. Everything else is reported
+    /// with the filter that keeps it compressed rather than dropped — a
+    /// scanned page whose only image is CCITT G4 is a real answer, and
+    /// silence would read as "this page has no images".
+    pub fn page_images(&self, idx: usize) -> Vec<PageImage> {
+        let pages = self.collect_pages();
+        let Some((_, resources)) = pages.get(idx) else {
+            return Vec::new();
         };
-        if let Some(decoded) = decode_stream_data(&dict, &raw) {
+        let Some(res) = self
+            .deref(resources)
+            .and_then(|r| r.as_dict().map(<[(String, PdfObject)]>::to_vec))
+        else {
+            return Vec::new();
+        };
+        let Some(xobjects) = PdfObject::dict_get(&res, "XObject").and_then(|x| self.deref(x))
+        else {
+            return Vec::new();
+        };
+        let Some(dict) = xobjects.as_dict() else {
+            return Vec::new();
+        };
+
+        let mut out = Vec::new();
+        for (_name, obj) in dict {
+            let Some(PdfObject::Stream { dict: sdict, raw }) = self.deref(obj) else {
+                continue;
+            };
+            let is_image = matches!(
+                PdfObject::dict_get(&sdict, "Subtype"),
+                Some(PdfObject::Name(n)) if n.as_str() == "Image"
+            );
+            if !is_image {
+                continue;
+            }
+            // An image is encrypted like any other stream, so a JPEG handed
+            // to an OCR engine from an encrypted document has to come out of
+            // the cipher first — handing over the ciphertext produces a
+            // recogniser failure that looks like a bad scan.
+            let raw = match self.stream_ciphertext(obj, &raw) {
+                Some(p) => p,
+                None => continue,
+            };
+            let filter = stream_filter_name(&sdict);
+            let width = dict_int(&sdict, "Width").unwrap_or(0) as u32;
+            let height = dict_int(&sdict, "Height").unwrap_or(0) as u32;
+            let bits = dict_int(&sdict, "BitsPerComponent").unwrap_or(8) as u8;
+
+            let mut jpeg = None;
+            let mut png = None;
+            match filter.as_str() {
+                // The filter *is* JPEG; the stored bytes already are the
+                // image, and undoing it would destroy it.
+                "DCTDecode" | "DCT" => jpeg = Some(raw),
+                // A fax scan is not an image until it is decoded. Left as
+                // bytes it is a bitstream a recogniser cannot read, which is
+                // why this used to be a filter name in a note and now is a
+                // page.
+                "CCITTFaxDecode" | "CCF" => {
+                    let parms = sdict
+                        .iter()
+                        .find(|(k, _)| k == "DecodeParms" || k == "DP")
+                        .and_then(|(_, v)| v.as_dict())
+                        .map(parms_from_dict)
+                        .unwrap_or_default();
+                    png = decode_fax_png(&raw, &parms, width, height);
+                }
+                // A JBIG2 page is a program against a template and a
+                // dictionary of glyphs, not a picture either. The size comes
+                // from the image dictionary — a PDF's JBIG2 stream has no
+                // page information segment of its own — and the glyph
+                // dictionary, when there is one, comes from `/JBIG2Globals`.
+                "JBIG2Decode" | "JBIG2" => {
+                    let globals = self.jbig2_globals(&sdict);
+                    png = decode_jbig2_png(globals.as_deref(), &raw, width, height);
+                }
+                _ => {}
+            }
+            out.push(PageImage {
+                width,
+                height,
+                bits,
+                filter,
+                jpeg,
+                png,
+            });
+        }
+        out
+    }
+
+    /// Every page's images, flattened. A caller OCRing a document does not
+    /// care which page an image came from, only that none is skipped.
+    pub fn all_images(&self) -> Vec<PageImage> {
+        (0..self.page_count())
+            .flat_map(|i| self.page_images(i))
+            .collect()
+    }
+
+    /// The `/JBIG2Globals` stream of an image dictionary, if it has one.
+    ///
+    /// The entry lives in the image dictionary, and some producers put it in
+    /// the `/DecodeParms` dictionary instead; both are read, because the
+    /// difference decides whether the page's glyphs are found or not.
+    fn jbig2_globals(&self, sdict: &[(String, PdfObject)]) -> Option<Vec<u8>> {
+        let direct = PdfObject::dict_get(sdict, "JBIG2Globals");
+        let in_parms = sdict
+            .iter()
+            .find(|(k, _)| k == "DecodeParms" || k == "DP")
+            .and_then(|(_, v)| v.as_dict())
+            .and_then(|d| PdfObject::dict_get(d, "JBIG2Globals"));
+        let entry = direct.or(in_parms)?;
+        let raw = match self.deref(entry)? {
+            PdfObject::Stream { raw, .. } => raw,
+            _ => return None,
+        };
+        self.stream_ciphertext(entry, &raw)
+    }
+
+    /// Decode one content stream and append it to the page's buffer.
+    fn push_stream_bytes(&self, obj: &PdfObject, out: &mut Vec<u8>) {
+        if let Some(decoded) = self.decode_stream(obj) {
             out.extend_from_slice(&decoded);
             out.push(b'\n');
         }
@@ -2848,9 +3324,10 @@ impl PdfDocument<'_> {
     pub fn extract_text_with_notes(&self) -> Extraction {
         let n = self.page_count();
         let mut report = FontReport::default();
+        let mut runs = RunReport::default();
         let mut out = String::new();
         for i in 0..n {
-            if let Some(text) = self.page_text(i, &mut report) {
+            if let Some(text) = self.page_text_with_runs(i, &mut report, &mut runs) {
                 let _ = writeln!(out, "Page {}:", i + 1);
                 out.push_str(&text);
                 out.push('\n');
@@ -2871,6 +3348,7 @@ impl PdfDocument<'_> {
             undecodable: report.undecodable,
             missing_fonts: report.missing,
             pages: n,
+            runs,
         }
     }
 
@@ -2880,6 +3358,13 @@ impl PdfDocument<'_> {
         let mut out = Vec::new();
         let Some(info_ref) = PdfObject::dict_get(&self.trailer, "Info") else {
             return out;
+        };
+        // The `/Info` dictionary's strings are encrypted under the Info
+        // object's own key, so its object number is needed before any of
+        // them can be read — not the trailer's.
+        let info_num = match info_ref {
+            PdfObject::Ref(n, _) => Some(*n),
+            _ => None,
         };
         let Some(PdfObject::Dict(info)) = self.deref(info_ref) else {
             return out;
@@ -2895,8 +3380,12 @@ impl PdfDocument<'_> {
             "ModDate",
         ] {
             if let Some(PdfObject::String(bytes)) = PdfObject::dict_get(&info, key) {
+                let plain = match info_num {
+                    Some(n) => self.decrypt_string_of(n, bytes),
+                    None => bytes.clone(),
+                };
                 let mut v = String::new();
-                decode_text_string_into(bytes, &mut v);
+                decode_text_string_into(&plain, &mut v);
                 out.push((key.into(), v));
             }
         }
@@ -2905,7 +3394,7 @@ impl PdfDocument<'_> {
 }
 
 /// PDF text string: UTF-16BE with BOM, or PDFDocEncoding ≈ Latin-1.
-#[cfg(test)]
+#[cfg(all(test, feature = "pdf"))]
 pub fn decode_text_string(bytes: &[u8]) -> String {
     let mut out = String::new();
     decode_text_string_into(bytes, &mut out);
@@ -2943,7 +3432,7 @@ pub fn decode_text_string_into(bytes: &[u8], out: &mut String) {
 // tests
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, feature = "pdf"))]
 mod tests {
     use super::*;
 
@@ -3780,5 +4269,338 @@ mod tests {
         assert!(!text.contains('A'), "{text:?}");
         assert!(!text.contains('\u{2022}'), "{text:?}");
         assert!(report.undecodable.is_empty(), "{report:?}");
+    }
+}
+
+/// An image drawn on a page, as far as this crate can honestly take it.
+#[derive(Debug, Clone)]
+pub struct PageImage {
+    pub width: u32,
+    pub height: u32,
+    pub bits: u8,
+    /// The stream's `/Filter`, or `""` when it has none. Named rather than
+    /// dropped, because "this page carries an image I cannot decode" and
+    /// "this page carries no image" are different answers.
+    pub filter: String,
+    /// The stored bytes, when `/DCTDecode` means they already are a JPEG.
+    pub jpeg: Option<Vec<u8>>,
+    /// A complete PNG, when this crate could turn the stored bytes into a
+    /// picture: a CCITT fax scan decoded to pixels and wrapped. Present
+    /// *instead of* `jpeg`, never alongside it — a consumer that has to pick
+    /// between two answers for one image is a consumer that will pick wrong.
+    pub png: Option<Vec<u8>>,
+}
+
+/// Decode a `/CCITTFaxDecode` stream and wrap the result as a PNG.
+///
+/// The PNG is grey and stored-deflate on purpose. Its job is to be handed to
+/// a subprocess and thrown away, so the bytes that make it small matter less
+/// than the bytes that make it *correct*; see `rgx_core::png`.
+///
+/// A stream that does not decode yields `None` rather than a partial page:
+/// half a scan reads as a bad image, and the report names the codec so the
+/// difference between "this page has an image I could not render" and
+/// "this page has no image" survives.
+fn decode_fax_png(raw: &[u8], parms: &DecodeParms, width: u32, height: u32) -> Option<Vec<u8>> {
+    let p = fax::FaxParams {
+        k: parms.k,
+        columns: parms.columns.max(0) as u32,
+        // `/Rows` wins when present; the image dictionary's `/Height` is the
+        // fallback, and the two disagree in real files more often than the
+        // specification suggests.
+        rows: if parms.rows > 0 {
+            parms.rows as u32
+        } else {
+            height
+        },
+        black_is_1: parms.black_is_1 != 0,
+        byte_align: parms.byte_align != 0,
+    };
+    let width = if width > 0 { width } else { p.columns };
+    let pixels = fax::decode_fax(raw, &p)?;
+    // The height is the number of rows that were decoded, not the one the
+    // dictionary claims: a block the encoder ended with `EOFB` can be
+    // shorter than `/Rows`, and the rows it holds are still a page worth
+    // reading. `encode_gray8` refuses a mismatch on its own, so a height
+    // taken from the claim instead would drop the whole image over a
+    // difference of a few rows.
+    let height = match width {
+        0 => return None,
+        w => (pixels.len() / w as usize) as u32,
+    };
+    if height == 0 {
+        return None;
+    }
+    rgx_core::png::encode_gray8(width, height, &pixels)
+}
+
+/// Decode a `/JBIG2Decode` stream and wrap the result as a PNG.
+///
+/// The PNG is grey and stored-deflate on the same terms as the fax one: it
+/// is handed to a subprocess and thrown away, so it has to be correct
+/// rather than small.
+///
+/// A stream that does not decode yields `None` rather than a partial page:
+/// half a page reads as a bad image, and the report names the codec so the
+/// difference between "this page has an image I could not render" and "this
+/// page has no image" survives.
+fn decode_jbig2_png(
+    globals: Option<&[u8]>,
+    raw: &[u8],
+    width: u32,
+    height: u32,
+) -> Option<Vec<u8>> {
+    let image = jbig2::decode_with_size(globals, raw, width, height)?;
+    rgx_core::png::encode_gray8(image.width, image.height, &image.pixels)
+}
+
+/// The `/Filter` of a stream as a name, taking the first of an array.
+fn stream_filter_name(dict: &[(String, PdfObject)]) -> String {
+    match PdfObject::dict_get(dict, "Filter") {
+        Some(PdfObject::Name(n)) => n.clone(),
+        Some(PdfObject::Array(items)) => match items.first() {
+            Some(PdfObject::Name(n)) => n.clone(),
+            _ => String::new(),
+        },
+        _ => String::new(),
+    }
+}
+
+fn dict_int(dict: &[(String, PdfObject)], key: &str) -> Option<u64> {
+    match PdfObject::dict_get(dict, key)? {
+        PdfObject::Int(n) => Some(*n as u64),
+        PdfObject::Real(r) => Some(*r as u64),
+        _ => None,
+    }
+}
+
+/// Every page image a PDF carries, flattened.
+///
+/// The caller OCRing a document does not care which page an image came from,
+/// only that none is skipped silently — which is why `PageImage` names the
+/// filter for the ones that cannot be read instead of hiding them.
+///
+/// An empty vector means there is no image to read, which is a different
+/// answer from "there is an image and it is unreadable": a PDF that is not
+/// a PDF, and a scan stored as CCITT G4, both come back empty here and the
+/// caller has to say which it was.
+pub fn all_page_images(data: &[u8]) -> Vec<PageImage> {
+    match PdfDocument::parse(data) {
+        Ok(doc) => doc.all_images(),
+        Err(_) => Vec::new(),
+    }
+}
+
+#[cfg(all(test, feature = "pdf"))]
+mod scan_images {
+    //! The page images a scanned PDF hands to an OCR engine.
+    //!
+    //! The case that matters is the one a real scanner produces: the page
+    //! *is* a picture, `/DCTDecode` because that filter is JPEG, and the
+    //! document's own text extraction returns nothing for it. A filter this
+    //! tree cannot undo is the other half — it has to come back named rather
+    //! than absent, because "this page has no image" and "this page has an
+    //! image I cannot read" send the reader to different places.
+
+    use super::all_page_images;
+    use alloc::vec::Vec;
+
+    /// A one-page PDF whose page draws one image with the given filter.
+    fn pdf_with_image(filter: &str, payload: &[u8]) -> Vec<u8> {
+        let mut objs: Vec<Vec<u8>> = Vec::new();
+        let image_stream = format!(
+            "<< /Type /XObject /Subtype /Image /Width 8 /Height 8 \
+             /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /{filter} \
+             /Length {} >>\nstream\n",
+            payload.len()
+        )
+        .into_bytes();
+        let mut image = image_stream;
+        image.extend_from_slice(payload);
+        image.extend_from_slice(b"\nendstream");
+
+        objs.push(b"<< /Type /Catalog /Pages 2 0 R >>".to_vec());
+        objs.push(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec());
+        objs.push(
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>".to_vec(),
+        );
+        objs.push(image);
+        let content = b"q 612 0 0 792 0 0 cm /Im0 Do Q";
+        objs.push(
+            format!("<< /Length {} >>\nstream\n", content.len())
+                .into_bytes()
+                .into_iter()
+                .chain(content.iter().copied())
+                .chain(b"\nendstream".iter().copied())
+                .collect(),
+        );
+
+        let mut out = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        for (i, body) in objs.iter().enumerate() {
+            offsets.push(out.len());
+            out.extend_from_slice(format!("{} 0 obj\n", i + 1).as_bytes());
+            out.extend_from_slice(body);
+            out.extend_from_slice(b"\nendobj\n");
+        }
+        let xref = out.len();
+        out.extend_from_slice(
+            format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes(),
+        );
+        for off in &offsets {
+            out.extend_from_slice(format!("{off:010} 00000 n \n").as_bytes());
+        }
+        out.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objs.len() + 1
+            )
+            .as_bytes(),
+        );
+        out
+    }
+
+    /// A one-page PDF whose page draws one JBIG2 image, with the glyph
+    /// dictionary a text region needs when it has one.
+    fn pdf_with_jbig2(page: &[u8], globals: Option<&[u8]>) -> Vec<u8> {
+        let mut objs: Vec<Vec<u8>> = Vec::new();
+        let parms = match globals {
+            Some(_) => " /DecodeParms << /JBIG2Globals 6 0 R >>",
+            None => "",
+        };
+        let mut image = format!(
+            "<< /Type /XObject /Subtype /Image /Width 1240 /Height 320 \
+             /ColorSpace /DeviceGray /BitsPerComponent 1 /Filter /JBIG2Decode{parms} \
+             /Length {} >>\nstream\n",
+            page.len()
+        )
+        .into_bytes();
+        image.extend_from_slice(page);
+        image.extend_from_slice(b"\nendstream");
+
+        objs.push(b"<< /Type /Catalog /Pages 2 0 R >>".to_vec());
+        objs.push(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec());
+        objs.push(
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1240 320] /Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>".to_vec(),
+        );
+        objs.push(image);
+        let content = b"q 1240 0 0 320 0 0 cm /Im0 Do Q";
+        objs.push(
+            format!("<< /Length {} >>\nstream\n", content.len())
+                .into_bytes()
+                .into_iter()
+                .chain(content.iter().copied())
+                .chain(b"\nendstream".iter().copied())
+                .collect(),
+        );
+        if let Some(g) = globals {
+            let mut stream = format!("<< /Length {} >>\nstream\n", g.len()).into_bytes();
+            stream.extend_from_slice(g);
+            stream.extend_from_slice(b"\nendstream");
+            objs.push(stream);
+        }
+
+        let mut out = b"%PDF-1.7\n".to_vec();
+        let mut offsets = Vec::new();
+        for (i, body) in objs.iter().enumerate() {
+            offsets.push(out.len());
+            out.extend_from_slice(format!("{} 0 obj\n", i + 1).as_bytes());
+            out.extend_from_slice(body);
+            out.extend_from_slice(b"\nendobj\n");
+        }
+        let xref = out.len();
+        out.extend_from_slice(
+            format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes(),
+        );
+        for off in &offsets {
+            out.extend_from_slice(format!("{off:010} 00000 n \n").as_bytes());
+        }
+        out.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objs.len() + 1
+            )
+            .as_bytes(),
+        );
+        out
+    }
+
+    /// A JBIG2 scan is a program against a template, not a picture, so the
+    /// page image comes back as a PNG this crate built.
+    #[test]
+    fn a_jbig2_page_image_comes_back_as_a_png() {
+        let page = include_bytes!("../testdata/jbig2/jbig2_text.arith_t0.jb2");
+        let pdf = pdf_with_jbig2(page, None);
+        let images = all_page_images(&pdf);
+        assert_eq!(images.len(), 1, "one page image");
+        assert_eq!(images[0].filter, "JBIG2Decode");
+        assert!(images[0].jpeg.is_none(), "it is not handed over as bytes");
+        let png = images[0].png.as_deref().expect("the scan is decoded");
+        assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n", "a PNG header");
+    }
+
+    /// A text region needs the glyph dictionary, and it comes from the
+    /// globals the image dictionary points at.
+    #[test]
+    fn a_jbig2_text_region_with_its_globals_comes_back_as_a_png() {
+        let page = include_bytes!("../testdata/jbig2/jbig2_text.symbol.jb2");
+        let globals = include_bytes!("../testdata/jbig2/jbig2_text.symbol.globals");
+        let pdf = pdf_with_jbig2(page, Some(globals));
+        let images = all_page_images(&pdf);
+        assert_eq!(images.len(), 1, "one page image");
+        let png = images[0].png.as_deref().expect("the scan is decoded");
+        assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n", "a PNG header");
+    }
+
+    /// A JBIG2 stream that does not decode is not a page, and a page that
+    /// comes back blank is a different page.
+    #[test]
+    fn a_jbig2_page_image_that_does_not_decode_is_named_not_dropped() {
+        let pdf = pdf_with_jbig2(b"not a jbig2 stream at all", None);
+        let images = all_page_images(&pdf);
+        assert_eq!(images.len(), 1, "the image is still reported");
+        assert!(images[0].png.is_none(), "but it is not handed over");
+        assert_eq!(images[0].filter, "JBIG2Decode");
+    }
+
+    /// A JPEG is not undone: `/DCTDecode` means the stored bytes already are
+    /// one, so decoding them into samples would destroy the image.
+    #[test]
+    fn a_dctdecode_page_image_comes_back_as_the_stored_jpeg() {
+        let jpeg = [0xffu8, 0xd8, b'R', b'G', b'X', 0xff, 0xd9];
+        let pdf = pdf_with_image("DCTDecode", &jpeg);
+        let images = all_page_images(&pdf);
+        assert_eq!(images.len(), 1, "one page image");
+        assert_eq!(
+            images[0].jpeg.as_deref(),
+            Some(&jpeg[..]),
+            "bytes untouched"
+        );
+        assert_eq!(images[0].filter, "DCTDecode");
+        assert_eq!(images[0].width, 8);
+        assert_eq!(images[0].height, 8);
+    }
+
+    /// The filter this tree cannot undo is named instead of dropped.
+    #[test]
+    fn a_page_image_in_a_codec_this_tree_cannot_undo_is_named_not_dropped() {
+        let pdf = pdf_with_image("CCFDecode", &[0u8; 32]);
+        let images = all_page_images(&pdf);
+        assert_eq!(images.len(), 1, "the image is still reported");
+        assert!(images[0].jpeg.is_none(), "but it is not handed over");
+        assert_eq!(images[0].filter, "CCFDecode");
+    }
+
+    #[test]
+    fn a_document_with_no_images_reports_none() {
+        let pdf = b"%PDF-1.4\n<< /Type /Catalog >>\n%%EOF\n";
+        assert!(all_page_images(pdf).is_empty());
+    }
+
+    #[test]
+    fn something_that_is_not_a_pdf_reports_none_rather_than_panicking() {
+        assert!(all_page_images(b"").is_empty());
+        assert!(all_page_images(&[0xff, 0xd8, 0xff, 0xe0]).is_empty());
+        assert!(all_page_images(b"%PDF-1.4\ntruncated").is_empty());
     }
 }

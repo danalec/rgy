@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Streaming and NDJSON layer for djson.
 //!
 //! The [`parse`](crate::djson::parser::parse) entry point is the right tool when the

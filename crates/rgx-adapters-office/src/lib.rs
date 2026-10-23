@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Office / OpenDocument / e-book adapters, fully in-process.
 //!
 //! All these formats are zip containers of XML parts. Reads the zip
@@ -27,37 +29,75 @@ extern crate alloc;
 extern crate std;
 
 use alloc::boxed::Box;
-use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use core::fmt::Write as _;
-use core::str;
-use rgx_adapters_archive::budget;
-use rgx_core::{bail, Context, Result};
-use rgx_core::{Adapter, Outcome, Reach};
+use rgx_core::Adapter;
 
+#[cfg(any(feature = "office", feature = "rtf", feature = "doc"))]
+use alloc::string::String;
+#[cfg(any(feature = "office", feature = "rtf"))]
+use alloc::string::ToString;
+#[cfg(feature = "office")]
+use core::fmt::Write as _;
+#[cfg(any(feature = "office", feature = "rtf"))]
+use core::str;
+#[cfg(feature = "office")]
+use rgx_adapters_archive::budget;
+#[cfg(feature = "doc")]
+use rgx_core::bail;
+#[cfg(any(feature = "office", feature = "doc"))]
+use rgx_core::Context;
+#[cfg(feature = "rtf")]
+use rgx_core::Reach;
+#[cfg(any(feature = "office", feature = "rtf", feature = "doc"))]
+use rgx_core::{decline, Outcome, Result};
+
+#[cfg(any(feature = "abiword", feature = "hwp", feature = "wordperfect"))]
+mod legacy;
+#[cfg(feature = "markup")]
 mod markup;
+#[cfg(feature = "ppt")]
 mod ppt;
+#[cfg(feature = "tex")]
 mod tex;
+#[cfg(feature = "visio")]
 mod visio;
+#[cfg(feature = "xls")]
 mod xls;
 
+#[cfg(feature = "office")]
 const MAX_PART: usize = 8 << 20; // per XML part
+#[cfg(feature = "office")]
 const MAX_OUT: usize = 16 << 20; // total extracted text
 
 pub fn adapters() -> Vec<Box<dyn Adapter>> {
     vec![
+        #[cfg(feature = "office")]
         Box::new(Office),
+        #[cfg(feature = "rtf")]
         Box::new(Rtf),
+        #[cfg(feature = "doc")]
         Box::new(Doc),
+        #[cfg(feature = "ppt")]
         Box::new(ppt::Ppt),
+        #[cfg(feature = "xls")]
         Box::new(xls::Xls),
+        #[cfg(feature = "tex")]
         Box::new(tex::Tex),
+        #[cfg(feature = "visio")]
         Box::new(visio::Visio),
+        #[cfg(feature = "markup")]
         Box::new(markup::Markup),
+        #[cfg(feature = "abiword")]
+        Box::new(legacy::AbiWord),
+        #[cfg(feature = "hwp")]
+        Box::new(legacy::HwpRaw),
+        #[cfg(feature = "wordperfect")]
+        Box::new(legacy::WordPerfect),
     ]
 }
 
 /// Which parts of the zip matter, per container kind.
+#[cfg(feature = "office")]
 #[derive(Clone, Copy, PartialEq)]
 enum Kind {
     Docx,
@@ -69,6 +109,7 @@ enum Kind {
     Xps,
 }
 
+#[cfg(feature = "office")]
 fn kind_of(ext: &str) -> Option<Kind> {
     Some(match ext {
         "docx" | "docm" | "dotx" | "dotm" => Kind::Docx,
@@ -84,7 +125,12 @@ fn kind_of(ext: &str) -> Option<Kind> {
 
 /// XML → text: strip tags, newline at paragraph-ish boundaries, unescape
 /// entities. Byte-level, no XML stack — malformed parts degrade gracefully.
-fn xml_to_text(xml: &[u8]) -> String {
+///
+/// Public because it is the tree's only XML → text pass: the docs crate
+/// feeds it the flat ODF that `soffice` writes for MS Publisher, whose
+/// document type has no text export filter to convert into instead.
+#[cfg(feature = "office")]
+pub fn xml_to_text(xml: &[u8]) -> String {
     /// end tags (or self-closing starts) that end a line
     fn classify_tag(name: &[u8]) -> TagClass {
         // Single-pass: lowercase the name into a 32-byte stack buffer
@@ -206,6 +252,7 @@ fn xml_to_text(xml: &[u8]) -> String {
 /// Entity-unescape `raw` straight into `out`, byte-for-byte. No
 /// intermediate `Vec<u8>`: the caller hands the raw XML slice in and
 /// the unescape writes through to the destination.
+#[cfg(feature = "office")]
 fn push_unescaped_bytes(out: &mut String, raw: &[u8]) {
     let mut i = 0usize;
     while i < raw.len() {
@@ -255,6 +302,8 @@ fn push_unescaped_bytes(out: &mut String, raw: &[u8]) {
     }
 }
 
+// `markup` looks for the end of a tag with the same finder.
+#[cfg(any(feature = "office", feature = "markup"))]
 fn find_sub(hay: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
     if from >= hay.len() || needle.is_empty() {
         return None;
@@ -262,6 +311,7 @@ fn find_sub(hay: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
     rgx_core::memchr::memmem::find(&hay[from..], needle).map(|p| p + from)
 }
 
+#[cfg(feature = "office")]
 fn find_byte(hay: &[u8], from: usize, b: u8) -> Option<usize> {
     if from >= hay.len() {
         return None;
@@ -270,6 +320,7 @@ fn find_byte(hay: &[u8], from: usize, b: u8) -> Option<usize> {
 }
 
 /// sharedStrings.xml → one line per `<si>`.
+#[cfg(feature = "office")]
 fn shared_strings(xml: &[u8]) -> Vec<String> {
     let mut out = Vec::new();
     let mut i = 0usize;
@@ -303,6 +354,7 @@ fn shared_strings(xml: &[u8]) -> Vec<String> {
 }
 
 /// One resolved spreadsheet cell.
+#[cfg(feature = "office")]
 struct Cell {
     /// column letters + row, e.g. "B12"
     reference: String,
@@ -310,6 +362,7 @@ struct Cell {
 }
 
 /// worksheet XML + shared strings → resolved cells (`t="s"` indices mapped).
+#[cfg(feature = "office")]
 fn sheet_cells(xml: &[u8], strings: &[String]) -> Vec<Cell> {
     // Search for the two static byte patterns `r="..."` and `t="..."`
     // directly instead of formatting `name=\"` per call. A 100k-cell
@@ -408,9 +461,10 @@ fn sheet_cells(xml: &[u8], strings: &[String]) -> Vec<Cell> {
 /// the truncation note; [`Office::extract`] folds it into the rendered
 /// text because this adapter returns a single text blob, not a member
 /// list.
+#[cfg(feature = "office")]
 fn read_zip_parts(data: &[u8], kind: Kind) -> Result<Vec<(String, Vec<u8>)>> {
     if !data.starts_with(b"PK\x03\x04") && !data.starts_with(b"PK\x05\x06") {
-        bail!("not a zip container (bad magic)");
+        decline!("not a zip container (bad magic)");
     }
     let archive = rgx_core::zip::ZipReader::with_limit(data, budget::budget().bytes)
         .map_err(rgx_core::Error::msg)
@@ -461,6 +515,7 @@ fn read_zip_parts(data: &[u8], kind: Kind) -> Result<Vec<(String, Vec<u8>)>> {
 /// The truncation note, if this extraction was capped, as text. The sink
 /// puts it first; a part named like that is not a part this crate would
 /// have emitted, so there is nothing to confuse it with.
+#[cfg(feature = "office")]
 fn truncation_note(parts: &[(String, Vec<u8>)]) -> Option<String> {
     parts
         .iter()
@@ -468,6 +523,7 @@ fn truncation_note(parts: &[(String, Vec<u8>)]) -> Option<String> {
         .map(|(_, note)| String::from_utf8_lossy(note).into_owned())
 }
 
+#[cfg(feature = "office")]
 fn part_matches(kind: Kind, name: &str) -> bool {
     // Zero-alloc case-insensitive match: `eq_ignore_ascii_case` and the
     // `_ascii_lowercase` byte predicates never touch the heap. The old
@@ -518,26 +574,33 @@ fn part_matches(kind: Kind, name: &str) -> bool {
 /// `1Table` stream. We walk the table and reassemble the text — nothing
 /// else in the file is decoded. Shares the rgx-core CFB reader with the
 /// `.msg` adapter.
+#[cfg(feature = "doc")]
 pub struct Doc;
+#[cfg(feature = "doc")]
 impl Adapter for Doc {
     fn name(&self) -> &'static str {
         "doc"
     }
     fn extensions(&self) -> &'static [&'static str] {
-        &["doc"]
+        // `dot` is here because a Word 97-2003 template is the same binary
+        // format as the document that gave the format its name: the same
+        // `WordDocument` stream, the same FIB, the same piece table. A
+        // template that nothing can read is a document that cannot be
+        // found.
+        &["doc", "dot"]
     }
     fn extract(&self, data: &[u8], _path: &str) -> Result<Outcome> {
         use rgx_core::cfb::Cfb;
         let cfb = Cfb::parse(data)?;
         let word = cfb
             .stream("WordDocument")
-            .context("no WordDocument stream")?;
+            .decline_context("no WordDocument stream")?;
         if word.len() < 0x20A {
             bail!("WordDocument stream shorter than the FIB");
         }
         let wident = u16::from_le_bytes([word[0], word[1]]);
         if wident != 0xA5EC {
-            bail!("not a Word document (wIdent 0x{wident:04X})");
+            decline!("not a Word document (wIdent 0x{wident:04X})");
         }
         let flags = u16::from_le_bytes([word[0x0A], word[0x0B]]);
         let table_name = if flags & 0x0200 != 0 {
@@ -545,7 +608,9 @@ impl Adapter for Doc {
         } else {
             "0Table"
         };
-        let table = cfb.stream(table_name).context("no 0Table/1Table stream")?;
+        let table = cfb
+            .stream(table_name)
+            .decline_context("no 0Table/1Table stream")?;
         let fc_clx = u32::from_le_bytes(word[0x01A2..0x01A6].try_into().unwrap()) as usize;
         let lcb_clx = u32::from_le_bytes(word[0x01A6..0x01AA].try_into().unwrap()) as usize;
         if fc_clx.checked_add(lcb_clx).is_none_or(|e| e > table.len()) {
@@ -580,7 +645,7 @@ impl Adapter for Doc {
                 _ => break,
             }
         }
-        let plcpcd = plcpcd.context("no piece table in Clx")?;
+        let plcpcd = plcpcd.decline_context("no piece table in Clx")?;
         let lcb = plcpcd.len();
         if lcb < 16 || (lcb - 4) % 12 != 0 {
             bail!("malformed PlcPcd (lcb {lcb})");
@@ -605,7 +670,17 @@ impl Adapter for Doc {
                 let off = (fc & 0x3FFF_FFFF) as usize / 2;
                 let end = off.saturating_add(chars).min(word.len());
                 if off < word.len() {
-                    out.push_str(&String::from_utf8_lossy(&word[off..end]));
+                    // The 8-bit text of a Word document is cp1252, and
+                    // reading it as UTF-8 does not read it differently -- it
+                    // replaces every byte above 0x7F with U+FFFD, and the
+                    // character is gone.
+                    out.push_str(
+                        &String::from_utf8(rgx_core::charset::decode(
+                            rgx_core::charset::WINDOWS_1252,
+                            &word[off..end],
+                        ))
+                        .unwrap_or_default(),
+                    );
                 }
             } else {
                 // Unicode: 2 bytes per char at fc
@@ -623,13 +698,15 @@ impl Adapter for Doc {
             }
         }
         if out.trim().is_empty() {
-            bail!("no text in .doc piece table");
+            decline!("no text in .doc piece table");
         }
         Ok(Outcome::Text(out.into_bytes()))
     }
 }
 
+#[cfg(feature = "office")]
 pub struct Office;
+#[cfg(feature = "office")]
 impl Adapter for Office {
     fn name(&self) -> &'static str {
         "office"
@@ -637,14 +714,14 @@ impl Adapter for Office {
     fn extensions(&self) -> &'static [&'static str] {
         &[
             "docx", "docm", "dotx", "dotm", "xlsx", "xlsm", "xltx", "xltm", "pptx", "pptm", "potx",
-            "potm", "ppsx", "odt", "ott", "ods", "ots", "odp", "otp", "odg", "otg", "epub", "vsdx",
-            "vssx", "vstx", "xps", "oxps",
+            "potm", "ppsx", "odt", "ott", "ods", "ots", "odp", "otp", "odg", "odgi", "odi", "otg",
+            "epub", "vsdx", "vssx", "vstx", "xps", "oxps",
         ]
     }
     fn extract(&self, data: &[u8], path: &str) -> Result<Outcome> {
         let ext = rgx_core::extension_of(path);
         let Some(kind) = kind_of(&ext) else {
-            bail!("unsupported office extension")
+            decline!("unsupported office extension")
         };
         let parts = read_zip_parts(data, kind)?;
         let notice = truncation_note(&parts);
@@ -711,7 +788,7 @@ impl Adapter for Office {
             }
         }
         if emitted == 0 && notice.is_none() {
-            bail!("no readable document parts in {path}");
+            decline!("no readable document parts in {path}");
         }
         // A truncation that leaves nothing readable is still an answer, and
         // it is the only one the user gets: `bail!` here would send the
@@ -727,7 +804,9 @@ impl Adapter for Office {
 /// RTF → text: drop control words/groups, decode `\'xx` escapes, newline
 /// at `\par`/`\line`/`\row`, tab at `\tab`/`\cell`. Not a full RTF engine
 /// — good enough to make documents greppable without pandoc.
+#[cfg(feature = "rtf")]
 pub struct Rtf;
+#[cfg(feature = "rtf")]
 impl Adapter for Rtf {
     fn name(&self) -> &'static str {
         "rtf"
@@ -736,15 +815,15 @@ impl Adapter for Rtf {
         &["rtf"]
     }
     /// RTF is 7-bit ASCII that ripgrep already reads; this stripper
-    /// is a strict subset as a *search space* (the control words,
-    /// destination groups and font table are removed) and a better
+    /// is a strict subset as a *search space* (the control words and
+    /// the `\*` destination groups are removed) and a better
     /// *document*. See [`Reach::Render`].
     fn reach(&self) -> Reach {
         Reach::Render
     }
     fn extract(&self, data: &[u8], _path: &str) -> Result<Outcome> {
         if !data.starts_with(b"{\\rtf") {
-            bail!("not an RTF file (bad magic)");
+            decline!("not an RTF file (bad magic)");
         }
         let mut out = String::with_capacity(data.len() / 2);
         let mut i = 0usize;
@@ -862,7 +941,16 @@ impl Adapter for Rtf {
                         })
                         .map(|p| p + i)
                         .unwrap_or(n);
-                    out.push_str(&String::from_utf8_lossy(&data[i..next]));
+                    // RTF's plain text is 7-bit ANSI, which is cp1252 for
+                    // the byte above 0x7F. Reading it as UTF-8 replaced
+                    // every one of them with U+FFFD.
+                    out.push_str(
+                        &String::from_utf8(rgx_core::charset::decode(
+                            rgx_core::charset::WINDOWS_1252,
+                            &data[i..next],
+                        ))
+                        .unwrap_or_default(),
+                    );
                     i = next;
                 }
                 _ => i += 1,
@@ -870,15 +958,17 @@ impl Adapter for Rtf {
         }
         let text = out.trim().to_string();
         if text.is_empty() {
-            bail!("no text content in RTF");
+            decline!("no text content in RTF");
         }
         Ok(Outcome::Text(text.into_bytes()))
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(feature = "office", feature = "rtf", feature = "doc")))]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "office")]
     use std::sync::Mutex;
 
     /// The producer budget is a process-wide global (it has to be: see
@@ -887,13 +977,16 @@ mod tests {
     /// zip-reading tests next door extract. Every test that reads the budget
     /// takes this lock; a test that *writes* it restores the default even if
     /// it panics.
+    #[cfg(feature = "office")]
     static BUDGET: Mutex<()> = Mutex::new(());
 
+    #[cfg(feature = "office")]
     fn locked<R>(f: impl FnOnce() -> R) -> R {
         let _guard = BUDGET.lock().unwrap_or_else(|e| e.into_inner());
         f()
     }
 
+    #[cfg(feature = "office")]
     fn under_budget<R>(members: usize, bytes: u64, f: impl FnOnce() -> R) -> R {
         struct Reset;
         impl Drop for Reset {
@@ -909,6 +1002,7 @@ mod tests {
     }
 
     /// Minimal stored (uncompressed) zip builder — no crate features needed.
+    #[cfg(feature = "office")]
     fn build_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
         fn crc32(b: &[u8]) -> u32 {
             let mut crc = 0xFFFF_FFFFu32;
@@ -983,11 +1077,13 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "office")]
     const DOC: &[u8] = br#"<?xml version="1.0"?><w:document><w:body>
         <w:p><w:r><w:t>Pressure ZIRCALOY vessel</w:t></w:r></w:p>
         <w:p><w:r><w:t>second &amp; final</w:t></w:r></w:p>
         </w:body></w:document>"#;
 
+    #[cfg(feature = "office")]
     #[test]
     fn docx_strips_xml_to_paragraphs() {
         let zip = build_zip(&[
@@ -1000,6 +1096,7 @@ mod tests {
         assert!(out.contains("=== word/document.xml ==="), "{out}");
     }
 
+    #[cfg(feature = "office")]
     #[test]
     fn xlsx_resolves_shared_strings_to_cell_addresses() {
         let ss =
@@ -1023,6 +1120,7 @@ mod tests {
     /// A page part and the document part must both surface, the document part
     /// first (it is the whole drawing's text, not one page's), and a
     /// `visio/windows/` part must not -- it is a UI state file, not text.
+    #[cfg(feature = "office")]
     #[test]
     fn vsdx_reads_document_then_page_xml_only() {
         let doc = br#"<?xml version="1.0"?><VisioDocument><Text>shape
@@ -1053,6 +1151,7 @@ mod tests {
         assert!(doc_at < page_at, "document part must come first: {out}");
     }
 
+    #[cfg(feature = "office")]
     #[test]
     fn odt_reads_content_xml() {
         let content = br#"<?xml version="1.0"?>
@@ -1067,6 +1166,58 @@ mod tests {
         assert!(out.contains("ZIRCALOY notes"), "{out}");
     }
 
+    /// The docs crate's `soffice` adapter runs this pass over a *whole*
+    /// flat ODF file (`fodg`), which is the shape LibreOffice writes for a
+    /// Draw document — MS Publisher is the one format that adapter still
+    /// owns, and Draw has no text export filter. Two things differ from the
+    /// odt case above and both are load-bearing: the text sits one level
+    /// deeper (`text:p > text:span`), and the surrounding `draw:frame`
+    /// carries the page geometry as attributes. A match must report a line
+    /// per text box and must not surface a coordinate.
+    #[cfg(feature = "office")]
+    #[test]
+    fn flat_odf_drawing_yields_one_line_per_text_box_and_no_geometry() {
+        let fodg = br#"<?xml version="1.0" encoding="UTF-8"?>
+            <office:document
+                xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0"
+                xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"
+                xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0">
+             <office:body><office:drawing>
+              <draw:page draw:name="page1">
+               <draw:polygon svg:viewBox="0 0 10801,0 10801,2014 0,2014">
+                <text:p/>
+               </draw:polygon>
+               <draw:frame svg:width="12.2cm" svg:x="3.9cm" svg:y="14.6cm">
+                <draw:text-box>
+                 <text:p text:style-name="P1"><text:span text:style-name="T3">This is a link to Apache POI </text:span></text:p>
+                 <text:p text:style-name="P1"><text:span text:style-name="T1">More normal text </text:span></text:p>
+                </draw:text-box>
+               </draw:frame>
+              </draw:page>
+             </office:drawing></office:body>
+            </office:document>"#;
+        let text = xml_to_text(fodg);
+        let link = text
+            .lines()
+            .find(|l| l.contains("This is a link to Apache POI"))
+            .unwrap_or_else(|| panic!("the text box was dropped: {text:?}"));
+        let other = text
+            .lines()
+            .find(|l| l.contains("More normal text"))
+            .unwrap_or_else(|| panic!("the second text box was dropped: {text:?}"));
+        assert_ne!(
+            link, other,
+            "two text boxes collapsed onto one line: {text:?}"
+        );
+        for coordinate in ["10801", "12.2cm", "3.9cm", "page1"] {
+            assert!(
+                !text.contains(coordinate),
+                "drawing geometry {coordinate} leaked into the text: {text:?}"
+            );
+        }
+    }
+
+    #[cfg(feature = "office")]
     #[test]
     fn epub_reads_ops_parts() {
         let ch = br#"<html xmlns="http://www.w3.org/1999/xhtml"><body>
@@ -1085,6 +1236,7 @@ mod tests {
     /// are gone: `MemberSink` carries both, a part that exceeds the cap
     /// emits the note instead of going missing, and a document under
     /// the cap is not touched.
+    #[cfg(feature = "office")]
     #[test]
     fn a_docx_the_byte_budget_stops_says_so() {
         // A part that does not fit the 4096-byte budget below, but is an
@@ -1130,6 +1282,7 @@ mod tests {
     /// The note is the whole answer when the budget left nothing readable —
     /// bailing there hands the pipeline a raw search of the zip bytes and the
     /// note goes with it.
+    #[cfg(feature = "office")]
     #[test]
     fn a_docx_truncated_to_nothing_still_reports_the_truncation() {
         let zip = build_zip(&[("word/header1.xml", &vec![b'A'; 4096])]);
@@ -1139,11 +1292,13 @@ mod tests {
         assert!(out.contains("rgx: archive truncated"), "{out}");
     }
 
+    #[cfg(feature = "office")]
     #[test]
     fn rejects_non_zip() {
         assert!(Office.extract(b"not a zip at all", "a.docx").is_err());
     }
 
+    #[cfg(feature = "rtf")]
     #[test]
     fn rtf_strips_control_words() {
         let rtf = br"{\rtf1\ansi{\fonttbl{\f0 Arial;}}\pard\par Hello ZIRCALOY\tab world\par {\*\fldinst blah}after\par}";
@@ -1161,9 +1316,25 @@ mod tests {
         assert!(out.contains("after"), "{out}");
     }
 
+    /// RTF's plain text is 7-bit ANSI, which is cp1252 above 0x7F.
+    ///
+    /// The bug this holds down: the text was read as UTF-8, so a cp1252
+    /// `0xE9` became U+FFFD and the character was gone from the answer.
+    #[cfg(feature = "rtf")]
+    #[test]
+    fn rtf_keeps_the_ansi_high_half() {
+        let mut rtf = br"{\rtf1\ansi Hello ".to_vec();
+        rtf.push(0xE9);
+        rtf.extend_from_slice(br" ZIRCALOY\par}");
+        let out = text_of(Rtf.extract(&rtf, "n.rtf").unwrap());
+        assert!(out.contains('é'), "the high byte was lost: {out}");
+        assert!(!out.contains('\u{FFFD}'), "a byte became U+FFFD: {out}");
+    }
+
     mod fuzz {
         use super::*;
 
+        #[cfg(feature = "office")]
         #[test]
         fn office_never_panics_on_mutation() {
             let zip = build_zip(&[
@@ -1187,6 +1358,7 @@ mod tests {
             );
         }
 
+        #[cfg(feature = "rtf")]
         #[test]
         fn rtf_never_panics_on_mutation() {
             let rtf = br"{\rtf1\ansi{\fonttbl{\f0 Arial;}}\pard\par Hello ZIRCALOY\tab world\par}"
@@ -1204,5 +1376,151 @@ mod tests {
                 },
             );
         }
+    }
+
+    /// A compound file with two *regular* streams, built by hand: the
+    /// header, one FAT sector, one directory sector, and the stream data
+    /// after that. The streams are regular rather than mini so the reader
+    /// walks the FAT -- which is the path a `.doc` takes, since its
+    /// `WordDocument` stream is larger than the mini cutoff.
+    #[cfg(feature = "doc")]
+    fn build_cfb(streams: &[(&str, &[u8])]) -> Vec<u8> {
+        const SECTOR: usize = 512;
+        let mut image = vec![0u8; SECTOR];
+        image[0..8].copy_from_slice(&rgx_core::cfb::CFB_SIG);
+        image[30..32].copy_from_slice(&9u16.to_le_bytes()); // 512-byte sectors
+        image[32..34].copy_from_slice(&6u16.to_le_bytes()); // 64-byte mini sectors
+        image[44..48].copy_from_slice(&1u32.to_le_bytes()); // one FAT sector
+        image[48..52].copy_from_slice(&1u32.to_le_bytes()); // the directory is sector 1
+        image[56..60].copy_from_slice(&4096u32.to_le_bytes()); // mini cutoff
+        image[60..64].copy_from_slice(&0xFFFF_FFFEu32.to_le_bytes()); // no miniFAT
+        image[64..68].copy_from_slice(&0u32.to_le_bytes()); // no miniFAT sectors
+        image[68..72].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // no DIFAT sectors
+        image[76..80].copy_from_slice(&0u32.to_le_bytes()); // the FAT is sector 0
+        for k in 1..109 {
+            let o = 76 + k * 4;
+            image[o..o + 4].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        }
+
+        // The data starts at sector 2, each stream on a sector boundary.
+        let mut data = Vec::new();
+        let mut starts = Vec::new();
+        for (_, bytes) in streams {
+            starts.push(2 + data.len() / SECTOR);
+            data.extend_from_slice(bytes);
+            while data.len() % SECTOR != 0 {
+                data.push(0);
+            }
+        }
+
+        // The FAT: sector 0 is the FAT itself, sector 1 the directory, and
+        // each stream a chain over the sectors it holds.
+        let mut fat = vec![0xFFu8; SECTOR];
+        let put = |fat: &mut Vec<u8>, sector: usize, value: u32| {
+            fat[sector * 4..sector * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        };
+        put(&mut fat, 0, 0xFFFF_FFFD); // FATSECT
+        put(&mut fat, 1, 0xFFFF_FFFE); // the directory ends here
+        for (i, (_, bytes)) in streams.iter().enumerate() {
+            let first = starts[i];
+            let count = bytes.len().div_ceil(SECTOR);
+            for k in 0..count {
+                let next = if k + 1 < count {
+                    (first + k + 1) as u32
+                } else {
+                    0xFFFF_FFFE
+                };
+                put(&mut fat, first + k, next);
+            }
+        }
+        image.extend_from_slice(&fat); // sector 0
+
+        // The directory: the root, then one entry per stream. The sector is
+        // padded to its size afterwards -- the entries start at its first
+        // byte, not after it.
+        let mut dir = Vec::new();
+        let entry = |dir: &mut Vec<u8>, name: &str, kind: u8, start: u32, size: u32| {
+            let mut e = vec![0u8; 128];
+            let n: Vec<u8> = name
+                .encode_utf16()
+                .chain(core::iter::once(0u16))
+                .flat_map(|u| u.to_le_bytes())
+                .collect();
+            e[0..n.len()].copy_from_slice(&n);
+            e[64..66].copy_from_slice(&(n.len() as u16).to_le_bytes());
+            e[66] = kind;
+            e[116..120].copy_from_slice(&start.to_le_bytes());
+            e[120..124].copy_from_slice(&size.to_le_bytes());
+            dir.extend_from_slice(&e);
+        };
+        entry(&mut dir, "Root Entry", 5, 0xFFFF_FFFE, 0);
+        for (i, (name, bytes)) in streams.iter().enumerate() {
+            entry(&mut dir, name, 2, starts[i] as u32, bytes.len() as u32);
+        }
+        while dir.len() < SECTOR {
+            dir.push(0);
+        }
+        image.extend_from_slice(&dir); // sector 1
+        image.extend_from_slice(&data);
+        image
+    }
+
+    /// The legacy Word adapter had no test: the format was implemented and
+    /// never exercised, which is the same as saying the implementation was
+    /// never checked. This builds the smallest file the reader accepts -- a
+    /// compound file with a `WordDocument` stream holding the FIB and the
+    /// text, and a `1Table` stream holding the piece table that points at
+    /// it -- and reads the text back.
+    #[test]
+    #[cfg(feature = "doc")]
+    fn a_legacy_word_document_is_read_through_its_piece_table() {
+        let text = "Zircaloy cladding report";
+        let units: Vec<u16> = text.encode_utf16().collect();
+        // The FIB, then the text at 0x300.
+        let mut word = vec![0u8; 0x300];
+        word[0..2].copy_from_slice(&0xA5ECu16.to_le_bytes()); // wIdent
+        word[0x0A..0x0C].copy_from_slice(&0x0200u16.to_le_bytes()); // the 1Table stream
+        for u in &units {
+            word.extend_from_slice(&u.to_le_bytes());
+        }
+        // The Clx: a Pcdt holding one piece, whose PCD points at the text.
+        // The Unicode piece has the high bit of `fc` clear; the compressed
+        // (cp1252) one has it set and the offset halved.
+        let mut plcpcd = Vec::new();
+        plcpcd.extend_from_slice(&0u32.to_le_bytes()); // CP[0]
+        plcpcd.extend_from_slice(&(units.len() as u32).to_le_bytes()); // CP[1]
+        plcpcd.extend_from_slice(&[0, 0]); // PCD: flags and reserved
+        plcpcd.extend_from_slice(&0x300u32.to_le_bytes()); // PCD: the offset
+        plcpcd.extend_from_slice(&[0, 0]); // PCD: the rest
+        let mut clx = vec![0x02u8];
+        clx.extend_from_slice(&(plcpcd.len() as u32).to_le_bytes());
+        clx.extend_from_slice(&plcpcd);
+        word[0x01A2..0x01A6].copy_from_slice(&0u32.to_le_bytes()); // fcClx
+        word[0x01A6..0x01AA].copy_from_slice(&(clx.len() as u32).to_le_bytes()); // lcbClx
+
+        let cfb = build_cfb(&[("WordDocument", &word), ("1Table", &clx)]);
+        match Doc.extract(&cfb, "letter.doc").unwrap() {
+            Outcome::Text(t) => {
+                let s = String::from_utf8(t).unwrap();
+                assert!(s.contains(text), "{s}");
+            }
+            _ => panic!("expected text"),
+        }
+    }
+
+    /// A Word 97-2003 template is the same binary format as the document
+    /// that named it, so the same reader answers for it.
+    #[test]
+    #[cfg(feature = "doc")]
+    fn a_word_template_is_claimed() {
+        let reg = rgx_core::Registry::new(vec![Box::new(Doc)]);
+        assert!(
+            reg.may_claim_for_path("letter.doc"),
+            "the registry must claim .doc"
+        );
+        assert!(
+            reg.may_claim_for_path("letter.dot"),
+            "the registry must claim .dot"
+        );
     }
 }

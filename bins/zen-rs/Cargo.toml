@@ -2,6 +2,7 @@
 name = "zen-rs"
 version = "0.1.0"
 edition = "2024"
+authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
 description = "The zen-rs CLI/TUI, unchanged behaviour, now built on the rgy workspace crates"
 license = "Apache-2.0"
 

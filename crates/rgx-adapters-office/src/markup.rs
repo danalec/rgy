@@ -1,16 +1,20 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Lightweight-markup → text: reStructuredText, org-mode, MediaWiki
 //! wikitext, Jupyter notebooks, Textile and troff/groff man pages.
 //! Everything pandoc used to cover in-process for grep's sake.
 //!
-//! Canonical full implementations (structured blocks, outlines, typed
-//! errors): `upstream::b01::io::markup::{rst,org,mediawiki,ipynb,textile,man}`.
-//! These siblings carry only the flat-text flattening.
+//! A reduced port of the markup readers of the `io` project by Dan Gohman,
+//! whose work is used here under Apache-2.0: the structured blocks, outlines
+//! and typed errors of `rst`, `org`, `mediawiki`, `ipynb`, `textile` and
+//! `man` are the upstream's, and these siblings carry only the flat-text
+//! flattening. See `NOTICE`.
 
 use alloc::string::String;
 #[allow(unused_imports)]
 use alloc::vec::Vec;
 use core::str;
-use rgx_core::{bail, Result};
+use rgx_core::{decline, Result};
 use rgx_core::{Adapter, Outcome, Reach};
 
 pub struct Markup;
@@ -70,10 +74,10 @@ impl Adapter for Markup {
             "html" | "htm" | "xhtml" => html::extract_text(data),
             "t2t" => t2t::extract_text(data),
             "fb2" => fb2::extract_text(data),
-            _ => bail!("unsupported markup extension: {ext}"),
+            _ => decline!("unsupported markup extension: {ext}"),
         };
         let Some(text) = text else {
-            bail!("no readable text in {path}")
+            decline!("no readable text in {path}")
         };
         Ok(Outcome::Text(text.into_bytes()))
     }
@@ -109,6 +113,155 @@ fn tidy(text: &str) -> String {
         out.truncate(tail);
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// declared charset
+// ---------------------------------------------------------------------------
+
+/// How far into a document the declaration is looked for.
+///
+/// The HTML5 specification asks for the `<meta charset>` in the first 1024
+/// bytes, and the XML prolog is at the very start. 4096 is generous enough
+/// for a page with a long comment before its head and short enough that a
+/// `charset=` in the body text is not mistaken for a declaration.
+const CHARSET_SNIFF_LEN: usize = 4096;
+
+/// The charset a document declares, if it declares one.
+///
+/// An HTML document says it in `<meta charset="...">` (or in the older
+/// `http-equiv` form, where the charset is a parameter of the `content`
+/// attribute); an XML document says it in the prolog
+/// (`<?xml version="1.0" encoding="..."?>`).
+///
+/// **Why the declaration is read.** A document that says what its bytes
+/// mean and is read as UTF-8 anyway does not get read differently -- it
+/// gets *changed*: every byte above 0x7F becomes U+FFFD, the character is
+/// gone from the rendering, and a search for it cannot find it. The
+/// declaration is the one place the file is allowed to say what it wants.
+fn declared_charset(data: &[u8]) -> Option<String> {
+    let head = &data[..data.len().min(CHARSET_SNIFF_LEN)];
+
+    // The XML prolog comes first: an XHTML document has one, and it is
+    // the authoritative statement.
+    if let Some(p) = find_ci(head, 0, b"<?xml") {
+        if let Some(v) = attr_value(&head[p..], b"encoding") {
+            return Some(v);
+        }
+    }
+
+    let mut from = 0usize;
+    while let Some(p) = find_ci(head, from, b"<meta") {
+        let rest = &head[p..];
+        let end = crate::find_sub(rest, 0, b">").unwrap_or(rest.len());
+        let tag = &rest[..end];
+        if let Some(v) = attr_value(tag, b"charset") {
+            if !v.is_empty() {
+                return Some(v);
+            }
+        }
+        // The older spelling: <meta http-equiv="content-type"
+        // content="text/html; charset=iso-8859-1">
+        if let Some(content) = attr_value(tag, b"content") {
+            if let Some(cs) = find_ci(content.as_bytes(), 0, b"charset=") {
+                let v = take_value(&content.as_bytes()[cs + 8..]);
+                if !v.is_empty() {
+                    return Some(v);
+                }
+            }
+        }
+        from = p + 5;
+        if from >= head.len() {
+            break;
+        }
+    }
+    None
+}
+
+/// A case-insensitive byte search.
+fn find_ci(hay: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || from > hay.len() {
+        return None;
+    }
+    let last = hay.len().checked_sub(needle.len())?;
+    let mut i = from;
+    while i <= last {
+        if hay[i..i + needle.len()]
+            .iter()
+            .zip(needle)
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
+        {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// The value of an attribute in a tag, if the tag has one.
+///
+/// The name is matched case-insensitively (HTML attribute names are not
+/// case-sensitive) and the value may be quoted with `"` or `'` or bare.
+fn attr_value(tag: &[u8], name: &[u8]) -> Option<String> {
+    let p = find_ci(tag, 0, name)?;
+    let mut i = p + name.len();
+    // The name must be a whole attribute: `charset` must not match the
+    // tail of `xcharset`.
+    if i < tag.len() && (tag[i].is_ascii_alphanumeric() || tag[i] == b'-' || tag[i] == b'_') {
+        return None;
+    }
+    while i < tag.len() && (tag[i] as char).is_whitespace() {
+        i += 1;
+    }
+    if i >= tag.len() || tag[i] != b'=' {
+        return None;
+    }
+    i += 1;
+    while i < tag.len() && (tag[i] as char).is_whitespace() {
+        i += 1;
+    }
+    if i >= tag.len() {
+        return None;
+    }
+    let value = if tag[i] == b'"' || tag[i] == b'\'' {
+        let quote = tag[i];
+        i += 1;
+        let start = i;
+        while i < tag.len() && tag[i] != quote {
+            i += 1;
+        }
+        &tag[start..i]
+    } else {
+        let start = i;
+        while i < tag.len() && !(tag[i] as char).is_whitespace() && tag[i] != b';' && tag[i] != b'>'
+        {
+            i += 1;
+        }
+        &tag[start..i]
+    };
+    Some(String::from_utf8_lossy(value).into_owned())
+}
+
+/// An unquoted attribute value, up to the first space or delimiter.
+fn take_value(rest: &[u8]) -> String {
+    let end = rest
+        .iter()
+        .position(|&c| {
+            (c as char).is_whitespace() || c == b';' || c == b'>' || c == b'"' || c == b'\''
+        })
+        .unwrap_or(rest.len());
+    String::from_utf8_lossy(&rest[..end]).into_owned()
+}
+
+/// Decode a document in the charset it declares.
+///
+/// A document that declares nothing is left as it is: the caller's own
+/// reading applies, and for a text format that is "valid UTF-8, and the
+/// invalid bytes marked". Only a document that *says* what its bytes mean
+/// is read in that encoding.
+fn decode_declared(data: &[u8]) -> Option<Vec<u8>> {
+    let cs = declared_charset(data)?;
+    rgx_core::charset::decode_named(&cs, data)
 }
 
 // ---------------------------------------------------------------------------
@@ -2040,7 +2193,7 @@ mod markdown {
 // ---------------------------------------------------------------------------
 
 mod html {
-    use super::tidy;
+    use super::{decode_declared, tidy};
     #[allow(unused_imports)]
     use alloc::string::{String, ToString};
     #[allow(unused_imports)]
@@ -2092,6 +2245,16 @@ mod html {
     }
 
     pub fn extract_text(data: &[u8]) -> Option<String> {
+        // A document that declares its charset is read in it, so its
+        // accented characters are characters and not U+FFFD.
+        let decoded;
+        let data = match decode_declared(data) {
+            Some(d) => {
+                decoded = d;
+                decoded.as_slice()
+            }
+            None => data,
+        };
         let mut text_out = String::with_capacity(data.len());
         let mut text = Vec::with_capacity(1024);
         let mut i = 0usize;
@@ -2400,7 +2563,7 @@ mod t2t {
 // ---------------------------------------------------------------------------
 
 mod fb2 {
-    use super::tidy;
+    use super::{decode_declared, tidy};
     #[allow(unused_imports)]
     use alloc::string::{String, ToString};
     #[allow(unused_imports)]
@@ -2424,6 +2587,15 @@ mod fb2 {
     }
 
     pub fn extract_text(data: &[u8]) -> Option<String> {
+        // FictionBook is XML, and the prolog may say what the bytes are.
+        let decoded;
+        let data = match decode_declared(data) {
+            Some(d) => {
+                decoded = d;
+                decoded.as_slice()
+            }
+            None => data,
+        };
         let mut text_out = String::with_capacity(data.len() / 4);
         let mut text = Vec::with_capacity(1024);
         let mut i = 0usize;
@@ -2807,6 +2979,52 @@ Second line.</p>
         assert!(!out.contains("color:red"), "style dropped: {out}");
         assert!(!out.contains("var x"), "script dropped: {out}");
         assert!(!out.contains("a comment"), "comment dropped: {out}");
+    }
+
+    /// A document that declares its charset is read in it.
+    ///
+    /// The bug this holds down: the page was read as UTF-8 whatever it
+    /// said, so a latin-1 `0xE9` became U+FFFD and the character was gone
+    /// from the rendering -- a search for "café" could not find it.
+    #[test]
+    fn an_html_document_is_read_in_the_charset_it_declares() {
+        let mut raw =
+            b"<html><head><meta charset=\"iso-8859-1\"></head><body><p>caf\xe9</p></body></html>"
+                .to_vec();
+        raw.push(0);
+        let out = text_of(Markup.extract(&raw, "p.html").unwrap());
+        assert!(out.contains("café"), "{out}");
+        assert!(!out.contains('\u{FFFD}'), "a byte became U+FFFD: {out}");
+    }
+
+    /// The older spelling of the same declaration.
+    #[test]
+    fn an_html_http_equiv_charset_is_honoured() {
+        let mut raw = b"<html><head><meta http-equiv=\"Content-Type\" content=\"text/html; charset=iso-8859-1\"></head><body><p>caf\xe9</p></body></html>".to_vec();
+        raw.push(0);
+        let out = text_of(Markup.extract(&raw, "p.html").unwrap());
+        assert!(out.contains("café"), "{out}");
+    }
+
+    /// The XML prolog of an XHTML document.
+    #[test]
+    fn an_xhtml_prolog_encoding_is_honoured() {
+        let mut raw =
+            b"<?xml version=\"1.0\" encoding=\"iso-8859-1\"?><html><body><p>caf\xe9</p></body></html>"
+                .to_vec();
+        raw.push(0);
+        let out = text_of(Markup.extract(&raw, "p.xhtml").unwrap());
+        assert!(out.contains("café"), "{out}");
+    }
+
+    /// A document that declares nothing is not re-read in a guessed
+    /// encoding: the caller's own reading applies.
+    #[test]
+    fn an_html_document_without_a_declaration_is_left_alone() {
+        let mut raw = b"<html><body><p>caf\xc3\xa9</p></body></html>".to_vec();
+        raw.push(0);
+        let out = text_of(Markup.extract(&raw, "p.html").unwrap());
+        assert!(out.contains("café"), "{out}");
     }
 
     #[test]

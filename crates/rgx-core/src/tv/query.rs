@@ -147,6 +147,25 @@ pub struct SearchConfig {
     /// against a `u64` per record and reads nothing.
     pub max_file_size: Option<u64>,
     pub unmap: Unmap,
+    /// The extraction fingerprint of the pipeline this query would run over
+    /// a claimed file, as the build computed it into
+    /// [`ManifestHead::extract_fp`](crate::tv::format::ManifestHead::extract_fp).
+    /// `Some(fp)` lets the n-gram filter reject records flagged
+    /// [`FileLoc::SIG_COVERS_ADAPTER`](crate::tv::format::FileLoc::SIG_COVERS_ADAPTER)
+    /// only while `fp` equals the store head's; `None` says the caller
+    /// states no extraction context and every rollup record stands unfiltered.
+    /// A search over the records' own bytes is covered by either signature
+    /// this format writes and may pass anything; this field exists so the
+    /// one rule serves every search that may see adapter output.
+    pub extract_fp: Option<u64>,
+    /// The query's n-gram signature, from the literal every match must
+    /// contain (see [`crate::ngram::query_sig512`]). The planner reads it to
+    /// reject records before their bytes are planned for reading;
+    /// `None` stands the filter down and is the only value a caller must
+    /// never read as "nothing matches". The search entry points derive it
+    /// from the pattern alongside the engine, so a caller that sets nothing
+    /// gets today's behaviour and a plan that reads everything.
+    pub ngram_query: Option<crate::ngram::NgramSig512>,
 }
 
 /// One hit, as the pack reports it.
@@ -181,6 +200,8 @@ impl Default for SearchConfig {
             search_binary: false,
             max_file_size: None,
             unmap: Unmap::Explicit,
+            extract_fp: None,
+            ngram_query: None,
         }
     }
 }

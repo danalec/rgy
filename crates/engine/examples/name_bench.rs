@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Phase 0 bench harness (first-PR sequence #1): name search + walk
 //! latency on a fixed, deterministic corpus, printing a table the plan's
 //! perf gate compares against (`benchmark/baseline-names.md`).

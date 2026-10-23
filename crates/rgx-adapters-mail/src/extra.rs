@@ -1,21 +1,34 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Extra mail adapters: Outlook `.msg` (OLE2/CFB) and Apple Mail `.emlx`.
 //!
 //! `.msg` uses the OLE2 Compound File Binary format — the same container as
 //! old `.doc`/`.xls`. The shared CFB reader now lives in rgx-core
 //! (`rgx_core::cfb`) so the office `.doc` adapter uses the same code.
 
+#[cfg(feature = "msg")]
 use alloc::string::String;
+#[cfg(feature = "msg")]
 use alloc::vec::Vec;
+#[cfg(feature = "msg")]
 use core::fmt::Write as _;
-use rgx_core::{bail, Result};
-use rgx_core::{cfb::Cfb, Adapter, Outcome};
-
+#[cfg(feature = "msg")]
+use rgx_core::cfb::Cfb;
+#[cfg(feature = "msg")]
 use rgx_core::cfb::Entry;
+#[cfg(feature = "msg")]
+use rgx_core::decline;
+#[cfg(any(feature = "msg", feature = "emlx"))]
+use rgx_core::Result;
+#[cfg(any(feature = "msg", feature = "emlx"))]
+use rgx_core::{Adapter, Outcome};
 
 /// Outlook `.msg`: MAPI properties stored as named streams inside a CFB.
 /// We read the standard ones: subject, body (ANSI or UTF-16), sender,
 /// recipients, attachment inventory.
+#[cfg(feature = "msg")]
 pub struct Msg;
+#[cfg(feature = "msg")]
 impl Adapter for Msg {
     fn name(&self) -> &'static str {
         "msg"
@@ -89,7 +102,7 @@ impl Adapter for Msg {
         }
 
         if !has_content && attach_names.is_empty() {
-            bail!("no readable MAPI properties in .msg");
+            decline!("no readable MAPI properties in .msg");
         }
         Ok(Outcome::Text(out.into_bytes()))
     }
@@ -98,7 +111,9 @@ impl Adapter for Msg {
 /// Apple Mail `.emlx`: an RFC-822 message followed by `\n<message-count>\n`
 /// and a binary plist. We strip the trailer and reuse the eml adapter, so
 /// attachments inside emlx files recurse through the full adapter chain.
+#[cfg(feature = "emlx")]
 pub struct Emlx;
+#[cfg(feature = "emlx")]
 impl Adapter for Emlx {
     fn name(&self) -> &'static str {
         "emlx"
@@ -134,11 +149,17 @@ impl Adapter for Emlx {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The `emlx` reader builds no string of its own; the test needs one to
+    // read the text back.
+    #[cfg(feature = "emlx")]
+    use alloc::string::String;
+    #[cfg(feature = "msg")]
     use core::iter;
 
     /// Build a minimal CFB: 1 FAT sector, 1 dir sector, mini stream in
     /// sector 2. Layout: sector0 = FAT, sector1 = directory, sector2 = mini
     /// stream, sector3 = miniFAT.
+    #[cfg(feature = "msg")]
     pub(crate) fn build_cfb(streams: &[(u16, &str, &[u8])]) -> Vec<u8> {
         // stream ids are mini-sector indices here; we lay streams
         // consecutively from mini-sector 0.
@@ -217,6 +238,7 @@ mod tests {
         image
     }
 
+    #[cfg(feature = "msg")]
     #[test]
     fn msg_reads_subject_and_body() {
         let subject = "ZIRCALOY inspection";
@@ -238,6 +260,7 @@ mod tests {
         assert!(s.contains("check the coolant pump seals"), "{s}");
     }
 
+    #[cfg(feature = "emlx")]
     #[test]
     fn emlx_strips_plist_trailer() {
         let raw = b"From: a@b.c\r\nSubject: ZIRCALOY note\r\n\r\nbody text\r\n";
@@ -253,9 +276,11 @@ mod tests {
         assert!(!s.contains("bplist"), "{s}");
     }
 
+    #[cfg(any(feature = "msg", feature = "emlx"))]
     mod fuzz {
         use super::*;
 
+        #[cfg(feature = "msg")]
         fn msg_fixture() -> Vec<u8> {
             let subject_u16: Vec<u8> = "ZIRCALOY inspection"
                 .encode_utf16()
@@ -267,6 +292,7 @@ mod tests {
             ])
         }
 
+        #[cfg(feature = "msg")]
         #[test]
         fn msg_cfb_never_panics_on_mutation() {
             rgx_core::fuzzkit::assert_never_panics(
@@ -283,6 +309,7 @@ mod tests {
             );
         }
 
+        #[cfg(feature = "emlx")]
         #[test]
         fn emlx_never_panics_on_mutation() {
             let raw = b"From: a@b.c\r\nSubject: x\r\n\r\nbody\r\n".to_vec();

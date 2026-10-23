@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Unicode tokenizer for the token index.
 //!
 //! The token index in [`super::index`] keys on whole tokens, not bytes; a

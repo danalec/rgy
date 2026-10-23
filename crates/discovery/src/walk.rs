@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! DFS directory-block vocabulary (the `discovery::Source` block type).
 //!
 //! Transported from fsearch `walk.rs`: the kinds/flags every backend lists

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! rgx-core: the adapter contract and the extraction pipeline.
 //!
 //! `no_std` + `alloc`. The `std` feature gates what genuinely needs it; see
@@ -101,6 +103,7 @@ extern crate alloc;
 use alloc::borrow::Cow;
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 #[cfg(feature = "std")]
 extern crate std;
@@ -108,9 +111,16 @@ extern crate std;
 pub mod base64;
 pub mod byteclass;
 pub mod cfb;
+pub mod charset;
+mod charset_mb_table;
+mod charset_state_table;
+mod charset_table;
 pub mod compress;
+pub mod crypt;
 pub mod encoding;
 pub mod error;
+pub mod filetype;
+pub mod filter;
 pub mod fixed;
 pub mod frequency;
 pub mod memchr;
@@ -119,6 +129,7 @@ pub mod memmap2;
 
 pub mod casefold_table;
 pub mod djson;
+pub mod facts_index;
 pub mod fuzzkit;
 pub mod fuzzy;
 pub mod hybrid;
@@ -127,12 +138,15 @@ pub mod index_io;
 pub mod literal;
 pub mod maskstats;
 pub mod matcher;
+pub mod mcp;
 pub mod nfa;
 pub mod ngram;
 pub mod numparse;
+pub mod png;
 pub mod prefilter;
 pub mod regex;
 pub mod required;
+pub mod rulebank;
 pub mod scan;
 pub mod searcher;
 pub mod sha256;
@@ -152,9 +166,21 @@ pub mod tv;
 pub mod tv_runtime;
 pub mod unicode_case;
 pub mod vm;
+pub mod walk_policy;
+// The ZIP reader, and with it the five compression methods the format
+// defines: deflate, bzip2, lzma, xz and zstd. The feature is what carries
+// them, so a binary that reads no zip archive carries no zip codec either.
+#[cfg(feature = "zip")]
 pub mod zip;
 
 pub use error::{Context, Error, Result};
+
+/// A fact about a file, as the filter's predicates see it.
+///
+/// Re-exported at the crate root because an adapter that has metadata to
+/// report names it here, and `rgx_core::filter::Field` is a mouthful for
+/// a type every adapter would spell.
+pub use filter::Field;
 
 /// `anyhow!` expands to `format!`, and a macro that names `alloc` only
 /// works inside this crate. Re-exporting it under `$crate` is what lets the
@@ -318,6 +344,40 @@ pub struct Ctx {
     pub max_members: usize,
     /// max bytes read from one real file before adapters see it
     pub max_file_size: usize,
+    /// The structured filter, when one was given.
+    ///
+    /// It is part of the [`Ctx`] and not a global because the cache is keyed
+    /// by the [`Ctx`]: two filters over the same file are two extractions
+    /// as far as the cache is concerned, and a cache that handed the
+    /// second one the first one's units would answer a question nobody
+    /// asked.
+    pub filter: Option<filter::Filter>,
+    /// Where the facts of the files go, when the caller asked for them.
+    ///
+    /// The index builder needs every file's facts, not only the ones a
+    /// filter kept, and the pipeline already assembles them — it has to,
+    /// to ask the filter. This is where they go on the way past.
+    ///
+    /// It is `None` in every run that does not ask, and it is not part of
+    /// the cache key: the sink decides where the facts are *written*,
+    /// not what the extraction *is*, and a key that moved when the sink
+    /// appeared would make the cache miss on a run that changed nothing.
+    pub facts_sink: Option<Arc<dyn FactsSink>>,
+}
+
+/// Where the pipeline's facts go.
+///
+/// The sink is shared: the walk runs the pipeline on several threads, and
+/// the facts of the files they handle have to end up in one place. So the
+/// trait takes `&self` and the implementor owns the interior mutability —
+/// a `Mutex` around a `Vec` is the obvious one.
+pub trait FactsSink: Send + Sync {
+    /// One file's facts, and the path they belong to.
+    ///
+    /// The path is the *logical* path: a member of an archive arrives
+    /// here as `archive.zip!inner.txt`, because that is the path the
+    /// filter saw and the path a query will ask about.
+    fn record(&self, path: &str, facts: Vec<Field>);
 }
 
 impl Default for Ctx {
@@ -326,14 +386,52 @@ impl Default for Ctx {
             max_depth: 4,
             max_members: 4096,
             max_file_size: 1 << 30,
+            filter: None,
+            facts_sink: None,
         }
+    }
+}
+
+impl Ctx {
+    /// Whether a file passes the structured filter.
+    ///
+    /// The facts are the ones the pipeline knows: the path, the extension
+    /// and the adapter that answered for the file (`raw` when none did),
+    /// plus whatever the adapter reported about the file itself. A file
+    /// the filter rejects contributes nothing to the corpus, not even a
+    /// note about why it could not be read: the question was not asked.
+    pub fn passes(&self, facts: &[Field]) -> bool {
+        match &self.filter {
+            None => true,
+            Some(f) => filter::matches(&f.expr, facts),
+        }
+    }
+
+    /// Whether a filter is in play.
+    ///
+    /// The facts of a file are only worth assembling when something will
+    /// look at them, and the adapter's own report is not free: an
+    /// adapter that has to parse the file again to answer pays for that
+    /// parse. So the question is asked only when there is a filter to
+    /// answer it, and the run that has no filter pays nothing.
+    pub fn wants_filter(&self) -> bool {
+        self.filter.is_some()
+    }
+
+    /// Whether the facts of a file are wanted by anyone.
+    ///
+    /// The filter wants them, and so does the index builder: the index is
+    /// the corpus's facts, and a file the filter would have rejected is
+    /// still a file the index has to know about.
+    pub fn wants_facts(&self) -> bool {
+        self.filter.is_some() || self.facts_sink.is_some()
     }
 }
 
 /// A searchable unit produced by the pipeline.
 #[derive(Debug)]
 pub struct Found {
-    /// e.g. `bundle.zip/inner/record.txt`
+    /// e.g. `bundle.zip!inner/record.txt`
     pub path: String,
     pub bytes: Vec<u8>,
     /// adapter that produced it ("raw" = no adapter claimed the file)
@@ -397,6 +495,7 @@ static POLICY: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(
 // environment is still read when it is down, so an unset override leaves
 // `RGX_ABLATE_MASK` in charge.
 static ABLATE_MASK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static ABLATE_EXTENTS: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 const POLICY_SOURCE: u8 = 1;
 const POLICY_RENDER: u8 = 2;
@@ -510,6 +609,39 @@ pub fn ablate_ngram() -> bool {
     false
 }
 
+/// Ablation instrumentation: the plan-time filter and the extent cuts
+/// switched off (`RGX_ABLATE_EXTENTS`).
+///
+/// Set, no record is rejected before the read plan is built and no gap is
+/// ever left unread: every planned unit covers exactly the span today's
+/// full-pack read covers. It exists so the sparse-read separation can be
+/// measured on the same query with the tier present and absent. Same
+/// contract as [`ablate_mask`]: cost may change, answers never do.
+#[cfg(feature = "std")]
+pub fn ablate_extents() -> bool {
+    ABLATE_EXTENTS.load(core::sync::atomic::Ordering::Relaxed)
+        || std::env::var_os("RGX_ABLATE_EXTENTS").is_some()
+}
+
+#[cfg(not(feature = "std"))]
+pub fn ablate_extents() -> bool {
+    ABLATE_EXTENTS.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Force [`ablate_extents`] on or off, overriding the environment.
+///
+/// For tests and in-process harnesses, which need the switch inside one
+/// process; overridable in both directions so a test can leave the state
+/// it found.
+pub fn set_ablate_extents(on: bool) {
+    ABLATE_EXTENTS.store(on, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Serialises the tests that flip [`set_ablate_extents`]: the switch is
+/// process-global, and two tests reading it mid-flip is a flake, not a bug.
+#[cfg(all(test, feature = "tv"))]
+pub(crate) static ABLATE_EXTENTS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// A content adapter. Implementations must be cheap to construct; tool
 /// detection for external-tool adapters happens in `available()`.
 pub trait Adapter: Send + Sync {
@@ -549,6 +681,59 @@ pub trait Adapter: Send + Sync {
     fn reach_for(&self, _data: &[u8]) -> Reach {
         self.reach()
     }
+
+    /// A byte prefix this adapter claims, for a file whose NAME says nothing
+    /// about what it is.
+    ///
+    /// **The extension is the claim, and this is the claim behind it.** Almost
+    /// every format names itself: `.zip` is a zip, `.pdf` is a PDF, and the
+    /// dotted declarations (`scan.ocr.jpg`) cover the names that carry a
+    /// second word. The formats that do not name themselves are the ones whose
+    /// own layout carries the name: a borg segment is `data/0/2` — no
+    /// extension, no dot, nothing in the path but a number — and the only
+    /// evidence of what it is lives in its first eight bytes.
+    ///
+    /// An adapter that answers here is a candidate only when NO adapter
+    /// claimed the file by name, and only when the bytes in hand start with
+    /// the prefix. The prefix is a claim, not a decision: the adapter still
+    /// runs, still reads the file, and still declines if the file is not
+    /// really its own.
+    fn magic(&self) -> Option<&'static [u8]> {
+        None
+    }
+
+    /// The facts this adapter knows about the file, for the `--filter`.
+    ///
+    /// **What a fact is.** A name and a value: `author` and `Jane Doe`,
+    /// `mail.from` and `admin@example.com`. The name is namespaced by
+    /// whoever reports it, so two adapters that both have a `from` do not
+    /// collide -- `mail.from` and `http.from` are different facts. The
+    /// filter's grammar spells the namespace with `:` or `.`; both mean
+    /// the same thing, so `mail:from` and `mail.from` are one path.
+    ///
+    /// **What a fact means to a predicate.** A predicate whose path is
+    /// the fact's *name* compares the fact's *value*; a predicate whose
+    /// path is the fact's *namespace* compares the fact's *name*. So
+    /// `author:"Jane Doe"` asks for the author to be Jane Doe, and
+    /// `exif:gps` asks whether the file has an EXIF fact called `gps` --
+    /// the second is a question about the fact's existence, and the
+    /// value beside it is the name it must have.
+    ///
+    /// **When it is asked.** Only when a filter is in play, and only for
+    /// an adapter that answered for the file. A file that no adapter
+    /// claims has no adapter to ask.
+    ///
+    /// **What it costs.** The adapter is asked *after* it extracted, so
+    /// an implementation that has to parse the file again pays for a
+    /// second parse. That is the price of not changing the shape of
+    /// [`Outcome`] for the two hundred and eighty-odd call sites that
+    /// build one, and it is paid only by the runs that ask the question.
+    /// An adapter whose metadata is already in hand when it renders
+    /// should keep it and hand it over cheaply.
+    fn facts(&self, _data: &[u8], _path: &str) -> Vec<Field> {
+        Vec::new()
+    }
+
     fn extract(&self, data: &[u8], path: &str) -> Result<Outcome>;
 }
 
@@ -561,6 +746,9 @@ pub trait Adapter: Send + Sync {
 pub struct Registry {
     adapters: Vec<Box<dyn Adapter>>,
     by_ext: alloc::collections::BTreeMap<String, Vec<usize>>,
+    /// The adapters that claim a byte prefix rather than an extension, with the
+    /// prefix itself, in registration order.
+    by_magic: Vec<(usize, &'static [u8])>,
 }
 
 /// One adapter's extension list with repeats removed, order preserved.
@@ -626,9 +814,13 @@ impl Registry {
     ) -> Self {
         let mut by_ext: alloc::collections::BTreeMap<String, Vec<usize>> =
             alloc::collections::BTreeMap::new();
+        let mut by_magic: Vec<(usize, &'static [u8])> = Vec::new();
         for (i, a) in adapters.iter().enumerate() {
             for ext in dedup_exts(a.extensions()) {
                 by_ext.entry(ext.to_string()).or_default().push(i);
+            }
+            if let Some(magic) = a.magic() {
+                by_magic.push((i, magic));
             }
         }
         for (name, ext) in extra_claims {
@@ -640,7 +832,22 @@ impl Registry {
                 slot.push(i);
             }
         }
-        Self { adapters, by_ext }
+        Self {
+            adapters,
+            by_ext,
+            by_magic,
+        }
+    }
+
+    /// Every adapter in registration order -- the chain as a caller
+    /// *describes* it rather than resolves it. The manifest head's
+    /// `extract_fp` folds this sequence to decide whether the rollup
+    /// signatures a build wrote cover the units a query's pipeline will
+    /// produce; resolution order decides units, so the description has to
+    /// carry it, plus each adapter's extension list and whether its binary
+    /// is present.
+    pub fn chain(&self) -> impl Iterator<Item = &dyn Adapter> + '_ {
+        self.adapters.iter().map(|a| &**a)
     }
 
     /// Every available adapter that could claim `ext`.
@@ -704,35 +911,191 @@ impl Registry {
             .map(|a| a.name())
             .collect()
     }
+
+    /// [`Self::candidates`] over a whole path rather than one extension, so a
+    /// dotted declaration is reachable.
+    ///
+    /// `scan.ocr.jpg` is offered to the adapter that declared `ocr.jpg` before
+    /// the one that declared `jpg`; if the first bails, the second still runs.
+    /// An ordinary filename has one dot, resolves to exactly one key, and pays
+    /// no more than [`Self::candidates`] does.
+    pub fn candidates_for_path<'a>(&'a self, path: &'a str) -> PathCandidates<'a> {
+        self.path_candidates(path, true)
+    }
+
+    /// The same walk, with the file's first bytes in hand, so an adapter that
+    /// claims a magic prefix gets its turn when the name claimed nobody.
+    ///
+    /// The magic phase runs LAST: the name is the stronger claim, and a file
+    /// whose extension an adapter understands is that adapter's business. Only
+    /// when the name is silent — `data/0/2`, `LICENSE`, `Makefile` — do the
+    /// bytes get a say.
+    pub fn candidates_for_path_bytes<'a>(
+        &'a self,
+        path: &'a str,
+        head: &'a [u8],
+    ) -> PathCandidates<'a> {
+        let mut c = self.path_candidates(path, true);
+        c.head = Some(head);
+        c
+    }
+
+    /// true if any adapter claims a byte prefix rather than an extension.
+    ///
+    /// A caller that would rather not read a file to find out can ask this
+    /// first: with no magic claimant there is nothing a peek could answer,
+    /// and the file's first bytes are not worth a syscall.
+    pub fn has_magic_claimants(&self) -> bool {
+        !self.by_magic.is_empty()
+    }
+
+    /// true if an available adapter claims these bytes by their magic.
+    ///
+    /// This is the question a caller can only ask with the bytes in hand, so
+    /// it is the one question the raw path may not answer for free — which is
+    /// why the caller reads a short window rather than the whole file.
+    pub fn claims_magic(&self, head: &[u8]) -> bool {
+        self.by_magic
+            .iter()
+            .any(|(i, magic)| head.starts_with(magic) && self.adapters[*i].available())
+    }
+
+    /// The same walk with the availability filter removed.
+    ///
+    /// `unavailable_claimants*` exists to name the adapters that
+    /// `candidates` drops, so it must see the dropped ones; routing it
+    /// through the filtered view returns an empty list for exactly the
+    /// files it was written to explain.
+    fn path_candidates<'a>(&'a self, path: &'a str, only_available: bool) -> PathCandidates<'a> {
+        PathCandidates {
+            reg: self,
+            keys: extension_candidates(path),
+            seen: Vec::new(),
+            pending: None,
+            only_available,
+            head: None,
+            magic_at: 0,
+        }
+    }
+
+    /// [`Self::may_claim`] for a whole path; see [`Self::candidates_for_path`].
+    pub fn may_claim_for_path(&self, path: &str) -> bool {
+        let pol = policy();
+        // `any`, not `next`, for the reason spelled out on `may_claim`.
+        self.candidates_for_path(path)
+            .any(|a| a.reach_needs_bytes() || pol != Policy::Source || a.reach() == Reach::Reveal)
+    }
+
+    /// [`Self::unavailable_claimants`] for a whole path; see
+    /// [`Self::candidates_for_path`]. A `scan.ocr.jpg` whose OCR binary is
+    /// missing is named here rather than searched raw in silence.
+    #[must_use]
+    pub fn unavailable_claimants_for_path(&self, path: &str) -> Vec<&'static str> {
+        self.path_candidates(path, false)
+            .filter(|a| !a.available())
+            .map(|a| a.name())
+            .collect()
+    }
 }
 
-/// Lowercased file extension of `path` (empty slice when none).
+/// The adapters a path's extension keys resolve to, in chain order.
 ///
-/// The returned `Cow` is `Borrowed` for the common case (path already
-/// lowercased, ASCII, no case to convert) and `Owned` only when a
-/// non-ASCII byte forces allocation. Splits on both `/` and `\`, so a
-/// Windows path like `a\b.c` is parsed the same as a POSIX path.
-pub fn extension_of(path: &str) -> Cow<'_, str> {
-    // Walk back to the basename: stop at the last separator (POSIX or
-    // Windows), then split on the last `.`. A path with no `.` after
-    // the separator returns the empty string. The .len() < path.len()
-    // guard rejects the leading-component case where `.rsplit('.').next()`
-    // would otherwise return the whole basename.
+/// **Why `seen` exists.** One adapter that declares both `ocr.jpg` and `jpg`
+/// would otherwise run twice for `scan.ocr.jpg`, and that cost is not
+/// uniform — `Inspect` is the most expensive adapter per byte in the tree.
+/// The vector is empty for a path whose extension nobody claims and for the
+/// single-dot case, so a corpus of source files pays nothing: only a file
+/// that reaches an adapter allocates, and those are the rare extensions.
+pub struct PathCandidates<'a> {
+    reg: &'a Registry,
+    keys: ExtensionCandidates<'a>,
+    /// Adapter indices already offered, so a dotted claim and the plain
+    /// claim underneath it cannot run the same adapter twice.
+    seen: Vec<usize>,
+    pending: Option<core::slice::Iter<'a, usize>>,
+    /// false only for the view that has to name what the filtered one drops.
+    only_available: bool,
+    /// The file's first bytes, when the caller has them. The magic phase
+    /// needs them, and without them the phase does not run at all.
+    head: Option<&'a [u8]>,
+    /// How far the magic phase has walked the registry's magic table.
+    magic_at: usize,
+}
+
+impl<'a> Iterator for PathCandidates<'a> {
+    type Item = &'a dyn Adapter;
+
+    fn next(&mut self) -> Option<&'a dyn Adapter> {
+        loop {
+            if let Some(list) = &mut self.pending {
+                if let Some(&i) = list.next() {
+                    if !self.seen.contains(&i) {
+                        self.seen.push(i);
+                        let a = &*self.reg.adapters[i];
+                        if !self.only_available || a.available() {
+                            return Some(a);
+                        }
+                    }
+                    continue;
+                }
+                self.pending = None;
+            }
+            if let Some(key) = self.keys.next() {
+                let Some(list) = self.reg.by_ext.get(key.as_ref()) else {
+                    continue;
+                };
+                self.pending = Some(list.iter());
+                continue;
+            }
+            // The name is silent. The bytes get their say, and only then: a
+            // magic is a claim about the file's CONTENT, so it cannot outrank
+            // a claim about the file's NAME.
+            let head = self.head?;
+            while self.magic_at < self.reg.by_magic.len() {
+                let (i, magic) = self.reg.by_magic[self.magic_at];
+                self.magic_at += 1;
+                if !head.starts_with(magic) || self.seen.contains(&i) {
+                    continue;
+                }
+                self.seen.push(i);
+                let a = &*self.reg.adapters[i];
+                if !self.only_available || a.available() {
+                    return Some(a);
+                }
+            }
+            return None;
+        }
+    }
+}
+
+/// The basename of `path` — everything after the last `/`, `\` or `!`, so a
+/// Windows path parses the same as a POSIX one and a member's own name is
+/// not read as part of the container's.
+///
+/// The `!` is the member separator: `bundle.zip!script.py` is the container
+/// `bundle.zip` and the member `script.py`, and the *member's* extension is
+/// what decides which adapter claims it. Reading the container's extension
+/// instead would route every member of a zip back to the zip reader, and
+/// the recursion would never reach the file inside. The member's own name
+/// may carry `/` of its own (`docs/report.pdf`), and the last separator of
+/// either kind wins, which is the same rule a filesystem path follows.
+fn basename_of(path: &str) -> &str {
     let mut start = path.len();
     for (i, b) in path.bytes().enumerate().rev() {
-        if b == b'/' || b == b'\\' {
+        if b == b'/' || b == b'\\' || b == b'!' {
             break;
         }
         start = i;
     }
-    let basename = &path[start..];
-    let ext = match basename.rsplit_once('.') {
-        Some((_, ext)) => ext,
-        None => "",
-    };
-    // ASCII-only fast path: copy the slice verbatim if every byte is
-    // already lowercase ASCII. UTF-8 case folding (locale-sensitive,
-    // surprisingly expensive) only fires on non-ASCII bytes.
+    &path[start..]
+}
+
+/// Lowercases an extension slice, borrowing when there is nothing to convert.
+///
+/// The ASCII fast path is not a micro-optimisation: this runs once per
+/// candidate per file, and `to_lowercase` allocates. A path that is already
+/// lowercase ASCII — nearly every path — borrows the original bytes instead.
+fn fold_ext(ext: &str) -> Cow<'_, str> {
     if ext
         .bytes()
         .all(|b| b.is_ascii_lowercase() || !b.is_ascii_alphabetic())
@@ -741,6 +1104,58 @@ pub fn extension_of(path: &str) -> Cow<'_, str> {
     } else {
         Cow::Owned(ext.to_lowercase())
     }
+}
+
+/// Every extension key `path` can match, most specific first.
+///
+/// A single dot yields one key, which is every ordinary filename. A second
+/// dot yields a dotted key *ahead* of it, so `scan.ocr.jpg` is offered as
+/// `ocr.jpg` and then as `jpg`: an adapter that declares `ocr.jpg` runs
+/// before one that declares `jpg`, and a bail still falls through to the
+/// plain one. That is what makes a declaration like `"ocr.jpg"` meaningful —
+/// an adapter may name a dotted extension and nothing else has to change.
+///
+/// The dots are read left to right and each suffix is yielded in turn, so
+/// `a.b.c.jpg` is offered as `b.c.jpg`, `c.jpg`, `jpg` — longest first,
+/// which is the order a "first match wins" chain needs. A name with no dot
+/// yields nothing; `.gitignore` yields `gitignore`, matching what
+/// [`extension_of`] has always returned for it.
+pub fn extension_candidates(path: &str) -> ExtensionCandidates<'_> {
+    ExtensionCandidates {
+        basename: basename_of(path),
+        scanned: 0,
+    }
+}
+
+/// Iterator over a path's dotted extension suffixes; see [`extension_candidates`].
+pub struct ExtensionCandidates<'a> {
+    basename: &'a str,
+    /// Bytes of `basename` already consumed, i.e. the start of the next suffix.
+    scanned: usize,
+}
+
+impl<'a> Iterator for ExtensionCandidates<'a> {
+    type Item = Cow<'a, str>;
+
+    fn next(&mut self) -> Option<Cow<'a, str>> {
+        let rest = &self.basename[self.scanned..];
+        let dot = rest.find('.')?;
+        self.scanned += dot + 1;
+        Some(fold_ext(&self.basename[self.scanned..]))
+    }
+}
+
+/// Lowercased file extension of `path` (empty slice when none).
+///
+/// The last of [`extension_candidates`] — the single component after the final
+/// dot. The returned `Cow` is `Borrowed` for the common case (path already
+/// lowercased, ASCII, no case to convert) and `Owned` only when a
+/// non-ASCII byte forces allocation. Splits on both `/` and `\`, so a
+/// Windows path like `a\b.c` is parsed the same as a POSIX path.
+pub fn extension_of(path: &str) -> Cow<'_, str> {
+    extension_candidates(path)
+        .last()
+        .unwrap_or(Cow::Borrowed(""))
 }
 
 // --- opt-in per-adapter profiling (RGX_PROFILE=1) ---
@@ -868,15 +1283,62 @@ pub fn process(
     ctx: &Ctx,
     out: &mut Vec<Found>,
 ) -> bool {
+    process_scoped(reg, path, data, depth, ctx, out, &[])
+}
+
+/// The facts of a file: what the pipeline knows, what the adapter
+/// reported, and what the file inherits from its containers.
+///
+/// The adapter's own report is passed in rather than asked for here,
+/// because the caller already has it and asking twice would parse the
+/// file twice.
+fn scoped_facts(path: &str, format: &str, reported: Vec<Field>, inherited: &[Field]) -> Vec<Field> {
+    let mut facts = filter::file_facts(path, format);
+    facts.extend(reported);
+    facts.extend(inherited.iter().cloned());
+    facts
+}
+
+/// [`process`], with the facts the file inherits from the containers it is
+/// inside.
+///
+/// **What is inherited.** The facts of the containers above this file, and
+/// only the ones that are not about the file itself: a member of
+/// `archive.zip` is inside a zip, whatever its own name says, so it
+/// inherits the container's `container` and `archive.entry` and the
+/// adapter's own report about the archive. It does not inherit the
+/// archive's path or extension -- those are the archive's, and the member
+/// has its own.
+///
+/// The wrapper exists because the inheritance only matters one level
+/// down, and every other caller of [`process`] has no container above the
+/// file.
+fn process_scoped(
+    reg: &Registry,
+    path: &str,
+    data: &[u8],
+    depth: usize,
+    ctx: &Ctx,
+    out: &mut Vec<Found>,
+    inherited: &[Field],
+) -> bool {
     // Publish the nesting depth for the adapters below, which build their work
     // budget and cannot be told otherwise -- `Adapter::extract` has no depth
     // parameter and this crate is `no_std`. See [`current_depth`].
     #[cfg(feature = "std")]
     let _depth_guard = DepthGuard::enter(depth);
-    let ext = extension_of(path);
     let mut bailed: Vec<&str> = Vec::new();
+    // Notes held until the bottom: an adapter that errors does not end the
+    // chain, so its note only becomes a unit if nothing later answers. The
+    // adapter's name rides along because `via` is what `--json`'s `adapter`
+    // field prints and what `--explain-engine` names: a note filed under
+    // `raw` would report "no adapter ran" about a file an adapter did run on
+    // and fail on, which is the one thing the note exists to prevent.
+    let mut notes: Vec<(&'static str, String)> = Vec::new();
     let pol = policy();
-    for adapter in reg.candidates(&ext) {
+    // The bytes are in hand, so the adapters that claim a magic prefix get
+    // their turn too — after the ones that claim the name, never before.
+    for adapter in reg.candidates_for_path_bytes(path, data) {
         // The policy is applied HERE rather than in the registry, because an
         // adapter that answers from the bytes cannot be answered without
         // them. Under `Source` a `Render` adapter does not get the file: the
@@ -908,6 +1370,19 @@ pub fn process(
         let outcome = adapter.extract(data, path);
         match outcome {
             Ok(Outcome::Text(text)) => {
+                // The filter is the last word on the file: a file it
+                // rejects is not in the corpus, and neither is a note about
+                // it.
+                if ctx.wants_facts() {
+                    let facts =
+                        scoped_facts(path, adapter.name(), adapter.facts(data, path), inherited);
+                    if let Some(sink) = ctx.facts_sink.as_ref() {
+                        sink.record(path, facts.clone());
+                    }
+                    if ctx.wants_filter() && !ctx.passes(&facts) {
+                        return false;
+                    }
+                }
                 // `Policy::Both` is the union, and the only mode in which a
                 // `Render` format is searched twice. It is deliberately
                 // scoped to a `Render` adapter's `Text`: a `Reveal` adapter's
@@ -955,9 +1430,41 @@ pub fn process(
                     });
                     return false;
                 }
+                // The container's facts are inherited by its members: a
+                // file inside a zip is inside a zip, whatever its own
+                // name says, so a filter that asks about the container
+                // has to be able to see it from the member it kept.
+                //
+                // `container` is the kind of container -- the adapter
+                // that opened it -- and `archive.entry` is how many
+                // entries it holds. Both are facts about the container
+                // and not about the member, which is why they travel
+                // down and are not recomputed for each member.
+                let mut container_facts: Vec<Field> = Vec::new();
+                if ctx.wants_facts() {
+                    container_facts = adapter.facts(data, path);
+                    container_facts.push(Field::new("container", adapter.name()));
+                    container_facts.push(Field::new("archive.entry", &members.len().to_string()));
+                }
                 for (inner, bytes) in members.into_iter().take(ctx.max_members) {
-                    let inner_path = format!("{}/{}", path, inner);
-                    process(reg, &inner_path, &bytes, depth + 1, ctx, out);
+                    // The member path is a **logical** path, not a filesystem
+                    // one: the container's path, then `!`, then the member's
+                    // own name. A `/` between the two levels would be a lie
+                    // -- `bundle.zip/script.py` reads as a directory called
+                    // `bundle.zip` holding a file `script.py`, and it makes
+                    // the member's own `docs/report.pdf` indistinguishable
+                    // from a second level of nesting. The member's name keeps
+                    // the separators it had inside the container.
+                    let inner_path = format!("{path}!{inner}");
+                    process_scoped(
+                        reg,
+                        &inner_path,
+                        &bytes,
+                        depth + 1,
+                        ctx,
+                        out,
+                        &container_facts,
+                    );
                 }
                 return false;
             }
@@ -966,6 +1473,22 @@ pub fn process(
                 let _ = reason;
             }
             Err(e) => {
+                // A **decline** is not a failure, and it must leave the
+                // corpus exactly as it found it: no note, no line that was
+                // not in the file, and the chain continues to the next
+                // candidate. `decline!` is how an adapter says "this file
+                // is not mine" or "I found nothing in it" — the ordinary
+                // event that must not be reported as a failure.
+                //
+                // This is the distinction the note machinery below exists
+                // to make: the note is for a file that IS this format and
+                // could not be decoded. An adapter stepping aside is not
+                // that, and a `.ts` that turns out to be TypeScript is not
+                // that either.
+                if e.is_decline() {
+                    bailed.push(adapter.name());
+                    continue;
+                }
                 // The note is an *extra* unit, never a replacement for the
                 // file. This arm used to push the note and stop, which read
                 // as "keep the corpus searchable" and was the opposite: every
@@ -984,22 +1507,33 @@ pub fn process(
                 // rga issue #151 lesson — one bad file must not kill the
                 // corpus search — holds, and now it also holds for a file
                 // that is merely not what the adapter wanted.
-                out.push(Found {
-                    path: path.to_string(),
-                    bytes: format!(
+                //
+                // It must NOT stop the chain, though, and that is the part
+                // this arm still got wrong. Every extractor is documented to
+                // decline with `bail!`, so "the first adapter declined" and
+                // "the first adapter had a hard failure" were the same event
+                // -- and a decline therefore shadowed every later claimant
+                // for the extension. `rgx-adapters-media`'s single-page TIFF
+                // reader refusing a two-page file so the chain walker could
+                // answer it did exactly that: the file fell to raw bytes and
+                // the page the reader wanted was silently not in the output.
+                //
+                // The note is held and the loop continues, so the bytes
+                // below are only reached when nothing later answers. `Bail`
+                // above is silent by design (it is the ordinary "not my
+                // file" and says nothing about the corpus), which is exactly
+                // why the two cannot be treated alike. A note that is held
+                // and then dropped — because a later adapter DID answer —
+                // is correct: there was no failure to report about the
+                // corpus, only about a claimant the next one superseded.
+                notes.push((
+                    adapter.name(),
+                    format!(
                         "[rgx: adapter '{}' failed: {}]\n",
                         adapter.name(),
                         format!("{e:#}").lines().next().unwrap_or("")
-                    )
-                    .into_bytes(),
-                    via: adapter.name(),
-                });
-                out.push(Found {
-                    path: path.to_string(),
-                    bytes: normalize_encoding(data.to_vec()),
-                    via: "raw",
-                });
-                return false;
+                    ),
+                ));
             }
         }
     }
@@ -1010,8 +1544,20 @@ pub fn process(
     // was known and unreadable, which is a different situation from "nothing
     // here claims it". A one-line note beside the bytes says which, the same
     // contract the adapter-failure note above honours.
-    let ext = extension_of(path);
-    let missing = reg.unavailable_claimants(&ext);
+    //
+    // The filter comes first: a file the filter rejects is not in the
+    // corpus, and a note about a file nobody asked for is noise.
+    if ctx.wants_facts() {
+        let mut facts = filter::file_facts(path, "raw");
+        facts.extend(inherited.iter().cloned());
+        if let Some(sink) = ctx.facts_sink.as_ref() {
+            sink.record(path, facts.clone());
+        }
+        if ctx.wants_filter() && !ctx.passes(&facts) {
+            return false;
+        }
+    }
+    let missing = reg.unavailable_claimants_for_path(path);
     if !missing.is_empty() {
         out.push(Found {
             path: path.to_string(),
@@ -1023,13 +1569,29 @@ pub fn process(
             via: "raw",
         });
     }
+    // Anything an earlier adapter reported while declining comes first, so a
+    // file nobody could read still says why before it says what it holds.
+    // `raw_only` is decided BEFORE the notes are moved out: an adapter that
+    // produced a record did produce a record, and the return value says
+    // whether the caller may treat this file as its own bytes. Reading it
+    // off the presence of a unit would have made every failure note a silent
+    // downgrade, which is how the note came to be invisible in the first
+    // place.
+    let raw_only = notes.is_empty();
+    for (via, note) in notes {
+        out.push(Found {
+            path: path.to_string(),
+            bytes: note.into_bytes(),
+            via,
+        });
+    }
     out.push(Found {
         path: path.to_string(),
         bytes: normalize_encoding(data.to_vec()),
         via: "raw",
     });
     let _ = bailed;
-    true
+    raw_only
 }
 
 /// Encoding post-processing (rga `postproc_encoding` parity): UTF-16 content
@@ -1277,7 +1839,7 @@ mod tests {
         );
         assert_eq!(
             reg.unavailable_claimants("gone"),
-            alloc::vec!["unavailable"],
+            vec!["unavailable"],
             "the name of the skipped adapter must be recoverable"
         );
         // The unclaimed extension stays silent: nothing claimed it.
@@ -1521,6 +2083,150 @@ mod tests {
         process(&reg, "b.txt", &utf16be, 0, &Ctx::default(), &mut out);
         assert_eq!(out[0].bytes, b"rod");
     }
+
+    // -----------------------------------------------------------------------
+    // The filter and the facts
+    // -----------------------------------------------------------------------
+
+    /// An adapter that reports facts about the file it was given, and
+    /// hands over a container whose members are the file's own text.
+    struct Container;
+    impl Adapter for Container {
+        fn name(&self) -> &'static str {
+            "box"
+        }
+        fn extensions(&self) -> &'static [&'static str] {
+            &["box"]
+        }
+        fn facts(&self, _data: &[u8], _path: &str) -> Vec<Field> {
+            vec![Field::new("box.kind", "crate")]
+        }
+        fn extract(&self, data: &[u8], _path: &str) -> Result<Outcome> {
+            Ok(Outcome::Members(vec![(
+                "inner.txt".to_string(),
+                data.to_vec(),
+            )]))
+        }
+    }
+
+    /// An adapter that reports a fact and renders the file.
+    struct Tagger;
+    impl Adapter for Tagger {
+        fn name(&self) -> &'static str {
+            "tagger"
+        }
+        fn extensions(&self) -> &'static [&'static str] {
+            &["tag"]
+        }
+        fn facts(&self, _data: &[u8], _path: &str) -> Vec<Field> {
+            vec![Field::new("author", "Jane Doe")]
+        }
+        fn extract(&self, data: &[u8], _path: &str) -> Result<Outcome> {
+            Ok(Outcome::Text(data.to_vec()))
+        }
+    }
+
+    fn ctx_with(filter_text: &str) -> Ctx {
+        Ctx {
+            filter: Some(filter::Filter::parse(filter_text).expect("the filter parses")),
+            ..Ctx::default()
+        }
+    }
+
+    #[test]
+    fn a_file_the_filter_rejects_produces_no_unit() {
+        let reg = Registry::new(vec![Box::new(Tagger)]);
+        let mut out = Vec::new();
+        let ctx = ctx_with("author:\"John Doe\"");
+        assert!(!process(&reg, "a.tag", b"hello", 0, &ctx, &mut out));
+        assert!(out.is_empty(), "a rejected file leaves no unit: {out:?}");
+    }
+
+    #[test]
+    fn a_file_the_filter_keeps_produces_its_unit() {
+        let reg = Registry::new(vec![Box::new(Tagger)]);
+        let mut out = Vec::new();
+        let ctx = ctx_with("author:\"Jane Doe\"");
+        assert!(!process(&reg, "a.tag", b"hello", 0, &ctx, &mut out));
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].bytes, b"hello");
+    }
+
+    #[test]
+    fn a_member_inherits_the_facts_of_its_container() {
+        let reg = Registry::new(vec![Box::new(Container)]);
+        let mut out = Vec::new();
+        // The member's own facts do not mention the container; the
+        // container's do, and they travel down to the member.
+        let ctx = ctx_with("box:kind");
+        process(&reg, "a.box", b"hello", 0, &ctx, &mut out);
+        assert_eq!(out.len(), 1, "the member survived the filter: {out:?}");
+        assert_eq!(out[0].path, "a.box!inner.txt");
+    }
+
+    #[test]
+    fn a_member_is_filtered_by_its_own_facts_too() {
+        let reg = Registry::new(vec![Box::new(Container)]);
+        let mut out = Vec::new();
+        // The member's extension is `txt`, and the container's are not
+        // inherited: the archive is a `.box`, the member is a `.txt`.
+        let ctx = ctx_with("ext:box");
+        process(&reg, "a.box", b"hello", 0, &ctx, &mut out);
+        assert!(
+            out.is_empty(),
+            "the member's own extension is `txt`: {out:?}"
+        );
+    }
+
+    #[test]
+    fn a_container_reports_its_kind_and_its_entry_count() {
+        let reg = Registry::new(vec![Box::new(Container)]);
+        let mut out = Vec::new();
+        let ctx = ctx_with("container:box AND archive:entry");
+        process(&reg, "a.box", b"hello", 0, &ctx, &mut out);
+        assert_eq!(out.len(), 1, "the member kept both facts: {out:?}");
+    }
+
+    #[test]
+    fn a_raw_file_is_filtered_by_its_path_and_extension() {
+        // No adapter claims `.txt`, so the file is raw, and the raw path
+        // in the pipeline is the one that answers for it.
+        let reg = Registry::new(vec![]);
+        let mut out = Vec::new();
+        let ctx = ctx_with("ext:txt");
+        assert!(process(&reg, "a.txt", b"hello", 0, &ctx, &mut out));
+        assert_eq!(out.len(), 1, "{out:?}");
+
+        let mut out = Vec::new();
+        let ctx = ctx_with("ext:zip");
+        process(&reg, "a.txt", b"hello", 0, &ctx, &mut out);
+        assert!(out.is_empty(), "the raw file was filtered out: {out:?}");
+    }
+
+    #[test]
+    fn no_filter_means_no_facts_are_assembled() {
+        // The adapter's `facts` is not called when there is no filter, so
+        // an adapter that would fail on the question is never asked it.
+        struct Grumpy;
+        impl Adapter for Grumpy {
+            fn name(&self) -> &'static str {
+                "grumpy"
+            }
+            fn extensions(&self) -> &'static [&'static str] {
+                &["gmp"]
+            }
+            fn facts(&self, _data: &[u8], _path: &str) -> Vec<Field> {
+                panic!("the facts are only asked when a filter is in play");
+            }
+            fn extract(&self, data: &[u8], _path: &str) -> Result<Outcome> {
+                Ok(Outcome::Text(data.to_vec()))
+            }
+        }
+        let reg = Registry::new(vec![Box::new(Grumpy)]);
+        let mut out = Vec::new();
+        process(&reg, "a.gmp", b"hello", 0, &Ctx::default(), &mut out);
+        assert_eq!(out.len(), 1);
+    }
 }
 
 #[cfg(all(test, feature = "std"))]
@@ -1608,8 +2314,14 @@ mod no_std_float_tests {
 
 #[cfg(test)]
 mod extension_of_tests {
-    use super::extension_of;
+    use super::{
+        bail, extension_candidates, extension_of, process, Adapter, Ctx, Outcome, Registry, Result,
+    };
     use alloc::borrow::Cow;
+    use alloc::boxed::Box;
+    use alloc::string::String;
+    use alloc::vec;
+    use alloc::vec::Vec;
 
     #[test]
     fn lowercases_uppercase_extension() {
@@ -1639,5 +2351,162 @@ mod extension_of_tests {
         let ext = extension_of(path);
         assert!(matches!(ext, Cow::Borrowed(_)));
         assert_eq!(ext.as_ref(), "rs");
+    }
+
+    // --- composite (dotted) extensions ---
+
+    /// Claims `ocr.jpg` only: the shape an OCR adapter needs, where the
+    /// ordinary `jpg` reader must not fire on every photo.
+    struct Ocr;
+    impl Adapter for Ocr {
+        fn name(&self) -> &'static str {
+            "ocr"
+        }
+        fn extensions(&self) -> &'static [&'static str] {
+            &["ocr.jpg"]
+        }
+        fn extract(&self, _d: &[u8], _p: &str) -> Result<Outcome> {
+            Ok(Outcome::Text(b"ocr text".to_vec()))
+        }
+    }
+
+    fn names<'a>(reg: &'a Registry, path: &str) -> Vec<&'a str> {
+        reg.candidates_for_path(path).map(|a| a.name()).collect()
+    }
+
+    /// Claims plain `jpg` — the adapter the dotted claim sits in front of.
+    struct Jpeg;
+    impl Adapter for Jpeg {
+        fn name(&self) -> &'static str {
+            "jpeg"
+        }
+        fn extensions(&self) -> &'static [&'static str] {
+            &["jpg"]
+        }
+        fn extract(&self, _d: &[u8], _p: &str) -> Result<Outcome> {
+            Ok(Outcome::Text(b"jpeg meta".to_vec()))
+        }
+    }
+
+    #[test]
+    fn candidates_are_offered_longest_suffix_first() {
+        let got: Vec<String> = extension_candidates("scan.ocr.jpg")
+            .map(|c| c.into_owned())
+            .collect();
+        assert_eq!(got, vec![String::from("ocr.jpg"), String::from("jpg")]);
+    }
+
+    #[test]
+    fn a_single_dot_yields_exactly_one_candidate() {
+        let got: Vec<String> = extension_candidates("main.rs")
+            .map(|c| c.into_owned())
+            .collect();
+        assert_eq!(got, vec![String::from("rs")]);
+        assert!(
+            matches!(
+                extension_candidates("main.rs").next(),
+                Some(Cow::Borrowed(_))
+            ),
+            "the common case must borrow, not allocate"
+        );
+    }
+
+    #[test]
+    fn extension_of_is_unchanged_by_the_candidate_iterator() {
+        // The dots in `extension_of`'s contract are the ones a reader relies
+        // on: a dotfile is all extension, a bare name is none, a Windows
+        // separator is not part of it.
+        assert_eq!(extension_of("scan.ocr.jpg").as_ref(), "jpg");
+        assert_eq!(extension_of(".gitignore").as_ref(), "gitignore");
+        assert_eq!(extension_of("Makefile").as_ref(), "");
+        assert_eq!(extension_of(r"a\b\c.rs").as_ref(), "rs");
+        assert_eq!(extension_of("").as_ref(), "");
+    }
+
+    #[test]
+    fn a_dotted_declaration_is_reachable_from_a_double_extension() {
+        let reg = Registry::new(vec![Box::new(Ocr)]);
+        assert_eq!(names(&reg, "scan.ocr.jpg"), vec!["ocr"]);
+        // ...and the plain name it shadows does not reach it.
+        assert!(names(&reg, "scan.jpg").is_empty());
+    }
+
+    #[test]
+    fn the_dotted_claim_runs_before_the_plain_one_and_bail_falls_through() {
+        struct Bailer;
+        impl Adapter for Bailer {
+            fn name(&self) -> &'static str {
+                "ocr"
+            }
+            fn extensions(&self) -> &'static [&'static str] {
+                &["ocr.jpg"]
+            }
+            fn extract(&self, _d: &[u8], _p: &str) -> Result<Outcome> {
+                // `Outcome::Bail`, not `bail!`: only a Bail falls through to
+                // the next adapter. An Err is a failure worth reporting and
+                // ends the chain with a note beside the file's own bytes.
+                Ok(Outcome::Bail("no text in this image".into()))
+            }
+        }
+        let reg = Registry::new(vec![Box::new(Bailer), Box::new(Jpeg)]);
+        assert_eq!(names(&reg, "scan.ocr.jpg"), vec!["ocr", "jpeg"]);
+        let mut out = Vec::new();
+        let passthrough = process(
+            &reg,
+            "scan.ocr.jpg",
+            b"raw bytes",
+            0,
+            &Ctx::default(),
+            &mut out,
+        );
+        assert!(!passthrough, "the plain adapter answered after the bail");
+        assert_eq!(out[0].via, "jpeg");
+    }
+
+    #[test]
+    fn an_adapter_declaring_both_keys_runs_once() {
+        struct Both;
+        impl Adapter for Both {
+            fn name(&self) -> &'static str {
+                "both"
+            }
+            fn extensions(&self) -> &'static [&'static str] {
+                &["ocr.jpg", "jpg"]
+            }
+            fn extract(&self, _d: &[u8], _p: &str) -> Result<Outcome> {
+                Ok(Outcome::Text(b"x".to_vec()))
+            }
+        }
+        let reg = Registry::new(vec![Box::new(Both), Box::new(Jpeg)]);
+        assert_eq!(
+            names(&reg, "scan.ocr.jpg"),
+            vec!["both", "jpeg"],
+            "running the dotted and the plain claim of one adapter twice is \
+             the cost `dedup_exts` exists to avoid"
+        );
+    }
+
+    #[test]
+    fn an_unavailable_dotted_claimant_is_named_by_path() {
+        struct Absent;
+        impl Adapter for Absent {
+            fn name(&self) -> &'static str {
+                "absent"
+            }
+            fn extensions(&self) -> &'static [&'static str] {
+                &["ocr.jpg"]
+            }
+            fn available(&self) -> bool {
+                false
+            }
+            fn extract(&self, _d: &[u8], _p: &str) -> Result<Outcome> {
+                bail!("never runs")
+            }
+        }
+        let reg = Registry::new(vec![Box::new(Absent)]);
+        assert_eq!(
+            reg.unavailable_claimants_for_path("a.ocr.jpg"),
+            vec!["absent"]
+        );
     }
 }

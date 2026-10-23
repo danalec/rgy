@@ -1,12 +1,15 @@
-//! AVI (RIFF) metadata, hand-rolled — reduced port of upstream
-//! `b01::io::binary::avi`: `avih` main header, `strh`/`strf` stream
-//! headers (codecs, audio format, video bit depth) and `LIST INFO` tags.
-//! Frame data is never decoded.
+// SPDX-License-Identifier: Apache-2.0
+
+//! AVI (RIFF) metadata, hand-rolled — a reduced port of the AVI reader of
+//! the `io` project by Dan Gohman, whose work is used here under Apache-2.0:
+//! `avih` main header, `strh`/`strf` stream headers (codecs, audio format,
+//! video bit depth) and `LIST INFO` tags. Frame data is never decoded.
+//! See `NOTICE`.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
-use rgx_core::{bail, Result};
+use rgx_core::{bail, decline, Result};
 use rgx_core::{Adapter, Outcome};
 
 pub struct AviInfo;
@@ -47,13 +50,13 @@ struct StreamOut {
 
 fn avi_text(data: &[u8]) -> Result<String> {
     if data.len() < 12 {
-        bail!("too small for a RIFF header");
+        decline!("too small for a RIFF header");
     }
     if &data[0..4] != b"RIFF" {
-        bail!("not a RIFF file");
+        decline!("not a RIFF file");
     }
     if &data[8..12] != b"AVI " {
-        bail!("not an AVI RIFF form");
+        decline!("not an AVI RIFF form");
     }
     let mut out = String::from("container: avi\n");
     let mut streams: Vec<StreamOut> = Vec::new();

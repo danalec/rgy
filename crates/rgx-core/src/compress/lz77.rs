@@ -394,7 +394,7 @@ impl Lz77Decoder {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "lz77"))]
 mod tests {
     use super::*;
 

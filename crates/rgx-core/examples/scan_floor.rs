@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! One-off diagnostic: is `pair_offsets` the bottleneck, or the memory system?
 //!
 //! Times three things over the same 246 MB buffer:

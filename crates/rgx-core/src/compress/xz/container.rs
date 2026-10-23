@@ -708,7 +708,7 @@ fn read_le32(data: &[u8], at: usize, what: &'static str) -> CompressResult<u32> 
     let b = data.get(at..at + 4).ok_or_else(|| invalid(what))?;
     Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
 }
-#[cfg(test)]
+#[cfg(all(test, feature = "xz"))]
 mod tests {
     use super::*;
     // `use super::*` does not carry the parent's private `use alloc::vec::Vec`,
@@ -791,6 +791,29 @@ mod tests {
         ] {
             let got = XzReader::decompress(compressed).unwrap_or_else(|e| panic!("{name}: {e:?}"));
             assert_eq!(got, expected, "{name}");
+        }
+    }
+
+    /// The bounded decode and the unbounded one must agree.
+    ///
+    /// The ceiling is what a bomb guard counts against, and a decode that
+    /// stops early is a decode that cannot have checked the checksum that
+    /// covers the bytes it did not see. A cap that is above the payload
+    /// changes nothing, and this says so: the two decodes are the same
+    /// bytes.
+    #[test]
+    fn the_bounded_decode_agrees_with_the_unbounded_one() {
+        for limit in [u64::MAX, 32 << 20, 1 << 20, 4096, 256, 128, 64] {
+            let bounded = XzReader::decompress_bounded(TINY_CRC32, limit)
+                .unwrap_or_else(|e| panic!("limit {limit}: {e:?}"));
+            assert_eq!(
+                bounded.bytes, TINY_CRC32_PLAIN,
+                "the bounded decode differs at the limit {limit}"
+            );
+            assert!(
+                !bounded.capped,
+                "the decode was capped at the limit {limit}"
+            );
         }
     }
 
@@ -1108,6 +1131,61 @@ mod tests {
         );
     }
 
+    /// `a_corrupt_check_is_rejected` above flips a byte in the compressed
+    /// body, which fails in the LZMA2 layer -- so `verify_check` had no test
+    /// at all. Only `verifies_the_sha256_check` touched a stored digest.
+    ///
+    /// This one corrupts the Check field itself. The offset is found by
+    /// search rather than hardcoded, because the Check's position depends on
+    /// the payload size, which changes whenever the fixture is regenerated --
+    /// and a stale constant here would silently start testing the wrong
+    /// bytes, which is what the previous version of this file did.
+    ///
+    /// The error is asserted by message rather than merely `is_err()`,
+    /// because that is what distinguishes "the decoder noticed a bad
+    /// Check" from "the decoder noticed something else first".
+    #[test]
+    fn a_corrupt_stored_check_is_rejected_by_the_check_verifier() {
+        for (name, stream, plain, check_id) in [
+            ("crc32", TINY_CRC32, TINY_CRC32_PLAIN, 1u8),
+            ("crc64", TINY_CRC64, TINY_CRC64_PLAIN, 4u8),
+        ] {
+            let size = check_size_of(check_id);
+            assert!(
+                size > 0 && size <= 8,
+                "{name}: implausible check size {size}"
+            );
+            // The intact stream must decode, or nothing below means anything.
+            assert_eq!(
+                XzReader::decompress(stream).expect("intact"),
+                plain,
+                "{name}: the fixture does not decode to begin with"
+            );
+
+            // The Check sits between the block data and the index, so it is
+            // somewhere in the tail. Try every window of the right width and
+            // require that the verifier rejects at least one of them. The
+            // count is not asserted: the decoder locates the Check relative
+            // to the block end, so more than one offset can land inside the
+            // same field. What is being pinned is that `verify_check` is
+            // reachable and says so, not how many windows overlap it.
+            let mut found = 0usize;
+            for at in 0..stream.len().saturating_sub(size) {
+                let mut bad = stream.to_vec();
+                bad[at] ^= 0xFF;
+                let err = XzReader::decompress(&bad).expect_err("a corrupt Check must error");
+                if format!("{err:?}").contains("check mismatch") {
+                    found += 1;
+                }
+            }
+            assert!(
+                found >= 1,
+                "{name}: corrupting the stored Check never reached \
+                 verify_check; the check field may have moved"
+            );
+        }
+    }
+
     #[test]
     fn a_corrupt_check_is_rejected() {
         // Flip a bit in the compressed body. The Check covers the decoded
@@ -1211,7 +1289,7 @@ mod tests {
 /// The container framing is untrusted input: bad VLI encodings, a header
 /// that declares a size nothing verifies, an index that disagrees with
 /// the blocks. None of it may panic.
-#[cfg(test)]
+#[cfg(all(test, feature = "xz"))]
 mod fuzz {
     use super::*;
 

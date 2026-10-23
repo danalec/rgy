@@ -292,7 +292,7 @@ impl Rle {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "bwt"))]
 mod tests {
     use super::*;
 

@@ -2,8 +2,26 @@
 name = "rgx-adapters-pdf"
 version = "0.1.0"
 edition = "2021"
+authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
 description = "rgx in-process PDF text adapter (full: classic xref + xref streams + ObjStm + CID fonts via ToUnicode CMaps + full filter zoo)"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
+readme = "README.md"
+keywords = ["pdf", "text-extraction", "document"]
+categories = ["parser-implementations", "text-processing"]
+repository = "https://github.com/danalec/rgx"
+
+[features]
+# One feature per adapter, and this crate holds exactly one adapter:
+# `Pdf`. Everything the reader needs -- the classic xref reader, the
+# xref-stream and ObjStm reader, the CID font reader, the fax decoder,
+# the security handler and the page-image rasteriser -- is private to
+# that adapter, so `pdf` gates the whole reader and
+# `--no-default-features` leaves a crate with no adapter at all.
+#
+# The crate is `#![no_std]` + `alloc`: it never needs `std`, so there is
+# no `std` feature to declare here.
+default = ["pdf"]
+pdf = []
 
 [dependencies]
-rgx-core = { path = "../rgx-core" }
+rgx-core = { path = "../rgx-core", version = "0.1.0" }

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Token index: an inverted index of `token -> Vec<(file_id, byte_offset)>`.
 //!
 //! Built once over a corpus, queried many times. A query that is "find

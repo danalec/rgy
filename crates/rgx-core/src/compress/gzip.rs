@@ -580,7 +580,7 @@ fn le16(data: &[u8]) -> u16 {
 fn le32(data: &[u8]) -> u32 {
     u32::from_le_bytes([data[0], data[1], data[2], data[3]])
 }
-#[cfg(test)]
+#[cfg(all(test, feature = "gzip"))]
 mod tests {
     use super::*;
     use crate::compress::crc32::crc32;
@@ -812,7 +812,7 @@ two
 /// The parser walks untrusted bytes: magic, FLG, an extra block whose
 /// length is declared by the file, NUL-terminated strings, and a trailer
 /// it can only find by decoding. None of that may panic.
-#[cfg(test)]
+#[cfg(all(test, feature = "gzip"))]
 mod fuzz {
     use super::*;
 

@@ -1,16 +1,20 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Deciding per LINE rather than per FILE.
 //!
-//! `rgx-core` has no `char` in the byte engine and `grep-regex`'s matcher is
-//! Unicode, so they disagree on every codepoint class as soon as a line
-//! holds a byte above `0x7f`. On a line that is entirely ASCII they agree:
-//! every codepoint class is a byte class. The decision moves down to the
-//! line: [`HybridMatcher`] runs [`ByteRegex`] over ASCII lines and hands
-//! the rest to a [`UnicodeMatcher`] — `grep-regex` in rgx.
+//! `rgx-core` has no `char` in the byte engine, whereas a codepoint-aware
+//! regex matcher disagrees on character classes as soon as a window holds a
+//! byte above `0x7f`. On a window that is entirely ASCII they agree: every
+//! codepoint class is a byte class. [`HybridMatcher`] runs [`ByteRegex`] over
+//! ASCII windows and hands the rest to a [`UnicodeMatcher`] delegate supplied
+//! by the caller (the standalone `rgx` binary instantiates [`ByteRegex`]
+//! directly; [`HybridMatcher`] is the library seam for callers that bring a
+//! Unicode engine).
 //!
 //! The delegate sees one line's content, never a terminator, and its
-//! `^`/`$` must be the line's. `grep-regex` with `multi_line(true)` is
-//! exactly that, which is the whole reason the seam is a trait: `rgx-core`
-//! is `no_std` and has no `grep-regex` dependency.
+//! `^`/`$` must be the line's. A multi-line Unicode regex engine is
+//! exactly that, which is why the seam is a trait: `rgx-core` is `no_std`
+//! and carries no external regex dependency.
 //!
 //! A UTF-16 file searched as the interleaving that encodes it is not a
 //! slower search but a different one; see

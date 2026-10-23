@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Correctly-rounded decimal-to-`f64`, without `std`.
 //!
 //! `f64::from_str` is std-only and `powi` with it, so a `no_std` build has no

@@ -1,12 +1,15 @@
-//! MPEG TS/PS metadata, hand-rolled — reduced port of upstream
-//! `b01::io::binary::mpeg`: TS table sections (PAT programs, PMT stream
-//! map, SDT service names) and PS pack/system headers (stream ids, mux
-//! rate). Elementary streams are never decoded.
+// SPDX-License-Identifier: Apache-2.0
+
+//! MPEG TS/PS metadata, hand-rolled — a reduced port of the MPEG reader of
+//! the `io` project by Dan Gohman, whose work is used here under Apache-2.0:
+//! TS table sections (PAT programs, PMT stream map, SDT service names) and
+//! PS pack/system headers (stream ids, mux rate). Elementary streams are
+//! never decoded. See `NOTICE`.
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt::Write as _;
-use rgx_core::{bail, Result};
+use rgx_core::{decline, Result};
 use rgx_core::{Adapter, Outcome};
 
 pub struct MpegInfo;
@@ -41,15 +44,40 @@ fn stream_type_name(st: u8) -> &'static str {
     }
 }
 
+/// The transport packet size, 188 or 192, or `None` when neither probe lands.
+///
+/// M2TS carries the 188-byte TS packet behind a 4-byte timestamp prefix, so its
+/// sync byte sits at offset 4 and never at 0 — which is why an extension whose
+/// entire purpose is to NAME the 192-byte format was the one a 188-only probe
+/// could not reach. Both sizes are confirmed by two sync bytes a whole packet
+/// apart, so a single accidental 0x47 does not decide it: a 192-byte file
+/// probed at 188 fails because data[0] is not 0x47, and vice versa.
+fn ts_packet_size(data: &[u8]) -> Option<usize> {
+    for (size, first) in [(188usize, 0usize), (192, 4)] {
+        // Two whole packets, as the 188-only probe required: one sync byte is a
+        // coincidence, two a whole packet apart is a container.
+        if data.len() >= size * 2 && data[first] == 0x47 && data[first + size] == 0x47 {
+            return Some(size);
+        }
+    }
+    None
+}
+
 fn mpeg_text(data: &[u8]) -> Result<String> {
-    if data.len() >= 376 && data[0] == 0x47 && data[188] == 0x47 {
-        ts_text(data)
+    if let Some(packet_size) = ts_packet_size(data) {
+        ts_text(data, packet_size)
     } else if data.len() >= 4 && data[0..4] == [0x00, 0x00, 0x01, 0xBA] {
         ps_text(data)
     } else if data.len() < 188 {
-        bail!("fewer bytes than one MPEG packet")
+        // A **decline**, not a failure: `.ts` is TypeScript as often as it is
+        // a transport stream, and the registry resolves by extension alone.
+        // Reporting "not an MPEG file" as an adapter failure put a note in
+        // the corpus for every `.ts` source file — a line that was not in
+        // the file, and a match the user could not explain. Stepping aside
+        // silently is what a file that is not ours deserves.
+        decline!("fewer bytes than one MPEG packet")
     } else {
-        bail!("not an MPEG TS/PS file")
+        decline!("not an MPEG TS/PS file")
     }
 }
 
@@ -60,15 +88,26 @@ type Stream = (u16, String, Option<String>);
 /// One program: number, SDT service name, PCR PID, its elementary streams.
 type Program = (u16, Option<String>, Option<u16>, Vec<Stream>);
 
-fn ts_text(data: &[u8]) -> Result<String> {
-    let mut out = String::from("container: mpeg-ts\n");
+fn ts_text(data: &[u8], packet_size: usize) -> Result<String> {
+    let kind = if packet_size == 192 {
+        "m2ts"
+    } else {
+        "mpeg-ts"
+    };
+    let mut out = format!("container: {kind}\n");
     let mut programs: Vec<Program> = Vec::new();
     let mut pmt_pids: Vec<u16> = Vec::new();
     let mut pat_done = false;
     let mut sdt_done = false;
     let mut counts: Vec<(u16, u64)> = Vec::new();
     let mut total = 0u64;
-    for packet in data.as_chunks::<188>().0 {
+    // Everything below indexes a packet from its own sync byte, so a chunk is
+    // narrowed to the 188 bytes that carry the TS packet and the 4-byte M2TS
+    // timestamp prefix is dropped. Taking the FIRST 188 bytes instead reads
+    // from the prefix, where the sync byte never is.
+    let skip = packet_size - 188;
+    for chunk in data.chunks_exact(packet_size) {
+        let packet = &chunk[skip..];
         if packet[0] != 0x47 {
             continue;
         }
@@ -109,7 +148,10 @@ fn ts_text(data: &[u8]) -> Result<String> {
         }
     }
     if programs.is_empty() && counts.is_empty() {
-        bail!("no TS packets decoded");
+        // Found nothing in it, not a failure: a transport stream with no
+        // program map is a real thing, and the file's own bytes are still
+        // worth searching.
+        decline!("no TS packets decoded");
     }
     for (num, name, pcr, streams) in &programs {
         let label = name.clone().unwrap_or_else(|| format!("program {num}"));
@@ -229,6 +271,19 @@ fn parse_sdt(section: &[u8], programs: &mut [Program]) -> bool {
     }
     let section_length = (((section[1] as usize) & 0x0F) << 8) | section[2] as usize;
     let end = (3 + section_length).min(section.len());
+    // The service loop starts after the 3-byte section header
+    // (table_id + section_syntax_indicator/reserved/section_length), the
+    // 2-byte transport_stream_id, the 1-byte reserved/version/current_next,
+    // the 2 section/last-section bytes, and then the 3-byte part of the first
+    // entry the code consumes alongside its id: `service_id` (2) and
+    // `reserved_future_use` (1) -- 3 + 2 + 1 + 2 + 3 = 11.
+    //
+    // Verified against the fixture rather than assumed: 11 is the only start
+    // that yields the declared `descriptors_loop_length` of 24 and lands the
+    // descriptor walk on the `0x48` service-descriptor tag. 7 and 8, the two
+    // values the layout seems to invite, read the id correctly at 7 but then
+    // compute a loop length of 3841 and start the walk at a `0x00` that is
+    // not a descriptor at all.
     let mut p = 11usize;
     let mut any = false;
     while p + 5 <= end {
@@ -350,7 +405,7 @@ fn ps_text(data: &[u8]) -> Result<String> {
         }
     }
     if stream_ids.is_empty() && mux_rate.is_none() {
-        bail!("no MPEG-PS structure decoded");
+        decline!("no MPEG-PS structure decoded");
     }
     if let Some(rate) = mux_rate {
         let _ = writeln!(out, "mux_rate: {rate}");
@@ -493,6 +548,45 @@ mod tests {
         assert!(text.contains("stream: avc pid 257"), "{text}");
         assert!(text.contains("stream: aac pid 258"), "{text}");
         assert!(text.contains("packets: 4"), "{text}");
+    }
+
+    /// Re-wrap a 188-byte TS stream as M2TS: 4 bytes of 33-bit timestamp prefix
+    /// in front of every packet, so the sync byte moves from offset 0 to offset
+    /// 4. The stream is the same stream, so the metadata must be the same
+    /// metadata -- which is the whole claim being tested. A real `.m2ts` from
+    /// ffmpeg is what caught the original 188-only probe; this is the case that
+    /// would have caught it again.
+    fn to_m2ts(ts: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(ts.len() / 188 * 192);
+        for (i, packet) in ts.as_chunks::<188>().0.iter().enumerate() {
+            out.extend_from_slice(&(i as u32).to_le_bytes());
+            out.extend_from_slice(packet);
+        }
+        out
+    }
+
+    #[test]
+    fn m2ts_is_read_with_a_four_byte_prefix_per_packet() {
+        let ts = mini_ts();
+        let m2 = to_m2ts(&ts);
+        assert_eq!(m2.len(), ts.len() / 188 * 192);
+        assert_eq!(m2[0], 0, "the prefix, not the sync byte, leads the file");
+        assert_eq!(m2[4], 0x47, "the sync byte moved to offset 4");
+        let text = mpeg_text(&m2).unwrap();
+        assert!(text.contains("container: m2ts"), "{text}");
+        assert!(text.contains("program: Zircaloy TV (number 1)"), "{text}");
+        assert!(text.contains("stream: avc pid 257"), "{text}");
+        assert!(text.contains("packets: 4"), "{text}");
+    }
+
+    /// The probe must not answer 192 for a plain 188-byte stream: a single
+    /// accidental 0x47 at offset 4 must not decide the packet size.
+    #[test]
+    fn a_sync_byte_at_offset_four_does_not_make_a_ts_stream_look_like_m2ts() {
+        let mut ts = mini_ts();
+        ts[4] = 0x47;
+        let text = mpeg_text(&ts).unwrap();
+        assert!(text.contains("container: mpeg-ts"), "{text}");
     }
 
     #[test]

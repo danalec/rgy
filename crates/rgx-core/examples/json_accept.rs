@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The conformance gate for [`rgx_core::djson`], as the `json-harness` suite
 //! drives it: read the document named as the last argument, and exit 0 if it
 //! was accepted, nonzero if it was rejected. That is the whole interface the

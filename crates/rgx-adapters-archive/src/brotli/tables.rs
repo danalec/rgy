@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! RFC 7932's normative tables: the static dictionary, the 121 word
 //! transformations, and the three literal-context lookup tables.
 //!

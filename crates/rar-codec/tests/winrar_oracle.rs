@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! WinRAR black-box oracle conformance runner.
 //!
 //! Gated on environment variables so the normal gate stays green:

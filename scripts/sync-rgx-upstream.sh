@@ -1,0 +1,392 @@
+#!/usr/bin/env bash
+# Re-sync the vendored rgx crates with an upstream rgx checkout.
+#
+# Usage:
+#   scripts/sync-rgx-upstream.sh --upstream <path> [--dry-run] [--prune]
+#
+# What it does:
+#   The `rgx-*` and `rar-codec` crates in crates/ are upstream rgx's crates,
+#   transported verbatim (README.md: "its engine and adapters, transported
+#   verbatim"). This script copies them from an upstream checkout, so the
+#   transport is a command with a log rather than a memory.
+#
+#   * Every file upstream tracks under a vendored crate is copied to the same
+#     relative path under crates/.
+#   * The third-party licence texts upstream keeps in LICENSES/ are copied
+#     to LICENSES/ as well, so a notice cannot go stale because the copy
+#     that needed it was not part of the crate. The copy never prunes: a
+#     text rgy carries and upstream does not (LICENSE-MIT-FSEARCH, and
+#     postgresql.txt when upstream's NOTICE names it) stays.
+#   * Files rgy has and upstream does not are reported as STALE. `--prune`
+#     removes them; without it they are only listed, because a file rgy
+#     wrote itself (see KEEP below) is not stale but ours.
+#   * The copy is byte-for-byte: no SPDX stripping, no path rewriting, no
+#     `alloc::` -> `std::`. Upstream and rgy are both `no_std` + `alloc`
+#     now, and the copy-time transforms that used to live in
+#     scripts/apply-vendored-edits.ps1 are all obsolete.
+#
+# What it does not do:
+#   It does not merge. A file upstream changed is taken whole; rgy's
+#   local edits to a vendored file are not re-applied on top of it. The
+#   vendored trees are upstream's trees, and the only file in them that is
+#   rgy's own is on the KEEP list.
+#
+#   It does not touch the root documents. COPYING, NOTICE and the
+#   workspace Cargo.toml are rgy's own and are maintained here: they
+#   describe the whole workspace, not the vendored part of it.
+#
+# The upstream path is a read-only input. Nothing outside crates/ is
+# touched.
+
+set -uo pipefail
+
+UPSTREAM=""
+DRY_RUN=0
+PRUNE=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --upstream) UPSTREAM="$2"; shift 2 ;;
+        --dry-run)  DRY_RUN=1; shift ;;
+        --prune)    PRUNE=1; shift ;;
+        -h|--help)  sed -n '2,26p' "$0"; exit 0 ;;
+        *) echo "unknown argument: $1" >&2; exit 1 ;;
+    esac
+done
+
+if [ -z "$UPSTREAM" ]; then
+    echo "no --upstream path given" >&2
+    echo "  example: scripts/sync-rgx-upstream.sh --upstream ../rgx" >&2
+    exit 1
+fi
+
+repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$repo_root" || exit 1
+
+UPSTREAM="$(cd "$UPSTREAM" 2>/dev/null && pwd)" || { echo "no such directory: $UPSTREAM" >&2; exit 1; }
+if [ ! -d "$UPSTREAM/.git" ]; then
+    echo "$UPSTREAM is not a git checkout" >&2
+    exit 1
+fi
+
+# The vendored crates. Each one is upstream rgx's crate of the same name,
+# and the path layout is identical on both sides (crates/<name>/...), so the
+# copy is a path-preserving one.
+CRATES="rgx-core rar-codec rgx-adapters-archive rgx-adapters-docs \
+rgx-adapters-inspect rgx-adapters-llm rgx-adapters-mail rgx-adapters-media \
+rgx-adapters-office rgx-adapters-pdf rgx-adapters-tabular rgx-adapters-threed"
+
+# Files inside a vendored tree that are rgy's own and must survive the
+# copy. One per line, repo-relative.
+#
+# tesla_valve.rs is rgy's empirical harness for the Tesla Valve indexing
+# idea: upstream rgx has no such example, and it is rgy's argument for the
+# pack-store design, not a copy of anything. It lives in the engine crate,
+# where rgy's own code belongs -- a vendored tree carries upstream's
+# licence and nothing else.
+KEEP=""
+
+# Local patches, applied after the copy, one file per patch under
+# scripts/rgx-local-patches/<repo-relative-path>.patch.
+#
+# A patch is a divergence from upstream that rgy has to carry: a bug
+# upstream has not fixed yet, or a fix upstream has not taken. The patch
+# directory is the place where that divergence is recorded, so the next
+# sync re-applies it instead of silently reverting it -- and so a patch
+# that no longer applies says so out loud, instead of leaving the file
+# half-patched.
+PATCH_DIR="scripts/rgx-local-patches"
+
+is_kept() {
+    local rel="$1" k
+    for k in $KEEP; do
+        [ "$rel" = "$k" ] && return 0
+    done
+    return 1
+}
+
+# Apply the local patch for a repo-relative path, if there is one.
+# Returns 0 when there is no patch, 1 when the patch does not apply.
+apply_local_patch() {
+    local rel="$1"
+    local patch="$PATCH_DIR/$rel.patch"
+    [ -f "$patch" ] || return 0
+    # `core.autocrlf=false` on purpose: the copy has to stay what the
+    # commit says it is. A checkout that rewrites the line endings is not
+    # a change, and a patch whose context is LF then matches nothing.
+    if git -c core.autocrlf=false apply --recount --whitespace=nowarn "$patch" 2>/dev/null; then
+        echo "  patch  $rel"
+        patched=$((patched + 1))
+        return 0
+    fi
+    echo "  FAILED local patch does not apply: $rel" >&2
+    echo "         $patch" >&2
+    echo "         upstream changed the file; re-derive the patch." >&2
+    return 1
+}
+
+# The bytes come from the upstream COMMIT, not from the working tree: the
+# manifest pins a commit, so the copy has to be that commit's bytes, and a
+# dirty upstream working tree would otherwise decide what this repository
+# holds. It also means the copy has the canonical line endings -- a
+# checkout with core.autocrlf hands out CRLF for content whose blob is LF.
+
+copied=0; unchanged=0; added=0; patched=0; ahead=0
+stale_list=""
+
+# The commit the copy is taken from. Every row of the manifest records it,
+# and it is the answer to "has upstream moved under this tree since we
+# looked?".
+upstream_commit="$(git -C "$UPSTREAM" rev-parse HEAD 2>/dev/null)"
+if [ -z "$upstream_commit" ]; then
+    echo "cannot read the upstream HEAD commit" >&2
+    exit 1
+fi
+
+echo "syncing vendored rgx crates from $UPSTREAM" >&2
+
+# Every tracked upstream file under the vendored crates, once. The staleness
+# check below asks "does upstream have this file", and asking git per file
+# would spawn a process per file -- a thousand of them, for a question one
+# `ls-files` answers.
+upstream_list="$(mktemp)"
+trap 'rm -f "$upstream_list"' EXIT
+for crate in $CRATES; do
+    git -C "$UPSTREAM" ls-files "crates/$crate" >> "$upstream_list"
+done
+sort -o "$upstream_list" "$upstream_list"
+
+for crate in $CRATES; do
+    src_dir="$UPSTREAM/crates/$crate"
+    dst_dir="$repo_root/crates/$crate"
+    if [ ! -d "$src_dir" ]; then
+        echo "  MISSING upstream crate: crates/$crate" >&2
+        exit 1
+    fi
+
+    # Upstream's tracked files only. The working tree also holds build
+    # junk under crates/rgx-core/fuzz/target, which upstream's .gitignore
+    # excludes and which must not travel.
+    #
+    # The bytes come from the commit, not from the working tree. The
+    # manifest pins a commit, so the copy has to be that commit's bytes:
+    # a dirty upstream working tree would otherwise decide what this
+    # repository holds, and the two would disagree the moment somebody
+    # edited a file upstream. `git cat-file` gives the committed content,
+    # which is also the canonical line endings -- a checkout with
+    # core.autocrlf would hand out CRLF for content whose blob is LF.
+    # Which files have to be copied: the ones whose local content is not
+    # the upstream blob's.
+    #
+    # The comparison is by hash, and it is done in bulk: the upstream tree
+    # at the pin is one `ls-tree` and the local files are one
+    # `hash-object --stdin-paths`. Doing it per file meant three process
+    # spawns per file -- three thousand of them for a thousand files, which
+    # is where the minutes went.
+    upstream_paths="$(mktemp)"
+    upstream_pairs="$(mktemp)"
+    local_paths="$(mktemp)"
+    local_pairs="$(mktemp)"
+    to_copy="$(mktemp)"
+
+    # "<blob hash>\t<path>" for every file the pinned upstream tree holds.
+    # `ls-tree` prints "<mode> SP <type> SP <hash> TAB <path>", and the path
+    # may hold spaces, so the split is on the tab and the hash is the third
+    # space-separated field of what comes before it.
+    git -C "$UPSTREAM" ls-tree -r "$upstream_commit" -- "crates/$crate" \
+        | awk -F'\t' '{ split($1, f, " "); print f[3] "\t" $2 }' \
+        > "$upstream_pairs"
+    cut -f2 "$upstream_pairs" > "$upstream_paths"
+
+    # The local hashes, for the paths that exist here. A path that does not
+    # exist is an addition, and `hash-object` would fail on it.
+    while IFS= read -r rel; do
+        [ -f "$repo_root/$rel" ] && printf '%s\n' "$rel"
+    done < "$upstream_paths" > "$local_paths"
+    git hash-object --no-filters --stdin-paths < "$local_paths" \
+        | paste -d'\t' "$local_paths" - > "$local_pairs"
+
+    # The paths to copy: the ones the upstream has and this tree does not,
+    # and the ones whose content is not the blob's. A file with a local
+    # patch is in the second group by construction -- the patch changed its
+    # content -- so it is rewritten and the patch goes on top again.
+    #
+    # Both directions matter. A path only upstream has is a new file; a
+    # path both have with a different hash is a changed one. Asking only
+    # "which local files differ" misses every new file the upstream brings,
+    # which is how a rename arrives as a deletion and nothing else.
+    awk -F'\t' '
+        NR==FNR { local[$1]=$2; next }
+        { if (!(($2) in local)) print $2; else if (local[$2] != $1) print $2 }
+    ' "$local_pairs" "$upstream_pairs" > "$to_copy"
+
+    while IFS= read -r rel; do
+        [ -n "$rel" ] || continue
+        dst="$repo_root/$rel"
+        if [ ! -f "$dst" ]; then
+            if [ "$DRY_RUN" = 1 ]; then
+                echo "  add    $rel"
+            else
+                mkdir -p "$(dirname "$dst")" || exit 1
+                git -C "$UPSTREAM" cat-file blob "$upstream_commit:$rel" > "$dst" || exit 1
+                echo "  add    $rel"
+            fi
+            added=$((added + 1))
+            if [ "$DRY_RUN" = 0 ]; then
+                apply_local_patch "$rel" || exit 1
+            fi
+            continue
+        fi
+        if [ "$DRY_RUN" = 1 ]; then
+            echo "  update $rel"
+        else
+            git -C "$UPSTREAM" cat-file blob "$upstream_commit:$rel" > "$dst" || exit 1
+            echo "  update $rel"
+        fi
+        copied=$((copied + 1))
+        if [ "$DRY_RUN" = 0 ]; then
+            apply_local_patch "$rel" || exit 1
+        fi
+    done < "$to_copy"
+
+    # What is left is what already matches the blob.
+    unchanged=$((unchanged + $(wc -l < "$upstream_paths") - $(grep -c . "$to_copy")))
+
+    # What rgy has that the pinned upstream does not.
+    while IFS= read -r rel; do
+        [ -n "$rel" ] || continue
+        is_kept "$rel" && continue
+        grep -Fxq "$rel" "$upstream_paths" && continue
+        stale_list="$stale_list$rel"$'\n'
+    done < <(find "$dst_dir" -type f \
+        -not -path '*/fuzz/target/*' \
+        | sed "s|^$repo_root/||" | sort)
+
+    # What the upstream has that the pinned commit does not: the files it
+    # has staged or edited since. The copy is taken at the pin, so those
+    # are not here -- and saying so is better than a silent difference
+    # between what is here and what is upstream.
+    while IFS= read -r rel; do
+        [ -n "$rel" ] || continue
+        echo "  ahead  $rel: upstream moved past the pinned commit; not copied yet" >&2
+        ahead=$((ahead + 1))
+    done < <(git -C "$UPSTREAM" diff --name-only "$upstream_commit" -- "crates/$crate" 2>/dev/null)
+
+    rm -f "$upstream_paths" "$upstream_pairs" "$local_paths" "$local_pairs" "$to_copy"
+done
+
+stale_count=0
+if [ -n "$stale_list" ]; then
+    stale_count="$(printf '%s' "$stale_list" | grep -c . || true)"
+fi
+
+# The third-party licence texts. Upstream's NOTICE points at these by name,
+# so a text that is missing here is a notice that points nowhere. The copy
+# is one way: a text rgy carries and upstream does not stays, because
+# rgy's NOTICE names it too.
+if [ -d "$UPSTREAM/LICENSES" ]; then
+    mkdir -p "$repo_root/LICENSES" || exit 1
+    for text in "$UPSTREAM"/LICENSES/*.txt; do
+        [ -f "$text" ] || continue
+        name="$(basename "$text")"
+        if [ -f "$repo_root/LICENSES/$name" ] && cmp -s "$text" "$repo_root/LICENSES/$name"; then
+            continue
+        fi
+        if [ "$DRY_RUN" = 1 ]; then
+            echo "  notice $name"
+        else
+            cp "$text" "$repo_root/LICENSES/$name" || exit 1
+            echo "  notice $name"
+        fi
+    done
+fi
+
+if [ "$stale_count" -gt 0 ]; then
+    echo ""
+    echo "stale: $stale_count file(s) rgy has and upstream does not" >&2
+    printf '%s' "$stale_list" | while IFS= read -r rel; do
+        [ -n "$rel" ] || continue
+        if [ "$PRUNE" = 1 ] && [ "$DRY_RUN" = 0 ]; then
+            rm -f "$repo_root/$rel"
+            echo "  removed $rel"
+        else
+            echo "  stale  $rel"
+        fi
+    done
+    if [ "$PRUNE" = 0 ]; then
+        echo "  (re-run with --prune to remove them)" >&2
+    fi
+fi
+
+echo ""
+echo "added $added, updated $copied, unchanged $unchanged, stale $stale_count, patched $patched, ahead $ahead"
+
+# --- the manifest ---------------------------------------------------------
+#
+# scripts/vendored-sources.tsv is written here, not maintained by hand, so
+# it cannot fall behind the tree it describes. The old manifest listed, per
+# file, the specification the file was written from -- rows like "RFC 1950"
+# -- and the drift check could never verify those: a specification version
+# is not a git commit, so every one of them read as drift and the check
+# said 81 of 115 rows were broken, which is the same as saying nothing.
+#
+# The manifest now records the relationship that actually exists: these
+# trees are upstream rgx's crates, and here is the commit they were taken
+# from. Every pin is a commit, so the check can ask its question and get
+# an answer. The per-file specification provenance is upstream's own
+# manifest's business -- scripts/vendored-sources.tsv in the rgx checkout
+# -- and the third-party notices travel with this repository's NOTICE.
+manifest="$repo_root/scripts/vendored-sources.tsv"
+if [ "$DRY_RUN" = 0 ]; then
+    tmp_manifest="$(mktemp)"
+    {
+        echo "# Vendored-source manifest. Read by scripts/check-drift.*, which asks"
+        echo "# one question: has the upstream changed what we copied since we copied"
+        echo "# it?"
+        echo "#"
+        echo "# Written by scripts/sync-rgx-upstream.sh, not by hand: a manifest that"
+        echo "# falls behind the tree it describes is worse than none, because it"
+        echo "# reads as \"nothing to do here\"."
+        echo "#"
+        echo "# Columns, tab separated:"
+        echo "#"
+        echo "#   1  rgx_path    the path in this repository. A tree row names a"
+        echo "#                   directory; a patch row names the patch file."
+        echo "#   2  upstream    the path in the upstream rgx checkout."
+        echo "#   3  pin         the upstream commit the copy was taken from."
+        echo "#   4  kind        tree | patch."
+        echo "#   5  note        why the row is here."
+        echo "#"
+        echo "# The trees below are upstream rgx's crates, transported verbatim; the"
+        echo "# README says so and the licence follows upstream's. The per-file"
+        echo "# specification provenance of those files is upstream's own manifest"
+        echo "# (scripts/vendored-sources.tsv in the rgx checkout), and the"
+        echo "# third-party notices are in NOTICE and LICENSES/."
+        echo ""
+        echo "# The upstream commit the copy was taken from: $upstream_commit"
+        echo ""
+    } > "$tmp_manifest"
+
+    for crate in $CRATES; do
+        printf 'crates/%s\tcrates/%s\t%s\ttree\t%s\n' \
+            "$crate" "$crate" "$upstream_commit" \
+            "upstream rgx's crate, transported verbatim" >> "$tmp_manifest"
+    done
+
+    if [ -d "$PATCH_DIR" ]; then
+        while IFS= read -r patch; do
+            rel="${patch#"$PATCH_DIR"/}"
+            rel="${rel%.patch}"
+            printf '%s\t%s\t%s\tpatch\t%s\n' \
+                "$PATCH_DIR/$rel.patch" "$rel" "$upstream_commit" \
+                "a divergence from upstream: the patch is applied on top of the copy" \
+                >> "$tmp_manifest"
+        done < <(find "$PATCH_DIR" -name '*.patch' -type f | sed "s|^$repo_root/||" | sort)
+    fi
+
+    mv "$tmp_manifest" "$manifest"
+    echo "manifest: scripts/vendored-sources.tsv rewritten (pin $upstream_commit)"
+fi
+
+[ "$DRY_RUN" = 1 ] && echo "(dry run: nothing was written)"
+exit 0

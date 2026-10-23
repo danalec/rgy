@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! rar-codec: pure-Rust RAR container codec.
 //!
 //! # Provenance
@@ -32,9 +34,10 @@
 //! matrices cover RAR5 and RAR4 methods, PPMd, solid groups, path
 //! encodings, encryption refusal and edge-case sizes) plus a reverse check
 //! that genuine UnRAR reads what [`ArchiveBuilder`] writes. The integration
-//! tests in `tests/` are the behavioral oracle retained from the port and
-//! are deliberately not rewritten; those files keep their BSD-2-Clause
-//! obligation.
+//! tests in `tests/` are the behavioral oracle, written for this crate
+//! against the fixtures in `testdata/`; no upstream file remains in the
+//! tree, and the BSD 2-Clause terms the original port inherited are kept on
+//! the record in the repository's `NOTICE`.
 //!
 //! Zero dependencies, `#![no_std]` + `alloc`, `#![forbid(unsafe_code)]`.
 //!

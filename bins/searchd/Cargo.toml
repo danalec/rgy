@@ -2,8 +2,9 @@
 name = "searchd"
 version = "0.1.0"
 edition = "2024"
+authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
 description = "The merged search daemon: JSON-lines over stdio/pipe/UDS, plus the rgx --serve front"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
 
 [[bin]]
 name = "searchd"
@@ -11,7 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 discovery = { path = "../../crates/discovery" }
-# The platform walk selector (docs/freebsd-support.md P2.1).
+# The platform walk selector (docs/design.md §2.2).
 discovery-dispatch = { path = "../../crates/discovery-dispatch" }
 engine = { path = "../../crates/engine" }
 name-core = { path = "../../crates/name-core" }

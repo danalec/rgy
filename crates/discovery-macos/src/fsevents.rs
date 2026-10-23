@@ -1,21 +1,18 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Whole-disk FSEvents stream, directory granularity, replayable by event id.
 
 use std::ffi::{CStr, c_void};
 use std::sync::mpsc::Sender;
 
-pub const MUST_SCAN_SUBDIRS: u32 = 0x1;
-pub const USER_DROPPED: u32 = 0x2;
-pub const KERNEL_DROPPED: u32 = 0x4;
-pub const HISTORY_DONE: u32 = 0x10;
-const CREATE_FLAG_NO_DEFER: u32 = 0x2;
+use crate::event::Event;
 
-pub struct Event {
-    pub path: Vec<u8>,
-    pub flags: u32,
-    pub id: u64,
-    /// Which `watch` delivered it (its `stream` number).
-    pub stream: u32,
-}
+/// `kFSEventStreamCreateFlagNoDefer` (0x2): the framework delivers an event
+/// as soon as it happens instead of waiting for the latency window to
+/// close. It is *not* `kFSEventStreamCreateFlagFileEvents` (0x10), so the
+/// stream stays directory-granular: it names the folder whose contents
+/// changed, not the item that changed.
+const CREATE_FLAG_NO_DEFER: u32 = 0x2;
 
 /// A stream's callback context.
 struct Info {
@@ -145,6 +142,10 @@ pub struct Stream(*mut c_void);
 // The stream is only started and stopped, never shared mid-call.
 unsafe impl Send for Stream {}
 unsafe impl Sync for Stream {}
+
+/// The stream is what the feed keeps alive: dropping it stops the feed,
+/// and a stopped feed is a daemon that stopped noticing changes.
+impl crate::feed::KeepAlive for Stream {}
 
 impl Drop for Stream {
     fn drop(&mut self) {

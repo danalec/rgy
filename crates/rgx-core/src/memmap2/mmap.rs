@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Independent reimplementation of memmap2-rs read-only Mmap handle.
 
 use std::fmt;

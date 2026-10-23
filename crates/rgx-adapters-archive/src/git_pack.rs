@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Git packfile (.pack) adapter.
 //!
 //! Indexes and extracts Git objects (blobs, commits, tags) from Git packfiles.
@@ -13,7 +15,7 @@
 use crate::budget::MemberSink;
 use alloc::format;
 use rgx_core::compress::zlib::ZlibDecoder;
-use rgx_core::{bail, Adapter, Outcome, Result};
+use rgx_core::{bail, decline, Adapter, Outcome, Result};
 
 pub struct GitPack;
 
@@ -28,7 +30,7 @@ impl Adapter for GitPack {
 
     fn extract(&self, data: &[u8], _path: &str) -> Result<Outcome> {
         if data.len() < 12 || &data[..4] != b"PACK" {
-            bail!("not a Git packfile (bad magic)");
+            decline!("not a Git packfile (bad magic)");
         }
 
         let version = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
@@ -56,7 +58,15 @@ impl Adapter for GitPack {
             while more && pos < data.len().saturating_sub(20) {
                 let next = data[pos];
                 pos += 1;
-                _size |= ((next & 0x7F) as u64) << shift;
+                // `shift` grew 7 per byte with no cap, so ten continuation
+                // bytes pushed it to 67 and `<< shift` overflowed: a panic in
+                // debug, a masked shift in release. A pack object size is a
+                // u64 at most, so 63 bits is the widest a contribution can be;
+                // past that the encoding is malformed and the extra bytes are
+                // consumed but contribute nothing.
+                if shift < 64 {
+                    _size |= ((next & 0x7F) as u64) << shift;
+                }
                 shift += 7;
                 more = (next & 0x80) != 0;
             }

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Simple case folding for literal pattern characters.
 //!
 //! ## Why this exists in a byte-mode engine

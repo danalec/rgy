@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Walk throughput: the sequential oracle vs the fanned-out walk.
 //!
 //! `engine`'s `name_bench` times the query path; this times discovery alone,

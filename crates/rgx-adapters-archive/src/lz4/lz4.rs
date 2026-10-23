@@ -705,6 +705,25 @@ impl Lz4Decoder {
         Ok(output)
     }
 
+    /// Decompress LZ4 block format (raw, no frame header) under a ceiling.
+    ///
+    /// **The block format declares no size, so the ceiling is the only bound
+    /// it has.** A frame announces its content size and can be refused from
+    /// the declaration; a block cannot, and a match copies from a two-byte
+    /// offset and may run long, so a small block can expand into a large
+    /// output. The decode stops at the ceiling and reports `capped`.
+    pub fn decode_block_bounded(&self, input: &[u8], limit: u64) -> CompressResult<Bounded> {
+        let mut output = Vec::with_capacity(input.len() * 2);
+        let mut cap = OutputCap::new(limit);
+        self.decode_block_into(input, &mut output, &mut cap)?;
+        Ok(Bounded {
+            bytes: output,
+            declared: None,
+            limit,
+            capped: cap.capped(),
+        })
+    }
+
     /// Append one LZ4 block to `output`, which doubles as the match
     /// dictionary.
     ///

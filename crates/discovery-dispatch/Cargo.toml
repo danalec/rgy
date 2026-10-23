@@ -2,11 +2,15 @@
 name = "discovery-dispatch"
 version = "0.1.0"
 edition = "2024"
-description = "The Source selector (docs/freebsd-support.md P2.1): the native walk per platform by cfg, the portable walk elsewhere"
-license = "MIT OR Apache-2.0"
+authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
+description = "The Source selector (docs/design.md §2.2): the native walk per platform by cfg, the portable walk elsewhere"
+license = "Apache-2.0"
 
 [dependencies]
 discovery = { path = "../discovery" }
+# The catch-up rule answers with the wire value the status response carries
+# (`replayed` / `relisted`), so the rule and the spelling cannot drift.
+proto = { path = "../proto" }
 
 # The platform walks, pulled in per-target so `source_for` can build the
 # native one on its own OS. Every crate is empty off-target.

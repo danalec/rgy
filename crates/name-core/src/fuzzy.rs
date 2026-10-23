@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Case-insensitive fuzzy matching for the interactive search UI.
 //!
 //! Interactive search ranks on *how well* a name matched, not merely whether it

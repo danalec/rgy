@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Byte-walking helpers shared by stream parsing and raw_value extraction.
 //! No `Value`, no `Arena` -- just byte-level JSON scanning.
 //!

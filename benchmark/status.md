@@ -248,7 +248,7 @@ Two rules follow:
 - **Absolute numbers as claims about other machines.** Every figure here is
   this machine on this corpus at these digests. The ratios are the portable
   part; the milliseconds are not. **A second host is now on file** —
-  [`status-linux-ryzen7-255.md`](status-linux-ryzen7-255.md), same corpora,
+  [`status-linux-ryzen7-255.md`](https://github.com/danalec/rgx/blob/main/benchmark/status-linux-ryzen7-255.md), same corpora,
   same gate — and it shows the engine-alone edge is *not* portable: rgx
   leads on the two single-byte shapes and loses the six multi-byte/class
   shapes there, against a clean 9-of-9 lead here. Quote §1.1 with this

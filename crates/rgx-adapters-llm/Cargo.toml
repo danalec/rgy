@@ -2,13 +2,37 @@
 name = "rgx-adapters-llm"
 version = "0.1.0"
 edition = "2021"
+authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
 description = "rgx adapters for machine-learning model files (GGUF, safetensors, NumPy, protobuf, tiktoken vocabularies)"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
+readme = "README.md"
+keywords = ["gguf", "safetensors", "npy", "protobuf"]
+categories = ["parser-implementations", "science"]
+repository = "https://github.com/danalec/rgx"
 
+[features]
+# One feature per adapter, in the order `adapters()` returns them. The
+# default is the whole crate: a binary that names the formats it needs
+# builds with `--no-default-features --features <name>`.
+default = ["gguf", "safetensors", "npy", "protobuf", "tiktoken", "keras", "torch", "pickle"]
+gguf = []
+safetensors = []
+npy = []
+protobuf = []
+tiktoken = []
+# The keras and torch adapters read a `.keras` / `.pt` zip through the
+# archive crate's producer budget (`budget::MemberSink`), so they are the
+# two families that pull that crate in. Its `std` feature is what carries
+# the `budget` module: the budget reads `RGX_MAX_MEMBERS` and
+# `RGX_MAX_MEMBER_BYTES` from the environment.
+keras = ["dep:rgx-adapters-archive", "rgx-adapters-archive/std", "rgx-core/zip"]
+torch = ["dep:rgx-adapters-archive", "rgx-adapters-archive/std", "rgx-core/zip"]
+pickle = []
 [dependencies]
-rgx-core = { path = "../rgx-core" }
+rgx-core = { path = "../rgx-core", version = "0.1.0", default-features = false, features = ["std", "sha256-hw"] }
 # The zip reader in `extra.rs` spends the same producer budget as the
 # archive crate's own zip adapter (`budget::MemberSink`), so a `.keras` /
 # `.pt` zip is capped by `-M` / RGX_MAX_MEMBER_BYTES like every other
-# container.
-rgx-adapters-archive = { path = "../rgx-adapters-archive" }
+# container. Optional: only the keras and torch families spend that
+# budget, and it switches off with them.
+rgx-adapters-archive = { path = "../rgx-adapters-archive", version = "0.1.0", default-features = false, optional = true }

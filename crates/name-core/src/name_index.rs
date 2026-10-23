@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+//
+// Transported from fsearch (https://github.com/noahdunnagan/fsearch), MIT
+// licensed, Copyright (c) 2026 Noah Dunnagan. Its notice is in
+// LICENSE-MIT-FSEARCH and in the repository's NOTICE.
 //! The name index: every entry on disk in one flat blob, mmap-able as is.
 //!
 //! Layout trick: entries are emitted one directory *block* at a time, blocks
@@ -11,9 +16,11 @@
 //! can match a query is answered 64 names at a time from per-class bitmaps
 //! (see `name_bits`) before any name is read.
 
+use crate::fold;
 use discovery::walk::{KIND_DIR, Listing, NONE};
 use memmap2::{Mmap, MmapMut};
 use rayon::prelude::*;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
@@ -111,7 +118,16 @@ impl BlobMut {
     }
 }
 
-const MAGIC: &[u8; 8] = b"FSIDX011";
+/// The blob's magic.
+///
+/// `FSIDX012` is `FSIDX011` with the name masks folded: a mask says which
+/// character classes a name holds, and the classes are now the ones of the
+/// *folded* name (see `crate::fold`), because that is the name a query is
+/// compared against. An index built before the fold says something else,
+/// so it is not loaded: a stale index would reject a name whose folded
+/// form holds a class its raw form does not, and the answer would depend
+/// on whether the index had been rebuilt.
+const MAGIC: &[u8; 8] = b"FSIDX012";
 
 #[derive(Clone, Copy)]
 enum Sec {
@@ -347,6 +363,27 @@ impl Index {
         (b - a <= 64).then(|| self.map.get(at..at + 64)?.try_into().ok()).flatten()
     }
 
+    /// The name of distinct name `id`, folded for comparison, and the
+    /// 64-byte window the wide scorer reads.
+    ///
+    /// The fold is what makes a name typed in NFC match one the filesystem
+    /// stored in NFD (parity row 1.12). The index keeps the bytes the
+    /// filesystem gave: the name that is displayed and the path that is
+    /// opened are the original ones, and the fold is a view for comparison
+    /// only.
+    ///
+    /// The window is the index's own bytes when the fold left the name
+    /// alone. A name the fold changed has no window in the index, so the
+    /// wide scorer reads it the other way (`fuzzy_score_capped` copies the
+    /// name into a buffer of its own).
+    pub fn uname_folded(&self, id: u32) -> (Cow<'_, [u8]>, Option<&[u8; 64]>) {
+        let raw = self.uname(id);
+        match fold::fold(raw) {
+            Cow::Borrowed(_) => (Cow::Borrowed(raw), self.uname_wide(id)),
+            Cow::Owned(folded) => (Cow::Owned(folded), None),
+        }
+    }
+
     pub fn name(&self, i: usize) -> &[u8] {
         self.uname(self.ent_name()[i])
     }
@@ -569,7 +606,11 @@ impl Index {
         let mut by_block = vec![0u64; words * NBITMAPS];
         by_block.par_chunks_mut(NBITMAPS).enumerate().for_each(|(w, out)| {
             for k in w * 64..(w * 64 + 64).min(u) {
-                for b in name_bitmaps(&unames[uoff[k] as usize..uoff[k + 1] as usize]) {
+                // The bitmaps describe the folded name: they are what a
+                // query's classes are tested against, and a query is
+                // compared against the folded name.
+                let folded = fold::fold(&unames[uoff[k] as usize..uoff[k + 1] as usize]);
+                for b in name_bitmaps(&folded) {
                     out[b] |= 1 << (k % 64);
                 }
             }
@@ -805,13 +846,17 @@ fn ext_key(name: &[u8]) -> Option<[u8; 16]> {
 
 /// The table of the 254 most common extensions among `names` (each at
 /// most 15 bytes) and each name's slot in it (see `Index::name_ext`).
+///
+/// The extension is the one of the *folded* name: the table prefilters a
+/// comparison, and a comparison sees the folded name (parity row 1.12).
 pub(crate) fn ext_slots(names: &[u8], off: &[u32]) -> (Vec<[u8; 16]>, Vec<u8>) {
     let name = |k: usize| &names[off[k] as usize..off[k + 1] as usize];
+    let ext = |k: usize| ext_key(&fold::fold(name(k)));
     let count = (0..off.len() - 1)
         .into_par_iter()
         .with_min_len(1 << 16)
         .fold(HashMap::<[u8; 16], u32, Fx>::default, |mut m, k| {
-            if let Some(e) = ext_key(name(k)) {
+            if let Some(e) = ext(k) {
                 *m.entry(e).or_default() += 1;
             }
             m
@@ -834,7 +879,7 @@ pub(crate) fn ext_slots(names: &[u8], off: &[u32]) -> (Vec<[u8; 16]>, Vec<u8>) {
         .into_par_iter()
         .map(|k| {
             let n = name(k);
-            match ext_key(n) {
+            match ext(k) {
                 Some(e) => slot.get(&e).copied().unwrap_or(255),
                 None => n.contains(&b'.') as u8 * 255,
             }
@@ -845,7 +890,13 @@ pub(crate) fn ext_slots(names: &[u8], off: &[u32]) -> (Vec<[u8; 16]>, Vec<u8>) {
 
 impl NameInfo {
     /// The info of a name whose folders' best location prior is `prior`.
+    ///
+    /// The name is folded first: the length, the stem and the head are
+    /// what a comparison sees (parity row 1.12), and a query typed in NFC
+    /// has to line up with a name the filesystem stored in NFD.
     pub fn of(name: &[u8], prior: i8) -> NameInfo {
+        let folded = fold::fold(name);
+        let name = &folded[..];
         let off = (name.len() > 1 && name[0] == b'.') as usize;
         let stem = name.iter().rposition(|&b| b == b'.').filter(|&p| p > off).unwrap_or(name.len());
         let tweak = 10 + if name.ends_with(b".app") { 25 } else { 0 } - if name.first() == Some(&b'.') { 8 } else { 0 };
@@ -930,6 +981,10 @@ impl std::hash::Hasher for FxH {
 /// Which character classes a name contains. A query token can only match a
 /// name whose mask is a superset of the token's mask, which rejects most of
 /// the disk with one AND per entry.
+///
+/// The bytes are taken as they are: the caller folds the name first (see
+/// `name_mask`, which does), because the classes a comparison sees are the
+/// classes of the folded name.
 pub fn char_mask(s: &[u8]) -> u64 {
     s.iter().fold(0, |m, &b| m | char_bit(b))
 }
@@ -938,7 +993,19 @@ pub fn char_mask(s: &[u8]) -> u64 {
 /// first byte of the name (past a leading dot) and of each space-separated
 /// word: where a typo match may start (`query::typo_score`), so a search
 /// rejects every other name without reading it.
+///
+/// The name is folded first: the mask says which classes a *comparison*
+/// sees, and a comparison sees the folded name (parity row 1.12).
 pub fn name_mask(s: &[u8]) -> u64 {
+    mask_of(&fold::fold(s))
+}
+
+/// `name_mask` for a name that is already folded: the mask without
+/// folding it again.
+///
+/// The hot path folds the name once and needs its mask from the same
+/// bytes, and folding twice would walk the name twice for nothing.
+pub(crate) fn mask_of(s: &[u8]) -> u64 {
     let off = (s.len() > 1 && s[0] == b'.') as usize;
     let starts = s.get(off).into_iter().chain(s.windows(2).filter(|w| w[0] == b' ').map(|w| &w[1]));
     starts.fold(char_mask(s), |m, &b| m | start_bit(b))
@@ -974,10 +1041,14 @@ pub const BM_DOUBLE: usize = BM_APP + 1;
 pub const NBITMAPS: usize = BM_DOUBLE + CLASSES;
 
 /// The bitmaps (see `BM_FIRST` and on) a name is in.
+///
+/// The name is the folded one (see `crate::fold`): the bitmaps are what a
+/// query's classes are tested against, so they have to describe the name
+/// a comparison sees.
 fn name_bitmaps(s: &[u8]) -> impl Iterator<Item = usize> {
     let (a, b) = s.split_at(s.len() / 2);
     let class = |m: u64, base: usize| (0..CLASSES).filter(move |c| m & (1 << c) != 0).map(move |c| base + c);
-    let starts = name_mask(s) >> CLASSES;
+    let starts = mask_of(s) >> CLASSES;
     class(char_mask(a), BM_FIRST)
         .chain(class(char_mask(b), BM_SECOND))
         .chain((0..23).filter(move |h| starts & (1 << h) != 0).map(|h| BM_START + h))
@@ -1068,7 +1139,7 @@ mod blob_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// P1.1 acceptance (`docs/freebsd-support.md`): a non-empty file must
+    /// P1.1 acceptance (`docs/design.md` §2.2): a non-empty file must
     /// arrive as `Blob::Mapped`, so a regression to the owned fallback is
     /// visible here instead of silently costing the whole blob in RSS. On
     /// FreeBSD this exercises `memmap2/platform/freebsd.rs`; on Linux and

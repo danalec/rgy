@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Binary Visio (.vsd, Visio 1.x-2010) text extraction.
 //!
 //! The file is an OLE CFB whose `VisioDocument` stream is a forest of
@@ -6,11 +8,13 @@
 //! variant (4096-byte window). Text lives in `VSD_TEXT` (0x0e) chunks:
 //! an 8-byte prefix followed by UTF-16LE (format version 11) or ANSI
 //! (versions 1-6) characters. The grammar — chunk headers with their
-//! trailer rules, pointer records, per-version quirks — follows LibreOffice's
-//! `libvisio` (MPL-2.0) reconstruction of the format; only text is
-//! interpreted, geometry/styles/stencils are walked past.
+//! trailer rules, pointer records, per-version quirks — was read from
+//! LibreOffice's `libvisio`, the reconstruction of the format that exists;
+//! the code here is rgx's own. Only text is interpreted;
+//! geometry/styles/stencils are walked past.
 //!
-//! Canonical full implementation: `upstream::b01::io::binary::visio`.
+//! A reduced port of the Visio reader of the `io` project by Dan Gohman,
+//! whose work is used here under Apache-2.0. See `NOTICE`.
 
 use alloc::borrow::Cow;
 #[allow(unused_imports)]
@@ -19,7 +23,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use rgx_core::cfb::Cfb;
 use rgx_core::Outcome;
-use rgx_core::{bail, Context, Result};
+use rgx_core::{bail, decline, Context, Result};
 
 /// Stream magic: `Visio (TM) Drawing\r\n\0`.
 const MAGIC: &[u8; 21] = b"Visio (TM) Drawing\r\n\0";
@@ -52,10 +56,10 @@ pub fn extract_text(data: &[u8]) -> Result<String> {
     let cfb = Cfb::parse(data)?;
     let doc = cfb
         .stream("VisioDocument")
-        .context("no VisioDocument stream")?;
+        .decline_context("no VisioDocument stream")?;
     let mut texts = extract_text_stream(&doc)?;
     if texts.is_empty() {
-        bail!("no text chunks in VisioDocument stream");
+        decline!("no text chunks in VisioDocument stream");
     }
     if texts.len() > MAX_TEXT {
         texts.truncate(MAX_TEXT);
@@ -78,7 +82,7 @@ fn rd_i32le(b: &[u8], o: usize) -> i32 {
 
 fn extract_text_stream(doc: &[u8]) -> Result<String> {
     if doc.len() < 0x36 || &doc[..21] != MAGIC {
-        bail!("not a binary Visio document (bad magic)");
+        decline!("not a binary Visio document (bad magic)");
     }
     let version = doc[0x1A];
     if !(1..=6).contains(&version) && version != 11 {
@@ -119,7 +123,7 @@ fn extract_text_stream(doc: &[u8]) -> Result<String> {
         walker.walk_streams(&buf, shift, 0);
     }
     if walker.texts.is_empty() {
-        bail!("no text chunks reached from the trailer stream");
+        decline!("no text chunks reached from the trailer stream");
     }
     Ok(walker.texts)
 }

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Byte sets: the alphabet a byte-mode regex matches over.
 //!
 //! **Provenance.** Written here first, at full scope, and copied into rgx as

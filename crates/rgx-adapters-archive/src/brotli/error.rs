@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! What a `.br` can be, or cannot be, decoded into.
 
 /// A decode that stopped. Every variant names a field of RFC 7932, so the

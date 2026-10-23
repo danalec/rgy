@@ -2,8 +2,44 @@
 name = "rgx-adapters-docs"
 version = "0.1.0"
 edition = "2021"
+authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
 description = "rgx adapters that shell out to external tools (soffice, tesseract) when present on PATH"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
+readme = "README.md"
+keywords = ["markdown", "latex", "docbook", "markup"]
+categories = ["parser-implementations", "text-processing"]
+repository = "https://github.com/danalec/rgx"
+
+[features]
+# One feature per adapter, in the order `adapters()` returns them: the
+# default build carries every format, so the default binary is unchanged,
+# and a user who names the formats they need gets a binary that carries
+# only those. The crate spawns processes, so it is std-only: there is no
+# `std` feature to declare.
+default = ["soffice", "ocr"]
+# `soffice` shells out to LibreOffice and borrows the office crate's XML →
+# text pass (`xml_to_text`) to read the flat ODF that soffice writes.
+soffice = ["dep:rgx-adapters-office", "rgx-adapters-office/office"]
+# `ocr` shells out to tesseract and borrows the pdf crate's page-image
+# reader (`all_page_images`): tesseract refuses a PDF unless its build
+# supports PDF input, so a scanned PDF is opened here and its page images
+# are handed over instead. A page that carries no image of its own is
+# rasterised by poppler's `pdftoppm` when the machine has that tool, and
+# only then: it is an external binary like the others, not a dependency.
+ocr = ["dep:rgx-adapters-pdf", "rgx-adapters-pdf/pdf"]
 
 [dependencies]
-rgx-core = { path = "../rgx-core" }
+rgx-core = { path = "../rgx-core", version = "0.1.0" }
+# for `xml_to_text` only: the soffice adapter converts to flat ODF (see
+# Soffice::extract) and this is the tree's one XML → text pass. Compile-time
+# only -- `rgx-adapters-office` reaches the registry through the root's own
+# `adapters-office` feature, which this dependency does not imply.
+# Optional: only the `soffice` family needs it, and it switches off
+# with it.
+rgx-adapters-office = { path = "../rgx-adapters-office", version = "0.1.0", default-features = false, optional = true }
+# for `pages_of_a_pdf` only: the ocr adapter claims `ocr.pdf`, and tesseract
+# refuses a PDF unless its build supports PDF input, so a scanned PDF is
+# opened here and its page images handed over instead (see the fn).
+# Optional: only the `ocr` family needs it, and it switches off with
+# it.
+rgx-adapters-pdf = { path = "../rgx-adapters-pdf", version = "0.1.0", default-features = false, optional = true }

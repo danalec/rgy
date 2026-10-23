@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Ctrl-C as a cooperative stop, without a signal-handling dependency.
 //!
 //! The workspace takes no dependency on `ctrlc`/`signal-hook`: the same

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Producer-side work budget, shared by every adapter in this crate.
 //!
 //! `Ctx::max_members` caps how many entries of an `Outcome::Members` the
@@ -345,7 +347,7 @@ impl Default for MemberSink {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(feature = "decompress", feature = "sevenz", feature = "zip")))]
 pub(crate) mod testing {
     use super::{reset_budget, set_budget, Budget};
     use std::sync::Mutex;
@@ -379,71 +381,71 @@ pub(crate) mod testing {
             f()
         })
     }
+}
 
-    #[cfg(test)]
-    mod depth_scaling {
-        use super::super::{budget, budget_for_depth, reset_budget, set_budget, Budget};
+#[cfg(test)]
+mod depth_scaling {
+    use super::{budget, budget_for_depth, reset_budget, set_budget, Budget};
 
-        fn under<R>(members: usize, bytes: u64, f: impl FnOnce() -> R) -> R {
-            set_budget(Budget { members, bytes });
-            let r = f();
-            reset_budget();
-            r
-        }
+    fn under<R>(members: usize, bytes: u64, f: impl FnOnce() -> R) -> R {
+        set_budget(Budget { members, bytes });
+        let r = f();
+        reset_budget();
+        r
+    }
 
-        /// **Depth 0 must be the process budget, unchanged.**
-        ///
-        /// This is the property that makes the whole change safe to ship: a
-        /// flat archive, or a tree of ordinary documents, must not see a
-        /// different budget than it always did, or every container test and
-        /// every user's `-g`-filtered corpus pays for a fix to a problem they
-        /// do not have.
-        #[test]
-        fn the_outermost_container_gets_the_whole_budget() {
-            under(4096, 1 << 30, || {
-                let b = budget();
-                assert_eq!(budget_for_depth(0).members, b.members);
-                assert_eq!(budget_for_depth(0).bytes, b.bytes);
-            });
-        }
+    /// **Depth 0 must be the process budget, unchanged.**
+    ///
+    /// This is the property that makes the whole change safe to ship: a
+    /// flat archive, or a tree of ordinary documents, must not see a
+    /// different budget than it always did, or every container test and
+    /// every user's `-g`-filtered corpus pays for a fix to a problem they
+    /// do not have.
+    #[test]
+    fn the_outermost_container_gets_the_whole_budget() {
+        under(4096, 1 << 30, || {
+            let b = budget();
+            assert_eq!(budget_for_depth(0).members, b.members);
+            assert_eq!(budget_for_depth(0).bytes, b.bytes);
+        });
+    }
 
-        /// **A nested container gets a share, and the shares are geometric.**
-        ///
-        /// Before this, every level drew the full budget again, so the guards
-        /// were each individually satisfied by a container that nested them —
-        /// the amplification this exists to stop.
-        #[test]
-        fn a_nested_container_gets_a_share_and_the_total_stays_under_twice_the_budget() {
-            const MEMBERS: usize = 4096;
-            const BYTES: u64 = 1 << 30;
-            under(MEMBERS, BYTES, || {
-                assert_eq!(budget_for_depth(1).members, MEMBERS / 2);
-                assert_eq!(budget_for_depth(1).bytes, BYTES / 2);
-                assert_eq!(budget_for_depth(2).members, MEMBERS / 4);
+    /// **A nested container gets a share, and the shares are geometric.**
+    ///
+    /// Before this, every level drew the full budget again, so the guards
+    /// were each individually satisfied by a container that nested them —
+    /// the amplification this exists to stop.
+    #[test]
+    fn a_nested_container_gets_a_share_and_the_total_stays_under_twice_the_budget() {
+        const MEMBERS: usize = 4096;
+        const BYTES: u64 = 1 << 30;
+        under(MEMBERS, BYTES, || {
+            assert_eq!(budget_for_depth(1).members, MEMBERS / 2);
+            assert_eq!(budget_for_depth(1).bytes, BYTES / 2);
+            assert_eq!(budget_for_depth(2).members, MEMBERS / 4);
 
-                // The worst case a caller can express: a tree in which every
-                // level spends its whole share. Sum the geometric series.
-                let total: u64 = (0..=4).map(|d| budget_for_depth(d).members as u64).sum();
-                assert!(
-                    total < 2 * MEMBERS as u64,
-                    "the tree total {total} must stay under twice the budget {}",
-                    2 * MEMBERS
-                );
-            });
-        }
+            // The worst case a caller can express: a tree in which every
+            // level spends its whole share. Sum the geometric series.
+            let total: u64 = (0..=4).map(|d| budget_for_depth(d).members as u64).sum();
+            assert!(
+                total < 2 * MEMBERS as u64,
+                "the tree total {total} must stay under twice the budget {}",
+                2 * MEMBERS
+            );
+        });
+    }
 
-        /// The floor is what keeps [`super::MemberSink::with_budget`]'s
-        /// `members >= 2` assertion true at any depth, and gives an innermost
-        /// container enough room to emit the truncation note.
-        #[test]
-        fn a_very_deep_container_still_gets_a_usable_floor() {
-            under(4096, 1 << 30, || {
-                for d in [8usize, 32, 64, 1_000] {
-                    let b = budget_for_depth(d);
-                    assert!(b.members >= 2, "members floor at depth {d}: {}", b.members);
-                    assert!(b.bytes >= 1, "bytes floor at depth {d}: {}", b.bytes);
-                }
-            });
-        }
+    /// The floor is what keeps [`super::MemberSink::with_budget`]'s
+    /// `members >= 2` assertion true at any depth, and gives an innermost
+    /// container enough room to emit the truncation note.
+    #[test]
+    fn a_very_deep_container_still_gets_a_usable_floor() {
+        under(4096, 1 << 30, || {
+            for d in [8usize, 32, 64, 1_000] {
+                let b = budget_for_depth(d);
+                assert!(b.members >= 2, "members floor at depth {d}: {}", b.members);
+                assert!(b.bytes >= 1, "bytes floor at depth {d}: {}", b.bytes);
+            }
+        });
     }
 }

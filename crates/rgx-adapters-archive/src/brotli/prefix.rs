@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! RFC 7932 Section 1.5.1 bit packing, and Section 3 prefix codes.
 //!
 //! Brotli packs bits into bytes least-significant first (§1.5.1): the

@@ -10,6 +10,7 @@ members = [
     "crates/discovery-dispatch",
     "crates/engine",
     "crates/proto",
+    "crates/autostart",
     "crates/rgx-core",
     "crates/rar-codec",
     "crates/rgx-adapters-archive",
@@ -31,16 +32,16 @@ members = [
     "tests",
 ]
 
-# One workspace, thin bins, one protocol (docs/IMPLEMENTATION_PLAN.md §3).
+# One workspace, thin bins, one protocol (docs/design.md §2).
 # crates/rgx-* are transported verbatim from ../rgx; name-core and
 # discovery-windows hold the zen-rs code with the RE-audit fixes.
 #
-# The Zen components and the Tesla Valve pack store are Apache-2.0 only;
-# the rest is MIT OR Apache-2.0. See COPYING — distributing a binary that
-# links either is governed by Apache-2.0.
+# The whole workspace is Apache-2.0. See COPYING — the licence a reader
+# gets is Apache-2.0, and the files carried from other projects keep their
+# own terms, with their notices in NOTICE and LICENSE-MIT-FSEARCH.
 [workspace.package]
 edition = "2021"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
 
 [profile.release]
 # rgx's measured release shape (insights-from-rgx.md): fat LTO + one

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! mmap-vs-read sequential scan, per OS — closes the open measurement in
 //! `docs/insights-from-rgx.md`. rgx measured mmap 1.51x SLOWER than
 //! `read()` for scans on Windows (ROADMAP §3.3) and kept its mmap path

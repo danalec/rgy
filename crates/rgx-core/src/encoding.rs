@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! BOM sniffing and the UTF-16 decode the reference searcher does *before* it
 //! looks for a line terminator.
 //!
@@ -365,9 +367,24 @@ pub fn decode(bom: Bom, bytes: &[u8]) -> Vec<u8> {
     if bom == Bom::Utf8 {
         return bytes[bom.len()..].to_vec();
     }
+    decode_utf16(bom == Bom::Utf16Be, &bytes[bom.len()..])
+}
+
+/// Decode UTF-16 bytes into UTF-8, with no byte-order-mark handling at all.
+///
+/// **Why this is separate from [`decode`].** A mark is not a character, and
+/// whether the bytes start with one depends on what the bytes are: a file
+/// opens with a mark and the mark is a preamble to strip, while a charset
+/// *declaration* of `utf-16` is a statement about the byte order and the
+/// mark may or may not be there. A decoder that always stripped two bytes
+/// would eat the first character of a mark-less stream.
+///
+/// `be` says which order the units are in; the caller has decided that, and
+/// this only carries it out.
+pub fn decode_utf16(be: bool, bytes: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(bytes.len());
-    let mut d = Utf16::new(bom == Bom::Utf16Le);
-    d.push(&bytes[bom.len()..], &mut out);
+    let mut d = Utf16::new(!be);
+    d.push(bytes, &mut out);
     d.finish(&mut out);
     out
 }
@@ -380,11 +397,7 @@ pub fn force_decode(bom: Bom, bytes: &[u8]) -> Vec<u8> {
     if bom == Bom::Utf8 {
         return bytes.to_vec();
     }
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut d = Utf16::new(bom == Bom::Utf16Le);
-    d.push(bytes, &mut out);
-    d.finish(&mut out);
-    out
+    decode_utf16(bom == Bom::Utf16Be, bytes)
 }
 
 /// Is the whole of this file binary, by the rule a directory walk applies?

@@ -2,8 +2,16 @@
 name = "rar-codec"
 version = "0.1.0"
 edition = "2021"
+authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
 description = "Pure-Rust, no_std RAR codec: RAR4/RAR5 parsing, LZ+Huffman and PPMd decode (solid, multivolume, VM filters), RAR5 store encode. Zero dependencies."
-license = "MIT OR Apache-2.0"
+# Every file in this crate is Apache-2.0 and carries the SPDX header saying
+# so, the crate root included. See the repository's COPYING, and its NOTICE
+# for the libarchive lineage the crate was born from.
+license = "Apache-2.0"
+readme = "README.md"
+keywords = ["rar", "codec", "archive", "compression"]
+categories = ["encoding", "compression"]
+repository = "https://github.com/danalec/rgx"
 
 [features]
 default = []

@@ -792,7 +792,7 @@ fn mtf_literal(sym: u16, mtf: &mut [u8], buf: &mut Vec<u8>) -> CompressResult<()
     buf.push(b);
     Ok(())
 }
-#[cfg(test)]
+#[cfg(all(test, feature = "bzip2"))]
 mod tests {
     use super::*;
     #[cfg(feature = "std")]
@@ -1035,7 +1035,7 @@ mod tests {
 /// A stream is untrusted input: bad magic, a randomized block, a
 /// selector run past the tree count, a run length that will not fit the
 /// block — every one must answer with an error, never a panic.
-#[cfg(test)]
+#[cfg(all(test, feature = "bzip2"))]
 mod fuzz {
     use super::*;
 

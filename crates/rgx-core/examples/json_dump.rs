@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Differential JSON dump for rgx, byte-identical to the canonical
 //! line. A run exposes the parser by reading a JSON file from
 //! argv[1] and writing one canonical line to stdout.

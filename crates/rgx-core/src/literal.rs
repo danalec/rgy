@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Literal extraction: the cheapest way to decide whether a pattern can
 //! match before paying for the automaton that decides where it matches.
 //!

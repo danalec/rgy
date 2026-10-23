@@ -1,11 +1,14 @@
-//! FLV metadata, hand-rolled — reduced port of upstream `b01::io::binary::flv`:
-//! the file header, the `onMetaData` script tag (AMF0) and the first
-//! audio/video tag codec bytes. Media payloads are never decoded.
+// SPDX-License-Identifier: Apache-2.0
+
+//! FLV metadata, hand-rolled — a reduced port of the FLV reader of the `io`
+//! project by Dan Gohman, whose work is used here under Apache-2.0: the file
+//! header, the `onMetaData` script tag (AMF0) and the first audio/video tag
+//! codec bytes. Media payloads are never decoded. See `NOTICE`.
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt::Write as _;
-use rgx_core::{bail, Result};
+use rgx_core::{bail, decline, Result};
 use rgx_core::{Adapter, Outcome};
 
 pub struct FlvInfo;
@@ -42,10 +45,10 @@ fn rd_f64be(b: &[u8], o: usize) -> f64 {
 
 fn flv_text(data: &[u8]) -> Result<String> {
     if data.len() < 9 {
-        bail!("fewer bytes than an FLV header");
+        decline!("fewer bytes than an FLV header");
     }
     if &data[0..3] != b"FLV" {
-        bail!("not an FLV file (bad signature)");
+        decline!("not an FLV file (bad signature)");
     }
     let data_offset = rd_u32be(data, 5) as usize;
     if data_offset < 9 || data_offset > data.len() {

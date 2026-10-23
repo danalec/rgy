@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Orchestration: index lifecycle, sync, pools, keep-warm.
 //!
 //! The keep-warm spinner (plan §4.4, from fsearch `engine.rs`): a parked
@@ -64,3 +66,10 @@ pub fn warm_stop() {
 
 /// TV pack store glue (the daemon corpus store).
 pub mod tv;
+
+/// Console output encoding: the Windows code page (parity row 4.7).
+///
+/// One place for the three binaries to put the console into UTF-8, and
+/// for the streams to fall back to `WriteConsoleW` when the console
+/// refuses. See the module docs for what it does and does not change.
+pub mod console;

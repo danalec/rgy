@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Independent reimplementation of memmap2-rs Windows side.
 //!
 //! FFI signatures are inlined in `extern "system"` blocks; no windows-sys

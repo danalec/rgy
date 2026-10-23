@@ -2,11 +2,16 @@
 name = "rgx-core"
 version = "0.1.0"
 edition = "2021"
+authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
 description = "Core adapter trait and extraction pipeline for rgx"
-# The `tv/`, `tv_runtime/` and `src/bin/rgx-tv.rs` portion is Apache-2.0 only
-# (per-file SPDX headers); everything else in this crate is MIT OR Apache-2.0.
-# See the repository's COPYING.
-license = "MIT OR Apache-2.0"
+# Every file in this crate is Apache-2.0 and carries the SPDX header saying
+# so — the pack store, the compression codecs and the JSON layer alike. See
+# the repository's COPYING.
+license = "Apache-2.0"
+readme = "README.md"
+keywords = ["search", "regex", "engine", "ripgrep"]
+categories = ["text-processing", "command-line-utilities"]
+repository = "https://github.com/danalec/rgx"
 
 [features]
 # rgx-core is `#![no_std]` + `alloc`; this feature decides what else it may
@@ -20,23 +25,52 @@ license = "MIT OR Apache-2.0"
 # typed `dyn Error` chain; the profiler's global map goes and its flag, a
 # core atomic, stays; and the JSON float parser becomes this crate's own,
 # since `f64::from_str` is std-only.
-default = ["std"]
+default = ["std", "sha256-hw", "gzip", "zlib", "deflate", "bzip2", "lzma", "xz", "zstd", "snappy", "lz4", "blosc", "zip"]
 std = ["dep:libc"]
 # The Tesla Valve pack store's codec, query vocabulary and planner. The
 # algorithmic half of `crates/rgx-tv`, held here so it can be `no_std` and so
 # `rgx` can take it without taking the thread pool with it. `rgx-tv` turns
 # this on; nothing else does, because a binary that does not read a pack
 # store should not link its format tables.
+# The in-house codecs, one feature each. `default` keeps every one of them,
+# so a plain dependency on this crate is unchanged and the crate's own test
+# count does not move; the point of the feature is that the CONSUMER names
+# the codec it needs, so a binary that carries the zip reader does not carry
+# the zstd decoder. The adapter crate that reads the format is what names
+# it -- the user names formats, not codecs.
+#
+# The codec that only exists to serve another codec is not a name of its
+# own: `gzip` needs `deflate`, and `deflate` needs `huffman` and `lz77`.
+gzip = ["deflate"]
+zlib = ["deflate"]
+deflate = ["huffman", "lz77"]
+bzip2 = ["huffman", "bwt"]
+lzma = []
+xz = ["lzma"]
+zstd = []
+snappy = []
+lz4 = []
+# The blosc frame reader, and the codecs the frame's own enumeration names:
+# blosclz (the library's own, decoded here), lz4, snappy, zlib and zstd. A
+# binary that reads no blosc frame carries no blosc codec either.
+blosc = ["lz4", "snappy", "zlib", "zstd"]
+# The ZIP reader, and the five compression methods the format
+# defines: deflate, bzip2, lzma, xz and zstd. A binary that reads no
+# zip archive carries no zip codec either.
+zip = ["deflate", "bzip2", "lzma", "xz", "zstd"]
+# The three codecs that only another codec uses. They are features so the
+# gating can be written the same way everywhere, but nothing names them
+# directly.
+huffman = []
+lz77 = []
+bwt = []
+
 tv = []
 # The std-bound half of `crates/rgx-tv`: filesystem wrappers for the
 # format tables, the inspector, the builder, the searcher and the store.
-# NOT in `default` -- that is `["std"]` alone. It reaches a workspace build
-# anyway because `engine` asks for it explicitly and Cargo unifies features
-# across everything compiled in one invocation, so every crate linked
-# alongside `engine` sees `tv-runtime` on. A crate depending on rgx-core by
-# itself, outside that build, does not get it: that is deliberate, matching
-# the `tv` note above -- do not link pack-store format tables into a binary
-# that never reads a pack store. Turn it off explicitly with
+# NOT in `default` -- that is `["std"]` alone. `rgx-tv` turns it on; nothing
+# else does, because a binary that does not read a pack store should not
+# link its format tables. Turn it off explicitly with
 # `--no-default-features --features std` for the no_std engine alone
 # (AVX2/SWAR + regex core, no pack store).
 tv-runtime = ["tv", "std", "dep:ignore"]

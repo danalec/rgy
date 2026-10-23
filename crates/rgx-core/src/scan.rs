@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The SIMD scan over a [`NibbleMask`].
 //!
 //! **Provenance.** Written here first, at full scope, and copied into rgx
@@ -547,7 +549,7 @@ pub struct BitMap {
 /// a buffer that never shrank** (`LineBuffer` held one long line for every
 /// later fill, so 125 of 129 fills were oversized and a raise built maps on
 /// fills that had previously declined cheaply). The drop fix emptied the
-/// buffer between fills, and re-measuring on `main` at `6eaf3fb` over 20 MiB
+/// buffer between fills, and re-measuring on `main` over 20 MiB
 /// corpora turns the result around:
 ///
 /// ```text

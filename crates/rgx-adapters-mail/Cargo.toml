@@ -2,16 +2,37 @@
 name = "rgx-adapters-mail"
 version = "0.1.0"
 edition = "2021"
+authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
 description = "rgx adapters for e-mail archives (mbox, eml) with MIME attachment recursion"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
+readme = "README.md"
+keywords = ["email", "mbox", "eml", "pst"]
+categories = ["parser-implementations", "encoding"]
+repository = "https://github.com/danalec/rgx"
 
 [features]
-# The empty `std::error::Error` impl on PstErr is gated here. The
-# adapter itself never needs it; the gate exists so the crate stays
-# buildable with `--no-default-features` (no_std + alloc) and the `std`
-# feature re-enables Error when the consumer wants it.
-default = []
+# One feature per adapter, in the order `adapters()` returns them. The
+# default is the whole crate, so the default build keeps every format; a
+# binary that names only the formats it wants builds with
+# `--no-default-features --features <name>`.
+#
+# `std` is the crate's own feature: the crate is `#![no_std]` + `alloc`, and
+# the only thing `std` buys is the `std::error::Error` impl on `PstErr`.
+# Every family but `pst` is pure byte slicing and needs no `std` at all.
+default = ["std", "mbox", "eml", "msg", "emlx", "pst", "wab", "mmdf", "thunderbird", "apple-mailbox"]
 std = []
+mbox = []
+eml = []
+msg = []
+# An `.emlx` is an RFC-822 message plus a binary-plist trailer: the adapter
+# strips the trailer and hands the message to the `eml` adapter, so the
+# family cannot exist without it.
+emlx = ["eml"]
+pst = ["std"]
+wab = []
+mmdf = []
+thunderbird = []
+apple-mailbox = []
 
 [dependencies]
-rgx-core = { path = "../rgx-core" }
+rgx-core = { path = "../rgx-core", version = "0.1.0" }

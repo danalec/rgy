@@ -852,7 +852,7 @@ impl Default for LzmaDecoder {
         Self::new()
     }
 }
-#[cfg(test)]
+#[cfg(all(test, feature = "lzma"))]
 mod tests {
     use super::*;
 
@@ -1084,7 +1084,7 @@ mod tests {
 /// probabilities steer every branch: truncated input, a bad properties
 /// byte, a distance past the dictionary, a chunk that over-declares its
 /// size. None may panic.
-#[cfg(test)]
+#[cfg(all(test, feature = "lzma"))]
 mod fuzz {
     use super::*;
 

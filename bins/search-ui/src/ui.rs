@@ -17,7 +17,7 @@ use crossterm::style::{Print, ResetColor, SetBackgroundColor, Stylize};
 use crossterm::terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen};
 use name_core::live::Live;
 use name_core::name_query::{Alternatives, Hit, Searcher};
-use std::io::{Stdout, Write};
+use std::io::Write;
 use std::time::Instant;
 
 /// Ink colours sampled off the reference recording (`watch.mp4`) so the UI
@@ -143,7 +143,7 @@ const MIN_HEIGHT: usize = 8;
 struct TerminalGuard;
 
 impl TerminalGuard {
-    fn enter(out: &mut Stdout) -> Result<Self, String> {
+    fn enter(out: &mut impl Write) -> Result<Self, String> {
         terminal::enable_raw_mode().map_err(|e| format!("cannot enter raw mode: {e}"))?;
         // Paint the whole alternate screen with the reference palette's
         // background so the ink colours read the way they do in the video,
@@ -162,7 +162,7 @@ impl TerminalGuard {
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        let mut out = std::io::stdout();
+        let mut out = engine::console::stdout();
         let _ = execute!(out, ResetColor, Show, LeaveAlternateScreen);
         let _ = terminal::disable_raw_mode();
     }
@@ -392,7 +392,7 @@ impl App {
 
         let mut rows: Vec<String> = Vec::with_capacity(height);
 
-        // FSearch layout: brand in bold white, two spaces, then a dim
+        // The layout: brand in bold white, two spaces, then a dim
         // subtitle that carries the volume and the entry count.
         let subtitle = format!(
             "{} · {} files and folders",
@@ -420,7 +420,7 @@ impl App {
         let first = self.top.min(self.results.len());
         let last = (first + list_height).min(self.results.len());
 
-        // FSearch flows the name flush left, the parent path dimmed after a
+        // The name flows flush left, the parent path dimmed after a
         // two-space gap, with no column rule between them. Every row of the
         // list is present even when empty: a shrinking list would otherwise
         // leave the previous frame's entries on screen below the last match.
@@ -513,7 +513,7 @@ impl App {
         line
     }
 
-    /// FSearch lays each row as: white name, two spaces, dim parent.
+    /// Each row is laid out as: white name, two spaces, dim parent.
     /// No column rule; the gap carries the layout, and a `fit`/`elide` pair
     /// keeps the row on one line. The name is regular weight — only the
     /// brand and the query are bold in the recording.
@@ -711,7 +711,12 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Action {
 /// Run the interactive search. Enter prints the selected path to stdout after
 /// the screen is restored, so the result can be piped onward.
 pub fn run(live: Live, root: String, indexed: usize) -> Result<(), String> {
-    let mut out = std::io::stdout();
+    // The console decides how the UTF-8 bytes are decoded, so it is put
+    // into UTF-8 before the first frame is painted (parity row 4.7): a
+    // name with an accent has to reach the screen as itself.
+    engine::console::init();
+
+    let mut out = engine::console::stdout();
     let _guard = TerminalGuard::enter(&mut out)?;
 
     let mut app = App::new(live, root, indexed);
@@ -778,7 +783,7 @@ pub fn run(live: Live, root: String, indexed: usize) -> Result<(), String> {
 
     drop(_guard);
     if let Some(path) = chosen {
-        println!("{path}");
+        engine::outln!("{path}");
     }
     Ok(())
 }
@@ -1334,8 +1339,8 @@ mod tests {
             "~\\Documents"
         );
         assert_eq!(
-            shorten_home_within("C:\\Users\\dana\\Developer\\Tools\\FSearch", home),
-            "~\\Developer\\Tools\\FSearch"
+            shorten_home_within("C:\\Users\\dana\\Developer\\Tools\\Search", home),
+            "~\\Developer\\Tools\\Search"
         );
     }
 

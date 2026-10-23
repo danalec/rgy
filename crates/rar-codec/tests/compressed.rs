@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! End-to-end tests for the RAR5 LZ77+Huffman decompressor.
 //!
 //! There is no reference encoder available in this repo, so these tests use

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Regression tests for two out-of-bounds panics in the media adapter, both
 //! reachable from a tiny crafted file, both aborting the process rather than
 //! degrading to a `Bail`.
@@ -16,10 +18,12 @@
 //! reproducible input and the whole point is that the exact bytes matter.
 
 use super::*;
+#[cfg(feature = "font")]
 use alloc::vec::Vec;
 
 /// 12 bytes: `ttcf`, a version, and `numFonts = 1` with no offset table at all.
 /// The old loop read `data[12..16]` immediately.
+#[cfg(feature = "font")]
 #[test]
 fn a_ttcf_with_no_offset_table_does_not_panic() {
     let mut f = Vec::new();
@@ -33,6 +37,7 @@ fn a_ttcf_with_no_offset_table_does_not_panic() {
 }
 
 /// The same, one font entry long but pointing past the end.
+#[cfg(feature = "font")]
 #[test]
 fn a_ttcf_whose_offset_table_is_truncated_does_not_panic() {
     let mut f = Vec::new();
@@ -49,6 +54,7 @@ fn a_ttcf_whose_offset_table_is_truncated_does_not_panic() {
 /// ~94 bytes: a PalmDOC header whose `numRecords`, `rec0` and `rec1` all pass
 /// their guards, whose record 0 starts with `MOBI`, and whose declared MOBI
 /// header length is **0** so the declared-length guard is satisfied.
+#[cfg(feature = "mobi")]
 #[test]
 fn a_mobi_record_with_a_zero_declared_header_length_does_not_panic() {
     let mut d = vec![0u8; 94];

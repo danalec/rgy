@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! What one confirm costs, and WHICH confirm, on the candidate stream a real
 //! search actually builds.
 //!
