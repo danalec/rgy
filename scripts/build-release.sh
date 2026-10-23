@@ -97,7 +97,18 @@ esac
 
 echo "rgy release build: $version ($platform)"
 
-# --- 3. the gate ------------------------------------------------------------
+# --- 3. the build -----------------------------------------------------------
+# The build comes before the tests, not after them. The e2e harness resolves
+# the bins by path (target/release) and refuses to run against a binary
+# older than its own sources -- which is the guard working, not a bug.
+# `cargo test` builds the bins into deps/ but does not uplift them to
+# target/release, so a test before a build would either exercise the
+# previous release's binary or stop the release for a reason that looks
+# like a test failure.
+echo "build: cargo build --release --locked --workspace"
+cargo build --release --locked --workspace || { echo "the build failed" >&2; exit 1; }
+
+# --- 4. the gate ------------------------------------------------------------
 if [ "$skip_tests" -eq 0 ]; then
     echo "gate: clippy, then the test suite"
     cargo clippy --release --locked --workspace --all-targets -- -D warnings || {
@@ -108,10 +119,6 @@ if [ "$skip_tests" -eq 0 ]; then
 else
     echo "gate: skipped (--skip-tests)"
 fi
-
-# --- 4. the build -----------------------------------------------------------
-echo "build: cargo build --release --locked --workspace"
-cargo build --release --locked --workspace || { echo "the build failed" >&2; exit 1; }
 
 exe_dir="$repo/target/release"
 

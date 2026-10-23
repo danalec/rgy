@@ -96,7 +96,19 @@ else { $platform = $hostTriple }
 
 Write-Host "rgy release build: $Version ($platform)"
 
-# --- 3. the gate ------------------------------------------------------------
+# --- 3. the build -----------------------------------------------------------
+# The build comes before the tests, not after them. The e2e harness resolves
+# the bins by path (target/release) and refuses to run against a binary
+# older than its own sources -- which is the guard working, not a bug.
+# `cargo test` builds the bins into deps/ but does not uplift them to
+# target/release, so a test before a build would either exercise the
+# previous release's binary or stop the release for a reason that looks
+# like a test failure.
+Write-Host "build: cargo build --release --locked --workspace"
+cargo build --release --locked --workspace
+if ($LASTEXITCODE -ne 0) { [Console]::Error.WriteLine("the build failed"); exit 1 }
+
+# --- 4. the gate ------------------------------------------------------------
 if (-not $SkipTests) {
     Write-Host "gate: clippy, then the test suite"
     cargo clippy --release --locked --workspace --all-targets -- -D warnings
@@ -109,11 +121,6 @@ if (-not $SkipTests) {
 } else {
     Write-Host "gate: skipped (--skip-tests)"
 }
-
-# --- 4. the build -----------------------------------------------------------
-Write-Host "build: cargo build --release --locked --workspace"
-cargo build --release --locked --workspace
-if ($LASTEXITCODE -ne 0) { [Console]::Error.WriteLine("the build failed"); exit 1 }
 
 $exeDir = Join-Path $root "target\release"
 
