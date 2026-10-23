@@ -37,7 +37,12 @@
 *.md text eol=lf
 *.sh text eol=lf
 *.tsv text eol=lf
+*.csv text eol=lf
 *.ps1 text eol=lf
+# These two name the rules above, so they are read under the same ones:
+# a checkout that rewrote them would rewrite the rules themselves.
+.gitattributes text eol=lf
+Cargo.lock text eol=lf
 # The workflow files carry shell inside YAML: a `run: |` block is a shell
 # script, and a CRLF one has a carriage return at the end of every command.
 # On a unix runner that is "command not found" for the first line.

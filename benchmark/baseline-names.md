@@ -1,10 +1,134 @@
 # Baseline: name search + walk (Phase 0 perf gate)
 
-Machine: Windows x64, `cargo run --release -p engine --example name_bench`
-(default corpus: 200,000 names / 1,000 dirs, 30 timed rounds after 3
-warmup rounds, counts proven equal before timing).
+## How this table is measured
 
-## At the scale the plan targets: 5M
+Host: AMD Ryzen 9 7950X3D (16 cores / 32 logical), Windows 11 Pro N
+10.0.26300. Measured on 2026-10-23.
+
+    python scripts/bench-names.py measure --runs 7 --threads 4 \
+        --names 200000 --names 5000000 --gate 200000 \
+        --out benchmark/baseline-names.csv
+
+The bench under it is `cargo run --release -p engine --example name_bench`:
+a fixed synthetic corpus, 30 timed rounds after 3 warmup rounds, and the
+match count proven equal before the timing starts (a fast wrong answer is a
+failure). What the script adds is the part a single run cannot give:
+
+- **A fixed worker width.** The search is a parallel scan, so the width of
+  the pool is part of what is measured. It is pinned to 4 threads
+  (`RAYON_NUM_THREADS`) and recorded in the baseline; a comparison against a
+  baseline taken at another width is refused, not reported.
+- **K independent runs, and the best of them.** Seven runs of the bench,
+  each with its own min-of-30. The statistic the gate compares is the
+  **best** of the seven: noise only ever makes a run slower, so the best run
+  is the one closest to the code's real cost.
+- **The spread, beside the number.** The spread is the dispersion of the
+  per-run minima, relative to the best of them. It is the width of the noise
+  floor the gate has to be read against, and it is in the table for that
+  reason.
+
+**A row whose spread is wider than the 20% threshold cannot decide the
+gate.** Noise and a regression look the same from here, so the script says
+`UNDECIDABLE` and exits 2 rather than calling either. That is the state the
+previous table was in the whole time, silently.
+
+Why 4 threads and not the machine's 32: on this host, with the other work
+that runs on it, the `mod` row measured over five runs of the same code at
+200k names:
+
+    4 threads    102.1 108.6 108.5 107.2 106.1 us    spread  6.4%
+    8 threads     81.2  70.1  74.0  71.3  76.9 us    spread 15.8%
+   16 threads     60.5  56.6  83.1  83.4  77.5 us    spread 47.3%
+   32 threads     62.8 117.6 105.3 117.3  68.1 us    spread 87.3%
+
+The wide pool is faster and unmeasurable: at 32 workers the spread is 87.3%,
+more than four times the threshold the gate applies, so no comparison
+against it decides anything. At 4 workers the same code spreads 6.4% -- under
+the threshold -- and a thread-matched measurement is the only kind two hosts,
+or two machines, can be compared on at all.
+
+The cost of that choice is in the numbers: the gate's rows are the 4-thread
+ones, which are slower than what the product pays on an idle 32-thread box.
+The gate is a regression detector, not a latency claim.
+
+## The gate's tables
+
+<!-- BEGIN: bench-names-table -->
+
+Corpus: 200,000 names, 4 threads, best of 7 runs.
+
+| query | hits | min µs | med µs | p90 µs | spread | plan |
+|---|---|---|---|---|---|---|
+| `'report_00000.pdf` | 1 | 0 | 0 | 1 | — | selective |
+| `^src` | 57,000 | 101 | 120 | 136 | 7% | full |
+| `dat$` | 114,000 | 174 | 195 | 212 | 4% | full |
+| `f1` | 80,547 | 148 | 159 | 180 | 5% | full |
+| `file` | 114,000 | 175 | 196 | 206 | 4% | full |
+| `mod` | 57,000 | 101 | 122 | 136 | 8% | full |
+| `rep` | 29,000 | 66 | 84 | 98 | 8% | full |
+| `report` | 29,000 | 68 | 85 | 100 | 3% | full |
+
+Corpus: 5,000,000 names, 4 threads, best of 7 runs.
+
+| query | hits | min µs | med µs | p90 µs | spread | plan |
+|---|---|---|---|---|---|---|
+| `'report_00000.pdf` | 1 | 1 | 1 | 1 | — | selective |
+| `^src` | 1,428,000 | 2562 | 4199 | 4605 | 39% | full |
+| `dat$` | 2,856,000 | 5619 | 7593 | 7965 | 17% | full |
+| `f1` | 1,639,704 | 3065 | 5016 | 5129 | 28% | full |
+| `file` | 2,856,000 | 4224 | 4560 | 4719 | 8% | full |
+| `mod` | 1,428,000 | 3254 | 4387 | 4619 | 12% | full |
+| `rep` | 716,000 | 1719 | 2787 | 2912 | 52% | full |
+| `report` | 716,000 | 1568 | 1649 | 1820 | 5% | full |
+
+<!-- END: bench-names-table -->
+
+**The gate rules on the 200k rows. The 5M rows are measured and reported,
+not gated.** The 5M measurement does not reproduce on this host: the spread
+across the seven runs of the same code reaches 52% on `rep` and 39% on
+`^src`, and two sessions of identical code disagree by 28% on `mod` — wider
+than the 20% the gate applies. A gate that fires on noise is worse than no
+gate, so the 5M rows are recorded, printed and compared, and the script says
+`REPORTED` instead of failing. The 200k rows, at a 3–8% spread, are the ones
+that can carry a verdict, and they have held across four sessions of the
+same code.
+
+Notes:
+- `hits` is the true match count at an unbounded limit; the timed work is
+  the scan+rank at `limit: 50`. The `plan` column is what `--explain`
+  reports (`QueryPlan`), which is what ties a row to an implementation.
+- `min µs` is the best of the seven runs. `med µs` and `p90 µs` are the
+  medians across the seven runs of the bench's own median and p90. `spread`
+  is the dispersion of the per-run minima.
+- A spread of "—" is a row below 10 µs, where the percentage is the timer's
+  resolution talking rather than the code's cost. The gate does not rule on
+  rows that small.
+- The corpus is synthetic (`name_bench.rs`); regenerate this table when the
+  corpus definition changes, and keep the machine class in mind when
+  comparing.
+- The table is generated from `benchmark/baseline-names.csv`, the way
+  `docs/parity.md` is generated from `docs/parity.toml` (AGENTS.md §4). The
+  CSV is the source of truth; `bench-names.py render --check` fails when the
+  two have drifted.
+
+**Gate:** a PR that regresses any row by more than 20% fails (plan §2).
+
+    python scripts/bench-names.py check --baseline benchmark/baseline-names.csv --runs 7
+
+Exit codes: 0 pass, 1 regression, 2 undecidable (the noise floor is wider
+than the threshold), 3 not comparable (a different worker width, or a row
+that is not measured at all).
+
+## The wide pool, as it was measured before
+
+The rows below are the previous table, kept because the write-up below
+quotes them. They were measured with the machine's own worker pool — 32
+threads on this host — and they do not reproduce: three runs of the same
+code moved the `mod` row's min between 65 µs and 116 µs, and the commit
+that wrote them did not reproduce them either. They are a record of a
+measurement, not a baseline.
+
+### At the scale the plan targets: 5M
 
 `name_bench 5000000`, same machine and discipline. This is the row the plan
 calls "name search, median @ 5M = 0.5 ms", and it is the one number the 200k
@@ -37,11 +161,7 @@ to score (a bound that pays, which `ranked` was meant to be and measured
 against), or an index layout that removes the indirection. Both are changes,
 not tunings.
 
-
-**Gate:** a PR that regresses any row by more than 20% fails (plan §2).
-These numbers are the *current* baseline - the plan's targets (name search
-median = 0.5 ms @ 5M) are fsearch-grade end-state goals, not this table's
-ceiling.
+### The 200k rows, as they were measured before
 
 | query | hits | min µs | med µs | p90 µs | plan |
 |---|---|---|---|---|---|
@@ -57,13 +177,11 @@ ceiling.
 Corpus build: 200k names in ~35 ms. Walk: 201,000 entries in 0.049 s
 (~4.1M entries/s, hot cache -- the tree is created and walked back to back).
 
-Notes:
-- `hits` is the true match count at an unbounded limit; the timed work is the
-  scan+rank at `limit: 50`. The `plan` column is what `--explain` reports
-  (`QueryPlan`), which is what ties a row to an implementation.
-- The corpus is synthetic (`name_bench.rs`); regenerate this table when the
-  corpus definition changes, and keep the machine class in mind when
-  comparing.
+The `min` column reproduces and the `med` column does not: on the same code,
+`mod` measured a min of 63 µs against the 60 recorded, and a median of 130 µs
+against the 68 recorded. The median of a noisy run is the number that moves;
+the minimum is the one that survives. That is the whole reason the gate
+compares minima and why it takes several runs to get one.
 
 ## What moved, and why
 
