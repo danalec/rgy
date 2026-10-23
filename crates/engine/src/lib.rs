@@ -73,3 +73,11 @@ pub mod tv;
 /// for the streams to fall back to `WriteConsoleW` when the console
 /// refuses. See the module docs for what it does and does not change.
 pub mod console;
+
+/// Which view of an adapter-claimed file a search reads.
+///
+/// rgy answers to `RGY_ADAPTER_VIEW` and falls back to rgx's own
+/// `RGX_ADAPTER_VIEW`, so a shell configured for rgx is configured for
+/// rgy too, and a shell that wants them to differ has a name of its own.
+/// See the module docs for why the namespace is rgy's to begin with.
+pub mod adapter_view;

@@ -89,6 +89,11 @@ fn main() {
     // UTF-8, not a console's idea of it.
     engine::console::init();
 
+    // Which view of an adapter-claimed file a search reads. rgy answers to
+    // RGY_ADAPTER_VIEW and falls back to rgx's RGX_ADAPTER_VIEW, so a shell
+    // configured for rgx is configured for rgy too.
+    engine::adapter_view::apply();
+
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut root = String::from(".");
     let mut limit = 50usize;

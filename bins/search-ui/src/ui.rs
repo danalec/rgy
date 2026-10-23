@@ -716,6 +716,11 @@ pub fn run(live: Live, root: String, indexed: usize) -> Result<(), String> {
     // name with an accent has to reach the screen as itself.
     engine::console::init();
 
+    // Which view of an adapter-claimed file a search reads. rgy answers to
+    // RGY_ADAPTER_VIEW and falls back to rgx's RGX_ADAPTER_VIEW, so a shell
+    // configured for rgx is configured for rgy too.
+    engine::adapter_view::apply();
+
     let mut out = engine::console::stdout();
     let _guard = TerminalGuard::enter(&mut out)?;
 
