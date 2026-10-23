@@ -72,8 +72,8 @@ the result is one project and not three.
 
 ### 2.2 Discovery: three backends behind one seam
 
-`discovery::Source` (full enumeration as DFS directory blocks) and
-`discovery::Watch` (change batches, or `Rescan` when the feed loses
+`rgy_discovery::Source` (full enumeration as DFS directory blocks) and
+`rgy_discovery::Watch` (change batches, or `Rescan` when the feed loses
 history) are the seam; the platform crates are behind it.
 
 - **Windows**: zen-rs's MFT streaming + USN, with its trap suite
@@ -135,7 +135,7 @@ content worker that builds the trigrams, not a regex pass at query time.
   byte-regex crate stays only where the Unicode mode is needed for
   `regex:` content queries; the path `re:` uses rgx-core.
 - **One protocol:** the JSON-lines op model (`{"q", "limit"}`,
-  `{"op":"grep"|"status"|"…"}`) is `proto`, spoken over a named pipe
+  `{"op":"grep"|"status"|"…"}`) is `rgy-proto`, spoken over a named pipe
   (Windows), a UDS (Unix) and stdio. rgx's `--serve` (an argv-array per
   line) stays as a **compatibility front** that translates to the same
   engine calls, so rg harnesses keep working; rgx's `--json` output stays
@@ -144,9 +144,9 @@ content worker that builds the trigrams, not a regex pass at query time.
   line. RFC 8259 §7 says the quotation mark, the reverse solidus and
   every C0 control (U+0000–U+001F) MUST be escaped, and a C0 control
   left raw is a line break inside the frame — a grep line out of a TSV
-  file is enough to break it. `proto::escape_json_string` is the one
-  escaper in this repository's crates: `proto`, `searchd` and `searchctl`
-  all call it, and the reader in `proto` knows every escape the RFC
+  file is enough to break it. `rgy_proto::escape_json_string` is the one
+  escaper in this repository's crates: `rgy-proto`, `searchd` and `searchctl`
+  all call it, and the reader in `rgy-proto` knows every escape the RFC
   defines and refuses the ones it does not. `crates/rgx-core` has its own
   (`djson::escape_json_string`), which is upstream's; a test in `searchd`
   holds the two to the same bytes.
@@ -163,8 +163,8 @@ content worker that builds the trigrams, not a regex pass at query time.
 - `searchctl` (names): fsearch's one-shot ergonomics + zen-rs's filters
   + rg-compatible exit codes where they do not conflict; `--json` from
   rgx.
-- `search-ui`: zen-rs's terminal UI (the sparkline stays), the name path
-  **wired** to `name_core::name_query::Searcher` (fzf-v1 + typos + top-k
+- `rgy-search-ui`: zen-rs's terminal UI (the sparkline stays), the name path
+  **wired** to `rgy_name_core::name_query::Searcher` (fzf-v1 + typos + top-k
   + NameCache) + content grep. The latency meter reports `first` (the
   cold sample, kept out of the rolling window) and p50/p90 by
   nearest-rank.
@@ -208,7 +208,7 @@ Decided 2026-10-13, and they still bind.
 |---|---|---|---|
 | 1 | FreeBSD version floor | **Always the newest stable** — 15.1-RELEASE as of 2026-10 | `O_SEARCH` (13+) and the current `dirent` layouts are available; the CI/VM image pins the newest release and re-pins on each one |
 | 2 | Does `zen-rs` run on FreeBSD? | **Deferred** — out of this port's "done" until tested | `zen-rs` is Windows-only by construction (MFT + USN); a `zen-rs` over the portable walk is a separate project |
-| 3 | Is the native backend seam worth wiring? | **Yes — parity with the other OSes** | `source_for(root, threads)` selects windows/linux/macos/freebsd/portable by `cfg`; `discovery-freebsd` (getdirentries + `d_type`) is in scope |
+| 3 | Is the native backend seam worth wiring? | **Yes — parity with the other OSes** | `source_for(root, threads)` selects windows/linux/macos/freebsd/portable by `cfg`; `rgy-discovery-freebsd` (getdirentries + `d_type`) is in scope |
 | 4 | v1 acceptance bar | **The same bar as the other OSes** — the suite green on a real kernel | "It compiles" is not v1 |
 | 5 | Where verification runs, and what performance means | **Correctness in a VM, performance on bare metal** | the suite may run in a VM (`vmactions/freebsd-vm`, a Gitea runner, or a local one); the latency/RSS bars in §1 are the FreeBSD bar, and a VM timing is not evidence for them |
 
@@ -218,9 +218,9 @@ Recorded so it is not re-investigated:
 
 - `searchd`'s `#[cfg(unix)] serve_uds` — Unix domain sockets work.
   `serve_pipe` is Windows-only and says so instead of misbehaving.
-- `discovery::interrupt` — the `#[cfg(unix)]` arm is `signal(2)`, which
+- `rgy_discovery::interrupt` — the `#[cfg(unix)]` arm is `signal(2)`, which
   FreeBSD has.
-- `discovery::walk` — portable by construction; `scan_sequential` is the
+- `rgy_discovery::walk` — portable by construction; `scan_sequential` is the
   oracle and is platform-independent.
 - `Blob`'s fallback path is exercised and correct, so the mmap backend
   is an optimisation, not a rescue.
@@ -239,7 +239,7 @@ Recorded so it is not re-investigated:
 - **Merge-specific:** the query-semantic diff table (old zen-rs query →
   new unified query → the same result sets on a fixture volume image),
   the name-cache extension property tests, and the protocol golden files
-  (`proto` request → reply) for the daemon, stdio and `--serve`.
+  (`rgy-proto` request → reply) for the daemon, stdio and `--serve`.
 - **Privileged and integration (opt-in):** the real-volume A/B
   (`ERS_USE_RECORDS`), the USN/FSEvents/inotify replay, the two-process
   daemon handoff, and the keep-warm behaviour under load (no starvation

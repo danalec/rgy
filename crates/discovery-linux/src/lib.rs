@@ -9,7 +9,7 @@
 //! work and not in this module.
 //!
 //! The whole backend is `cfg(target_os = "linux")` — on other hosts this
-//! crate compiles empty and the portable `discovery::PortableSource` is
+//! crate compiles empty and the portable `rgy_discovery::PortableSource` is
 //! the Source.
 
 #[cfg(target_os = "linux")]
@@ -23,5 +23,5 @@ pub use walk::LinuxSource;
 pub use watch::InotifyWatch;
 
 // On a non-Linux host this crate compiles empty: the portable
-// `discovery::PortableSource` is the Source and the Windows/macOS
+// `rgy_discovery::PortableSource` is the Source and the Windows/macOS
 // backends own their platforms.

@@ -30,13 +30,13 @@
 //! answering from the base's snapshot.
 
 use crate::name_index::{Index, enc_size, name_mask};
-use discovery::walk::{self, FLAG_MOUNT, KIND_DIR, KIND_FILE, KIND_LINK, KIND_OTHER, Listing, NONE, RawEnt};
+use rgy_discovery::walk::{self, FLAG_MOUNT, KIND_DIR, KIND_FILE, KIND_LINK, KIND_OTHER, Listing, NONE, RawEnt};
 use std::collections::{BTreeMap, HashMap};
 
 /// One entry of the overlay.
 #[derive(Clone, Copy)]
 pub struct OEnt {
-    /// `discovery::walk::KIND_*`, with the flag bits of `walk::FLAG_*`.
+    /// `rgy_discovery::walk::KIND_*`, with the flag bits of `walk::FLAG_*`.
     pub kind: u8,
     pub size: u64,
     pub mtime: u32,
@@ -465,7 +465,7 @@ impl Live {
         Applied::Done
     }
 
-    /// Apply one batch of change events, as a [`discovery::Watch`] feed
+    /// Apply one batch of change events, as a [`rgy_discovery::Watch`] feed
     /// produces them.
     ///
     /// Each record names the changed path in `name`, and the granularity of
@@ -483,7 +483,7 @@ impl Live {
     /// `name` is a platform path join (`\` between parts on Windows) while
     /// this index speaks `/`, so the separators are normalized first and the
     /// folder is taken at the last separator of either kind.
-    pub fn apply_events(&mut self, events: &[discovery::UsnRecord]) {
+    pub fn apply_events(&mut self, events: &[rgy_discovery::UsnRecord]) {
         let mut dirs: Vec<Vec<u8>> = Vec::new();
         for e in events {
             let p: Vec<u8> = e.name.as_bytes().iter().map(|&b| if b == b'\\' { b'/' } else { b }).collect();
@@ -494,7 +494,7 @@ impl Live {
                 // tree is not this index's business.
                 continue;
             }
-            if e.file_attributes & discovery::FILE_ATTRIBUTE_DIRECTORY != 0 {
+            if e.file_attributes & rgy_discovery::FILE_ATTRIBUTE_DIRECTORY != 0 {
                 dirs.push(p);
             } else {
                 let cut = p.iter().rposition(|&b| b == b'/').unwrap_or(0);
@@ -532,11 +532,11 @@ impl Live {
     /// takes the write lock per batch instead — lock, apply one batch,
     /// unlock — so queries interleave; holding the write across this loop
     /// would block every query for the feed's whole life.
-    pub fn run_watch_feed(&mut self, watch: &mut dyn discovery::Watch, root: &[u8]) -> Result<(), String> {
+    pub fn run_watch_feed(&mut self, watch: &mut dyn rgy_discovery::Watch, root: &[u8]) -> Result<(), String> {
         loop {
             match watch.next_batch()? {
-                discovery::ChangeBatch::Events(events) => self.apply_events(&events),
-                discovery::ChangeBatch::Rescan => {
+                rgy_discovery::ChangeBatch::Events(events) => self.apply_events(&events),
+                rgy_discovery::ChangeBatch::Rescan => {
                     self.apply_dir(root, true);
                 }
             }
@@ -738,7 +738,7 @@ mod tests {
     use super::*;
     use crate::name_index::Index;
     use crate::name_query::{Hit, Query, Searcher};
-    use discovery::{PortableSource, Source};
+    use rgy_discovery::{PortableSource, Source};
 
     /// A tree in a temporary directory, with one file in it.
     fn tree(tag: &str) -> (std::path::PathBuf, Vec<u8>) {
@@ -768,13 +768,13 @@ mod tests {
     }
 
     /// What a directory-granular feed says when a folder's contents change.
-    fn folder_changed(root: &[u8]) -> Vec<discovery::UsnRecord> {
-        vec![discovery::UsnRecord {
+    fn folder_changed(root: &[u8]) -> Vec<rgy_discovery::UsnRecord> {
+        vec![rgy_discovery::UsnRecord {
             file_reference: 0,
             parent_reference: 0,
             usn: 1,
-            reason: discovery::USN_REASON_FILE_CREATE,
-            file_attributes: discovery::FILE_ATTRIBUTE_DIRECTORY,
+            reason: rgy_discovery::USN_REASON_FILE_CREATE,
+            file_attributes: rgy_discovery::FILE_ATTRIBUTE_DIRECTORY,
             name: String::from_utf8(root.to_vec()).unwrap(),
         }]
     }
@@ -834,12 +834,12 @@ mod tests {
         std::fs::write(outside.join("other.txt"), b"other\n").unwrap();
         let name = outside.to_string_lossy().into_owned();
 
-        live.apply_events(&[discovery::UsnRecord {
+        live.apply_events(&[rgy_discovery::UsnRecord {
             file_reference: 0,
             parent_reference: 0,
             usn: 1,
-            reason: discovery::USN_REASON_FILE_CREATE,
-            file_attributes: discovery::FILE_ATTRIBUTE_DIRECTORY,
+            reason: rgy_discovery::USN_REASON_FILE_CREATE,
+            file_attributes: rgy_discovery::FILE_ATTRIBUTE_DIRECTORY,
             name: name.clone(),
         }]);
 

@@ -55,7 +55,7 @@ pub mod placeholder;
 /// `scan_priority` -- which says so in its own comments.
 mod scan_priority;
 
-/// fsearch's `engine::no_materialize`: on macOS it marks files so a scan
+/// fsearch's `rgy_engine::no_materialize`: on macOS it marks files so a scan
 /// does not materialize cloud placeholders. Portable no-op — the platform
 /// backends can set their own policy.
 pub fn no_materialize() {}

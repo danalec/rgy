@@ -1,4 +1,4 @@
-# `name-core` — the specification
+# `rgy-name-core` — the specification
 
 The name index: what the disk looked like, and what it looks like now.
 This document is the contract the four modules of `crates/name-core` are
@@ -54,7 +54,7 @@ A tree that is not at `/` has to say so: `Live::new` means "the root is
 A snapshot of one walk, stored in one file.
 
 - `Index::build(listings, event_id, synced_at, home)` takes the DFS listing
-  blocks a `discovery::Source` produces and builds the index.
+  blocks a `rgy_discovery::Source` produces and builds the index.
 - Entries are numbered in DFS order; directories own contiguous ranges of
   their children, so a folder's subtree is a range and not a filter.
 - Names are interned: many entries, few distinct names. The bitmaps are

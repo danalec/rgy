@@ -17,9 +17,9 @@
 //! (see `name_bits`) before any name is read.
 
 use crate::fold;
-use discovery::walk::{KIND_DIR, Listing, NONE};
 use memmap2::{Mmap, MmapMut};
 use rayon::prelude::*;
+use rgy_discovery::walk::{KIND_DIR, Listing, NONE};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::Write;
@@ -1162,7 +1162,7 @@ mod blob_tests {
         // Build -> freeze -> save -> load exercises both Blob arms: the
         // anonymous map on build and the file map (or owned fallback) on
         // load, with the header size check in between.
-        use discovery::walk::{KIND_FILE, Listing, NONE, RawEnt};
+        use rgy_discovery::walk::{KIND_FILE, Listing, NONE, RawEnt};
         let mut names = b"hi.txt".to_vec();
         let ents = vec![RawEnt { name_off: 0, name_len: 6, kind: KIND_FILE, size: 3, mtime: 7, child: NONE }];
         let ls = vec![Listing { id: 0, names: std::mem::take(&mut names), ents }];
@@ -1194,7 +1194,7 @@ mod path_tests {
     /// whose path is in question.
     #[test]
     fn a_path_deeper_than_the_inline_chain_is_not_truncated() {
-        use discovery::walk::{KIND_DIR, KIND_FILE, Listing, NONE, RawEnt};
+        use rgy_discovery::walk::{KIND_DIR, KIND_FILE, Listing, NONE, RawEnt};
 
         // More than the 256 the inline chain holds, so the walk has to spill.
         const DEPTH: usize = 300;
@@ -1229,7 +1229,7 @@ mod path_tests {
     /// tree produces.
     #[test]
     fn a_shallow_path_is_reconstructed_exactly() {
-        use discovery::walk::{KIND_DIR, KIND_FILE, Listing, NONE, RawEnt};
+        use rgy_discovery::walk::{KIND_DIR, KIND_FILE, Listing, NONE, RawEnt};
 
         let listings = vec![
             Listing { id: 0, names: b"docs".to_vec(), ents: vec![RawEnt { name_off: 0, name_len: 4, kind: KIND_DIR, size: 0, mtime: 7, child: 1 }] },

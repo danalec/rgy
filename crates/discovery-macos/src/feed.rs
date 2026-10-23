@@ -4,13 +4,13 @@
 //!
 //! FSEvents is a callback: the stream calls back with a batch of events and
 //! the caller reads the batches off a channel. The daemon speaks the other
-//! dialect — [`discovery::Watch::next_batch`] is a pull — so this module is
+//! dialect — [`rgy_discovery::Watch::next_batch`] is a pull — so this module is
 //! the adapter between the two, and it is where the two decisions live:
 //!
 //! - **the granularity.** FSEvents reports the *folder* whose contents
 //!   changed, not the file that changed. The live model re-lists the parent
 //!   of a file-granular record, so a folder event has to say "this is a
-//!   folder": [`discovery::FILE_ATTRIBUTE_DIRECTORY`] is the one bit that
+//!   folder": [`rgy_discovery::FILE_ATTRIBUTE_DIRECTORY`] is the one bit that
 //!   says it, and the overlay then re-lists the named folder. Re-listing the
 //!   folder's *parent* instead would see only the folder's own mtime and
 //!   miss the edit inside.
@@ -24,7 +24,7 @@
 
 use std::sync::mpsc::Receiver;
 
-use discovery::{ChangeBatch, FILE_ATTRIBUTE_DIRECTORY, UsnRecord, Watch};
+use rgy_discovery::{ChangeBatch, FILE_ATTRIBUTE_DIRECTORY, UsnRecord, Watch};
 
 use crate::event::{Event, ITEM_IS_DIR, KERNEL_DROPPED, MUST_SCAN_SUBDIRS, USER_DROPPED};
 
@@ -234,7 +234,7 @@ fn absolute_root(root: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use discovery::Source;
+    use rgy_discovery::Source;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -463,9 +463,9 @@ mod tests {
         let root = feed_path(&dir);
 
         // The index as it was before the file appeared.
-        let src = discovery::PortableSource::new(root.clone(), 2);
-        let mut live = name_core::live::Live::with_root(
-            name_core::name_index::Index::build(src.enumerate().expect("the walk"), 0, 1, b"/"),
+        let src = rgy_discovery::PortableSource::new(root.clone(), 2);
+        let mut live = rgy_name_core::live::Live::with_root(
+            rgy_name_core::name_index::Index::build(src.enumerate().expect("the walk"), 0, 1, b"/"),
             &root,
         );
 
@@ -483,8 +483,8 @@ mod tests {
 
         // And the index knows about it.
         let wanted = feed_path(&dir.join("sub/new.txt"));
-        let hits = name_core::name_query::Searcher { live: &live }
-            .search(&name_core::name_query::Query::parse("new", "").expect("a query"));
+        let hits = rgy_name_core::name_query::Searcher { live: &live }
+            .search(&rgy_name_core::name_query::Query::parse("new", "").expect("a query"));
         assert!(
             hits.iter()
                 .any(|h| h.over.as_deref() == Some(wanted.as_slice())),
@@ -502,9 +502,9 @@ mod tests {
         std::fs::write(dir.join("sub/keep.txt"), b"keep\n").unwrap();
         let root = feed_path(&dir);
 
-        let src = discovery::PortableSource::new(root.clone(), 2);
-        let mut live = name_core::live::Live::with_root(
-            name_core::name_index::Index::build(src.enumerate().expect("the walk"), 0, 1, b"/"),
+        let src = rgy_discovery::PortableSource::new(root.clone(), 2);
+        let mut live = rgy_name_core::live::Live::with_root(
+            rgy_name_core::name_index::Index::build(src.enumerate().expect("the walk"), 0, 1, b"/"),
             &root,
         );
 
@@ -520,8 +520,8 @@ mod tests {
         live.apply_events(&records);
 
         let wanted = feed_path(&dir.join("sub/new.txt"));
-        let hits = name_core::name_query::Searcher { live: &live }
-            .search(&name_core::name_query::Query::parse("new", "").expect("a query"));
+        let hits = rgy_name_core::name_query::Searcher { live: &live }
+            .search(&rgy_name_core::name_query::Query::parse("new", "").expect("a query"));
         assert!(
             hits.iter()
                 .any(|h| h.over.as_deref() == Some(wanted.as_slice())),

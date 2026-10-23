@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! DFS directory-block vocabulary (the `discovery::Source` block type).
+//! DFS directory-block vocabulary (the `rgy_discovery::Source` block type).
 //!
 //! Transported from fsearch `walk.rs`: the kinds/flags every backend lists
 //! and the [`Listing`] block the name index lays out in DFS order. The
@@ -225,7 +225,7 @@ pub struct Progress {
 }
 
 /// Portable whole-tree scan: one [`Listing`] per directory, DFS pre-order,
-/// listing 0 = `root`. This is the `discovery::Source` block stream — the
+/// listing 0 = `root`. This is the `rgy_discovery::Source` block stream — the
 /// macOS getattrlistbulk fast path lives in `discovery-macos` and returns
 /// the same blocks.
 ///

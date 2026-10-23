@@ -12,10 +12,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "autostart"
-version = "0.1.0"
-
-[[package]]
 name = "bitflags"
 version = "2.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -106,73 +102,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "discovery"
-version = "0.1.0"
-dependencies = [
- "rayon",
-]
-
-[[package]]
-name = "discovery-dispatch"
-version = "0.1.0"
-dependencies = [
- "discovery",
- "discovery-freebsd",
- "discovery-linux",
- "discovery-macos",
- "discovery-windows",
- "proto",
-]
-
-[[package]]
-name = "discovery-freebsd"
-version = "0.1.0"
-dependencies = [
- "discovery",
- "libc",
-]
-
-[[package]]
-name = "discovery-linux"
-version = "0.1.0"
-dependencies = [
- "discovery",
- "libc",
- "rayon",
-]
-
-[[package]]
-name = "discovery-macos"
-version = "0.1.0"
-dependencies = [
- "discovery",
- "libc",
- "name-core",
- "rayon",
-]
-
-[[package]]
-name = "discovery-windows"
-version = "0.1.0"
-dependencies = [
- "discovery",
- "windows",
-]
-
-[[package]]
 name = "either"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
-
-[[package]]
-name = "engine"
-version = "0.1.0"
-dependencies = [
- "discovery",
- "name-core",
- "rgx-core",
-]
 
 [[package]]
 name = "errno"
@@ -379,19 +312,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "name-core"
-version = "0.1.0"
-dependencies = [
- "discovery",
- "memchr",
- "memmap2",
- "rayon",
- "regex",
- "regex-syntax",
- "rgx-core",
-]
-
-[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -434,10 +354,6 @@ checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
 ]
-
-[[package]]
-name = "proto"
-version = "0.1.0"
 
 [[package]]
 name = "quote"
@@ -604,8 +520,141 @@ dependencies = [
 ]
 
 [[package]]
+name = "rgy-autostart"
+version = "0.1.0"
+
+[[package]]
+name = "rgy-discovery"
+version = "0.1.0"
+dependencies = [
+ "rayon",
+]
+
+[[package]]
+name = "rgy-discovery-dispatch"
+version = "0.1.0"
+dependencies = [
+ "rgy-discovery",
+ "rgy-discovery-freebsd",
+ "rgy-discovery-linux",
+ "rgy-discovery-macos",
+ "rgy-discovery-windows",
+ "rgy-proto",
+]
+
+[[package]]
+name = "rgy-discovery-freebsd"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "rgy-discovery",
+]
+
+[[package]]
+name = "rgy-discovery-linux"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "rayon",
+ "rgy-discovery",
+]
+
+[[package]]
+name = "rgy-discovery-macos"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "rayon",
+ "rgy-discovery",
+ "rgy-name-core",
+]
+
+[[package]]
+name = "rgy-discovery-windows"
+version = "0.1.0"
+dependencies = [
+ "rgy-discovery",
+ "windows",
+]
+
+[[package]]
 name = "rgy-e2e-tests"
 version = "0.0.0"
+
+[[package]]
+name = "rgy-engine"
+version = "0.1.0"
+dependencies = [
+ "rgx-core",
+ "rgy-discovery",
+ "rgy-name-core",
+]
+
+[[package]]
+name = "rgy-name-core"
+version = "0.1.0"
+dependencies = [
+ "memchr",
+ "memmap2",
+ "rayon",
+ "regex",
+ "regex-syntax",
+ "rgx-core",
+ "rgy-discovery",
+]
+
+[[package]]
+name = "rgy-proto"
+version = "0.1.0"
+
+[[package]]
+name = "rgy-search-ui"
+version = "0.1.0"
+dependencies = [
+ "crossterm",
+ "rgy-discovery",
+ "rgy-engine",
+ "rgy-name-core",
+]
+
+[[package]]
+name = "rgy-searchctl"
+version = "0.1.0"
+dependencies = [
+ "mimalloc",
+ "rgy-discovery",
+ "rgy-discovery-dispatch",
+ "rgy-engine",
+ "rgy-name-core",
+ "rgy-proto",
+]
+
+[[package]]
+name = "rgy-searchd"
+version = "0.1.0"
+dependencies = [
+ "mimalloc",
+ "rgx-core",
+ "rgy-discovery",
+ "rgy-discovery-dispatch",
+ "rgy-discovery-linux",
+ "rgy-discovery-macos",
+ "rgy-discovery-windows",
+ "rgy-engine",
+ "rgy-name-core",
+ "rgy-proto",
+]
+
+[[package]]
+name = "rgy-zen-rs"
+version = "0.1.0"
+dependencies = [
+ "mimalloc",
+ "rgy-discovery",
+ "rgy-discovery-windows",
+ "rgy-name-core",
+ "rgy-search-ui",
+]
 
 [[package]]
 name = "rsqlite-vfs"
@@ -665,44 +714,6 @@ name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
-
-[[package]]
-name = "search-ui"
-version = "0.1.0"
-dependencies = [
- "crossterm",
- "discovery",
- "engine",
- "name-core",
-]
-
-[[package]]
-name = "searchctl"
-version = "0.1.0"
-dependencies = [
- "discovery",
- "discovery-dispatch",
- "engine",
- "mimalloc",
- "name-core",
- "proto",
-]
-
-[[package]]
-name = "searchd"
-version = "0.1.0"
-dependencies = [
- "discovery",
- "discovery-dispatch",
- "discovery-linux",
- "discovery-macos",
- "discovery-windows",
- "engine",
- "mimalloc",
- "name-core",
- "proto",
- "rgx-core",
-]
 
 [[package]]
 name = "serde_core"
@@ -1116,17 +1127,6 @@ name = "windows_x86_64_msvc"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
-
-[[package]]
-name = "zen-rs"
-version = "0.1.0"
-dependencies = [
- "discovery",
- "discovery-windows",
- "mimalloc",
- "name-core",
- "search-ui",
-]
 
 [[package]]
 name = "zstd"

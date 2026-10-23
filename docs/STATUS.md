@@ -62,10 +62,11 @@ verification on machines this host does not have.
 |---|---|---|
 | `searchctl` (name + content CLI, rg exit codes, `--json`) | `bins/searchctl` | ✅ |
 | `searchd` (JSON-lines daemon) | `bins/searchd` | ✅ name + `grep:`/`regex:`/`sym:` ops |
-| The JSON-lines protocol and its one escaper | `crates/proto` | ✅ RFC 8259 §7: the quotation mark, the reverse solidus and every C0 control are escaped, so a path, a query or a grep line out of a TSV file reaches the wire as **one** line and the framing cannot be broken by the content. `proto`, `searchd` and `searchctl` share the escaper, and a test holds it byte-for-byte equal to the upstream `djson::escape_json_string` |
+| The JSON-lines protocol and its one escaper | `crates/proto` | ✅ RFC 8259 §7: the quotation mark, the reverse solidus and every C0 control are escaped, so a path, a query or a grep line out of a TSV file reaches the wire as **one** line and the framing cannot be broken by the content. `rgy-proto`, `searchd` and `searchctl` share the escaper, and a test holds it byte-for-byte equal to the upstream `djson::escape_json_string` |
 | Named pipe / UDS fronts, `--serve` compat, `--tv-dir` | `bins/searchd` | ✅ |
 | zen-rs bin / TUI (unchanged behaviour) | `bins/zen-rs`, `bins/search-ui` | ✅ |
 | `rgy-autostart` (login item, per platform) | `crates/autostart` | ✅ startup task / HKCU Run, systemd user unit, launchd agent |
+| The crates on crates.io | `crates/*/Cargo.toml`, `bins/*/Cargo.toml` | ⬜ renamed to `rgy-*`, every `cargo publish --dry-run` green, **not uploaded** — see below |
 | Packaging (winget, brew, tarballs) | `scripts/build-release.*`, `scripts/publish-release.*`, `.winget/`, `Formula/` | ✅ machinery in place; **no release published yet** |
 | Release flow (the one-line installers, the Linux build over ssh) | `install.sh`, `install.ps1`, `scripts/release-linux.sh` | ✅ the installers pin the digest of the artifact they install; the pins are release data |
 | Homebrew submission (the pull request to homebrew-core) | `scripts/publish-homebrew.*` | ✅ the machinery; the pull request waits for the first release to exist |
@@ -220,25 +221,45 @@ the three platforms behaving alike.
   queries.
 - **Publishing to a registry.** The rgx repository is published
   (`https://github.com/danalec/rgx`, answering 200 since 2026-10-23, and
-  the blob links in this file resolve), and the rgx crates are going to
-  crates.io. rgy's own crates are not published yet. The *distribution*
-  package is called `rgy-search`, because `rgy` is taken on crates.io (a
-  GameBoy emulator library); on winget and homebrew the name is free, and
-  one name across the registries is worth more than the shorter one. The
-  project, the repository (`danalec/rgy`) and the binaries keep the name
-  `rgy`.
+  the blob links in this file resolve), and the rgx crates are on
+  crates.io: all twelve — `rgx-core`, `rar-codec` and the ten
+  `rgx-adapters-*` — at **0.1.0**, confirmed against the crates.io API on
+  2026-10-23.
 
-  The names of the internal crates are a separate problem, and it is not
-  solved by publishing them. Checked against the crates.io API on
-  2026-10-23: `rgy`, `engine`, `proto`, `discovery`, `zen-rs` and
-  `autostart` are **all taken**; `rgy-search`, `rgx-core` and `rar-codec`
-  are free. So every internal crate needs a `rgy-` prefix (or another
-  name) before it can be published at all, and the order matters:
-  `name-core` depends on `rgx-core` by path, so `rgx-core` has to exist
-  first. `cargo publish --dry-run -p rgx-core` passes today (127 files,
-  compiles, stops at the upload); `-p name-core` fails, because a
-  path dependency without a version requirement cannot be published. The
-  crate names are the decision; the machinery is in place.
+  rgy's own crates are **renamed and prepared, not uploaded**. Checked
+  against the crates.io API on 2026-10-23, `rgy`, `engine`, `proto`,
+  `discovery`, `zen-rs` and `autostart` are all taken, so every crate
+  carries the `rgy-` prefix: `rgy-proto`, `rgy-discovery`,
+  `rgy-name-core`, `rgy-engine`, `rgy-autostart`, the four
+  `rgy-discovery-{windows,linux,macos,freebsd}`, `rgy-discovery-dispatch`,
+  `rgy-searchctl`, `rgy-searchd`, `rgy-search-ui` and `rgy-zen-rs`. The
+  library target names follow the package names (`rgy_discovery`,
+  `rgy_name_core`, …), and that is not cosmetic: a library whose target
+  name stayed `discovery` would collide with the crates.io crate of that
+  name, and two dependencies sharing one lib name is `E0464` **on the
+  consumer's side**, not a warning here. The shipped binaries keep their
+  names (`searchctl`, `searchd`, `rgy-autostart`); only the package names
+  moved.
+
+  The *distribution* keeps a different name: `rgy-search`, because `rgy`
+  is taken on crates.io (a GameBoy emulator library); on winget and
+  homebrew the name is free, and one name across the registries is worth
+  more than the shorter one. The project, the repository (`danalec/rgy`)
+  and the binaries keep the name `rgy`.
+
+  What is left is the upload, and it is the one irreversible step:
+  crates.io takes a version once and afterwards only lets it be yanked.
+  The manifests, the lockfile and the metadata are in place, and all
+  fourteen crates pass `cargo publish --dry-run` — the three with no
+  internal dependency plainly, the other eleven with a local patch
+  override so that a dependency which is not on the registry yet still
+  resolves. In the real run each crate's dry-run passes on its own,
+  because by then its dependencies are published. The publish itself
+  waits for an explicit go. One gap is known and stated: the
+  `repository` metadata points at `https://github.com/danalec/rgy`,
+  which does not answer yet (404) — the repository still lives only on
+  the private forgejo, and crates.io metadata is fixed at publish time,
+  so the URL is set now and the repository follows.
 - **The first release.** The packaging is in place — the winget manifest,
   the Homebrew formula, the scripts that build the archives and publish
   them — but nothing has been published yet, so the manifest and the

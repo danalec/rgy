@@ -83,7 +83,7 @@ rgx-adapters-office rgx-adapters-pdf rgx-adapters-tabular rgx-adapters-threed"
 #
 # tesla_valve.rs is rgy's empirical harness for the Tesla Valve indexing
 # idea: upstream rgx has no such example, and it is rgy's argument for the
-# pack-store design, not a copy of anything. It lives in the engine crate,
+# pack-store design, not a copy of anything. It lives in the rgy-engine crate,
 # where rgy's own code belongs -- a vendored tree carries upstream's
 # licence and nothing else.
 KEEP=""

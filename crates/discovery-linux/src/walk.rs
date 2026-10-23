@@ -5,19 +5,21 @@
 //! per-entry directory open — the Linux half of fsearch's getattrlistbulk
 //! trick. The walk is sequential DFS with a single id counter (the
 //! parallel fanout refactor keeps its own allocator; until then the
-//! portable `discovery::walk::scan` and this must agree on id semantics).
+//! portable `rgy_discovery::walk::scan` and this must agree on id semantics).
 
 use std::ffi::{CString, OsString};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
-use discovery::walk::{KIND_DIR, KIND_FILE, KIND_LINK, KIND_OTHER, Listing, NONE, RawEnt, blocked};
+use rgy_discovery::walk::{
+    KIND_DIR, KIND_FILE, KIND_LINK, KIND_OTHER, Listing, NONE, RawEnt, blocked,
+};
 
 pub struct LinuxSource {
     pub root: PathBuf,
 }
 
-impl discovery::Source for LinuxSource {
+impl rgy_discovery::Source for LinuxSource {
     fn enumerate(&self) -> Result<Vec<Listing>, String> {
         Ok(scan(&self.root))
     }
@@ -116,7 +118,7 @@ fn list_dir(path: &Path) -> Option<Listing> {
 }
 
 /// DFS walk, listing 0 = `root`'s children, ids in pre-order — the same
-/// block contract as [`discovery::walk::scan`].
+/// block contract as [`rgy_discovery::walk::scan`].
 pub fn scan(root: &Path) -> Vec<Listing> {
     let mut out: Vec<Listing> = Vec::new();
     let mut next_id = 1u32;

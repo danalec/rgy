@@ -1,10 +1,17 @@
 [package]
-name = "autostart"
+name = "rgy-autostart"
 version = "0.1.0"
 edition = "2024"
 authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
 description = "Registering the rgy search daemon to start at login, per platform (parity row 4.13)"
 license = "Apache-2.0"
+repository = "https://github.com/danalec/rgy"
+homepage = "https://github.com/danalec/rgy"
+documentation = "https://docs.rs/rgy-autostart"
+keywords = ["autostart", "login", "service"]
+categories = ["os::windows-apis", "os::unix-apis"]
+readme = "../../README.md"
+
 
 [[bin]]
 name = "rgy-autostart"

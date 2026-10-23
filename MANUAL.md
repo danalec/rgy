@@ -105,8 +105,8 @@ Rust **1.85** or newer.
 
 ```sh
 cargo build --release            # the whole workspace
-cargo build --release -p searchctl   # just the command-line tool
-cargo build --release -p searchd     # just the daemon
+cargo build --release -p rgy-searchctl   # just the command-line tool
+cargo build --release -p rgy-searchd     # just the daemon
 ```
 
 The binaries land in `target/release/`. On Windows that is

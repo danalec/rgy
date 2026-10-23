@@ -1,17 +1,24 @@
 [package]
-name = "name-core"
+name = "rgy-name-core"
 version = "0.1.0"
 edition = "2024"
 authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
 description = "Name index, query filters, fuzzy ranking (fsearch engine + zen query vocabulary)"
 license = "Apache-2.0 AND MIT"
+repository = "https://github.com/danalec/rgy"
+homepage = "https://github.com/danalec/rgy"
+documentation = "https://docs.rs/rgy-name-core"
+keywords = ["search", "fuzzy", "filename", "index"]
+categories = ["text-processing", "filesystem"]
+readme = "../../README.md"
+
 
 [dependencies]
-discovery = { path = "../discovery" }
+rgy-discovery = { path = "../discovery", version = "0.1.0" }
 # One regex engine (§4.4): the vendored zen-rs copy is gone; `re:`
 # path patterns compile through rgx-core's syntax/nfa/vm, the same engine
 # the copy was taken from (Apache-2.0).
-rgx-core = { path = "../rgx-core" }
+rgx-core = { path = "../rgx-core", version = "0.1.0" }
 # fsearch's name index v2 mmaps its name blob (name_index.rs).
 memmap2 = "0.9"
 # fsearch's parallel scan/rank (name_query.rs, live.rs).

@@ -36,14 +36,14 @@ use std::io::{BufRead, Write};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use discovery::{PortableSource, interrupt, walk::Cancelled};
-use engine::{keep_warm, warm_stop};
-use name_core::content::{self, Grep};
-use name_core::live::Live;
-use name_core::name_index::Index;
-use name_core::name_query::{Alternatives, Query, Searcher};
-use name_core::persist;
-use proto::{CatchUp, GrepFile, Hit as WireHit, Request, Response};
+use rgy_discovery::{PortableSource, interrupt, walk::Cancelled};
+use rgy_engine::{keep_warm, warm_stop};
+use rgy_name_core::content::{self, Grep};
+use rgy_name_core::live::Live;
+use rgy_name_core::name_index::Index;
+use rgy_name_core::name_query::{Alternatives, Query, Searcher};
+use rgy_name_core::persist;
+use rgy_proto::{CatchUp, GrepFile, Hit as WireHit, Request, Response};
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -67,7 +67,7 @@ struct Ctx {
     ///
     /// The `Watch` thread applies the feed's changes to this index. Its
     /// shape, so the next hand does not re-derive it:
-    /// - A platform `discovery::Watch` (InotifyWatch / UsnWatch / fsevents)
+    /// - A platform `rgy_discovery::Watch` (InotifyWatch / UsnWatch / fsevents)
     ///   is constructed on a background thread and polled with `next_batch`;
     ///   `Live::run_watch_feed` is the loop body (already tested), so this is
     ///   just the factory + `spawn`.
@@ -95,7 +95,7 @@ struct Ctx {
     live: std::sync::RwLock<Live>,
     /// How this process caught up, as the status answer reports it.
     ///
-    /// The platform's capability (`discovery_dispatch::catch_up_for`) says
+    /// The platform's capability (`rgy_discovery_dispatch::catch_up_for`) says
     /// what the OS *could* do; this says what this process *did*, which is
     /// the only claim the answer can honestly make — and nothing replays
     /// unless a watermark was saved and the journal still covers it. The
@@ -129,7 +129,7 @@ impl Ctx {
 /// Print usage and leave. `code` is the exit status: 0 when the user asked
 /// for help, 2 for the rg convention's "bad invocation".
 fn usage(code: i32) -> ! {
-    engine::errln!(
+    rgy_engine::errln!(
         "searchd [--root <dir>] [--index <file>] [--reindex] [--max-age <dur>]\n         [--tv-dir <store>] [--listen stdio|uds:<path>|pipe:<name>] [--serve]\n\n\
          proto framing (default): one JSON request per line\n  \
            {{\"op\":\"search\",\"q\":\"...\",\"limit\":50}}\n  \
@@ -167,12 +167,12 @@ fn main() {
     // console encodes the keystrokes with the input code page. A
     // redirected stdout keeps its raw bytes -- a machine consumer wants
     // UTF-8, not a console's idea of it.
-    engine::console::init_with_input();
+    rgy_engine::console::init_with_input();
 
     // Which view of an adapter-claimed file a search reads. rgy answers to
     // RGY_ADAPTER_VIEW and falls back to rgx's RGX_ADAPTER_VIEW, so a shell
     // configured for rgx is configured for rgy too.
-    engine::adapter_view::apply();
+    rgy_engine::adapter_view::apply();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut root = String::from(".");
@@ -215,7 +215,7 @@ fn main() {
             "--serve" => serve = true,
             "-h" | "--help" => usage(0),
             other => {
-                engine::errln!("searchd: unknown argument {other}");
+                rgy_engine::errln!("searchd: unknown argument {other}");
                 std::process::exit(2);
             }
         }
@@ -251,7 +251,7 @@ fn main() {
     match listen.split_once(':') {
         None if listen == "stdio" => {
             let stdin = std::io::stdin();
-            run_stream(stdin.lock(), engine::console::stdout(), &ctx, serve);
+            run_stream(stdin.lock(), rgy_engine::console::stdout(), &ctx, serve);
         }
         Some(("uds", path)) => serve_uds(path, &ctx, serve),
         Some(("pipe", name)) => serve_pipe(name, &ctx, serve),
@@ -370,7 +370,7 @@ impl Journal {
         else {
             return Journal::none();
         };
-        let Ok(volume) = discovery_windows::volume::Volume::open(vol_root) else {
+        let Ok(volume) = rgy_discovery_windows::volume::Volume::open(vol_root) else {
             return Journal::none();
         };
         let Ok(j) = volume.query_usn_journal() else {
@@ -477,7 +477,7 @@ fn open_index(root: &str, index: Option<&str>, reindex: bool, max_age: Option<Du
                         // The age limit still applies to a resumed index:
                         // the journal says what changed, but the index is
                         // only as current as the walk that built it.
-                        engine::errln!(
+                        rgy_engine::errln!(
                             "searchd: reusing index {} ({} entries, built {}) — resuming the change journal at {}",
                             index_path.display(),
                             idx.n,
@@ -493,7 +493,7 @@ fn open_index(root: &str, index: Option<&str>, reindex: bool, max_age: Option<Du
                         };
                     }
                     Startup::Reuse => {
-                        engine::errln!(
+                        rgy_engine::errln!(
                             "searchd: reusing index {} ({} entries, built {}){}",
                             index_path.display(),
                             idx.n,
@@ -512,20 +512,22 @@ fn open_index(root: &str, index: Option<&str>, reindex: bool, max_age: Option<Du
                         // The journal does not reach back to the saved
                         // position: the gap cannot be replayed, so the tree
                         // is walked again.
-                        engine::errln!(
+                        rgy_engine::errln!(
                             "searchd: rebuilding — the change journal no longer covers the saved position ({watermark}); the tree is walked again"
                         );
                     }
                 }
             }
-            Err(why) => engine::errln!("searchd: rebuilding — {why}"),
+            Err(why) => rgy_engine::errln!("searchd: rebuilding — {why}"),
         }
     }
 
     // The platform walk where one exists (docs/design.md §2.2),
     // the portable walk where none does or where the native one refuses.
-    let source =
-        discovery_dispatch::source_for(root.as_bytes().to_vec(), PortableSource::DEFAULT_THREADS);
+    let source = rgy_discovery_dispatch::source_for(
+        root.as_bytes().to_vec(),
+        PortableSource::DEFAULT_THREADS,
+    );
     // The first thing a daemon does is walk a tree it was pointed at, and
     // that is the longest silent stretch in the program. Report it, and let
     // Ctrl-C stop it cleanly instead of killing the daemon mid-build.
@@ -539,14 +541,14 @@ fn open_index(root: &str, index: Option<&str>, reindex: bool, max_age: Option<Du
                 + REPORT_EVERY.as_millis() as u64
         {
             last_report.store(now, std::sync::atomic::Ordering::Relaxed);
-            engine::errln!("searchd: scanning… {}", interrupt::line(p));
+            rgy_engine::errln!("searchd: scanning… {}", interrupt::line(p));
         }
     }) {
         Ok(l) => l,
         // A daemon with no index has nothing to answer with, and a partial
         // one would answer wrongly. Exit rather than start.
         Err(Cancelled) => {
-            engine::errln!("searchd: scan cancelled — no index written, exiting");
+            rgy_engine::errln!("searchd: scan cancelled — no index written, exiting");
             std::process::exit(2);
         }
     };
@@ -564,12 +566,12 @@ fn open_index(root: &str, index: Option<&str>, reindex: bool, max_age: Option<Du
     let watermark = journal.head;
     let idx = Index::build(listings, watermark, now_secs(), root.as_bytes());
     match persist::save(&idx, &root_path, &index_path) {
-        Ok(saved) => engine::errln!(
+        Ok(saved) => rgy_engine::errln!(
             "searchd: indexed {} entries → {}",
             idx.n,
             saved.index.display()
         ),
-        Err(e) => engine::errln!(
+        Err(e) => rgy_engine::errln!(
             "searchd: could not save index to {}: {e}",
             index_path.display()
         ),
@@ -695,7 +697,7 @@ fn grep(q: &str, limit: usize, ctx: &Ctx) -> Vec<Response> {
             Ok(alts) => {
                 for alt in &alts.alts {
                     let pat = alt.grep.clone().unwrap_or_else(|| q.to_string());
-                    match engine::tv::grep_tv(dir, &pat) {
+                    match rgy_engine::tv::grep_tv(dir, &pat) {
                         Ok(fs) => files.extend(fs.into_iter().map(|f| GrepFile {
                             path: f.path,
                             lines: f.lines.into_iter().map(|(n, t)| (n as usize, t)).collect(),
@@ -729,13 +731,13 @@ fn grep(q: &str, limit: usize, ctx: &Ctx) -> Vec<Response> {
             }
             let live_guard = ctx.live.read().unwrap();
             let searcher = Searcher { live: &live_guard };
-            let mut jobs: Vec<(String, name_core::name_query::GrepMode, Query)> = Vec::new();
+            let mut jobs: Vec<(String, rgy_name_core::name_query::GrepMode, Query)> = Vec::new();
             for alt in &alts.alts {
                 match &alt.grep {
                     Some(pat) => jobs.push((pat.clone(), alt.grep_mode, alt.clone_for_scan())),
                     None => jobs.push((
                         q.to_string(),
-                        name_core::name_query::GrepMode::Literal,
+                        rgy_name_core::name_query::GrepMode::Literal,
                         alt.clone_for_scan(),
                     )),
                 }
@@ -831,13 +833,13 @@ fn serve_stream(mut input: impl BufRead, mut out: impl Write, ctx: &Ctx) {
         // Compat mode always answers content search (rgx is a content
         // grep); the pattern is literal under -F, regex otherwise.
         let mode = if fixed {
-            name_core::name_query::GrepMode::Literal
+            rgy_name_core::name_query::GrepMode::Literal
         } else {
-            name_core::name_query::GrepMode::Regex
+            rgy_name_core::name_query::GrepMode::Regex
         };
         let mut matched = false;
         if let Some(dir) = &ctx.tv_dir {
-            match engine::tv::grep_tv(dir, &pattern) {
+            match rgy_engine::tv::grep_tv(dir, &pattern) {
                 Ok(fs) => {
                     for f in fs {
                         matched = true;
@@ -914,7 +916,7 @@ fn serve_pattern(argv: &[String]) -> Option<(String, bool)> {
 }
 
 fn serve_file(out: &mut impl Write, path: &str, lines: &[(usize, String)]) {
-    let esc = proto::escape_json_string;
+    let esc = rgy_proto::escape_json_string;
     let _ = writeln!(
         out,
         "{{\"type\":\"begin\",\"data\":{{\"path\":{{\"text\":\"{}\"}}}}}}",
@@ -945,7 +947,7 @@ fn serve_end(
     error: Option<&str>,
 ) {
     let err = error
-        .map(|e| format!(",\"error\":\"{}\"", proto::escape_json_string(e)))
+        .map(|e| format!(",\"error\":\"{}\"", rgy_proto::escape_json_string(e)))
         .unwrap_or_default();
     let _ = writeln!(
         out,
@@ -966,16 +968,20 @@ fn serve_end(
 /// delivered instead of being missed. It is 0 when the index carries no
 /// position, and the feed then starts at the journal's head.
 #[cfg(windows)]
-fn open_watch(root: &[u8], journal: &Journal, watermark: u64) -> Option<Box<dyn discovery::Watch>> {
+fn open_watch(
+    root: &[u8],
+    journal: &Journal,
+    watermark: u64,
+) -> Option<Box<dyn rgy_discovery::Watch>> {
     let path = std::str::from_utf8(root).ok()?;
     let vol_root = std::path::Path::new(path).ancestors().last()?.to_str()?;
     // The volume lives for the process; leak it so the UsnWatch owns a
     // 'static borrow and can move into the update thread.
-    let volume: &'static discovery_windows::volume::Volume = Box::leak(Box::new(
-        discovery_windows::volume::Volume::open(vol_root).ok()?,
+    let volume: &'static rgy_discovery_windows::volume::Volume = Box::leak(Box::new(
+        rgy_discovery_windows::volume::Volume::open(vol_root).ok()?,
     ));
-    let indexer = discovery_windows::indexer::Indexer::new(volume);
-    let mut watch = discovery_windows::UsnWatch::new(indexer);
+    let indexer = rgy_discovery_windows::indexer::Indexer::new(volume);
+    let mut watch = rgy_discovery_windows::UsnWatch::new(indexer);
     if watermark != 0 && watermark <= i64::MAX as u64 {
         watch.start_usn = watermark as i64;
         // The journal's identity travels with it: a journal that was deleted
@@ -991,10 +997,12 @@ fn open_watch(
     root: &[u8],
     _journal: &Journal,
     _watermark: u64,
-) -> Option<Box<dyn discovery::Watch>> {
+) -> Option<Box<dyn rgy_discovery::Watch>> {
     use std::os::unix::ffi::OsStrExt;
     let path = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(root));
-    Some(Box::new(discovery_linux::InotifyWatch::new(&path).ok()?))
+    Some(Box::new(
+        rgy_discovery_linux::InotifyWatch::new(&path).ok()?,
+    ))
 }
 
 /// The macOS feed: FSEvents, pulled.
@@ -1014,16 +1022,16 @@ fn open_watch(
     root: &[u8],
     _journal: &Journal,
     watermark: u64,
-) -> Option<Box<dyn discovery::Watch>> {
+) -> Option<Box<dyn rgy_discovery::Watch>> {
     // Start where the index stands, and from now otherwise: an event id of
     // zero asks the framework for the whole history it still keeps, which
     // is a flood of folders to re-list at startup.
     let since = if watermark > 0 {
         watermark
     } else {
-        discovery_macos::current_id()
+        rgy_discovery_macos::current_id()
     };
-    Some(Box::new(discovery_macos::FseventsWatch::open(
+    Some(Box::new(rgy_discovery_macos::FseventsWatch::open(
         root,
         since,
         FSEVENTS_LATENCY,
@@ -1049,7 +1057,7 @@ fn open_watch(
     _root: &[u8],
     _journal: &Journal,
     _watermark: u64,
-) -> Option<Box<dyn discovery::Watch>> {
+) -> Option<Box<dyn rgy_discovery::Watch>> {
     None
 }
 
@@ -1070,7 +1078,7 @@ fn spawn_watch(ctx: &std::sync::Arc<Ctx>, journal: &Journal, watermark: u64) {
             };
             loop {
                 match watch.next_batch() {
-                    Ok(discovery::ChangeBatch::Events(events)) => {
+                    Ok(rgy_discovery::ChangeBatch::Events(events)) => {
                         let mut live = ctx.live.write().unwrap();
                         live.apply_events(&events);
                         // The feed's position is the watermark the index is
@@ -1080,7 +1088,7 @@ fn spawn_watch(ctx: &std::sync::Arc<Ctx>, journal: &Journal, watermark: u64) {
                             live.event_id = pos;
                         }
                     }
-                    Ok(discovery::ChangeBatch::Rescan) => {
+                    Ok(rgy_discovery::ChangeBatch::Rescan) => {
                         ctx.live.write().unwrap().apply_dir(&root, true);
                         // The feed lost its history, so nothing was replayed:
                         // the tree was walked again instead. The platform's
@@ -1100,7 +1108,7 @@ fn serve_uds(path: &str, ctx: &std::sync::Arc<Ctx>, serve: bool) {
     let listener = match UnixListener::bind(path) {
         Ok(l) => l,
         Err(e) => {
-            engine::errln!("searchd: bind {path}: {e}");
+            rgy_engine::errln!("searchd: bind {path}: {e}");
             std::process::exit(2);
         }
     };
@@ -1118,7 +1126,7 @@ fn serve_uds(path: &str, ctx: &std::sync::Arc<Ctx>, serve: bool) {
 
 #[cfg(not(unix))]
 fn serve_uds(_path: &str, _ctx: &std::sync::Arc<Ctx>, _serve: bool) {
-    engine::errln!("searchd: uds listen is unix-only; use pipe:<name> or stdio");
+    rgy_engine::errln!("searchd: uds listen is unix-only; use pipe:<name> or stdio");
     std::process::exit(2);
 }
 
@@ -1160,10 +1168,10 @@ fn spawn_pipe_acceptor(path: &str, ctx: std::sync::Arc<Ctx>, serve: bool) {
             spawn_pipe_acceptor(&path, ctx.clone(), serve);
             match conn.try_clone() {
                 Ok(r) => run_stream(std::io::BufReader::new(r), conn, &ctx, serve),
-                Err(e) => engine::errln!("searchd: pipe {path}: {e}"),
+                Err(e) => rgy_engine::errln!("searchd: pipe {path}: {e}"),
             }
         }
-        Err(e) => engine::errln!("searchd: pipe {path}: {e}"),
+        Err(e) => rgy_engine::errln!("searchd: pipe {path}: {e}"),
     });
 }
 
@@ -1227,7 +1235,7 @@ fn open_pipe_server(path: &str) -> std::io::Result<std::fs::File> {
 
 #[cfg(not(windows))]
 fn serve_pipe(name: &str, _ctx: &std::sync::Arc<Ctx>, _serve: bool) {
-    engine::errln!("searchd: pipe:{name} is windows-only; use uds:<path> or stdio");
+    rgy_engine::errln!("searchd: pipe:{name} is windows-only; use uds:<path> or stdio");
     std::process::exit(2);
 }
 
@@ -1240,7 +1248,7 @@ fn now_secs() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use discovery::Source;
+    use rgy_discovery::Source;
 
     /// The JSON escaper this repository uses and the one upstream's rgx
     /// uses must agree on the same input, byte for byte.
@@ -1270,7 +1278,7 @@ mod tests {
         ];
         for c in cases {
             assert_eq!(
-                proto::escape_json_string(c),
+                rgy_proto::escape_json_string(c),
                 rgx_core::djson::escape_json_string(c),
                 "the two escapers disagree on {c:?}"
             );
@@ -1411,12 +1419,12 @@ mod tests {
         // The file appears, and the feed says the folder whose contents
         // changed (what a directory-granular feed says).
         std::fs::write(dir.join("late.txt"), b"late\n").unwrap();
-        live.apply_events(&[discovery::UsnRecord {
+        live.apply_events(&[rgy_discovery::UsnRecord {
             file_reference: 0,
             parent_reference: 0,
             usn: 0,
             reason: 0,
-            file_attributes: discovery::FILE_ATTRIBUTE_DIRECTORY,
+            file_attributes: rgy_discovery::FILE_ATTRIBUTE_DIRECTORY,
             name: String::from_utf8_lossy(&root).into_owned(),
         }]);
 
@@ -1484,12 +1492,12 @@ mod tests {
         // changed (what a directory-granular feed says).
         std::fs::write(dir.join("late-one.txt"), b"one\n").unwrap();
         std::fs::write(dir.join("late-two.txt"), b"two\n").unwrap();
-        live.apply_events(&[discovery::UsnRecord {
+        live.apply_events(&[rgy_discovery::UsnRecord {
             file_reference: 0,
             parent_reference: 0,
             usn: 0,
             reason: 0,
-            file_attributes: discovery::FILE_ATTRIBUTE_DIRECTORY,
+            file_attributes: rgy_discovery::FILE_ATTRIBUTE_DIRECTORY,
             name: String::from_utf8_lossy(&root).into_owned(),
         }]);
 

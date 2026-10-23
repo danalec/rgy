@@ -26,8 +26,8 @@ use crate::live::{Live, join};
 use crate::name_index::{Blob, HDR, as_bytes, fields, header, layout, sec};
 use crate::name_query::{GrepMode, Query, fold};
 use crate::placeholder;
-use discovery::walk::KIND_FILE;
 use rayon::prelude::*;
+use rgy_discovery::walk::KIND_FILE;
 // Per-file confirmation runs on the rgx engine (docs/design.md §2.3
 // 4.3: literal/hybrid/fixed/VM + SIMD prefilter replace memchr/regex
 // verify). regex_syntax stays for plan()'s HIR; the regex crate remains
@@ -3814,8 +3814,8 @@ mod grep_pipeline_tests {
     use crate::live::Live;
     use crate::name_index::Index;
     use crate::name_query::{GrepMode, Query};
-    use discovery::PortableSource;
-    use discovery::Source;
+    use rgy_discovery::PortableSource;
+    use rgy_discovery::Source;
 
     fn tiny_live(tag: &str) -> (Live, std::path::PathBuf) {
         // Unique per test: they run in parallel and share the temp root.
@@ -4107,7 +4107,7 @@ mod grep_pipeline_tests {
 
     /// The Watch thread's core: a batch of change events (each naming the
     /// changed path) drives the same freshness as a hand `apply_dir`. This is
-    /// what a `discovery::Watch` feed calls, pinned without an OS watch.
+    /// what a `rgy_discovery::Watch` feed calls, pinned without an OS watch.
     #[test]
     fn apply_events_and_sync_reflect_an_edit() {
         let dir = std::env::temp_dir().join(format!("rgy_evt_{}", std::process::id()));
@@ -4135,7 +4135,7 @@ mod grep_pipeline_tests {
         // Edit the file; a Watch event names the changed path, and applying it
         // (then syncing) must reach the query.
         std::fs::write(dir.join("edit.rs"), b"fn after() {}\n").unwrap();
-        let rec = discovery::UsnRecord {
+        let rec = rgy_discovery::UsnRecord {
             file_reference: 0,
             parent_reference: 0,
             usn: 0,
@@ -4156,9 +4156,9 @@ mod grep_pipeline_tests {
     /// OS watch, so the loop is pinned without an OS-specific watcher.
     #[test]
     fn run_watch_feed_applies_what_the_feed_reports() {
-        struct OneShot(Option<discovery::ChangeBatch>);
-        impl discovery::Watch for OneShot {
-            fn next_batch(&mut self) -> Result<discovery::ChangeBatch, String> {
+        struct OneShot(Option<rgy_discovery::ChangeBatch>);
+        impl rgy_discovery::Watch for OneShot {
+            fn next_batch(&mut self) -> Result<rgy_discovery::ChangeBatch, String> {
                 self.0.take().ok_or_else(|| "feed exhausted".to_string())
             }
         }
@@ -4186,7 +4186,7 @@ mod grep_pipeline_tests {
 
         // The feed reports the edit; running it must reflect it.
         std::fs::write(dir.join("edit.rs"), b"fn after() {}\n").unwrap();
-        let rec = discovery::UsnRecord {
+        let rec = rgy_discovery::UsnRecord {
             file_reference: 0,
             parent_reference: 0,
             usn: 0,
@@ -4194,7 +4194,7 @@ mod grep_pipeline_tests {
             file_attributes: 0,
             name: dir.join("edit.rs").to_string_lossy().into_owned(),
         };
-        let mut feed = OneShot(Some(discovery::ChangeBatch::Events(vec![rec])));
+        let mut feed = OneShot(Some(rgy_discovery::ChangeBatch::Events(vec![rec])));
         assert!(live.run_watch_feed(&mut feed, &root).is_err(), "the feed ends with its error");
         content.sync(&live, b"", &[], std::slice::from_ref(&root), &root);
 
@@ -4233,12 +4233,12 @@ mod grep_pipeline_tests {
         // Edit a file inside sub/; a directory event names sub/ (its contents
         // changed). Only re-listing sub/ (the dir branch) reaches the edit.
         std::fs::write(dir.join("sub/edit.rs"), b"fn after() {}\n").unwrap();
-        let rec = discovery::UsnRecord {
+        let rec = rgy_discovery::UsnRecord {
             file_reference: 0,
             parent_reference: 0,
             usn: 0,
             reason: 0,
-            file_attributes: discovery::FILE_ATTRIBUTE_DIRECTORY,
+            file_attributes: rgy_discovery::FILE_ATTRIBUTE_DIRECTORY,
             name: dir.join("sub").to_string_lossy().into_owned(),
         };
         live.apply_events(&[rec]);

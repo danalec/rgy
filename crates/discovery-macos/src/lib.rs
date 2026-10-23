@@ -4,7 +4,7 @@
 //! `getattrlistbulk` walk and FSEvents watch, transported verbatim.
 //!
 //! The whole backend is `cfg(target_os = "macos")`; on other hosts this
-//! crate compiles empty and `discovery::PortableSource` is the Source.
+//! crate compiles empty and `rgy_discovery::PortableSource` is the Source.
 //!
 //! **Type-checked, not run.** The code is fsearch's, which compiles on
 //! macOS; the only edits are import paths. `cargo check --target
@@ -15,7 +15,7 @@
 //! The FSEvents watch is a callback feed and the daemon speaks a pull, so
 //! [`feed::FseventsWatch`] is the adapter between the two: it owns the
 //! stream (dropping the stream stops the feed) and turns each pushed batch
-//! into one [`discovery::ChangeBatch`]. Its decisions — which folder an
+//! into one [`rgy_discovery::ChangeBatch`]. Its decisions — which folder an
 //! event means, and which events belong to the indexed tree — are plain
 //! functions over [`event::Event`], so they are tested on every platform
 //! rather than only on a Mac.

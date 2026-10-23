@@ -100,7 +100,7 @@ def bench_command(names: int) -> list[str]:
     compare.
     """
     return [
-        "cargo", "run", "--release", "-p", "engine", "--example", "name_bench",
+        "cargo", "run", "--release", "-p", "rgy-engine", "--example", "name_bench",
         str(names), "--csv", "--no-walk",
     ]
 

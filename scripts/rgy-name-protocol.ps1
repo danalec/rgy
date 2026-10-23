@@ -45,7 +45,7 @@ Write-Host "name-tier protocol: scales=$($scaleList -join ', ') rounds=$Rounds t
 $bin = Join-Path $Repo 'target\release\examples\name_proto.exe'
 if (!(Test-Path $bin)) {
     cargo build --release --manifest-path (Join-Path $Repo 'Cargo.toml') `
-        -p engine --example name_proto
+        -p rgy-engine --example name_proto
 }
 
 $tree = (git -C $Repo rev-parse HEAD).Trim()

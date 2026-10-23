@@ -15,8 +15,8 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 use crossterm::execute;
 use crossterm::style::{Print, ResetColor, SetBackgroundColor, Stylize};
 use crossterm::terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen};
-use name_core::live::Live;
-use name_core::name_query::{Alternatives, Hit, Searcher};
+use rgy_name_core::live::Live;
+use rgy_name_core::name_query::{Alternatives, Hit, Searcher};
 use std::io::Write;
 use std::time::Instant;
 
@@ -162,7 +162,7 @@ impl TerminalGuard {
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        let mut out = engine::console::stdout();
+        let mut out = rgy_engine::console::stdout();
         let _ = execute!(out, ResetColor, Show, LeaveAlternateScreen);
         let _ = terminal::disable_raw_mode();
     }
@@ -714,14 +714,14 @@ pub fn run(live: Live, root: String, indexed: usize) -> Result<(), String> {
     // The console decides how the UTF-8 bytes are decoded, so it is put
     // into UTF-8 before the first frame is painted (parity row 4.7): a
     // name with an accent has to reach the screen as itself.
-    engine::console::init();
+    rgy_engine::console::init();
 
     // Which view of an adapter-claimed file a search reads. rgy answers to
     // RGY_ADAPTER_VIEW and falls back to rgx's RGX_ADAPTER_VIEW, so a shell
     // configured for rgx is configured for rgy too.
-    engine::adapter_view::apply();
+    rgy_engine::adapter_view::apply();
 
-    let mut out = engine::console::stdout();
+    let mut out = rgy_engine::console::stdout();
     let _guard = TerminalGuard::enter(&mut out)?;
 
     let mut app = App::new(live, root, indexed);
@@ -788,7 +788,7 @@ pub fn run(live: Live, root: String, indexed: usize) -> Result<(), String> {
 
     drop(_guard);
     if let Some(path) = chosen {
-        engine::outln!("{path}");
+        rgy_engine::outln!("{path}");
     }
     Ok(())
 }
@@ -995,8 +995,8 @@ mod bench {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use discovery::walk::{KIND_DIR, KIND_FILE, Listing, NONE, RawEnt};
-    use name_core::name_index;
+    use rgy_discovery::walk::{KIND_DIR, KIND_FILE, Listing, NONE, RawEnt};
+    use rgy_name_core::name_index;
 
     /// The same four entries the old zen fixture had, as the two DFS
     /// [`Listing`]s `name_index::Index::build` wants.

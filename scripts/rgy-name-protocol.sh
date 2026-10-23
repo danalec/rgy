@@ -202,7 +202,7 @@ elif [ -x "$examples/name_proto" ]; then
     bin="$examples/name_proto"
 fi
 if [ -z "$bin" ]; then
-    cargo build --release --manifest-path "$repo/Cargo.toml" -p engine --example name_proto
+    cargo build --release --manifest-path "$repo/Cargo.toml" -p rgy-engine --example name_proto
     if [ -x "$examples/name_proto.exe" ]; then
         bin="$examples/name_proto.exe"
     elif [ -x "$examples/name_proto" ]; then

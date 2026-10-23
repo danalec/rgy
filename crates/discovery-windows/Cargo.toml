@@ -1,13 +1,20 @@
 [package]
-name = "discovery-windows"
+name = "rgy-discovery-windows"
 version = "0.1.0"
 edition = "2024"
 authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
 description = "Windows discovery backend: NTFS MFT streaming + USN journal (from zen-rs)"
 license = "Apache-2.0"
+repository = "https://github.com/danalec/rgy"
+homepage = "https://github.com/danalec/rgy"
+documentation = "https://docs.rs/rgy-discovery-windows"
+keywords = ["filesystem", "search", "mft", "usn"]
+categories = ["filesystem"]
+readme = "../../README.md"
+
 
 [dependencies]
-discovery = { path = "../discovery" }
+rgy-discovery = { path = "../discovery", version = "0.1.0" }
 
 # Gated to Windows, like the crate body in `src/lib.rs`. The `windows` family
 # does not cross-compile -- `windows-future` pulls internals `windows-core`

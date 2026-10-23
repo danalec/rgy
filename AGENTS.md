@@ -23,6 +23,18 @@ that nobody asked for, and it is the reason the licence story is hard: a
 file whose SPDX header says Apache-2.0 while its content is somebody
 else's work is a licence claim this project cannot make.
 
+**A directory name is not a crate name.** The fourteen rgy crates publish
+as `rgy-<directory>` (`crates/proto` → `rgy-proto`, `crates/name-core` →
+`rgy-name-core`, `crates/discovery-windows` → `rgy-discovery-windows`),
+because `proto`, `discovery`, `name-core`, `engine`, `autostart` and
+`zen-rs` are taken on crates.io. The **library target names follow the
+package names** (`rgy_discovery`, `rgy_name_core`), so the Rust paths
+are `rgy_discovery::…`. That is deliberate: a library whose target name
+stayed `discovery` would collide with the crates.io crate of that name,
+and two dependencies sharing one lib name is `E0464` on the consumer's
+side. The **shipped binaries keep their names** (`searchctl`, `searchd`,
+`rgy-autostart`) — only the package names moved.
+
 ### The sync is the only way they change
 
 ```sh

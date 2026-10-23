@@ -1,24 +1,31 @@
 [package]
-name = "searchctl"
+name = "rgy-searchctl"
 version = "0.1.0"
 edition = "2024"
 authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
 description = "The merged name-search CLI (fsearch ergonomics + zen-rs filters)"
 license = "Apache-2.0"
+repository = "https://github.com/danalec/rgy"
+homepage = "https://github.com/danalec/rgy"
+documentation = "https://docs.rs/rgy-searchctl"
+keywords = ["search", "cli", "filesystem"]
+categories = ["command-line-utilities"]
+readme = "../../README.md"
+
 
 [[bin]]
 name = "searchctl"
 path = "src/main.rs"
 
 [dependencies]
-discovery = { path = "../../crates/discovery" }
+rgy-discovery = { path = "../../crates/discovery", version = "0.1.0" }
 # The platform walk selector (docs/design.md §2.2).
-discovery-dispatch = { path = "../../crates/discovery-dispatch" }
+rgy-discovery-dispatch = { path = "../../crates/discovery-dispatch", version = "0.1.0" }
 # The console's UTF-8 code page (parity row 4.7).
-engine = { path = "../../crates/engine" }
-name-core = { path = "../../crates/name-core" }
+rgy-engine = { path = "../../crates/engine", version = "0.1.0" }
+rgy-name-core = { path = "../../crates/name-core", version = "0.1.0" }
 # The JSON escaper the daemon uses, so a path or a grep line reaches the
 # wire the same way whichever side wrote it.
-proto = { path = "../../crates/proto" }
+rgy-proto = { path = "../../crates/proto", version = "0.1.0" }
 # One allocator story (plan 4.4).
 mimalloc = { version = "0.1", default-features = false }

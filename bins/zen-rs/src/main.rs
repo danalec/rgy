@@ -15,17 +15,17 @@
 // cross-compile). Everything that reads a volume is gated; what is left
 // below is the index writing and its tests, which are platform-independent.
 #[cfg(windows)]
-use discovery_windows::{indexer, ntfs, seam, volume};
+use rgy_discovery_windows::{indexer, ntfs, seam, volume};
 #[cfg(windows)]
-use name_core::live::Live;
+use rgy_name_core::live::Live;
 #[cfg(windows)]
-use name_core::name_index::Index;
+use rgy_name_core::name_index::Index;
 #[cfg(windows)]
-use name_core::name_query::{Alternatives, Searcher, merge_hits};
+use rgy_name_core::name_query::{Alternatives, Searcher, merge_hits};
 #[cfg(windows)]
-use name_core::persist;
+use rgy_name_core::persist;
 #[cfg(windows)]
-use search_ui as ui;
+use rgy_search_ui as ui;
 
 // One allocator story (plan 4.4/4.10): mimalloc for the general heap, matching
 // searchctl/searchd -- it measured 5-12% on parallel walks on Windows.
@@ -426,7 +426,7 @@ fn cmd_list(source: &str, filter: Option<&str>) -> Result<(), String> {
 /// the same feed `searchd` holds open, run to its end here as a demo.
 #[cfg(windows)]
 fn cmd_tail(volume_path: &str) -> Result<(), String> {
-    use discovery::Watch;
+    use rgy_discovery::Watch;
 
     let volume = Volume::open(volume_path).map_err(|e| e.to_string())?;
     let (idx, _stats) = build_index(&volume)?;
@@ -439,7 +439,7 @@ fn cmd_tail(volume_path: &str) -> Result<(), String> {
     while rounds < 10 {
         rounds += 1;
         match watch.next_batch()? {
-            discovery::ChangeBatch::Events(events) => {
+            rgy_discovery::ChangeBatch::Events(events) => {
                 let n = events.len();
                 if n == 0 {
                     break;
@@ -448,7 +448,7 @@ fn cmd_tail(volume_path: &str) -> Result<(), String> {
                 total += n;
                 eprintln!("round {rounds}: applied {n} change(s)");
             }
-            discovery::ChangeBatch::Rescan => {
+            rgy_discovery::ChangeBatch::Rescan => {
                 eprintln!("round {rounds}: history lost at the root - a full rescan is due");
                 break;
             }
@@ -462,15 +462,15 @@ fn cmd_tail(volume_path: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use discovery::walk::{KIND_DIR, KIND_FILE, Listing, NONE, RawEnt};
+    use rgy_discovery::walk::{KIND_DIR, KIND_FILE, Listing, NONE, RawEnt};
     // The save/load round trip runs off Windows too, so the index format and
     // its persistence are imported here rather than through the gated
     // imports at the top of the file.
-    use name_core::name_index::Index;
-    use name_core::persist;
+    use rgy_name_core::name_index::Index;
+    use rgy_name_core::persist;
 
     /// root (listing 0) has "projects" (dir, listing 1) with "notes.txt".
-    /// Built from `discovery::walk` listings rather than an MFT scan, so the
+    /// Built from `rgy_discovery::walk` listings rather than an MFT scan, so the
     /// save/load round trip tests run off Windows too.
     fn sample_index() -> Index {
         let mut root_names = Vec::new();
@@ -603,8 +603,8 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn every_live_change_is_answered() {
-        use discovery::{PortableSource, Source};
-        use name_core::live::Live;
+        use rgy_discovery::{PortableSource, Source};
+        use rgy_name_core::live::Live;
 
         let dir = std::env::temp_dir().join(format!(
             "zen-rs-live-{}-{}",
@@ -629,12 +629,12 @@ mod tests {
         // changed (what a directory-granular feed says).
         std::fs::write(dir.join("late-one.txt"), b"one\n").expect("the first arrival");
         std::fs::write(dir.join("late-two.txt"), b"two\n").expect("the second arrival");
-        live.apply_events(&[discovery::UsnRecord {
+        live.apply_events(&[rgy_discovery::UsnRecord {
             file_reference: 0,
             parent_reference: 0,
             usn: 0,
             reason: 0,
-            file_attributes: discovery::FILE_ATTRIBUTE_DIRECTORY,
+            file_attributes: rgy_discovery::FILE_ATTRIBUTE_DIRECTORY,
             name: String::from_utf8_lossy(&root_bytes).into_owned(),
         }]);
 

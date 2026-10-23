@@ -1,10 +1,17 @@
 [package]
-name = "discovery"
+name = "rgy-discovery"
 version = "0.1.0"
 edition = "2024"
 authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
 description = "Platform discovery seam (Source/Watch) and the shared change vocabulary"
 license = "Apache-2.0"
+repository = "https://github.com/danalec/rgy"
+homepage = "https://github.com/danalec/rgy"
+documentation = "https://docs.rs/rgy-discovery"
+keywords = ["filesystem", "search", "discovery", "index"]
+categories = ["filesystem", "command-line-utilities"]
+readme = "../../README.md"
+
 
 [dependencies]
 # The portable walk fans directory reads across a pool; `scan_sequential`

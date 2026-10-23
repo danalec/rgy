@@ -25,7 +25,7 @@ pub const NAMESPACE_WIN32_AND_DOS: u8 = 3;
 /// `FILE_ATTRIBUTE_REPARSE_POINT` and the USN reason flags live in
 /// `discovery` (the shared change vocabulary — one type, one home). These
 /// re-exports keep the `ntfs::…` paths working.
-pub use discovery::{
+pub use rgy_discovery::{
     FILE_ATTRIBUTE_REPARSE_POINT, USN_REASON_FILE_CREATE, USN_REASON_FILE_DELETE,
     USN_REASON_JOURNAL_DELETE, USN_REASON_PATH_RELEVANT, USN_REASON_RENAME_DUPLICATE_SOURCE,
     USN_REASON_RENAME_DUPLICATE_TARGET, USN_REASON_RENAME_NEW_NAME, USN_REASON_RENAME_OLD_NAME,

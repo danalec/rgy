@@ -1,27 +1,34 @@
 [package]
-name = "discovery-dispatch"
+name = "rgy-discovery-dispatch"
 version = "0.1.0"
 edition = "2024"
 authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
 description = "The Source selector (docs/design.md §2.2): the native walk per platform by cfg, the portable walk elsewhere"
 license = "Apache-2.0"
+repository = "https://github.com/danalec/rgy"
+homepage = "https://github.com/danalec/rgy"
+documentation = "https://docs.rs/rgy-discovery-dispatch"
+keywords = ["filesystem", "search", "dispatch"]
+categories = ["filesystem"]
+readme = "../../README.md"
+
 
 [dependencies]
-discovery = { path = "../discovery" }
+rgy-discovery = { path = "../discovery", version = "0.1.0" }
 # The catch-up rule answers with the wire value the status response carries
 # (`replayed` / `relisted`), so the rule and the spelling cannot drift.
-proto = { path = "../proto" }
+rgy-proto = { path = "../proto", version = "0.1.0" }
 
 # The platform walks, pulled in per-target so `source_for` can build the
 # native one on its own OS. Every crate is empty off-target.
 [target.'cfg(windows)'.dependencies]
-discovery-windows = { path = "../discovery-windows" }
+rgy-discovery-windows = { path = "../discovery-windows", version = "0.1.0" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-discovery-linux = { path = "../discovery-linux" }
+rgy-discovery-linux = { path = "../discovery-linux", version = "0.1.0" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-discovery-macos = { path = "../discovery-macos" }
+rgy-discovery-macos = { path = "../discovery-macos", version = "0.1.0" }
 
 [target.'cfg(target_os = "freebsd")'.dependencies]
-discovery-freebsd = { path = "../discovery-freebsd" }
+rgy-discovery-freebsd = { path = "../discovery-freebsd", version = "0.1.0" }

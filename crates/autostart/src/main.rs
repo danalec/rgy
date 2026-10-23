@@ -34,12 +34,12 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use autostart::linux;
-use autostart::macos;
-use autostart::plan::{Mechanism, Platform, choose_mechanism, default_name, detect_platform};
-use autostart::render::{reg_add_command_line, schtasks_command_line, windows_task_command};
-use autostart::windows;
-use autostart::{Removal, Report, mechanism_label, resolve_binary};
+use rgy_autostart::linux;
+use rgy_autostart::macos;
+use rgy_autostart::plan::{Mechanism, Platform, choose_mechanism, default_name, detect_platform};
+use rgy_autostart::render::{reg_add_command_line, schtasks_command_line, windows_task_command};
+use rgy_autostart::windows;
+use rgy_autostart::{Removal, Report, mechanism_label, resolve_binary};
 
 /// The console's output code page.
 ///
@@ -165,7 +165,7 @@ fn parse_options(argv: &[String]) -> Result<Options, String> {
             "--args" => {
                 index += 1;
                 let value = argv.get(index).ok_or("--args needs a value")?;
-                options.args = autostart::split_args(value);
+                options.args = rgy_autostart::split_args(value);
             }
             "--name" => {
                 index += 1;
@@ -349,7 +349,7 @@ fn install_linux(name: &str, binary: &Path, args: &[String]) -> Result<Report, S
 
 /// The macOS side: a launchd agent.
 fn install_macos(name: &str, binary: &Path, args: &[String]) -> Result<Report, String> {
-    let home = autostart::home_dir();
+    let home = rgy_autostart::home_dir();
     let path = macos::plist_path_in(&home, name);
 
     let changed = macos::write_plist(&home, name, binary, args)
@@ -514,7 +514,7 @@ fn uninstall_linux(name: &str) -> Result<Removal, String> {
 
 /// The macOS side: unload the agent, and take the plist away.
 fn uninstall_macos(name: &str) -> Result<Removal, String> {
-    let home = autostart::home_dir();
+    let home = rgy_autostart::home_dir();
     let path = macos::plist_path_in(&home, name);
     let mut notes = Vec::new();
 
@@ -611,7 +611,7 @@ fn status_linux(name: &str) {
 
 /// The macOS side.
 fn status_macos(name: &str) {
-    let home = autostart::home_dir();
+    let home = rgy_autostart::home_dir();
     let state = macos::status(&home, name);
 
     println!("mechanism: launchd agent");

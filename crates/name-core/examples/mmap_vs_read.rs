@@ -12,7 +12,7 @@
 //! (root); otherwise they are marked unavailable rather than faked by a
 //! "first round" that still sits in page cache.
 //!
-//! Run: `cargo run --release -p name-core --example mmap_vs_read -- [MiB]`
+//! Run: `cargo run --release -p rgy-name-core --example mmap_vs_read -- [MiB]`
 //! (default 256 MiB)
 
 use std::fs::File;

@@ -107,14 +107,14 @@ mod tests {
         use crate::live::Live;
         use crate::name_index::Index;
         use crate::name_query::{Query, Searcher};
-        use discovery::walk::{KIND_FILE, NONE, RawEnt};
+        use rgy_discovery::walk::{KIND_FILE, NONE, RawEnt};
 
         /// An index with one file, whose name is `name`.
         fn live_with(name: &str) -> Live {
             let mut names = Vec::new();
             names.extend_from_slice(name.as_bytes());
             let ents = vec![RawEnt { name_off: 0, name_len: name.len() as u16, kind: KIND_FILE, size: 10, mtime: 1_700_000_000, child: NONE }];
-            let listing = discovery::walk::Listing { id: 0, names, ents };
+            let listing = rgy_discovery::walk::Listing { id: 0, names, ents };
             Live::new(Index::build(vec![listing], 0, 1_700_000_000, b"/"))
         }
 
@@ -174,7 +174,7 @@ mod tests {
             std::fs::write(dir.join(name), b"hello").expect("the file");
 
             let root = dir.as_os_str().as_encoded_bytes().to_vec();
-            let live = Live::new(Index::build(discovery::walk::scan(&root, 1), 0, 1_700_000_000, b"/"));
+            let live = Live::new(Index::build(rgy_discovery::walk::scan(&root, 1), 0, 1_700_000_000, b"/"));
             let s = Searcher { live: &live };
             let hits = s.search(&Query::parse("caf\u{e9}", "").expect("parses"));
             assert_eq!(hits.len(), 1, "the file on the disk did not match the NFC query");

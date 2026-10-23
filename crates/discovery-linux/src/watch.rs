@@ -3,21 +3,21 @@
 //! Recursive inotify `Watch`: every directory under the root gets a watch;
 //! an `IN_Q_OVERFLOW` (or watch-limit hit) reports [`ChangeBatch::Rescan`],
 //! and anything else is translated into `UsnRecord`-shaped
-//! [`discovery::UsnRecord`]s the name layer already knows (create/delete/
+//! [`rgy_discovery::UsnRecord`]s the name layer already knows (create/delete/
 //! rename reason bits) — one change vocabulary across backends.
 
 use std::ffi::CString;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::PathBuf;
 
-use discovery::{ChangeBatch, UsnRecord, Watch};
+use rgy_discovery::{ChangeBatch, UsnRecord, Watch};
 
 /// fsearch/Zen path-reason equivalents, folded into the shared
 /// `USN_REASON_*` bits so `Index::apply_usn` filters them the same way.
-const REASON_CREATE: u32 = discovery::USN_REASON_FILE_CREATE;
-const REASON_DELETE: u32 = discovery::USN_REASON_FILE_DELETE;
-const REASON_RENAME_OLD: u32 = discovery::USN_REASON_RENAME_OLD_NAME;
-const REASON_RENAME_NEW: u32 = discovery::USN_REASON_RENAME_NEW_NAME;
+const REASON_CREATE: u32 = rgy_discovery::USN_REASON_FILE_CREATE;
+const REASON_DELETE: u32 = rgy_discovery::USN_REASON_FILE_DELETE;
+const REASON_RENAME_OLD: u32 = rgy_discovery::USN_REASON_RENAME_OLD_NAME;
+const REASON_RENAME_NEW: u32 = rgy_discovery::USN_REASON_RENAME_NEW_NAME;
 
 pub struct InotifyWatch {
     fd: i32,

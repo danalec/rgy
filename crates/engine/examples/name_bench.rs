@@ -9,15 +9,15 @@
 //! before timing (a fast wrong answer is a failure). A >20% regression on
 //! any row fails the PR.
 //!
-//! Run: `cargo run --release -p engine --example name_bench [names] [--csv]`
+//! Run: `cargo run --release -p rgy-engine --example name_bench [names] [--csv]`
 //!
 //! `--csv` puts a machine-readable table on stdout and the human summary on
 //! stderr, so a gate can diff a baseline without parsing prose:
-//! `cargo run --release -p engine --example name_bench 1000000 --csv > base.csv`.
+//! `cargo run --release -p rgy-engine --example name_bench 1000000 --csv > base.csv`.
 //!
 //! `--save-index <file> --root <dir>` turns the run into the artifact the
 //! daemon's resident measurement needs (`benchmark/baseline-names.md`): the
-//! synthetic index is persisted through `name_core::persist` -- sidecar
+//! synthetic index is persisted through `rgy_name_core::persist` -- sidecar
 //! included, so `searchd` will trust it -- and the run stops there, before
 //! the query rows and the walk fixture. The fixture writes one file per
 //! corpus entry, and a resident run must not put a corpus on disk. The
@@ -32,11 +32,11 @@
 
 use std::time::Instant;
 
-use discovery::walk::Listing;
-use name_core::live::Live;
-use name_core::name_index::Index;
-use name_core::name_query::{Query, Searcher};
-use name_core::persist;
+use rgy_discovery::walk::Listing;
+use rgy_name_core::live::Live;
+use rgy_name_core::name_index::Index;
+use rgy_name_core::name_query::{Query, Searcher};
+use rgy_name_core::persist;
 
 /// Deterministic corpus: `n` files spread over `dirs` directories, plus a
 /// few directories-of-directories so the DFS layout is not flat. Names mix
@@ -51,10 +51,10 @@ fn synthetic_listings(n: usize, dirs: usize) -> Vec<Listing> {
         let name = format!("dir_{d:04}");
         let off = root_names.len() as u32;
         root_names.extend_from_slice(name.as_bytes());
-        root_ents.push(discovery::walk::RawEnt {
+        root_ents.push(rgy_discovery::walk::RawEnt {
             name_off: off,
             name_len: name.len() as u16,
-            kind: discovery::walk::KIND_DIR,
+            kind: rgy_discovery::walk::KIND_DIR,
             size: 0,
             mtime: 1_700_000_000,
             child: d as u32 + 1,
@@ -78,13 +78,13 @@ fn synthetic_listings(n: usize, dirs: usize) -> Vec<Listing> {
             };
             let off = names.len() as u32;
             names.extend_from_slice(name.as_bytes());
-            ents.push(discovery::walk::RawEnt {
+            ents.push(rgy_discovery::walk::RawEnt {
                 name_off: off,
                 name_len: name.len() as u16,
-                kind: discovery::walk::KIND_FILE,
+                kind: rgy_discovery::walk::KIND_FILE,
                 size: 1000 + (i as u64),
                 mtime: 1_700_000_000,
-                child: discovery::walk::NONE,
+                child: rgy_discovery::walk::NONE,
             });
         }
         out.push(Listing {
@@ -329,7 +329,7 @@ fn main() {
             }
         }
         let t = Instant::now();
-        let ls = discovery::walk::scan(tmp.to_string_lossy().as_bytes(), 4);
+        let ls = rgy_discovery::walk::scan(tmp.to_string_lossy().as_bytes(), 4);
         let elapsed = t.elapsed().as_secs_f64();
         let entries: usize = ls.iter().map(|l| l.ents.len()).sum();
         eprintln!(

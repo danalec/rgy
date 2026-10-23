@@ -23,7 +23,7 @@ searchctl --root ~ "invoice grep:tesla"   # and what is inside it
 | [docs/design.md](docs/design.md) | the decisions this workspace is built on, and the rules that keep it honest | maintainers |
 | [docs/insights-from-rgx.md](docs/insights-from-rgx.md) | what the rgx side taught about storage and access shapes | maintainers |
 | [docs/on-disk-formats.md](docs/on-disk-formats.md) | the on-disk formats: the index blob, the packs, the content segments | maintainers |
-| [docs/name-core.md](docs/name-core.md) | the name index and the query engine | maintainers |
+| [docs/rgy-name-core.md](docs/rgy-name-core.md) | the name index and the query engine | maintainers |
 | [AGENTS.md](AGENTS.md) | the rules of this repository, for agents and for people | everyone |
 | [benchmark/](benchmark/) | the measured tables and the write-ups behind them | everyone |
 
@@ -85,15 +85,15 @@ the tarball — but none of them has been published yet. The
 
 ```sh
 # name: fuzzy words, filters narrow, hits ranked
-cargo run --release -p searchctl -- --root crates "walk ext:rs"
+cargo run --release -p rgy-searchctl -- --root crates "walk ext:rs"
 # content: `grep:` literal, `regex:`, `sym:` — output is path:line:text
-cargo run --release -p searchctl -- --root crates "grep:Listing"
+cargo run --release -p rgy-searchctl -- --root crates "grep:Listing"
 # both in one query: the name narrows what is read, the content confirms
-cargo run --release -p searchctl -- --root crates "walk ext:rs grep:Listing"
+cargo run --release -p rgy-searchctl -- --root crates "walk ext:rs grep:Listing"
 # the daemon: JSON lines in, hits frames out, index warm between queries
-echo '{"op":"grep","q":"regex:fn.list"}' | cargo run --release -p searchd -- --root crates
+echo '{"op":"grep","q":"regex:fn.list"}' | cargo run --release -p rgy-searchd -- --root crates
 # rgx --serve compat: one JSON argv-array per line, begin/end framing
-echo '["-e","Listing"]' | cargo run --release -p searchd -- --root crates --serve
+echo '["-e","Listing"]' | cargo run --release -p rgy-searchd -- --root crates --serve
 # transports: --listen uds:/tmp/rgy.sock (unix) or pipe:rgy-search (windows)
 ```
 

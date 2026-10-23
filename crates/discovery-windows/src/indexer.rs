@@ -20,7 +20,7 @@ fn resume_after_gap(gap_end: u64, rec_size: u64) -> (u64, u64) {
     (skip, gap_end + skip)
 }
 
-/// One indexed directory entry: the `discovery::Source` row a [`NameRow`]s
+/// One indexed directory entry: the `rgy_discovery::Source` row a [`NameRow`]s
 /// scan produces, before the rows are grouped into DFS [`Listing`]s.
 #[derive(Clone, Debug)]
 pub struct NameRow {
@@ -52,16 +52,16 @@ fn name_is_indexable(e: &ntfs::FileNameEntry) -> bool {
     !(parent < 0x10 && parent != ROOT_FRN)
 }
 
-/// Group [`NameRow`]s into DFS [`discovery::walk::Listing`]s for
-/// [`name_core::name_index::Index::build`]: one block per directory,
+/// Group [`NameRow`]s into DFS [`rgy_discovery::walk::Listing`]s for
+/// [`rgy_name_core::name_index::Index::build`]: one block per directory,
 /// listing 0 = the children of `root_frn`, each directory entry's `child`
 /// naming the listing of that directory's children.
 ///
 /// Rows of a directory's aliases (same `frn`, different name) point at the
 /// same child listing — directories are not hard-linked on NTFS, so this is
 /// only a hard-link-style edge case in the data.
-pub fn listings_from_rows(rows: &[NameRow], root_frn: u64) -> Vec<discovery::walk::Listing> {
-    use discovery::walk::{KIND_DIR, KIND_FILE, KIND_LINK, Listing, NONE, RawEnt};
+pub fn listings_from_rows(rows: &[NameRow], root_frn: u64) -> Vec<rgy_discovery::walk::Listing> {
+    use rgy_discovery::walk::{KIND_DIR, KIND_FILE, KIND_LINK, Listing, NONE, RawEnt};
     use std::collections::HashMap;
 
     let mut by_parent: HashMap<u64, Vec<usize>> = HashMap::new();
@@ -160,8 +160,8 @@ impl<'a> Indexer<'a> {
     }
 
     /// Walk the MFT and collect every indexed name as a [`NameRow`] — the
-    /// `discovery::Source` feed for the name index (grouped into DFS
-    /// [`discovery::walk::Listing`]s by [`listings_from_rows`]).
+    /// `rgy_discovery::Source` feed for the name index (grouped into DFS
+    /// [`rgy_discovery::walk::Listing`]s by [`listings_from_rows`]).
     ///
     /// Attempts fast extent streaming by reading MFT cluster runs directly
     /// and falls back to sequential record-by-record
@@ -554,7 +554,7 @@ impl<'a> Indexer<'a> {
     /// one. `start_usn` is passed through as-is; the caller clamps it to the
     /// journal window first.
     /// Read whatever USN records are pending, without applying them — the
-    /// `discovery::Watch` feed (`UsnWatch`). All-ones ReasonMask, V4 max
+    /// `rgy_discovery::Watch` feed (`UsnWatch`). All-ones ReasonMask, V4 max
     /// version. The returned `next_usn` is the resume point even when no
     /// records matched.
     pub fn read_usn_batch(
@@ -727,7 +727,7 @@ mod tests {
 #[cfg(test)]
 mod listings_tests {
     use super::*;
-    use discovery::walk::{KIND_DIR, KIND_FILE, NONE};
+    use rgy_discovery::walk::{KIND_DIR, KIND_FILE, NONE};
 
     #[test]
     fn rows_become_dfs_listings_with_child_links() {
@@ -809,7 +809,7 @@ mod listings_tests {
         ];
         let ls = listings_from_rows(&rows, 5);
         assert_eq!(ls.len(), 1, "the junction gets no child listing");
-        assert_eq!(ls[0].ents[0].kind, discovery::walk::KIND_LINK);
+        assert_eq!(ls[0].ents[0].kind, rgy_discovery::walk::KIND_LINK);
         assert_eq!(ls[0].ents[0].child, NONE);
     }
 }

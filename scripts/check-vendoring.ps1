@@ -49,7 +49,7 @@ Write-Host "checking vendoring rules in $repoRoot" -ForegroundColor Cyan
 # provenance are acceptable in Cargo.toml, so only the non-comment part
 # of a line is inspected.
 Write-Host "`n[1/5] no upstream in manifests" -ForegroundColor Cyan
-# Scope to crates/rar-codec, crates/rgx-core, crates/rgx-adapters-* only: rgy's own crates (name-core, discovery*, engine, proto, bins/*) are not vendored-from-upstream and would false-positive.
+# Scope to crates/rar-codec, crates/rgx-core, crates/rgx-adapters-* only: rgy's own crates (rgy-name-core, rgy-discovery*, rgy-engine, rgy-proto, bins/*) are not vendored-from-upstream and would false-positive.
 $scope = '[\\/]crates[\\/](?:rar-codec|rgx-core|rgx-adapters-[^\\/]+)(?:[\\/]|$)'
 $manifests = @()
 $manifests += Get-ChildItem -Path . -Filter 'Cargo.toml' -Recurse -File |

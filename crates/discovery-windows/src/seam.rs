@@ -1,20 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The Windows backends behind the `discovery::Source`/`Watch` seam.
+//! The Windows backends behind the `rgy_discovery::Source`/`Watch` seam.
 //!
 //! `MftSource` enumerates the volume as DFS directory blocks via the MFT
 //! walk (the trap suite in `indexer`); `UsnWatch` tails the USN journal as
 //! [`ChangeBatch`]es. Together they are the Windows half of
 //! `docs/design.md` §2.2.
 
-use discovery::walk::Listing;
-use discovery::{ChangeBatch, Source, Watch};
+use rgy_discovery::walk::Listing;
+use rgy_discovery::{ChangeBatch, Source, Watch};
 
 use crate::indexer::{Indexer, listings_from_rows};
 use crate::paths::Paths;
 
 /// `Source`: the NTFS MFT walk as DFS [`Listing`]s for
-/// `name_core::name_index::Index::build`.
+/// `rgy_name_core::name_index::Index::build`.
 pub struct MftSource<'a> {
     pub indexer: Indexer<'a>,
     /// Volume root FRN — 5 (`ROOT_FRN`) on every real volume.

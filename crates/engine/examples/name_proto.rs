@@ -32,16 +32,16 @@
 //! case-insensitive -- the literal vocabulary the name index agrees with
 //! on this corpus, which the count gate verifies rather than assumes.
 //!
-//! Run: `cargo run --release -p engine --example name_proto -- <mode> ...`
+//! Run: `cargo run --release -p rgy-engine --example name_proto -- <mode> ...`
 
 use std::path::Path;
 use std::time::Instant;
 
-use discovery::walk;
-use name_core::live::Live;
-use name_core::name_index::Index;
-use name_core::name_query::{Query, Searcher};
-use name_core::persist;
+use rgy_discovery::walk;
+use rgy_name_core::live::Live;
+use rgy_name_core::name_index::Index;
+use rgy_name_core::name_query::{Query, Searcher};
+use rgy_name_core::persist;
 
 /// The match count is reported unsaturated: the interactive limit would
 /// pin broad queries at the cap and the count gate would then compare the

@@ -282,8 +282,8 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 mod tests {
     use super::*;
     use crate::name_index::Index;
-    use discovery::PortableSource;
-    use discovery::Source;
+    use rgy_discovery::PortableSource;
+    use rgy_discovery::Source;
 
     fn tree(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("rgy-persist-{tag}-{}", std::process::id()));

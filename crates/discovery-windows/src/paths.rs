@@ -55,7 +55,7 @@ impl<'a> Paths<'a> {
     /// The record names the file and its parent's file reference; the
     /// parent's path comes from the MFT and the file's name from the
     /// record itself.
-    pub fn of_record(&mut self, record: &discovery::UsnRecord) -> Option<String> {
+    pub fn of_record(&mut self, record: &rgy_discovery::UsnRecord) -> Option<String> {
         let root = self.volume.root.clone();
         path_of_record(&root, record, &mut self.cache, &mut |frn| {
             self.volume.read_file_record(frn).ok().flatten()
@@ -115,7 +115,7 @@ fn path_of_at(
 /// names — that is the folder to re-list, whichever link it was.
 fn path_of_record(
     root: &str,
-    record: &discovery::UsnRecord,
+    record: &rgy_discovery::UsnRecord,
     cache: &mut HashMap<u64, Vec<u8>>,
     read: &mut impl FnMut(u64) -> Option<Vec<u8>>,
 ) -> Option<String> {
@@ -191,7 +191,7 @@ mod tests {
         let mut cache = HashMap::new();
         let mut read = |frn: u64| records.get(&frn).cloned();
 
-        let record = discovery::UsnRecord {
+        let record = rgy_discovery::UsnRecord {
             file_reference: 500,
             parent_reference: 42,
             usn: 7,

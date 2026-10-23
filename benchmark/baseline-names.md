@@ -9,7 +9,7 @@ Host: AMD Ryzen 9 7950X3D (16 cores / 32 logical), Windows 11 Pro N
         --names 200000 --names 5000000 --gate 200000 \
         --out benchmark/baseline-names.csv
 
-The bench under it is `cargo run --release -p engine --example name_bench`:
+The bench under it is `cargo run --release -p rgy-engine --example name_bench`:
 a fixed synthetic corpus, 30 timed rounds after 3 warmup rounds, and the
 match count proven equal before the timing starts (a fast wrong answer is a
 failure). What the script adds is the part a single run cannot give:
@@ -293,7 +293,7 @@ Commands:
     # peak_rss_bytes=154652672 peak_rss_mib=147.5 resident_rss_mib=147.5 exit=1
 
 `name_bench --save-index <file> --root <dir>` exists for this recipe: the
-index is persisted through `name_core::persist` (root sidecar included, so
+index is persisted through `rgy_name_core::persist` (root sidecar included, so
 `searchd` will trust it) and the run stops before the walk fixture, which
 writes one file per corpus entry. `exit=1` in hold mode is mem-peak killing
 the daemon on schedule.

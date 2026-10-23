@@ -1,14 +1,21 @@
 [package]
-name = "discovery-macos"
+name = "rgy-discovery-macos"
 version = "0.1.0"
 edition = "2024"
 authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
 description = "macOS discovery backend: getattrlistbulk walk + FSEvents watch (from fsearch)"
 license = "Apache-2.0"
+repository = "https://github.com/danalec/rgy"
+homepage = "https://github.com/danalec/rgy"
+documentation = "https://docs.rs/rgy-discovery-macos"
+keywords = ["filesystem", "search", "fsevents"]
+categories = ["filesystem"]
+readme = "../../README.md"
+
 
 [dependencies]
-discovery = { path = "../discovery" }
-name-core = { path = "../name-core" }
+rgy-discovery = { path = "../discovery", version = "0.1.0" }
+rgy-name-core = { path = "../name-core", version = "0.1.0" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"

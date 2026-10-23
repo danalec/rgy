@@ -81,7 +81,7 @@ Widen it to the grammar, or make the end sentinel say what was dropped.
 
 ## Interactive UI
 
-**The meter measures the typing loop, not a bench cell.** `search-ui` is
+**The meter measures the typing loop, not a bench cell.** `rgy-search-ui` is
 per-keystroke whole-disk name search: every character is a full
 `name_query::Searcher` pass (fzf-v1 + typos + top-k + NameCache) over the
 live index. A smoothed mean hides exactly the shape the sparkline exists to
@@ -262,6 +262,6 @@ min-of-N; 4.3 ms spawn floor measured and reported separately):
   the resident-scan rows show the scan itself costs the same either way —
   the delta is the read() copy vs page faults. Windows first-touch cold
   stays unmeasured (needs a kernel driver to drop the standby list).
-- `discovery-macos` is imports-only transport, unverified (no macOS
+- `rgy-discovery-macos` is imports-only transport, unverified (no macOS
   target on the machine that built this workspace). It is the first row
   of the macOS limits in [STATUS.md](STATUS.md).

@@ -3,7 +3,7 @@
 //! searchctl — the merged name-search CLI.
 //!
 //! fsearch one-shot ergonomics + zen-rs's filter vocabulary (see
-//! `name_core::name_query`), over the v2 name index. It enumerates a
+//! `rgy_name_core::name_query`), over the v2 name index. It enumerates a
 //! directory tree (`--root`, portable walk / no privileges); the Windows
 //! MFT fast path (`--volume`) and content `grep:` land with the engine and
 //! the content layer.
@@ -16,7 +16,7 @@
 //! snapshot of any age served without saying so is how a query ends up
 //! missing a file created yesterday. The root is pinned in a sidecar so an
 //! index built for another tree can never be loaded (see
-//! `name_core::persist`).
+//! `rgy_name_core::persist`).
 //!
 //! rg-compatible exit codes: 0 = matches, 1 = no matches, 2 = error.
 //! `--json` prints one object per hit. Parse warnings (unknown `type:`,
@@ -25,13 +25,13 @@
 
 use std::time::{Duration, Instant};
 
-use discovery::interrupt;
-use discovery_dispatch::source_for;
-use name_core::content::{self, Grep};
-use name_core::live::Live;
-use name_core::name_index::Index;
-use name_core::name_query::{Alternatives, Hit, Searcher, merge_hits};
-use name_core::persist;
+use rgy_discovery::interrupt;
+use rgy_discovery_dispatch::source_for;
+use rgy_name_core::content::{self, Grep};
+use rgy_name_core::live::Live;
+use rgy_name_core::name_index::Index;
+use rgy_name_core::name_query::{Alternatives, Hit, Searcher, merge_hits};
+use rgy_name_core::persist;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -44,7 +44,7 @@ const REPORT_EVERY: Duration = Duration::from_millis(500);
 /// for help, 2 for the rg convention's "bad invocation". `--help` used to
 /// exit 2 like a malformed command, which a script reads as an error.
 fn usage(code: i32) -> ! {
-    engine::errln!(
+    rgy_engine::errln!(
         "searchctl [options] <query>\n\n\
          options:\n  \
            --root <dir>       tree to index (default: .)\n  \
@@ -87,12 +87,12 @@ fn main() {
     // put into UTF-8 before anything is printed (parity row 4.7). A
     // redirected stdout keeps its raw bytes: a machine consumer wants
     // UTF-8, not a console's idea of it.
-    engine::console::init();
+    rgy_engine::console::init();
 
     // Which view of an adapter-claimed file a search reads. rgy answers to
     // RGY_ADAPTER_VIEW and falls back to rgx's RGX_ADAPTER_VIEW, so a shell
     // configured for rgx is configured for rgy too.
-    engine::adapter_view::apply();
+    rgy_engine::adapter_view::apply();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut root = String::from(".");
@@ -137,7 +137,7 @@ fn main() {
             "--json" => json = true,
             "-h" | "--help" => usage(0),
             a if a.starts_with('-') => {
-                engine::errln!("searchctl: unknown option {a}");
+                rgy_engine::errln!("searchctl: unknown option {a}");
                 std::process::exit(2);
             }
             a => {
@@ -164,7 +164,7 @@ fn main() {
         max_age,
     };
     if let Err(e) = run(&opts, &query) {
-        engine::errln!("searchctl: {e}");
+        rgy_engine::errln!("searchctl: {e}");
         std::process::exit(2);
     }
 }
@@ -204,7 +204,7 @@ fn obtain_index(opts: &Opts) -> Result<Index, String> {
                 // The age goes with the reuse: an index that is "reused" is a
                 // snapshot, and a snapshot of unknown age is how a query
                 // answers "no such file" for a file that exists.
-                engine::errln!(
+                rgy_engine::errln!(
                     "searchctl: reusing index {} ({} entries, built {})",
                     index_path.display(),
                     idx.n,
@@ -212,7 +212,7 @@ fn obtain_index(opts: &Opts) -> Result<Index, String> {
                 );
                 return Ok(idx);
             }
-            Err(why) => engine::errln!("searchctl: rebuilding — {why}"),
+            Err(why) => rgy_engine::errln!("searchctl: rebuilding — {why}"),
         }
     }
 
@@ -221,7 +221,7 @@ fn obtain_index(opts: &Opts) -> Result<Index, String> {
     // no privileges needed either way, the selector falls back on its own.
     let source = source_for(
         opts.root.as_bytes().to_vec(),
-        discovery::PortableSource::DEFAULT_THREADS,
+        rgy_discovery::PortableSource::DEFAULT_THREADS,
     );
     // A scan of a large tree is seconds of silence otherwise, which reads as
     // a hang. One line every `REPORT_EVERY`; the count is a real tally of
@@ -241,20 +241,20 @@ fn obtain_index(opts: &Opts) -> Result<Index, String> {
                     + REPORT_EVERY.as_millis() as u64
             {
                 last_report.store(now, std::sync::atomic::Ordering::Relaxed);
-                engine::errln!("searchctl: scanning… {}", interrupt::line(p));
+                rgy_engine::errln!("searchctl: scanning… {}", interrupt::line(p));
             }
         })
         .map_err(|_| "scan cancelled — no index written".to_string())?;
     let idx = Index::build(listings, 0, now_secs(), opts.root.as_bytes());
     match persist::save(&idx, &root_path, &index_path) {
-        Ok(saved) => engine::errln!(
+        Ok(saved) => rgy_engine::errln!(
             "searchctl: indexed {} entries → {}",
             idx.n,
             saved.index.display()
         ),
         // A cache miss must not fail the query: the index is built and
         // usable, it just will not be there next time.
-        Err(e) => engine::errln!(
+        Err(e) => rgy_engine::errln!(
             "searchctl: could not save index to {}: {e}",
             index_path.display()
         ),
@@ -277,7 +277,7 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
         .unwrap_or_default();
     let alts = Alternatives::parse(query, &home)?;
     for w in &alts.warnings {
-        engine::errln!("warning: {w}");
+        rgy_engine::errln!("warning: {w}");
     }
 
     // Content index, when one is already built alongside this root's name
@@ -338,9 +338,9 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
                 std::process::exit(1);
             }
             if json {
-                engine::outln!("{{\"count\":{n}}}");
+                rgy_engine::outln!("{{\"count\":{n}}}");
             } else {
-                engine::outln!("{n}");
+                rgy_engine::outln!("{n}");
             }
             return Ok(());
         }
@@ -362,14 +362,14 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
                 for (ln, text) in &f.lines {
                     shown += 1;
                     if json {
-                        let esc = proto::escape_json_string;
-                        engine::outln!(
+                        let esc = rgy_proto::escape_json_string;
+                        rgy_engine::outln!(
                             "{{\"path\":\"{}\",\"line\":{ln},\"text\":\"{}\"}}",
                             esc(&path),
                             esc(text)
                         );
                     } else {
-                        engine::outln!("{path}:{ln}:{text}");
+                        rgy_engine::outln!("{path}:{ln}:{text}");
                     }
                 }
             }
@@ -424,12 +424,12 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
         // command prints is worse than no total at all. `merge_hits` is the
         // same merge the results go through.
         let total = merge_hits(all, usize::MAX).len();
-        engine::errln!(
+        rgy_engine::errln!(
             "searchctl: {} entries indexed, {total} matches",
             searcher.live.base.n
         );
         for line in &summary {
-            engine::errln!("searchctl: {line}");
+            rgy_engine::errln!("searchctl: {line}");
         }
     }
 
@@ -443,9 +443,9 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
             std::process::exit(1);
         }
         if json {
-            engine::outln!("{{\"count\":{n}}}");
+            rgy_engine::outln!("{{\"count\":{n}}}");
         } else {
-            engine::outln!("{n}");
+            rgy_engine::outln!("{n}");
         }
         return Ok(());
     }
@@ -487,10 +487,10 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
             format!("{root_disp}{}{rel}", std::path::MAIN_SEPARATOR)
         };
         if json {
-            let esc = proto::escape_json_string(&path);
-            engine::outln!("{{\"path\":\"{esc}\",\"score\":{}}}", h.score);
+            let esc = rgy_proto::escape_json_string(&path);
+            rgy_engine::outln!("{{\"path\":\"{esc}\",\"score\":{}}}", h.score);
         } else {
-            engine::outln!("{path}");
+            rgy_engine::outln!("{path}");
         }
         out.clear();
     }

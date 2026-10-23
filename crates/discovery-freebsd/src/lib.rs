@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! FreeBSD discovery backend (`docs/design.md` §4):
-//! the `getdirentries` bulk walk as a [`discovery::Source`], selected by
+//! the `getdirentries` bulk walk as a [`rgy_discovery::Source`], selected by
 //! `discovery-dispatch` on this target. The whole backend is
 //! `cfg(target_os = "freebsd")`; on other hosts this crate compiles empty
 //! and the portable walk stays the Source.
@@ -22,7 +22,7 @@ mod tests {
     use super::scan;
     use std::collections::BTreeMap;
 
-    use discovery::walk::{KIND_DIR, KIND_FILE, Listing, NONE, scan_sequential};
+    use rgy_discovery::walk::{KIND_DIR, KIND_FILE, Listing, NONE, scan_sequential};
 
     type Rows = BTreeMap<String, Vec<(String, u8, u64, u32, Option<String>)>>;
 
@@ -37,7 +37,7 @@ mod tests {
         dir
     }
 
-    fn name_of(l: &Listing, e: &discovery::walk::RawEnt) -> String {
+    fn name_of(l: &Listing, e: &rgy_discovery::walk::RawEnt) -> String {
         let s = &l.names[e.name_off as usize..(e.name_off + e.name_len as u32) as usize];
         String::from_utf8_lossy(s).into_owned()
     }
@@ -140,7 +140,7 @@ mod tests {
         };
         assert_eq!(kind_of("top.txt"), Some(KIND_FILE));
         assert_eq!(kind_of("a"), Some(KIND_DIR));
-        assert_eq!(kind_of("alink"), Some(discovery::walk::KIND_LINK));
+        assert_eq!(kind_of("alink"), Some(rgy_discovery::walk::KIND_LINK));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

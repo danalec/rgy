@@ -6,7 +6,7 @@
 $ErrorActionPreference = "Stop"
 
 # Build from the workspace root no matter where the script is invoked
-# from — `cargo -p engine` is meaningless outside it.
+# from — `cargo -p rgy-engine` is meaningless outside it.
 Set-Location $PSScriptRoot
 
 $sysroot = (rustc --print sysroot).Trim()
@@ -23,7 +23,7 @@ try {
     # Pass 1: instrumented build of the trainer only (name_bench exercises
     # the same Searcher path the daemon does).
     $env:RUSTFLAGS = "-Cprofile-generate=$tmp\prof"
-    cargo build --release -p engine --example name_bench --target-dir "$tmp\target"
+    cargo build --release -p rgy-engine --example name_bench --target-dir "$tmp\target"
     # Native commands don't throw on failure even with Stop; every step
     # needs its exit code checked or a broken build looks like a missing exe.
     if ($LASTEXITCODE -ne 0) { throw "pgo.ps1: instrumented build failed" }

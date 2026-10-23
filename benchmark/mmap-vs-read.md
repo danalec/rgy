@@ -58,7 +58,7 @@ user-mode cache-empty tricks are not honest "cold").
 ## Reproduce
 
 ```sh
-cargo run --release -p name-core --example mmap_vs_read -- 256
+cargo run --release -p rgy-name-core --example mmap_vs_read -- 256
 # cold rows on Linux:
 sudo target/release/examples/mmap_vs_read 256
 ```

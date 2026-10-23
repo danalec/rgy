@@ -7,8 +7,8 @@
 //! over a rayon pool; mount points are not crossed, firmlinks are (that is
 //! how /Users etc. on the data volume appear under / exactly once).
 
-use name_core::no_materialize;
 use rayon::Scope;
+use rgy_name_core::no_materialize;
 use std::cell::RefCell;
 use std::ffi::CString;
 use std::sync::Mutex;
@@ -39,8 +39,8 @@ const DIR_MNTSTATUS_TRIGGER: u32 = 0x2;
 const SF_FIRMLINK: u32 = 0x0080_0000;
 
 // One vocabulary across backends: the block type the name index consumes
-// lives in the seam (discovery::walk) — this walk produces it.
-pub use discovery::walk::{
+// lives in the seam (rgy_discovery::walk) — this walk produces it.
+pub use rgy_discovery::walk::{
     FLAG_HIDDEN, FLAG_MOUNT, KIND_DIR, KIND_FILE, KIND_LINK, KIND_OTHER, Listing, NONE, RawEnt,
 };
 
@@ -155,7 +155,7 @@ fn finish_dir<'s>(s: &Scope<'s>, fd: i32, path: Option<Vec<u8>>, id: u32, ctx: &
         e.kind &= !MAYBE_EMPTY;
         if e.kind & 3 == KIND_DIR && e.kind & FLAG_MOUNT == 0 {
             let name = &l.names[e.name_off as usize..e.name_off as usize + e.name_len as usize];
-            let child_path = path.as_ref().map(|p| name_core::live::join(p, name));
+            let child_path = path.as_ref().map(|p| rgy_name_core::live::join(p, name));
             if child_path.as_deref().is_some_and(blocked) {
                 continue;
             }

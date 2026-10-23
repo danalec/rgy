@@ -4,7 +4,7 @@
 The memory goals (peak <=1.2 GB, resident <=64 MB @5M) are measured by
 running an index build or the name bench under this wrapper:
 
-    python scripts/mem-peak.py -- cargo run --release -p engine --example name_bench -- 5000000
+    python scripts/mem-peak.py -- cargo run --release -p rgy-engine --example name_bench -- 5000000
 
 It prints the command's exit code and its peak resident set (the "peak" the
 plan means: the high-water mark, not the current RSS). Peak working set on

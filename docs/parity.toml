@@ -340,7 +340,7 @@ name = "Daemon transport"
 windows = "P"
 linux = "P"
 macos = "P"
-notes = "named pipe | UDS | UDS. proto JSON-lines identical on all three."
+notes = "named pipe | UDS | UDS. rgy-proto JSON-lines identical on all three."
 
 [[feature]]
 id = "4.2"
@@ -412,7 +412,7 @@ name = "mimalloc default heap"
 windows = "P"
 linux = "P"
 macos = "P"
-notes = "rgx measured 5-12% on 32-worker walks. searchctl/searchd/zen-rs wired; search-ui is a lib (its binary sets the allocator)."
+notes = "rgx measured 5-12% on 32-worker walks. searchctl/searchd/zen-rs wired; rgy-search-ui is a lib (its binary sets the allocator)."
 
 [[feature]]
 id = "4.11"

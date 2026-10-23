@@ -50,7 +50,7 @@ Auto-generated from [`docs/parity.toml`](parity.toml) by
 | 3.8 | Incremental content sync | P | P | P | USN-driven \| inotify-driven \| FSEvents-driven. Same worker; different feed. Linux inherits row 1.3's replay limit. |
 | 3.9 | Text/encoding detection | P | P | P | OS-neutral (rgx encoding.rs). |
 | | **§6.4** | | | | |
-| 4.1 | Daemon transport | P | P | P | named pipe \| UDS \| UDS. proto JSON-lines identical on all three. |
+| 4.1 | Daemon transport | P | P | P | named pipe \| UDS \| UDS. rgy-proto JSON-lines identical on all three. |
 | 4.2 | Single-instance ownership | P | P | P | lock file + LockFileEx \| flock \| flock. Follower attach + handoff. |
 | 4.3 | stdio mode | P | P | P | Pure. |
 | 4.4 | rgx --serve compat front | P | P | P | Pure protocol shim. |
@@ -59,7 +59,7 @@ Auto-generated from [`docs/parity.toml`](parity.toml) by
 | 4.7 | Console output encoding | P | N | N | UTF-8 codepage / WriteConsoleW \| UTF-8 \| UTF-8. Windows-only fix. |
 | 4.8 | keep-warm spinner (250 ms) | P | P | P | SetThreadPriority + timeBeginPeriod \| spinner thread \| spinner + QoS. Cap + headless-off on all. |
 | 4.9 | big-block allocator (>=1 MiB -> mmap, free returns) | P | P | P | fsearch rule: VirtualAlloc \| mmap \| mmap, one `platform` module. |
-| 4.10 | mimalloc default heap | P | P | P | rgx measured 5-12% on 32-worker walks. searchctl/searchd/zen-rs wired; search-ui is a lib (its binary sets the allocator). |
+| 4.10 | mimalloc default heap | P | P | P | rgx measured 5-12% on 32-worker walks. searchctl/searchd/zen-rs wired; rgy-search-ui is a lib (its binary sets the allocator). |
 | 4.11 | release_memory after big phases | P | P | D | VirtualFree path \| malloc_trim \| no trim (drop caches manually). macOS malloc does not return aggressively -- document RSS behaviour. |
 | 4.12 | PGO release builds | P | P | P | MSVC /GENPROFILE or gcc \| -fprofile-generate/use \| -fprofile-instr-generate. pgo.ps1 / pgo.sh at the repo root. |
 | 4.13 | login-item autostart | P | P | N | startup task, falling back to HKCU Run \| systemd user unit \| launchd agent. crates/autostart writes all three as plain text the user can read. A logon-triggered task needs an administrator on a stock Windows session, so the tool falls back to the registry and says so. Registering is the consent: no prompt, no elevation, no dialog. |

@@ -107,7 +107,7 @@ pub fn text_tree(root: &Path) {
 /// developer's real `%LOCALAPPDATA%\rgy`, so every test run leaves a stray
 /// index behind — and since fixtures are fresh temp trees, a cached index
 /// from a previous run could answer a query it has no business answering.
-/// `RGY_INDEX_DIR` is the same override `name_core::persist` reads.
+/// `RGY_INDEX_DIR` is the same override `rgy_name_core::persist` reads.
 fn index_cache_dir() -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "rgy-e2e-cache-{}-{}",

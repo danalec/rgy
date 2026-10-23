@@ -1,9 +1,16 @@
 [package]
-name = "proto"
+name = "rgy-proto"
 version = "0.1.0"
 edition = "2024"
 authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
 description = "JSON-lines protocol types shared by daemon, stdio, and CLI (skeleton)"
 license = "Apache-2.0"
+repository = "https://github.com/danalec/rgy"
+homepage = "https://github.com/danalec/rgy"
+documentation = "https://docs.rs/rgy-proto"
+keywords = ["search", "json", "protocol", "daemon"]
+categories = ["encoding", "command-line-utilities"]
+readme = "../../README.md"
+
 
 [dependencies]

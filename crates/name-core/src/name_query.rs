@@ -15,8 +15,8 @@
 use crate::fold;
 use crate::live::Live;
 use crate::name_index::{BM_DOUBLE, BM_FIRST, BM_SECOND, BM_START, CLASSES, Index, ZONE, Zone, char_bit, start_bit};
-use discovery::walk::{FLAG_HIDDEN, KIND_DIR, KIND_FILE, KIND_LINK};
 use rayon::prelude::*;
+use rgy_discovery::walk::{FLAG_HIDDEN, KIND_DIR, KIND_FILE, KIND_LINK};
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -1112,16 +1112,16 @@ mod tests {
         for (name, kind) in [("readme.md", KIND_FILE), ("walk.rs", KIND_FILE), ("alias", KIND_LINK), ("notes.txt", KIND_FILE)] {
             let off = names.len() as u32;
             names.extend_from_slice(name.as_bytes());
-            ents.push(discovery::walk::RawEnt {
+            ents.push(rgy_discovery::walk::RawEnt {
                 name_off: off,
                 name_len: name.len() as u16,
                 kind,
                 size: 10,
                 mtime: 1_700_000_000,
-                child: discovery::walk::NONE,
+                child: rgy_discovery::walk::NONE,
             });
         }
-        let listing = discovery::walk::Listing { id: 0, names, ents };
+        let listing = rgy_discovery::walk::Listing { id: 0, names, ents };
         Live::new(Index::build(vec![listing], 0, 1_700_000_000, b"/"))
     }
 
@@ -1134,16 +1134,16 @@ mod tests {
             let name = format!("entry_{i:06}.txt");
             let off = names.len() as u32;
             names.extend_from_slice(name.as_bytes());
-            ents.push(discovery::walk::RawEnt {
+            ents.push(rgy_discovery::walk::RawEnt {
                 name_off: off,
                 name_len: name.len() as u16,
                 kind: KIND_FILE,
                 size: 10,
                 mtime: 1_700_000_000,
-                child: discovery::walk::NONE,
+                child: rgy_discovery::walk::NONE,
             });
         }
-        let listing = discovery::walk::Listing { id: 0, names, ents };
+        let listing = rgy_discovery::walk::Listing { id: 0, names, ents };
         Live::new(Index::build(vec![listing], 0, 1_700_000_000, b"/"))
     }
 
@@ -1162,18 +1162,18 @@ mod tests {
                     let name = format!("{}{i:05}.rs", c as char);
                     let off = names.len() as u32;
                     names.extend_from_slice(name.as_bytes());
-                    ents.push(discovery::walk::RawEnt {
+                    ents.push(rgy_discovery::walk::RawEnt {
                         name_off: off,
                         name_len: name.len() as u16,
                         kind: KIND_FILE,
                         size: 10,
                         mtime: 1_700_000_000,
-                        child: discovery::walk::NONE,
+                        child: rgy_discovery::walk::NONE,
                     });
                 }
             }
         }
-        let listing = discovery::walk::Listing { id: 0, names, ents };
+        let listing = rgy_discovery::walk::Listing { id: 0, names, ents };
         Live::new(Index::build(vec![listing], 0, 1_700_000_000, b"/"))
     }
 

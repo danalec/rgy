@@ -67,13 +67,13 @@ they are already present. What v3 still owes: the C port's reader.
 
 The Tesla Valve corpus store (`rgx-core` `tv/` + `tv_runtime/`): packs of
 corpus bytes with an incremental manifest, searched via
-`tv_runtime::searcher::search_store` (the `engine::tv` glue). Pack header
+`tv_runtime::searcher::search_store` (the `rgy_engine::tv` glue). Pack header
 (`tv/format.rs`, `PackHeader::SIZE`) precedes each pack's content; the
 manifest lists packs with ids, filenames, content lengths. The daemon's
 `--tv-dir` points at a store directory.
 
 ## Content segments
 
-The trigram/bloom side (`name-core::content`): the same 4 KiB header
+The trigram/bloom side (`rgy_name_core::content`): the same 4 KiB header
 convention (`HDR`, magic + u64 fields) for its segment files, built by
 `build_segment`/`merge` under a store directory.

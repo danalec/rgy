@@ -7,7 +7,7 @@
 //! so *is* the sequential baseline.
 //!
 //! ```text
-//! cargo run --release -p discovery --example walk_bench -- <root> [rounds]
+//! cargo run --release -p rgy-discovery --example walk_bench -- <root> [rounds]
 //! ```
 //!
 //! Emits CSV on stdout (header + one row per thread count) so a regression can
@@ -27,7 +27,7 @@ fn main() {
 
     // Warm the OS page cache first, so the comparison is walk cost rather
     // than whoever paid for first-touch I/O.
-    drop(discovery::walk::scan_sequential(&root_bytes));
+    drop(rgy_discovery::walk::scan_sequential(&root_bytes));
 
     eprintln!("root={root} rounds={rounds}");
     println!("threads,entries,min_ms,median_ms,speedup");
@@ -38,7 +38,7 @@ fn main() {
         let mut entries = 0usize;
         for _ in 0..rounds {
             let t0 = Instant::now();
-            let listings = discovery::walk::scan(&root_bytes, threads);
+            let listings = rgy_discovery::walk::scan(&root_bytes, threads);
             samples.push(t0.elapsed().as_secs_f64() * 1000.0);
             entries = listings.iter().map(|l| l.ents.len()).sum();
             std::hint::black_box(&listings);

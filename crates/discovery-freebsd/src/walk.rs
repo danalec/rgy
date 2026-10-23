@@ -23,13 +23,15 @@ use std::mem::offset_of;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
-use discovery::walk::{KIND_DIR, KIND_FILE, KIND_LINK, KIND_OTHER, Listing, NONE, RawEnt, blocked};
+use rgy_discovery::walk::{
+    KIND_DIR, KIND_FILE, KIND_LINK, KIND_OTHER, Listing, NONE, RawEnt, blocked,
+};
 
 pub struct FreeBsdSource {
     pub root: PathBuf,
 }
 
-impl discovery::Source for FreeBsdSource {
+impl rgy_discovery::Source for FreeBsdSource {
     fn enumerate(&self) -> Result<Vec<Listing>, String> {
         Ok(scan(&self.root))
     }
@@ -168,7 +170,7 @@ fn list_dir(path: &Path) -> Option<Listing> {
 }
 
 /// DFS walk, listing 0 = `root`'s children, ids in pre-order — the same
-/// block contract as [`discovery::walk::scan`].
+/// block contract as [`rgy_discovery::walk::scan`].
 pub fn scan(root: &Path) -> Vec<Listing> {
     let mut out: Vec<Listing> = Vec::new();
     let mut next_id = 1u32;

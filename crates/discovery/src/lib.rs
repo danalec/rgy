@@ -16,7 +16,7 @@
 /// offsets: `FileAttributes`@52, `FileNameLength`@56, `FileNameOffset`@58).
 ///
 /// Moved out of `ntfs.rs` at the workspace merge: this is what a `Watch`
-/// feed produces and what the live overlay (`name_core::live::Live`) consumes, so
+/// feed produces and what the live overlay (`rgy_name_core::live::Live`) consumes, so
 /// it cannot live in the Windows backend crate without a dependency cycle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsnRecord {
@@ -81,7 +81,7 @@ pub trait Source {
     /// Enumerate everything under the source root as [`walk::Listing`]s —
     /// listing 0 is the root's children, `RawEnt::child` links into the
     /// listing of each subdirectory. This is the block stream
-    /// `name_core::name_index::Index::build` consumes.
+    /// `rgy_name_core::name_index::Index::build` consumes.
     fn enumerate(&self) -> Result<Vec<walk::Listing>, String>;
 }
 

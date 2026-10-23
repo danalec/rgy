@@ -6,7 +6,7 @@
 //! answer everywhere else and as the fallback whenever a native backend
 //! refuses: the pick is a speed decision, never a semantics one. Every
 //! backend emits the same [`Listing`] block stream as
-//! [`discovery::walk::scan_sequential`], which the differential test below
+//! [`rgy_discovery::walk::scan_sequential`], which the differential test below
 //! proves per platform.
 //!
 //! This crate exists because the platform backends depend on `discovery`
@@ -21,9 +21,9 @@
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use std::path::PathBuf;
 
-use discovery::walk::{Cancel, Cancelled, Listing, Progress};
-use discovery::{PortableSource, Source};
-use proto::CatchUp;
+use rgy_discovery::walk::{Cancel, Cancelled, Listing, Progress};
+use rgy_discovery::{PortableSource, Source};
+use rgy_proto::CatchUp;
 
 /// The platform whose change feed decides how a restart catches up.
 ///
@@ -119,13 +119,13 @@ enum Kind {
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd")))]
     Portable,
     #[cfg(target_os = "linux")]
-    Linux(discovery_linux::LinuxSource),
+    Linux(rgy_discovery_linux::LinuxSource),
     #[cfg(target_os = "macos")]
     Macos(MacSource),
     #[cfg(target_os = "freebsd")]
-    FreeBsd(discovery_freebsd::FreeBsdSource),
+    FreeBsd(rgy_discovery_freebsd::FreeBsdSource),
     #[cfg(windows)]
-    Mft(discovery_windows::MftSource<'static>),
+    Mft(rgy_discovery_windows::MftSource<'static>),
 }
 
 /// macOS exposes its walk as a free function (`getattrlistbulk`), not as a
@@ -139,7 +139,7 @@ struct MacSource {
 #[cfg(target_os = "macos")]
 impl Source for MacSource {
     fn enumerate(&self) -> Result<Vec<Listing>, String> {
-        Ok(discovery_macos::scan(&self.root, self.threads))
+        Ok(rgy_discovery_macos::scan(&self.root, self.threads))
     }
 }
 
@@ -176,14 +176,14 @@ fn pick(root: &[u8], threads: usize) -> Kind {
     #[cfg(target_os = "linux")]
     {
         let _ = threads;
-        return Kind::Linux(discovery_linux::LinuxSource {
+        return Kind::Linux(rgy_discovery_linux::LinuxSource {
             root: path_of(root),
         });
     }
     #[cfg(target_os = "freebsd")]
     {
         let _ = threads;
-        return Kind::FreeBsd(discovery_freebsd::FreeBsdSource {
+        return Kind::FreeBsd(rgy_discovery_freebsd::FreeBsdSource {
             root: path_of(root),
         });
     }
@@ -220,7 +220,7 @@ fn pick(root: &[u8], threads: usize) -> Kind {
 /// root". Anything else — a subtree, a volume that will not open without
 /// privileges, a non-NTFS root — keeps the portable walk.
 #[cfg(windows)]
-fn try_mft(root: &[u8]) -> Option<discovery_windows::MftSource<'static>> {
+fn try_mft(root: &[u8]) -> Option<rgy_discovery_windows::MftSource<'static>> {
     let path = std::str::from_utf8(root).ok()?;
     let p = std::path::Path::new(path);
     if p.parent().is_some() {
@@ -229,11 +229,11 @@ fn try_mft(root: &[u8]) -> Option<discovery_windows::MftSource<'static>> {
     let vol_root = p.to_str()?;
     // The volume lives for the process; leak it so the MftSource owns a
     // 'static borrow (the same trade `searchd`'s `open_watch` makes).
-    let volume: &'static discovery_windows::volume::Volume = Box::leak(Box::new(
-        discovery_windows::volume::Volume::open(vol_root).ok()?,
+    let volume: &'static rgy_discovery_windows::volume::Volume = Box::leak(Box::new(
+        rgy_discovery_windows::volume::Volume::open(vol_root).ok()?,
     ));
-    let indexer = discovery_windows::indexer::Indexer::new(volume);
-    Some(discovery_windows::MftSource::new(indexer))
+    let indexer = rgy_discovery_windows::indexer::Indexer::new(volume);
+    Some(rgy_discovery_windows::MftSource::new(indexer))
 }
 
 impl AnySource {
@@ -261,7 +261,7 @@ impl AnySource {
     pub fn enumerate(&self) -> Result<Vec<Listing>, String> {
         match &self.kind {
             #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd")))]
-            Kind::Portable => Ok(discovery::walk::scan(&self.root, self.threads)),
+            Kind::Portable => Ok(rgy_discovery::walk::scan(&self.root, self.threads)),
             #[cfg(target_os = "linux")]
             Kind::Linux(s) => s.enumerate(),
             #[cfg(target_os = "macos")]
@@ -315,7 +315,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 
-    use discovery::walk::{NONE, RawEnt, scan_sequential};
+    use rgy_discovery::walk::{NONE, RawEnt, scan_sequential};
 
     type Rows = BTreeMap<String, Vec<(String, u8, u64, u32, Option<String>)>>;
 

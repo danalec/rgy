@@ -1,20 +1,27 @@
 [package]
-name = "zen-rs"
+name = "rgy-zen-rs"
 version = "0.1.0"
 edition = "2024"
 authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
 description = "The zen-rs CLI/TUI, unchanged behaviour, now built on the rgy workspace crates"
 license = "Apache-2.0"
+repository = "https://github.com/danalec/rgy"
+homepage = "https://github.com/danalec/rgy"
+documentation = "https://docs.rs/rgy-zen-rs"
+keywords = ["search", "cli", "tui"]
+categories = ["command-line-utilities"]
+readme = "../../README.md"
+
 
 [[bin]]
 name = "zen-rs"
 path = "src/main.rs"
 
 [dependencies]
-name-core = { path = "../../crates/name-core" }
-discovery = { path = "../../crates/discovery" }
-discovery-windows = { path = "../../crates/discovery-windows" }
-search-ui = { path = "../search-ui" }
+rgy-name-core = { path = "../../crates/name-core", version = "0.1.0" }
+rgy-discovery = { path = "../../crates/discovery", version = "0.1.0" }
+rgy-discovery-windows = { path = "../../crates/discovery-windows", version = "0.1.0" }
+rgy-search-ui = { path = "../search-ui", version = "0.1.0" }
 # One allocator story (plan 4.4/4.10): mimalloc for the general heap, the
 # same as searchctl/searchd. Transparent -- identical results, just a faster
 # heap for the parallel MFT/USN walks.

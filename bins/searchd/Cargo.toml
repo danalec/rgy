@@ -1,36 +1,43 @@
 [package]
-name = "searchd"
+name = "rgy-searchd"
 version = "0.1.0"
 edition = "2024"
 authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
 description = "The merged search daemon: JSON-lines over stdio/pipe/UDS, plus the rgx --serve front"
 license = "Apache-2.0"
+repository = "https://github.com/danalec/rgy"
+homepage = "https://github.com/danalec/rgy"
+documentation = "https://docs.rs/rgy-searchd"
+keywords = ["search", "daemon", "filesystem"]
+categories = ["command-line-utilities"]
+readme = "../../README.md"
+
 
 [[bin]]
 name = "searchd"
 path = "src/main.rs"
 
 [dependencies]
-discovery = { path = "../../crates/discovery" }
+rgy-discovery = { path = "../../crates/discovery", version = "0.1.0" }
 # The platform walk selector (docs/design.md §2.2).
-discovery-dispatch = { path = "../../crates/discovery-dispatch" }
-engine = { path = "../../crates/engine" }
-name-core = { path = "../../crates/name-core" }
-proto = { path = "../../crates/proto" }
+rgy-discovery-dispatch = { path = "../../crates/discovery-dispatch", version = "0.1.0" }
+rgy-engine = { path = "../../crates/engine", version = "0.1.0" }
+rgy-name-core = { path = "../../crates/name-core", version = "0.1.0" }
+rgy-proto = { path = "../../crates/proto", version = "0.1.0" }
 # rgx --serve front reads argv arrays with rgx's own JSON parser.
-rgx-core = { path = "../../crates/rgx-core" }
+rgx-core = { path = "../../crates/rgx-core", version = "0.1.0" }
 # One allocator story (plan 4.4): mimalloc for the general heap —
 # MSVCRT's HeapAlloc serialises the parallel content readers on Windows.
 mimalloc = { version = "0.1", default-features = false }
 
 # Platform live-change feeds (the Watch): each crate implements
-# `discovery::Watch` for its OS. Pulled in per-platform so `open_watch` can
+# `rgy_discovery::Watch` for its OS. Pulled in per-platform so `open_watch` can
 # build the right one.
 [target.'cfg(windows)'.dependencies]
-discovery-windows = { path = "../../crates/discovery-windows" }
+rgy-discovery-windows = { path = "../../crates/discovery-windows", version = "0.1.0" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-discovery-linux = { path = "../../crates/discovery-linux" }
+rgy-discovery-linux = { path = "../../crates/discovery-linux", version = "0.1.0" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-discovery-macos = { path = "../../crates/discovery-macos" }
+rgy-discovery-macos = { path = "../../crates/discovery-macos", version = "0.1.0" }
