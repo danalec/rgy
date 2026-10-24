@@ -164,16 +164,24 @@ to satisfy all of them.
 Type `invoice` and rgy also finds `invoce`, `invoces` and `invoicing`.
 That is the point: you remember the name, not the spelling.
 
-To say exactly what you mean, put the word in quotes:
+To say exactly what you mean, mark the word:
 
 | you write | rgy looks for |
 |---|---|
 | `invoice` | anything close to "invoice" |
-| `'invoice` | exactly "invoice" |
-| `'invoice` | exactly "invoice", nothing else |
+| `'invoice` | a name that *contains* "invoice" |
 | `^invoice` | something that *starts* with "invoice" |
 | `invoice$` | something that *ends* with "invoice" |
+| `=invoice` | a name that has "invoice" as a whole *word* |
+| `"invoice pdf"` | a name that *contains* "invoice pdf", the space and all |
 | `!invoice` | anything that is **not** close to "invoice" |
+
+`=invoice` is the strict one: `port` is the word of `report_port.txt` and
+not of `report`, so `=port` finds the first and not the second.
+
+`"invoice pdf"` is the phrase: the words have to be there together, in
+that order, with the space between them. `invoice pdf` (without the
+quotes) is two loose words, and the name only has to carry both.
 
 ### The filters
 

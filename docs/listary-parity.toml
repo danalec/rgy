@@ -143,22 +143,22 @@ size = "M"
 id = "S.7"
 name = "Keyword / word-boundary matcher"
 phase = 2
-status = "G"
+status = "P"
 evidence = "§5.2"
 listary = "A matcher that matches on word boundaries, so a query word matches a word of the name and not a fragment of it."
-rgy = "Absent. A query matches anywhere in the name."
-work = "A keyword matcher over the name's word boundaries, as a second matcher axis alongside fuzzy. This is the matcher that makes `invoice pdf` behave differently from `invoicepdf`."
+rgy = "Done. `=port` asks for a whole word of the name: the words are the runs between the delimiters (the same ones the scorer's boundary bonus knows), and the query has to be one of them. It is a mode, not an automatic axis: the fuzzy match already forgives what the keyword one refuses, and running both on every candidate would cost the scan a third of itself."
+work = "None. The matcher is `Mode::Keyword` in `name_query.rs`, and the manual says what the marker means."
 size = "S"
 
 [[capability]]
 id = "S.8"
 name = "Phrase matcher"
 phase = 2
-status = "G"
+status = "P"
 evidence = "§5.2, §5.8.2"
 listary = "An exact-phrase matcher, fed by the tokenizer's quoted-phrase token."
-rgy = "The query grammar has no quote syntax: `\"` is not a token character."
-work = "The tokenizer learns `\"` as a phrase delimiter and the phrase matcher runs as its own axis. The tokenizer's character set is small and known (space, `:`, `\"`, `/`, `\\`), so this is a contained change in the parser."
+rgy = "Done. The tokenizer learns `\"` as a phrase delimiter: a quoted run is one token (`Mode::Phrase`) and the phrase matcher looks for the words together, in order, with the spaces between them. The old tokenizer kept the quoted run together and threw the quotes away, so `\"invoice pdf\"` was a fuzzy token with a space in it."
+work = "None. The matcher is `Mode::Phrase` in `name_query.rs`, and the manual says what the quotes mean."
 size = "S"
 
 [[capability]]

@@ -67,7 +67,7 @@ verification on machines this host does not have.
 | zen-rs bin / TUI (unchanged behaviour) | `bins/zen-rs`, `bins/search-ui` | ✅ |
 | `rgy-autostart` (login item, per platform) | `crates/autostart` | ✅ startup task / HKCU Run, systemd user unit, launchd agent |
 | The crates on crates.io | `crates/*/Cargo.toml`, `bins/*/Cargo.toml` | ✅ all fourteen published at 0.1.0 on 2026-10-23 — see below |
-| The Listary plan | `docs/listary-parity.toml`, `scripts/listary-parity.py` | ⬜ 11 gaps and 9 degraded rows, each with work and a phase — see below |
+| The Listary plan | `docs/listary-parity.toml`, `scripts/listary-parity.py` | ⬜ 9 gaps and 9 degraded rows, each with work and a phase — see below |
 | Packaging (winget, brew, tarballs) | `scripts/build-release.*`, `scripts/publish-release.*`, `.winget/`, `Formula/` | ✅ machinery in place; **no release published yet** |
 | Release flow (the one-line installers, the Linux build over ssh) | `install.sh`, `install.ps1`, `scripts/release-linux.sh` | ✅ the installers pin the digest of the artifact they install; the pins are release data |
 | Homebrew submission (the pull request to homebrew-core) | `scripts/publish-homebrew.*` | ✅ the machinery; the pull request waits for the first release to exist |
@@ -132,11 +132,24 @@ with the work that closes every gap and the phase it belongs to. It asks a
 different question from the matrix above — that one asks "does this work on
 each OS", this one asks "does rgy do what Listary does".
 
-Eleven are gaps, nine are degraded, and fifteen are already at parity:
+Nine are gaps, nine are degraded, and seventeen are already at parity:
 the NTFS MFT reader, the USN journal monitor, the multi-volume enumeration,
 the folder walker, the atomic index snapshot, the u32-second modification
 time, the fail-closed regex and the parallel scoring came in with the merge
-or were already here — and the transliteration shadow and the rank key below.
+or were already here — and the transliteration shadow, the rank key and the
+matchers below.
+
+**The matchers.** A quoted run is a phrase (`"invoice pdf"` is one token and
+the name has to carry the words together, with the space between them) and
+`=port` asks for a whole word (`port` is the word of `report_port.txt` and
+not of `report`). Both are modes, like `'x`, `^x` and `x$`: the fuzzy
+match already forgives what the keyword one refuses, and running every
+matcher on every candidate would cost the scan a third of itself.
+
+The negation was wrong while the modes were added: `!invoice` negated an
+*exact* match, so it still answered `invoce` — and the manual said it
+meant "not close to". The negation now asks the same question the match
+does, so what `!x` keeps is what `x` would not have found.
 
 **The rank key.** The order of the results is now one `u64`, and the
 priority is in its high bits: `Ignored < Low < Normal < Internal < High <

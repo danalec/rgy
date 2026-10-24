@@ -27,6 +27,11 @@ pub enum Mode {
     Exact,
     Prefix,
     Suffix,
+    /// A quoted run: the words together, in order, with the spaces between
+    /// them (`"invoice pdf"`).
+    Phrase,
+    /// A whole word of the name (`=invoice`), not a fragment of one.
+    Keyword,
 }
 
 #[derive(Clone, Debug)]
@@ -147,11 +152,12 @@ impl Default for Query {
 
 impl Query {
     /// Parse the human query language. Plain words are fuzzy tokens;
-    /// `'x` exact, `^x` prefix, `x$` suffix, `!x` negate; filters are
+    /// `'x` exact, `^x` prefix, `x$` suffix, `=x` word, `!x` negate, a
+    /// quoted run a phrase; filters are
     /// `ext: type: kind: in: size: mtime: re: path: limit: grep: regex: sym:`.
     pub fn parse(s: &str, home: &str) -> Result<Query, String> {
         let mut q = Query { size: (0, u64::MAX), mtime: (0, u32::MAX), limit: 50, ..Default::default() };
-        for word in split_words(s) {
+        for (word, quoted) in split_words(s) {
             if let Some((k, v)) = word.split_once(':')
                 && q.filter(k, v, home)?
             {
@@ -164,23 +170,38 @@ impl Query {
                 continue;
             }
             for piece in word.split('/').filter(|p| !p.is_empty()) {
-                q.push_token(piece);
+                q.push_token_mode(piece, quoted);
             }
         }
         Ok(q)
     }
 
     pub fn push_token(&mut self, w: &str) {
-        let (mut t, mut negate, mut mode) = (w, false, Mode::Fuzzy);
+        self.push_token_mode(w, false);
+    }
+
+    /// Push a token, with the mode the caller already knows: a quoted run
+    /// is a phrase.
+    ///
+    /// The markers come after the negation, so `!^x` is a negated prefix
+    /// and `!"a b"` a negated phrase. `!` on its own negates the fuzzy
+    /// match — `!invoice` is "not close to invoice", which is what the
+    /// manual says and what the old code did not do (it negated an exact
+    /// match, so `!invoice` still answered `invoce`).
+    fn push_token_mode(&mut self, w: &str, quoted: bool) {
+        let (mut t, mut negate) = (w, false);
         if let Some(r) = t.strip_prefix('!') {
-            (t, negate, mode) = (r, true, Mode::Exact);
+            (t, negate) = (r, true);
         }
+        let mut mode = if quoted { Mode::Phrase } else { Mode::Fuzzy };
         if let Some(r) = t.strip_prefix('\'') {
             (t, mode) = (r, Mode::Exact);
         } else if let Some(r) = t.strip_prefix('^') {
             (t, mode) = (r, Mode::Prefix);
         } else if let Some(r) = t.strip_suffix('$') {
             (t, mode) = (r, Mode::Suffix);
+        } else if let Some(r) = t.strip_prefix('=') {
+            (t, mode) = (r, Mode::Keyword);
         }
         // Zen-rs: a term carrying `*`/`?` globs the WHOLE PATH; bare
         // terms stay fsearch tokens (the name engine wins, the filter
@@ -452,21 +473,28 @@ fn real_path(p: String) -> String {
 }
 
 /// Split on spaces, keeping "double quoted" runs together.
-fn split_words(s: &str) -> Vec<String> {
-    let (mut out, mut cur, mut quoted) = (Vec::new(), String::new(), false);
+///
+/// A quoted run comes back marked: it is a phrase, not a word — the phrase
+/// matcher takes the words together with the spaces between them.
+fn split_words(s: &str) -> Vec<(String, bool)> {
+    let (mut out, mut cur, mut quoted, mut was_quoted) = (Vec::new(), String::new(), false, false);
     for c in s.chars() {
         match c {
-            '"' => quoted = !quoted,
+            '"' => {
+                quoted = !quoted;
+                was_quoted = true;
+            }
             ' ' if !quoted => {
                 if !cur.is_empty() {
-                    out.push(std::mem::take(&mut cur));
+                    out.push((std::mem::take(&mut cur), was_quoted));
+                    was_quoted = false;
                 }
             }
             _ => cur.push(c),
         }
     }
     if !cur.is_empty() {
-        out.push(cur);
+        out.push((cur, was_quoted));
     }
     out
 }
@@ -542,20 +570,6 @@ pub fn now_secs() -> u32 {
 #[inline(always)]
 pub(crate) fn fold(b: u8) -> u8 {
     b | (((b.wrapping_sub(b'A') < 26) as u8) << 5)
-}
-
-#[inline(always)]
-fn is_subseq(name: &[u8], q: &[u8]) -> bool {
-    let mut j = 0;
-    for &b in name {
-        if fold(b) == q[j] {
-            j += 1;
-            if j == q.len() {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 fn find_ci(name: &[u8], q: &[u8]) -> Option<usize> {
@@ -947,7 +961,40 @@ fn token_score(name: &[u8], wide: Wide, m: u64, t: &Token) -> Option<i32> {
         }
         Mode::Suffix => (name.len() >= t.text.len() && name[name.len() - t.text.len()..].iter().zip(&t.text).all(|(&a, &b)| fold(a) == b))
             .then(|| 50 - (name.len() as i32).min(80) / 3),
+        // The phrase: the words together, in order, with the spaces between
+        // them. It is the match that a name has to carry whole.
+        Mode::Phrase => find_ci(name, &t.text).map(|p| 40 + if p == 0 { 30 } else { 0 } - (name.len() as i32).min(80) / 3),
+        // The word: the query is a whole word of the name, not a fragment
+        // of one. `port` is the word of `report_port.txt` and not of
+        // `report`.
+        Mode::Keyword => keyword_score(name, &t.text),
     }
+}
+
+/// The score of a name that has the query as a whole word.
+///
+/// The words are the runs between the delimiters (the same ones the
+/// scorer's boundary bonus knows: space, `_`, `-`, `.`, `/`, the brackets,
+/// the comma, the plus and the at). A word that matches is the tightest
+/// match there is, so it scores like the exact mode does.
+fn keyword_score(name: &[u8], q: &[u8]) -> Option<i32> {
+    if q.is_empty() {
+        return None;
+    }
+    let mut start = 0usize;
+    for i in 0..name.len() {
+        let delim = class(name[i]) == Class::Delim;
+        if !delim && i + 1 != name.len() {
+            continue;
+        }
+        let end = if delim { i } else { i + 1 };
+        let word = &name[start..end];
+        if word.len() == q.len() && word.iter().zip(q).all(|(&a, &b)| fold(a) == b) {
+            return Some(40 + if start == 0 { 30 } else { 0 } - (name.len() as i32).min(80) / 3);
+        }
+        start = i + 1;
+    }
+    None
 }
 
 /// The score of the query against the name read in another script.
@@ -972,12 +1019,15 @@ fn shadow_score(name: &[u8], q: &[u8]) -> Option<i32> {
     best
 }
 
+/// Does the name match the token?
+///
+/// The negation asks the same question the match does, so what `!x` keeps
+/// is what `x` would not have found: the fuzzy match forgives one typo in
+/// a short word, and the negation has to forgive it too, or `!invoice`
+/// answers `invoce`.
 #[inline]
 fn token_matches(name: &[u8], t: &Token) -> bool {
-    match t.mode {
-        Mode::Fuzzy => is_subseq(name, &t.text),
-        _ => token_score(name, None, !0, t).is_some(),
-    }
+    token_score(name, None, !0, t).is_some()
 }
 
 /// Top k by (score, then lower entry index): a total order, so the result
@@ -1612,6 +1662,41 @@ mod tests {
         assert_eq!(a.tokens[0].mode, Mode::Suffix);
         let a = q("!tmp");
         assert!(a.tokens[0].negate);
+    }
+
+    /// A quoted run is a phrase: the words together, with the spaces.
+    #[test]
+    fn a_quoted_run_is_a_phrase() {
+        let a = q("\"invoice pdf\"");
+        assert_eq!(a.tokens[0].mode, Mode::Phrase);
+        assert_eq!(a.tokens[0].text, b"invoice pdf");
+        assert!(hit("\"invoice pdf\"", "/p/Invoice PDF 2024.pdf", KIND_FILE, 0));
+        // The phrase has to be whole: the words in the other order are not
+        // the phrase.
+        assert!(!hit("\"invoice pdf\"", "/p/pdf_invoice.pdf", KIND_FILE, 0));
+        // And the words of a phrase are not two loose tokens: the name has
+        // to carry the space between them.
+        assert!(!hit("\"invoice pdf\"", "/p/invoiceandpdf.pdf", KIND_FILE, 0));
+    }
+
+    /// The `=` marker asks for a whole word of the name.
+    #[test]
+    fn the_word_marker_asks_for_a_whole_word() {
+        let a = q("=port");
+        assert_eq!(a.tokens[0].mode, Mode::Keyword);
+        assert!(hit("=port", "/p/report_port.txt", KIND_FILE, 0));
+        // A fragment of a word is not the word.
+        assert!(!hit("=port", "/p/report.txt", KIND_FILE, 0));
+        assert!(!hit("=port", "/p/porting.txt", KIND_FILE, 0));
+    }
+
+    /// `!` negates the fuzzy match, which is what the manual says: the old
+    /// code negated an exact match, so `!invoice` still answered `invoce`.
+    #[test]
+    fn the_negation_negates_the_fuzzy_match() {
+        assert!(!hit("!invoice", "/p/invoice.pdf", KIND_FILE, 0));
+        assert!(!hit("!invoice", "/p/invoce.pdf", KIND_FILE, 0));
+        assert!(hit("!invoice", "/p/receipt.pdf", KIND_FILE, 0));
     }
 }
 
