@@ -67,6 +67,7 @@ verification on machines this host does not have.
 | zen-rs bin / TUI (unchanged behaviour) | `bins/zen-rs`, `bins/search-ui` | ✅ |
 | `rgy-autostart` (login item, per platform) | `crates/autostart` | ✅ startup task / HKCU Run, systemd user unit, launchd agent |
 | The crates on crates.io | `crates/*/Cargo.toml`, `bins/*/Cargo.toml` | ✅ all fourteen published at 0.1.0 on 2026-10-23 — see below |
+| The Listary plan | `docs/listary-parity.toml`, `scripts/listary-parity.py` | ⬜ 22 gaps and 7 degraded rows, each with work and a phase — see below |
 | Packaging (winget, brew, tarballs) | `scripts/build-release.*`, `scripts/publish-release.*`, `.winget/`, `Formula/` | ✅ machinery in place; **no release published yet** |
 | Release flow (the one-line installers, the Linux build over ssh) | `install.sh`, `install.ps1`, `scripts/release-linux.sh` | ✅ the installers pin the digest of the artifact they install; the pins are release data |
 | Homebrew submission (the pull request to homebrew-core) | `scripts/publish-homebrew.*` | ✅ the machinery; the pull request waits for the first release to exist |
@@ -122,6 +123,43 @@ parity row at all.
 The CI gate (`python scripts/parity-matrix.py --check`) keeps it that way:
 it fails when a gap appears that is not on the known-gaps list, and when a
 listed gap has been closed and the list forgot.
+
+#### The Listary plan
+
+[docs/listary-parity.md](listary-parity.md) is the plan: 37 capabilities
+recovered from the reverse engineering of Listary 7.1.0.45, one row each,
+with the work that closes every gap and the phase it belongs to. It asks a
+different question from the matrix above — that one asks "does this work on
+each OS", this one asks "does rgy do what Listary does".
+
+Twenty-two are gaps, seven are degraded, and eight are already at parity:
+the NTFS MFT reader, the USN journal monitor, the multi-volume
+enumeration, the folder walker, the atomic index snapshot, the
+u32-second modification time, the fail-closed regex and the parallel
+scoring came in with the merge or were already here.
+
+The phases run in a dependency order, and it is not the order the rows are
+written in:
+
+1. **The rank key** — Listary's ranking is a packed 64-bit composite, not
+   a tuple. Everything that ranks follows from that one decision.
+2. **The matchers** — six matchers instead of one, and the positions they
+   matched. The positions are what makes a match visible.
+3. **The priority rules** — the priority becomes a rule system the user
+   writes. It needs the parent chain from phase 5, so it is written before
+   it is implemented.
+4. **The query surface** — the grammar, the relative time facets and the
+   replay path.
+5. **The index shape** — five indexes over a validated parent-chain
+   forest. The on-disk format stays rgy's own.
+6. **Pinyin** — the matcher family and the data behind it.
+7. **Product surface** — the HTTP API, the suggestion sources, the index
+   schedule and the diagnostics. Not algorithm, but the claim that Listary
+   beats Everything is about the whole product.
+
+The gate (`python scripts/listary-parity.py --check`) fails when a gap has
+no work or no phase, and when a parity claim names no place in the code. It
+does not fail because a gap is open: a gap is the work.
 
 #### The limits that are documented
 

@@ -20,6 +20,7 @@ searchctl --root ~ "invoice grep:tesla"   # and what is inside it
 | [FORMATS.md](FORMATS.md) | what it reads inside a file, format by format | everyone |
 | [docs/STATUS.md](docs/STATUS.md) | the scoreboard: what is built, what is measured, what is unverified — and what is left | maintainers |
 | [docs/parity.md](docs/parity.md) | the 53-feature per-OS matrix, with the gaps marked | maintainers |
+| [docs/listary-parity.md](docs/listary-parity.md) | what Listary does that rgy does not, and the work that closes it — the implementation plan | maintainers |
 | [docs/design.md](docs/design.md) | the decisions this workspace is built on, and the rules that keep it honest | maintainers |
 | [docs/insights-from-rgx.md](docs/insights-from-rgx.md) | what the rgx side taught about storage and access shapes | maintainers |
 | [docs/on-disk-formats.md](docs/on-disk-formats.md) | the on-disk formats: the index blob, the packs, the content segments | maintainers |

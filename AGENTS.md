@@ -170,6 +170,7 @@ says so in the failure, but the fix is the build above.
 | `AGENTS.md` | this file |
 | `docs/design.md` | the decisions the code is built on, and the rules that keep it honest |
 | `docs/STATUS.md` | the scoreboard: what is built, measured, unverified — and what is left |
+| `docs/listary-parity.md` | what Listary does that rgy does not, and the work that closes it: the implementation plan |
 | `docs/` | everything else, one document per subject |
 
 The README is short on purpose. When a section grows past a screen, it
