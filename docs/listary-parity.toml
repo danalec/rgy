@@ -176,11 +176,11 @@ size = "M"
 id = "S.10"
 name = "Incremental re-ranking on query edit"
 phase = 2
-status = "G"
+status = "D"
 evidence = "§5.4, §5.5"
 listary = "When the query is edited, the executor reuses the previous result set and the previous state instead of re-scanning the index -- a keystroke-latency optimisation, keyed by an incremental-search session id."
-rgy = "Every query is a fresh scan. The daemon keeps the index warm, but a changed query re-walks it."
-work = "A session in the engine that keeps the last result set and re-ranks it when the query changes, with the incremental-search id as the key. This is the single biggest latency win in the list, and it is also the most invasive: it needs a session object with a revision, and the executor has to be able to re-rank without re-scanning."
+rgy = "Degraded, and the reason is measured. The session exists: `name_core::session::Session` has the id (the protocol carries it, one session per client), the revision of the index the result set was found against, the previous result set, and the re-rank. The re-rank is exact -- it is only taken when the new query can match no more entries than the old one, so the old set is a superset and the answer is the answer a fresh search gives (a test pins that, over the keystroke sequences a user types). What the measurement does not support is the claim that it pays: on a 200k-name corpus the re-ranked keystroke is 0.97x the fresh one, and the reason is structural. rgy's `full` scan is a linear pass over the entry array at about 0.3 ns an entry, while a re-rank visits the candidates one by one at about 18 ns; and the name table -- which is where the cost of a broad query is -- is already narrowed by the existing `NameCache`, so the re-rank re-pays what the cache already saved. The re-rank is therefore guarded: it is used only when the previous set is at most a sixtieth of the scope, the same rule the engine's own `selective` plan follows, so a session is never a pessimisation."
+work = "The win needs the cost to be somewhere the re-rank can avoid. rgy's scan is already a linear pass, so the re-rank can only win where the scan is not linear: the `selective` plan's per-candidate cost (about 18 ns against 0.3 ns an entry) is where a session would pay, and it does not, because the previous set is a superset of the new one only when the new query narrows -- and a narrowing query is exactly the one the name table already narrows. The honest version of this row is a session that reuses the previous *candidate set* rather than the previous *result set*: the set of names the previous query matched, which is what the `selective` plan walks."
 size = "L"
 
 # ---------------------------------------------------------------------------
@@ -276,11 +276,11 @@ size = "S"
 id = "Q.4"
 name = "Facet replay path"
 phase = 4
-status = "G"
+status = "P"
 evidence = "§5.4, §5.6"
 listary = "An unchanged facet selection does not trigger a re-search: the engine replays the previous plan. The product crate carries the invariant 'file search window facet selection unchanged; skipping re-search to keep the engine replay path'."
-rgy = "Absent. Every keystroke re-searches."
-work = "The facet state machine keeps the previous selection, and an unchanged selection replays the previous plan instead of re-searching. This row depends on S.10 -- the replay path needs the session that incremental re-ranking introduces."
+rgy = "Done. The session holds the previous answer and the query that produced it, and a query that is the same query -- the same text and the same filters -- is answered from it without a search. The protocol carries the session id, so each client has its own and one window's keystrokes do not disturb another's. The rule is the whole query, not the selection alone: a query whose text changed has a different answer, and replaying the old one would be a stale answer (a test pins that)."
+work = "None. The replay path is `name_core::session::Session::search_replaying_facets`, and the daemon calls it for every request that carries a session id."
 size = "M"
 
 # ---------------------------------------------------------------------------

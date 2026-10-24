@@ -2444,6 +2444,7 @@ fn ends_with_fold(name: &[u8], s: &[u8]) -> bool {
 }
 
 /// Fuzzy words this long forgive one typo (see `typo_score`).
+#[derive(Clone)]
 pub struct Hit {
     /// The key it was ranked by: the tier, the score, and the tie-break.
     ///
@@ -2889,11 +2890,86 @@ impl Searcher<'_> {
         hits
     }
 
+    /// The hits of `q`, re-ranked from a set of entries a previous query
+    /// matched.
+    ///
+    /// The entries are `(entry index, name id)`: the name id is what the
+    /// score comes from, and the name table already holds it. The walk
+    /// this replaces is the one over every entry in the scope; here only
+    /// the entries that matched are visited, and each is re-scored against
+    /// the new names.
+    ///
+    /// The answer is the same a fresh search gives, and that is the point:
+    /// the caller may only use this when the new query can match no more
+    /// entries than the old one, so the old match set is a superset of the
+    /// new one. The session decides that; this only does the work.
+    pub(crate) fn rerank_entries(&self, q: &Query, entries: &[(u32, u32)]) -> Vec<Hit> {
+        let pos: Vec<&Token> = q.tokens.iter().filter(|t| !t.negate).collect();
+        let neg: Vec<&Token> = q.tokens.iter().filter(|t| t.negate).collect();
+        let (lo, hi) = self.scope_range(q).unwrap_or((1, self.live.base.n));
+        // The names are scored as a fresh search scores them: the table
+        // does the narrowing itself.
+        let scored = self.names(q, &pos, &neg, lo, hi);
+        let s = Scan { q, live: self.live, names: &scored.names, npos: pos.len(), need_dirs: pos.len() > 1 || !neg.is_empty(), now: now_secs() };
+        // The dir memo is the same one the scan would build: the folder
+        // tokens need it, and it is what tells a folder match from a name
+        // match. The re-rank builds it per candidate (the same way the
+        // `selective` plan does), so it does not need the whole tree's
+        // memo.
+        let _ = scored.memo.get_or_init(|| self.dir_tokens(&scored.names));
+        // The entries are re-scored in parallel, the way the scan scores
+        // them: a sequential loop over the candidates would make the
+        // re-rank slower than the scan it replaces, on a machine with more
+        // than one core.
+        let mut hits = top_k(entries.len(), q.limit, entries.len(), RankKey::default(), |r, top| {
+            let (mut pbuf, mut memo) = (Vec::new(), HashMap::<u32, DirMemo, crate::name_index::Fx>::default());
+            let re = q.path_re.clone();
+            for &(i, name) in &entries[r] {
+                let i = i as usize;
+                if i < lo || i >= hi {
+                    continue;
+                }
+                // The entry's name must still match: the query narrowed, so
+                // some of the old matches no longer do.
+                let Some(nh) = scored.names.get(name) else { continue };
+                if nh.flags & NF_OK == 0 {
+                    continue;
+                }
+                let m = if s.need_dirs { s.memo_of(self.live.base.parent()[i], &mut memo, &mut |k| scored.names.get(k)) } else { DirMemo::default() };
+                if let Some(k) = s.score(i, nh, m, top.floor, &mut pbuf, re.as_ref()) {
+                    top.push(k);
+                }
+            }
+        });
+        // The overlay is not in the index, so it is searched every time:
+        // an entry added since the last compaction has no index to re-rank.
+        hits.extend(self.search_overlay(q));
+        self.sort_hits(&mut hits, q.sort);
+        hits.truncate(q.limit);
+        hits
+    }
+
+    /// The hits of `q`, split into the index's and the overlay's.
+    ///
+    /// The split is what a session needs: the overlay's entries have no
+    /// index to re-rank, so the session keeps only the index's -- and the
+    /// count of the two together is what says whether the index's set was
+    /// complete (a search that hit its cap found more than it kept).
+    pub(crate) fn search_split(&self, q: &Query) -> (Vec<Hit>, Vec<Hit>) {
+        let base = self.search_base(q);
+        let over = self.search_overlay(q);
+        (base, over)
+    }
+
     /// The order the hits come in, for the query's `sort:`.
     ///
     /// The choice orders the hits the cap kept; it does not pick them. The
     /// cap still takes the best by score, so `sort:mtime` is "the newest of
     /// the best matches", not "the newest matches".
+    pub(crate) fn sort_hits_public(&self, hits: &mut [Hit], sort: SortBy) {
+        self.sort_hits(hits, sort);
+    }
+
     fn sort_hits(&self, hits: &mut [Hit], sort: SortBy) {
         let idx = &self.live.base;
         match sort {
@@ -4180,7 +4256,7 @@ static MEMO_POOL: std::sync::Mutex<Vec<Vec<DirMemo>>> = std::sync::Mutex::new(Ve
 /// What the name table depends on: two queries with the same key score
 /// every name the same.
 #[derive(PartialEq)]
-struct NameKey {
+pub struct NameKey {
     tokens: Vec<(Vec<u8>, Mode, bool)>,
     exts: Vec<Vec<u8>>,
     name_re: Option<String>,
@@ -4189,7 +4265,8 @@ struct NameKey {
 }
 
 impl NameKey {
-    fn of(q: &Query, scope: Option<(usize, usize)>) -> NameKey {
+    /// The key of `q`, with the scope whose names alone were scored.
+    pub fn of(q: &Query, scope: Option<(usize, usize)>) -> NameKey {
         NameKey {
             tokens: q.tokens.iter().map(|t| (t.text.clone(), t.mode, t.negate)).collect(),
             exts: q.exts.clone(),
@@ -4200,7 +4277,7 @@ impl NameKey {
 
     /// Can only match names `prev` matched: same filters, same tokens, each
     /// positive token the same or longer in a way that only narrows it.
-    fn narrows(&self, prev: &NameKey) -> bool {
+    pub fn narrows(&self, prev: &NameKey) -> bool {
         self.exts == prev.exts
             && self.name_re == prev.name_re
             && self.scope == prev.scope

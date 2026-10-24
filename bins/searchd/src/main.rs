@@ -117,6 +117,14 @@ struct Ctx {
     /// Set when a content search has been asked for: what tells the
     /// content thread there is something to build an index for.
     wants_content: std::sync::atomic::AtomicBool,
+    /// The incremental search sessions, one per client (parity row S.10).
+    ///
+    /// A session holds the last result set and re-ranks it when the query
+    /// narrows, instead of walking the index again. The id is the client's
+    /// own: the protocol carries it, so two clients (two windows of the
+    /// TUI) do not share a session and neither one's keystrokes disturb
+    /// the other's.
+    sessions: std::sync::Mutex<std::collections::HashMap<u64, rgy_name_core::session::Session>>,
 }
 
 impl Ctx {
@@ -138,6 +146,36 @@ impl Ctx {
     /// tree was walked again and the answer has to change with it.
     fn set_relisted(&self) {
         self.catch_up.store(CATCH_UP_RELISTED, Ordering::Relaxed);
+    }
+
+    /// Search the alternatives through the client's session.
+    ///
+    /// The session is the incremental-search id (parity row S.10): the
+    /// daemon keeps one per id, and a query that narrows the previous one
+    /// is answered by re-ranking the previous result set instead of
+    /// walking the index again. The facet replay path (parity row Q.4) is
+    /// the same session: a facet selection that has not changed replays
+    /// the previous answer instead of searching again.
+    ///
+    /// The answers are the same either way -- the session is an
+    /// optimisation, not a different search -- so this is only about the
+    /// work. An alternative (`|`) is searched on its own: a session holds
+    /// one result set, and a query with alternatives is not one query.
+    fn search_with_session(
+        &self,
+        id: u64,
+        searcher: &Searcher<'_>,
+        alts: &[Query],
+        limit: usize,
+    ) -> Vec<rgy_name_core::name_query::Hit> {
+        if alts.len() != 1 {
+            return searcher.search_alternatives(alts, limit);
+        }
+        let mut sessions = self.sessions.lock().unwrap();
+        let session = sessions
+            .entry(id)
+            .or_insert_with(|| rgy_name_core::session::Session::new(id));
+        session.search_replaying_facets(searcher, &alts[0])
     }
 }
 
@@ -269,6 +307,7 @@ fn main() {
         }),
         content: std::sync::Mutex::new(None),
         wants_content: std::sync::atomic::AtomicBool::new(false),
+        sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
     });
 
     // Keep the index fresh as the tree changes (the Watch thread); queries
@@ -664,7 +703,7 @@ fn handle(req: Request, ctx: &Ctx) -> Vec<Response> {
                 catch_up: ctx.catch_up(),
             });
         }
-        Request::Search { q, limit } => match Alternatives::parse(&q, &ctx.home) {
+        Request::Search { q, limit, session } => match Alternatives::parse(&q, &ctx.home) {
             Err(e) => responses.push(Response::Error { message: e }),
             Ok(alts) => {
                 for w in &alts.warnings {
@@ -678,7 +717,15 @@ fn handle(req: Request, ctx: &Ctx) -> Vec<Response> {
                 // the `u32::MAX` sentinel. A query that matched three files
                 // added since the last compaction answered with one of
                 // them -- and the daemon's answer is what the CLI reads.
-                let hits = searcher.search_alternatives(&alts.alts, limit);
+                //
+                // With a session the answer is the same one, computed from
+                // the session's previous result set (parity row S.10): a
+                // query that narrows the previous one is re-ranked instead
+                // of walked again.
+                let hits = match session {
+                    Some(id) => ctx.search_with_session(id, &searcher, &alts.alts, limit),
+                    None => searcher.search_alternatives(&alts.alts, limit),
+                };
                 let mut buf = Vec::new();
                 let wire: Vec<WireHit> = hits
                     .iter()
@@ -1582,6 +1629,7 @@ mod tests {
             catch_up: std::sync::atomic::AtomicU8::new(CATCH_UP_REPLAYED),
             content: std::sync::Mutex::new(None),
             wants_content: std::sync::atomic::AtomicBool::new(false),
+            sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
         });
         assert_eq!(ctx.catch_up(), CatchUp::Replayed);
 
@@ -1641,12 +1689,14 @@ mod tests {
             catch_up: std::sync::atomic::AtomicU8::new(CATCH_UP_RELISTED),
             content: std::sync::Mutex::new(None),
             wants_content: std::sync::atomic::AtomicBool::new(false),
+            sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
         });
 
         let responses = handle(
             Request::Search {
                 q: "late".to_string(),
                 limit: 10,
+                session: None,
             },
             &ctx,
         );
@@ -1690,6 +1740,7 @@ mod tests {
             catch_up: std::sync::atomic::AtomicU8::new(CATCH_UP_RELISTED),
             content: std::sync::Mutex::new(None),
             wants_content: std::sync::atomic::AtomicBool::new(false),
+            sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
         });
         let names = |rs: Vec<Response>| -> Vec<String> {
             rs.iter()
@@ -1783,12 +1834,14 @@ mod tests {
             catch_up: std::sync::atomic::AtomicU8::new(CATCH_UP_RELISTED),
             content: std::sync::Mutex::new(None),
             wants_content: std::sync::atomic::AtomicBool::new(false),
+            sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
         });
 
         let responses = handle(
             Request::Search {
                 q: "late".to_string(),
                 limit: 10,
+                session: None,
             },
             &ctx,
         );

@@ -1,0 +1,610 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! The incremental search session: what a keystroke re-uses.
+//!
+//! Listary's engine keeps a session per search and re-uses the previous
+//! result set when the query is edited, instead of walking the index again
+//! (parity row S.10). The win is the latency of a keystroke, and it is the
+//! largest single win in the matrix.
+//!
+//! rgy's engine already re-uses one thing across a keystroke: the table of
+//! scored **names** (`name_query::NameCache`). A query that narrows the
+//! previous one re-scores the names the previous table holds, not the two
+//! million it holds in all. What it does not have is a **session**: an
+//! identity, a revision, and the previous result set held under both.
+//!
+//! This module is that session. It holds:
+//!
+//! * an **id**, so a client can keep its own session and the daemon can
+//!   tell two of them apart (Listary's incremental-search id);
+//! * the **revision** of the index the result set was found against, so a
+//!   session whose index has moved is dropped rather than answered from;
+//! * the **previous result set**, so the next keystroke re-ranks it
+//!   instead of walking the index.
+//!
+//! ## What is re-ranked, and what is exact
+//!
+//! The re-rank is exact or it does not happen. A query may be answered
+//! from the session only when it can match **no more** entries than the
+//! previous one did -- the same rule the name table follows
+//! ([`NameKey::narrows`]). Then the previous result set is a superset of
+//! the new one, and re-ranking it gives the answer a fresh search gives.
+//!
+//! The previous result set has to be the **complete** match set for that to
+//! hold, and a search that hit its cap does not have one: the entries the
+//! cap dropped may be the ones the next keystroke wants. So a session
+//! records whether its set is complete, and an incomplete one is not used
+//! for a re-rank -- it is a fresh search, exactly as before.
+//!
+//! That is where the win comes from: a query that is close to its answer
+//! has few hits, so its result set is complete, and the next keystroke
+//! re-scores those few entries instead of the whole index. A query with
+//! thousands of hits has an incomplete set, and the next keystroke walks
+//! the index as before -- which is right, because the next keystroke would
+//! have to look at all of them anyway.
+//!
+//! ## What the session does not change
+//!
+//! The answers are the answers a fresh search gives: the same [`Searcher`],
+//! the same scorers, the same filters. A session that cannot re-rank
+//! exactly is not used at all.
+
+use crate::name_query::{Hit, NameKey, Query, Searcher};
+
+/// How much more a re-rank's visit costs than a step of the linear scan.
+///
+/// The scan reads the names in order, at about 0.3 ns an entry; a re-rank
+/// goes to each entry's own name, at about 18 ns. The re-rank therefore
+/// only pays while the previous set is at most a sixtieth of what the scan
+/// would walk -- the same rule the engine's own `selective` plan follows.
+const RERANK_VISIT_RATIO: u64 = 60;
+
+/// A search session: an identity, a revision, and the last result set.
+///
+/// The session is cheap to make and cheap to drop; what it holds is not
+/// large (the result set, capped by the query's own limit).
+pub struct Session {
+    /// The session's identity. The client picks it, or the daemon does.
+    id: u64,
+    last: std::sync::Mutex<Option<Last>>,
+    /// Whether the last search was answered from the session.
+    reranked: std::sync::atomic::AtomicBool,
+}
+
+/// The state a session keeps between two keystrokes.
+struct Last {
+    /// When the session was filled.
+    at: std::time::Instant,
+    /// The revision of the index the result set was found against.
+    revision: u64,
+    /// The query's key: what a later query is compared against.
+    key: SessionKey,
+    /// The facet selection the query carried: the filters without the text.
+    facets: Facets,
+    /// The answer the search gave, kept for the facet replay (Q.4).
+    answer: Option<Vec<Hit>>,
+    /// The base entries the search matched, with the name they matched
+    /// under.
+    ///
+    /// The name id is what makes the re-rank cheap: the score of an entry
+    /// comes from its name's score, and the name table already holds it.
+    entries: Vec<(u32, u32)>,
+    /// Whether `entries` is the complete match set.
+    ///
+    /// A search that hit its cap does not have one, and a set that is not
+    /// complete cannot be re-ranked: the entries the cap dropped may be the
+    /// ones the next keystroke wants.
+    complete: bool,
+}
+
+impl Session {
+    /// A session with the given identity and nothing in it.
+    pub fn new(id: u64) -> Session {
+        Session { id, last: std::sync::Mutex::new(None), reranked: std::sync::atomic::AtomicBool::new(false) }
+    }
+
+    /// The session's identity.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Drop what the session holds.
+    pub fn clear(&self) {
+        *self.last.lock().unwrap() = None;
+    }
+
+    /// Whether the session holds anything.
+    pub fn is_empty(&self) -> bool {
+        self.last.lock().unwrap().is_none()
+    }
+
+    /// The number of entries the session holds.
+    pub fn len(&self) -> usize {
+        self.last.lock().unwrap().as_ref().map_or(0, |l| l.entries.len())
+    }
+
+    /// The revision the session's result set was found against.
+    pub fn revision(&self) -> Option<u64> {
+        self.last.lock().unwrap().as_ref().map(|l| l.revision)
+    }
+
+    /// Whether the session's result set is the complete match set.
+    ///
+    /// A search that hit its cap did not find everything, so its set is
+    /// not complete and cannot be re-ranked: the entries the cap dropped
+    /// may be the ones the next keystroke wants.
+    pub fn is_complete(&self) -> bool {
+        self.last.lock().unwrap().as_ref().is_some_and(|l| l.complete)
+    }
+
+    /// Whether the last search was answered from the session.
+    ///
+    /// This is how a caller -- and a test -- tells a re-rank from a fresh
+    /// search. The answers are the same either way; the work is not.
+    pub fn last_reranked(&self) -> bool {
+        self.reranked.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Search the query, re-using the session when it can.
+    ///
+    /// The session is filled with what the search matched, so the next
+    /// keystroke can re-rank it. The answers are the same either way: the
+    /// re-rank path is only taken when it is provably the same set.
+    pub fn search(&self, searcher: &Searcher<'_>, q: &Query) -> Vec<Hit> {
+        // The session's entries are only good for the index they were
+        // matched against. A different revision is a different index, and
+        // the entries mean something else now.
+        let revision = searcher.live.base.event_id;
+        match self.rerank(searcher, q, revision) {
+            Some(hits) => {
+                self.reranked.store(true, std::sync::atomic::Ordering::Relaxed);
+                hits
+            }
+            None => {
+                self.reranked.store(false, std::sync::atomic::Ordering::Relaxed);
+                let (base, over) = searcher.search_split(q);
+                let complete = base.len() + over.len() < q.limit;
+                let mut hits = base;
+                hits.extend(over);
+                self.fill(searcher, q, revision, &hits, complete);
+                self.sort_and_cap(searcher, q, hits)
+            }
+        }
+    }
+
+    /// The hits of `q`, re-ranked from the session's entries.
+    ///
+    /// `None` when the session cannot answer the query: the query widens
+    /// the previous one, the index moved, the previous set was not
+    /// complete, the previous set was too big for the re-rank to pay, or
+    /// the session is empty. The answer is then a fresh search, and the
+    /// caller cannot tell the difference -- which is the point.
+    fn rerank(&self, searcher: &Searcher<'_>, q: &Query, revision: u64) -> Option<Vec<Hit>> {
+        let last = self.last.lock().unwrap();
+        let last = last.as_ref()?;
+        if last.revision != revision || !last.complete {
+            return None;
+        }
+        // The query has to narrow the previous one, and it has to be the
+        // same shape of query: a filter that changed the answer cannot be
+        // re-ranked from the entries the old filter chose.
+        if !SessionKey::of(q).narrows(&last.key) {
+            return None;
+        }
+        // The re-rank visits the entries one by one, and a visit costs about
+        // sixty times what a step of the linear scan costs (the scan reads
+        // the names in order; the re-rank goes to each entry's name). So
+        // the re-rank only pays when the previous set is much smaller than
+        // what a fresh scan would walk -- the same rule the engine's own
+        // `selective` plan follows. Without it the session would be a
+        // pessimisation on a wide query, and a session that makes the
+        // search slower is not an optimisation.
+        let (lo, hi) = searcher.scope_range(q).unwrap_or((1, searcher.live.base.n));
+        if (last.entries.len() as u64).saturating_mul(RERANK_VISIT_RATIO) > (hi - lo) as u64 {
+            return None;
+        }
+        Some(searcher.rerank_entries(q, &last.entries))
+    }
+
+    /// Fill the session with what the search matched.
+    fn fill(&self, searcher: &Searcher<'_>, q: &Query, revision: u64, hits: &[Hit], complete: bool) {
+        let mut entries = Vec::with_capacity(hits.len());
+        for h in hits {
+            if h.idx == u32::MAX {
+                // An overlay entry: it has no entry in the index, so the
+                // session cannot re-rank it. The overlay is searched on
+                // every keystroke anyway.
+                continue;
+            }
+            let name = searcher.live.base.ent_name()[h.idx as usize];
+            entries.push((h.idx, name));
+        }
+        *self.last.lock().unwrap() = Some(Last {
+            at: std::time::Instant::now(),
+            revision,
+            key: SessionKey::of(q),
+            facets: Facets::of(q),
+            answer: Some(hits.to_vec()),
+            entries,
+            complete,
+        });
+    }
+
+    /// The hits in the query's order, capped.
+    fn sort_and_cap(&self, searcher: &Searcher<'_>, q: &Query, mut hits: Vec<Hit>) -> Vec<Hit> {
+        searcher.sort_hits_public(&mut hits, q.sort);
+        hits.truncate(q.limit);
+        hits
+    }
+
+    /// Drop the session once searching has stopped: the result set is worth
+    /// keeping only while the user is typing.
+    pub fn trim_if_idle(&self, idle: std::time::Duration) {
+        let mut g = self.last.lock().unwrap();
+        if g.as_ref().is_some_and(|s| s.at.elapsed() > idle) {
+            *g = None;
+        }
+    }
+
+    /// The facet selection: the part of the query that is not the text the
+    /// user is typing.
+    ///
+    /// Listary's product crate keeps the facet selection in a state
+    /// machine, and an unchanged selection does not trigger a re-search:
+    /// "file search window facet selection unchanged; skipping re-search to
+    /// keep the engine replay path" (parity row Q.4). The facet state lives
+    /// in the product, not in the engine -- and rgy's product is the TUI
+    /// and the daemon, which is where this is.
+    ///
+    /// The selection is the query's filters: the extension, the kind, the
+    /// folder, the size, the date, the regex, the globs. The text is not
+    /// part of it: the text is what changes on every keystroke, and the
+    /// selection is what the user clicks.
+    pub fn facets(&self) -> Facets {
+        self.last.lock().unwrap().as_ref().map_or(Facets::default(), |l| l.facets.clone())
+    }
+
+    /// Search the query, replaying the previous answer when the query has
+    /// not changed at all.
+    ///
+    /// This is the facet replay path (parity row Q.4). The selection is
+    /// compared with the one the session holds, and so is the text: a
+    /// query that is the same query is answered from the previous answer,
+    /// with no search at all.
+    ///
+    /// The answer is the previous one, which is why the session has to
+    /// hold it: a replay that cannot return the previous answer is not a
+    /// replay. And it is the *whole* query that has to be the same: a
+    /// query whose text changed has a different answer, and replaying the
+    /// old one would be a stale answer.
+    pub fn search_replaying_facets(&self, searcher: &Searcher<'_>, q: &Query) -> Vec<Hit> {
+        let key = SessionKey::of(q);
+        // The whole query is the same and the index has not moved: the
+        // previous answer is the answer.
+        if let Some(last) = self.last.lock().unwrap().as_ref()
+            && last.key == key
+            && last.revision == searcher.live.base.event_id
+            && let Some(hits) = &last.answer
+        {
+            self.reranked.store(true, std::sync::atomic::Ordering::Relaxed);
+            return hits.clone();
+        }
+        self.reranked.store(false, std::sync::atomic::Ordering::Relaxed);
+        self.search(searcher, q)
+    }
+}
+
+/// The facet selection of a query: the filters, without the text.
+///
+/// The text is what the user types; the selection is what they click. The
+/// two are kept apart so a selection that has not changed can be told from
+/// a query that has.
+#[derive(Clone, PartialEq, Default, Debug)]
+pub struct Facets {
+    kind: Option<u8>,
+    link: bool,
+    apps: bool,
+    exts: Vec<Vec<u8>>,
+    scope: Option<Vec<u8>>,
+    size: (u64, u64),
+    size_set: bool,
+    mtime: (u32, u32),
+    name_re: Option<String>,
+    path_re: Option<String>,
+    globs: Vec<(bool, Vec<u8>)>,
+}
+
+impl Facets {
+    /// The selection of `q`.
+    pub fn of(q: &Query) -> Facets {
+        Facets {
+            kind: q.kind,
+            link: q.link,
+            apps: q.apps,
+            exts: q.exts.clone(),
+            scope: q.scope.clone(),
+            size: q.size,
+            size_set: q.size_set,
+            mtime: q.mtime,
+            name_re: q.name_re.as_ref().map(|r| r.as_str().to_string()),
+            path_re: q.path_re.as_ref().map(|r| r.as_str().to_string()),
+            globs: q.globs.clone(),
+        }
+    }
+
+    /// Whether the selection is empty: a query with no filters at all.
+    pub fn is_empty(&self) -> bool {
+        self.kind.is_none()
+            && !self.link
+            && !self.apps
+            && self.exts.is_empty()
+            && self.scope.is_none()
+            && !self.size_set
+            && self.mtime == (0, u32::MAX)
+            && self.name_re.is_none()
+            && self.path_re.is_none()
+            && self.globs.is_empty()
+    }
+}
+
+/// What a session's previous query decided, and what a later query has to
+/// match to be answered from it.
+///
+/// The name table's key ([`NameKey`]) says which **names** a query matches.
+/// The session needs more: the filters decide which **entries** match, and
+/// a filter that changed the answer cannot be re-ranked from the entries
+/// the old filter chose.
+#[derive(PartialEq)]
+pub struct SessionKey {
+    names: NameKey,
+    /// The filters on the entries themselves.
+    filters: Filters,
+}
+
+/// The filters a query puts on the entries.
+#[derive(PartialEq)]
+struct Filters {
+    kind: Option<u8>,
+    link: bool,
+    apps: bool,
+    size: (u64, u64),
+    size_set: bool,
+    mtime: (u32, u32),
+    /// The whole-path glob patterns, with their negation.
+    globs: Vec<(bool, Vec<u8>)>,
+    /// The path regex, as its text: the compiled form is not comparable.
+    path_re: Option<String>,
+}
+
+impl SessionKey {
+    /// The key of `q`.
+    fn of(q: &Query) -> SessionKey {
+        SessionKey {
+            names: NameKey::of(q, None),
+            filters: Filters {
+                kind: q.kind,
+                link: q.link,
+                apps: q.apps,
+                size: q.size,
+                size_set: q.size_set,
+                mtime: q.mtime,
+                globs: q.globs.clone(),
+                path_re: q.path_re.as_ref().map(|r| r.as_str().to_string()),
+            },
+        }
+    }
+
+    /// Can only match entries `prev` matched: the same filters, and the
+    /// tokens narrowed the way the name table's key narrows them.
+    fn narrows(&self, prev: &SessionKey) -> bool {
+        self.filters == prev.filters && self.names.narrows(&prev.names)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::live::Live;
+    use crate::name_index::Index;
+    use rgy_discovery::walk::{KIND_FILE, KIND_LINK, Listing, NONE, RawEnt};
+
+    /// An index of `n` files whose names are `entry_000000.txt` and so on,
+    /// plus a few that do not follow the pattern.
+    fn live(n: usize) -> Live {
+        let mut names = Vec::new();
+        let mut ents = Vec::new();
+        for i in 0..n {
+            let name = format!("entry_{i:06}.txt");
+            let off = names.len() as u32;
+            names.extend_from_slice(name.as_bytes());
+            ents.push(RawEnt { name_off: off, name_len: name.len() as u16, kind: KIND_FILE, size: 10, mtime: 1_700_000_000, child: NONE });
+        }
+        for name in ["invoice.pdf", "invoice.txt"] {
+            let off = names.len() as u32;
+            names.extend_from_slice(name.as_bytes());
+            ents.push(RawEnt { name_off: off, name_len: name.len() as u16, kind: KIND_FILE, size: 10, mtime: 1_700_000_000, child: NONE });
+        }
+        let off = names.len() as u32;
+        names.extend_from_slice(b"entry_link");
+        ents.push(RawEnt { name_off: off, name_len: 10, kind: KIND_LINK, size: 10, mtime: 1_700_000_000, child: NONE });
+        Live::new(Index::build(vec![Listing { id: 0, names, ents }], 0, 1_700_000_000, b"/"))
+    }
+
+    fn q(s: &str) -> Query {
+        Query::parse(s, "").expect("parses")
+    }
+
+    /// The entries a search answers, by their index in the index.
+    ///
+    /// The index is the identity: the path is rebuilt from it, and a hit
+    /// in the overlay has no index at all (it has `u32::MAX`).
+    fn paths(hits: &[Hit]) -> Vec<u32> {
+        let mut v: Vec<u32> = hits.iter().map(|h| h.idx).collect();
+        v.sort_unstable();
+        v
+    }
+
+    /// A re-ranked answer is the answer a fresh search gives.
+    ///
+    /// This is the whole property: the session is an optimisation, and an
+    /// optimisation that changes the answer is a bug. The queries are the
+    /// ones a keystroke produces -- one token growing, a filter added, a
+    /// kind narrowed.
+    #[test]
+    fn a_reranked_answer_is_the_answer_a_fresh_search_gives() {
+        let live = live(200);
+        let searcher = Searcher { live: &live };
+        let session = Session::new(1);
+        let queries = ["entry", "entry_0", "entry_00", "entry_000", "invoice", "invoice.p", "entry_00 ext:txt", "entry_00 type:link"];
+        for w in queries {
+            let fresh = searcher.search(&q(w));
+            let reranked = session.search(&searcher, &q(w));
+            assert_eq!(paths(&reranked), paths(&fresh), "the session changed the answer of {w:?}: {:?} vs {:?}", paths(&reranked), paths(&fresh));
+        }
+    }
+
+    /// A session that widens the query is not used.
+    ///
+    /// Deleting a character widens the match: the previous match set is not
+    /// a superset of the new one, so the entries it holds are not enough.
+    /// The session has to notice and answer with a fresh search.
+    #[test]
+    fn a_widening_query_is_answered_fresh() {
+        let live = live(200);
+        let searcher = Searcher { live: &live };
+        let session = Session::new(1);
+        session.search(&searcher, &q("entry_00"));
+        let fresh = searcher.search(&q("entry_0"));
+        let got = session.search(&searcher, &q("entry_0"));
+        assert_eq!(paths(&got), paths(&fresh), "a widening query is answered fresh: {:?} vs {:?}", paths(&got), paths(&fresh));
+    }
+
+    /// A filter that changed the answer cannot be re-ranked from the
+    /// entries the old filter chose.
+    #[test]
+    fn a_changed_filter_is_answered_fresh() {
+        let live = live(200);
+        let searcher = Searcher { live: &live };
+        let session = Session::new(1);
+        session.search(&searcher, &q("entry"));
+        let fresh = searcher.search(&q("entry ext:pdf"));
+        let got = session.search(&searcher, &q("entry ext:pdf"));
+        assert_eq!(paths(&got), paths(&fresh), "a new filter is answered fresh: {:?} vs {:?}", paths(&got), paths(&fresh));
+    }
+
+    /// A session holds nothing after a query that matched no entry, and
+    /// nothing after a clear.
+    #[test]
+    fn a_session_can_be_cleared() {
+        let live = live(200);
+        let searcher = Searcher { live: &live };
+        let session = Session::new(7);
+        assert_eq!(session.id(), 7, "the session keeps its identity");
+        session.search(&searcher, &q("entry"));
+        assert!(!session.is_empty(), "a search fills the session");
+        assert!(!session.is_empty(), "the session holds the entries it matched");
+        session.clear();
+        assert!(session.is_empty(), "a cleared session holds nothing");
+        let hits = session.search(&searcher, &q("entry"));
+        assert!(!hits.is_empty(), "a cleared session still answers");
+    }
+
+    /// The re-rank is actually taken.
+    ///
+    /// A test that only compares the answers cannot tell a re-rank from a
+    /// fresh search -- and a session that never re-ranks would pass every
+    /// other test here while doing nothing. So the session says whether it
+    /// re-ranked.
+    #[test]
+    fn a_narrowing_query_is_re_ranked_and_not_searched_again() {
+        let live = live(200);
+        let searcher = Searcher { live: &live };
+        let session = Session::new(1);
+        // A query with few hits: its result set is complete, so the next
+        // keystroke can be answered from it.
+        session.search(&searcher, &q("invoice"));
+        assert!(session.is_complete(), "a query with few hits has a complete result set");
+        // The next keystroke narrows it, and is answered from the session.
+        session.search(&searcher, &q("invoice.p"));
+        assert!(session.last_reranked(), "the narrowing query was re-ranked");
+    }
+
+    /// A query with more hits than the cap has no complete result set, so
+    /// the next keystroke cannot be answered from it.
+    #[test]
+    fn a_query_that_hit_its_cap_cannot_be_re_ranked() {
+        let live = live(200);
+        let searcher = Searcher { live: &live };
+        let session = Session::new(1);
+        // A query with more hits than the limit.
+        let mut wide = q("entry");
+        wide.limit = 5;
+        let hits = session.search(&searcher, &wide);
+        assert_eq!(hits.len(), 5, "the cap took five");
+        assert!(!session.is_complete(), "a capped search has no complete result set");
+        // The next keystroke is a fresh search.
+        session.search(&searcher, &q("entry_0"));
+        assert!(!session.last_reranked(), "a capped query cannot be re-ranked");
+    }
+
+    /// An unchanged query replays the previous answer.
+    ///
+    /// This is the facet replay path (parity row Q.4): Listary's product
+    /// crate skips the re-search when the selection has not changed, and
+    /// the engine's replay path is what it replays.
+    #[test]
+    fn an_unchanged_query_replays_the_previous_answer() {
+        let live = live(200);
+        let searcher = Searcher { live: &live };
+        let session = Session::new(1);
+        // A search with a filter on it.
+        let first = session.search_replaying_facets(&searcher, &q("entry ext:txt"));
+        assert!(!first.is_empty(), "the search answered");
+        // The same query: the answer is replayed, with no search.
+        let second = session.search_replaying_facets(&searcher, &q("entry ext:txt"));
+        assert!(session.last_reranked(), "the query did not change, so the answer was replayed");
+        assert_eq!(paths(&second), paths(&first), "the replay answers the same as the search");
+    }
+
+    /// A query whose text changed is searched again.
+    ///
+    /// The facet selection did not change -- the filters are the same --
+    /// but the text did, and the text decides the answer. Replaying the
+    /// previous answer here would be a stale answer.
+    #[test]
+    fn a_query_whose_text_changed_is_searched_again() {
+        let live = live(200);
+        let searcher = Searcher { live: &live };
+        let session = Session::new(1);
+        session.search_replaying_facets(&searcher, &q("entry ext:txt"));
+        // The same filters, a different text.
+        let got = session.search_replaying_facets(&searcher, &q("invoice ext:txt"));
+        assert!(!session.last_reranked(), "the text changed, so the search ran again");
+        let fresh = searcher.search(&q("invoice ext:txt"));
+        assert_eq!(paths(&got), paths(&fresh), "the answer is the fresh one: {:?} vs {:?}", paths(&got), paths(&fresh));
+    }
+
+    /// A changed facet selection is a new search.
+    #[test]
+    fn a_changed_facet_selection_is_searched_again() {
+        let live = live(200);
+        let searcher = Searcher { live: &live };
+        let session = Session::new(1);
+        session.search_replaying_facets(&searcher, &q("entry ext:txt"));
+        // The selection changed: the filter is a different one.
+        session.search_replaying_facets(&searcher, &q("entry ext:pdf"));
+        assert!(!session.last_reranked(), "the selection changed, so the search ran again");
+    }
+
+    /// The selection is the filters, without the text.
+    #[test]
+    fn the_selection_is_the_filters_and_not_the_text() {
+        let a = Facets::of(&q("entry ext:txt"));
+        let b = Facets::of(&q("invoice ext:txt"));
+        assert_eq!(a, b, "the text is not part of the selection");
+        let c = Facets::of(&q("entry ext:pdf"));
+        assert_ne!(a, c, "a different filter is a different selection");
+        assert!(!a.is_empty(), "the selection has a filter in it");
+        assert!(Facets::of(&q("entry")).is_empty(), "a query with no filters has an empty selection");
+    }
+}

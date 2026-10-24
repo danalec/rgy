@@ -60,6 +60,12 @@ pub mod persist;
 /// search never downloads a file the user did not ask for.
 pub mod placeholder;
 
+/// The incremental search session: what a keystroke re-uses (parity row
+/// S.10). A query that narrows the previous one is answered by re-ranking
+/// the entries the previous search matched, instead of walking the index
+/// again.
+pub mod session;
+
 /// The scan workers' interactive priority: the platform's answer to "this
 /// work is interactive, do not let it wait behind the machine's other work".
 /// Windows has MMCSS, macOS has a QoS class, Linux has the approximation in

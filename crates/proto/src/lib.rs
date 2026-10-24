@@ -13,7 +13,18 @@
 #[derive(Debug, Clone, PartialEq)]
 pub enum Request {
     /// Name search: `{"op":"search","q":…,"limit":…}`.
-    Search { q: String, limit: usize },
+    ///
+    /// The `session` is the incremental-search id (parity row S.10): the
+    /// daemon keeps a session per id, and a query that narrows the
+    /// previous one is answered by re-ranking the previous result set
+    /// instead of walking the index again. It is optional and additive:
+    /// a request without one is answered by a fresh search, exactly as
+    /// before.
+    Search {
+        q: String,
+        limit: usize,
+        session: Option<u64>,
+    },
     /// Content grep: `{"op":"grep","q":…,"limit":…}` (Phase 4 engine).
     Grep { q: String, limit: usize },
     /// `{"op":"status"}` — index size, event id, uptime.
@@ -110,6 +121,10 @@ impl Request {
             "search" => Some(Request::Search {
                 q: obj.get("q")?.as_str()?.to_string(),
                 limit,
+                session: obj
+                    .get("session")
+                    .and_then(|s| s.as_num())
+                    .map(|n| n as u64),
             }),
             "grep" | "content" => Some(Request::Grep {
                 q: obj.get("q")?.as_str()?.to_string(),
@@ -122,12 +137,22 @@ impl Request {
 
     pub fn to_json(&self) -> String {
         match self {
-            Request::Search { q, limit } => {
-                format!(
-                    r#"{{"op":"search","q":"{}","limit":{}}}"#,
-                    escape_json_string(q),
-                    limit
-                )
+            Request::Search { q, limit, session } => {
+                // The session id is additive: a request without one is the
+                // request as it was before the field existed.
+                match session {
+                    Some(s) => format!(
+                        r#"{{"op":"search","q":"{}","limit":{},"session":{}}}"#,
+                        escape_json_string(q),
+                        limit,
+                        s
+                    ),
+                    None => format!(
+                        r#"{{"op":"search","q":"{}","limit":{}}}"#,
+                        escape_json_string(q),
+                        limit
+                    ),
+                }
             }
             Request::Grep { q, limit } => {
                 format!(
@@ -489,7 +514,8 @@ mod tests {
         assert_eq!(
             Request::Search {
                 q: "a".into(),
-                limit: 1
+                limit: 1,
+                session: None
             }
             .to_json(),
             r#"{"op":"search","q":"a","limit":1}"#
@@ -578,6 +604,7 @@ mod tests {
         let r = Request::Search {
             q: "report type:pdf".into(),
             limit: 25,
+            session: None,
         };
         let line = r.to_json();
         assert_eq!(Request::from_json(&line), Some(r));
@@ -684,6 +711,7 @@ mod tests {
             let req = Request::Search {
                 q: c.into(),
                 limit: 7,
+                session: None,
             };
             let line = req.to_json();
             assert!(
@@ -705,6 +733,7 @@ mod tests {
         let q = |s: &str| Request::Search {
             q: s.into(),
             limit: 1,
+            session: None,
         };
         assert_eq!(
             Request::from_json(r#"{"op":"search","q":"A\u00e9","limit":1}"#),
