@@ -126,6 +126,9 @@ pub enum Miss {
     TooOld { built: u64 },
     /// The sidecar checked out but the blob is missing or will not load.
     BadIndex,
+    /// The blob loaded, but its parent chain is not a forest: a broken
+    /// chain, a cycle or a parent that is not a folder.
+    BadForest { fault: crate::name_index::ForestFault },
 }
 
 impl std::fmt::Display for Miss {
@@ -141,6 +144,7 @@ impl std::fmt::Display for Miss {
                 write!(f, "index is {} old", age_text(age))
             }
             Miss::BadIndex => write!(f, "index blob would not load"),
+            Miss::BadForest { fault } => write!(f, "index is not a forest: {fault}"),
         }
     }
 }
@@ -194,7 +198,12 @@ pub fn load_for(root: &Path, index: &Path, max_age: Option<Duration>) -> Result<
 
     // The sidecar checked out, so a blob that will not map is corruption,
     // not an absence — say so instead of looking like "never saved".
-    Index::load(index).ok_or(Miss::BadIndex)
+    let idx = Index::load(index).ok_or(Miss::BadIndex)?;
+    // A blob whose parent chain is not a forest would answer with paths
+    // that do not exist. It is corruption too, and it is caught here
+    // rather than in the middle of a search.
+    idx.validate_forest().map_err(|fault| Miss::BadForest { fault })?;
+    Ok(idx)
 }
 
 /// Load a saved index trusting the root its sidecar names -- for tools that

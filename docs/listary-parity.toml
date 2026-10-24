@@ -220,8 +220,8 @@ phase = 3
 status = "D"
 evidence = "§4.5, §4.6"
 listary = "Resolving a record's priority walks the parent chain and replays the rules; the result is then checked against the stored priority, and a broken chain is an error rather than a fallback."
-rgy = "Degraded. The index keeps a parent pointer per record (the `Parent` section), and the resolution walks it: a record's level is the closest rule that matches a name in its chain and applies to it. The rules are replayed once, at index time, and the value stored IS the resolution -- so there is no second path for it to drift from, which is what the check is for. The chain is not validated: a broken one is a broken index, not an error the search reports."
-work = "The parent chain's integrity (the cycle and dead-ancestor checks of row I.2), so a broken chain is an error the index build reports rather than a priority that silently changes."
+rgy = "Degraded. The index keeps a parent pointer per record (the `Parent` section), and the resolution walks it: a record's level is the closest rule that matches a name in its chain and applies to it. The rules are replayed once, at index time, and the value stored IS the resolution -- so there is no second path for it to drift from, which is what the check is for. The chain is validated now (row I.2): an index whose chain is broken, cyclic or has a parent that is not a folder is refused at load. What is still missing is the check against the stored priority: rgy resolves once and stores the answer, so there is nothing to compare it against."
+work = "The stored priority is checked against a replay of the rules at load, the way Listary does: the two paths exist and are compared, so a drift between them is an error rather than a silent change."
 size = "L"
 
 [[capability]]
@@ -257,7 +257,7 @@ phase = 4
 status = "P"
 evidence = "§5.1, §5.6"
 listary = "The date filters have named relative windows: last_24_hours, last_week, last_month, last_year, older -- parsed into real time ranges, with the parser carrying the 86400-second day constant."
-rgy = "Done. `mtime:` takes the named windows -- `today`, `week`, `month`, `year` and `older` (older than a year) -- and resolves them to a range at parse time, with the 86400-second day. The explicit range (`mtime:2024-01-01..2024-02-01`) and the relative age (`mtime:-7d`) are still there; the named windows are a vocabulary on top of them."
+rgy = "Done. `mtime:` takes the named windows -- `today`, `week`, `month`, `year` and `older` (older than a year) -- and resolves them to a range at parse time, with the 86400-second day. The explicit range and the relative age are there too, and they had to be fixed to be: `mtime:2024-01-01..2024-02-01` was a \"bad range\" error (the filter knew only ages) and `mtime:-7d` -- the form the manual spells -- was one too. The named windows are a vocabulary on top of them."
 work = "None. The windows are in `name_query`'s `mtime:` filter and the manual lists them."
 size = "S"
 
@@ -268,8 +268,8 @@ phase = 4
 status = "D"
 evidence = "§5.6"
 listary = "The date-modified facet carries operator suffixes: `DM:c` (created) and `DM:<` (before), recovered verbatim from the binary."
-rgy = "`mtime:` is a range; there is no created/before distinction and no operator suffix."
-work = "An operator suffix on the date facet, with the two recovered tokens as the first two cases."
+rgy = "The operator suffix is there, and the two recovered tokens are the first two cases: `mtime:<` is before and `mtime:c` is created. The date the operator applies to can be a calendar date (`2024-01-01`), a range of two (`2024-01-01..2024-02-01`) or an age (`7d`), and a date that does not exist is refused. What rgy cannot answer is the created date: the index keeps the modification time and the discovery backends do not all carry a creation time, so `mtime:c` answers with the modification time -- the honest answer for the data rgy has, and not a different one."
+work = "The creation time in the index: a column the backends fill (NTFS has it in the standard information, the portable walk has it in the metadata) and the filter reads. Until then `mtime:c` is the modification time under the created name."
 size = "S"
 
 [[capability]]
@@ -306,11 +306,11 @@ size = "L"
 id = "I.2"
 name = "Validated parent-chain forest"
 phase = 5
-status = "G"
+status = "P"
 evidence = "§4.5"
 listary = "The path index is a validated forest, not a flat table: it detects a broken parent chain, a dead ancestor, a wrong record kind and a cycle."
-rgy = "The tree is implicit in the DFS ranges. There is no per-record chain to validate, and no integrity check beyond what the ranges already give."
-work = "Per-record parent pointers with the four integrity checks, so a corrupt index is detected rather than read. This is the substrate P.3 resolves against."
+rgy = "Done. The chain is per record: the `Parent` section says each entry's folder, and the `DirParent` section says each folder's folder. The check is `Index::validate_forest`, and it names the four faults Listary names: a broken chain (a parent that is not there), a cycle (a chain that does not reach the root), a wrong record kind (a parent that is not a folder) and a dead ancestor (an entry that survives a folder the change feed killed -- the one only the live set can see, so `Live::validate_forest` raises it). The check is one pass, because the tree is written in depth-first order and a parent's id is smaller than its child's: a chain that breaks that rule cannot reach the root, so it is caught rather than followed. A blob that fails the check is refused at load (`Miss::BadForest`), so a corrupt index is detected rather than read."
+work = "None. The check is `name_index::Index::validate_forest` and `live::Live::validate_forest`, and the load path refuses an index that fails it."
 size = "M"
 
 [[capability]]

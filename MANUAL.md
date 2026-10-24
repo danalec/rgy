@@ -205,7 +205,7 @@ A filter narrows by a property of the file, not by its name.
 | `dir:` | the folder it is in | `dir:documents` |
 | `type:` | what kind of thing it is | `type:dir`, `type:link`, `type:image` |
 | `size:` | how big it is | `size:+10m` (bigger than 10 MB), `size:-1k` |
-| `mtime:` | when it changed | `mtime:-7d` (in the last week), `mtime:today`, `mtime:week`, `mtime:month`, `mtime:year`, `mtime:older` |
+| `mtime:` | when it changed | `mtime:-7d` (in the last week), `mtime:today`, `mtime:week`, `mtime:month`, `mtime:year`, `mtime:older`, `mtime:2024-01-01` (that day), `mtime:<2024-01-01` (before it) |
 | `in:` | where it is | `in:downloads` |
 | `re:` | the path as a regular expression | `re:\.rs$` |
 | `limit:` | how many hits | `limit:20` |
@@ -224,6 +224,13 @@ A bare extension goes in `ext:`; `type:` names kinds.
 **An unknown `type:` fails closed.** rgy warns on stderr, returns nothing,
 and exits 1 — it does not quietly search everything. If you get no
 results and a warning, that is the reason.
+
+**The date filter takes a date or an age.** `mtime:2024-01-01` is the files
+changed that day; `mtime:2024-01-01..2024-02-01` is the days in between;
+`mtime:-7d` is the last seven days. The operator says which side of the
+value you mean: `mtime:<2024-01-01` is "before that day" and
+`mtime:>2024-01-01` is "after it". A date that does not exist
+(`2023-02-29`) is refused, not silently ignored.
 
 ### The priority rules
 

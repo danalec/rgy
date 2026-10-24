@@ -222,6 +222,45 @@ impl Live {
         self.dead[i as usize >> 6] & (1 << (i & 63)) != 0
     }
 
+    /// Check the parent chain of the live set.
+    ///
+    /// The index's own chain is checked by [`Index::validate_forest`]; what
+    /// only the live set can see is the **dead ancestor**: an entry that
+    /// survives a folder the change feed killed. Such an entry has no path
+    /// -- its parent is gone -- and the search would answer with a path
+    /// that cannot be opened.
+    ///
+    /// The walk is O(d): a folder's ancestors are the same for every entry
+    /// under it, and the tree is written in depth-first order, so a
+    /// parent's id is smaller than its child's.
+    pub fn validate_forest(&self) -> Result<(), crate::name_index::ForestFault> {
+        self.base.validate_forest()?;
+        let de = self.base.dir_entry();
+        let dp = self.base.dir_parent();
+        // For each folder: is it dead, and does it have a dead ancestor?
+        // A folder whose parent is dead is itself orphaned, so the flag
+        // folds down the chain.
+        let mut orphan = vec![false; self.base.d];
+        for k in 1..self.base.d {
+            let p = dp[k] as usize;
+            let e = de[k] as usize;
+            let dead = e < self.base.n && self.is_dead(e as u32);
+            if dead || orphan[p] {
+                orphan[k] = true;
+                // A folder that is alive under a folder that is gone: the
+                // entries under it have no path either.
+                if !dead {
+                    for child in self.base.children(k as u32) {
+                        if child < self.base.n && !self.is_dead(child as u32) {
+                            return Err(crate::name_index::ForestFault::DeadAncestor { entry: child as u32, folder: k as u32 });
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Mark a base entry gone.
     fn kill(&mut self, i: u32) {
         let w = &mut self.dead[i as usize >> 6];
@@ -862,6 +901,24 @@ mod tests {
         let rebuilt = Index::build(live.to_listings(), 0, 1, b"/");
         let live2 = Live::with_root(rebuilt, &root);
         assert_eq!(hits(&live2, "only").len(), 1, "the file is still there after the rebuild");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A live set whose parent chain is a forest says so, and the dead
+    /// ancestor is the fault only the live set can see.
+    ///
+    /// The index's own chain is checked by `Index::validate_forest`; what
+    /// only the live set knows is that a folder the change feed killed
+    /// leaves its children without a path.
+    #[test]
+    fn the_live_forest_is_checked() {
+        let dir = std::env::temp_dir().join(format!("rgy_forest_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("sub/inner.txt"), b"hi\n").unwrap();
+        let root = dir.to_string_lossy().into_owned().into_bytes();
+        let live = live(&root);
+        assert_eq!(live.validate_forest(), Ok(()), "a live set over a real tree is a forest: {:?}", live.validate_forest());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

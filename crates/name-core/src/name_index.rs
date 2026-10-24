@@ -877,6 +877,101 @@ impl Index {
         self.by_key();
         self.memo_plan();
     }
+
+    /// Check the parent chain: the index is a forest, and a forest that is
+    /// not a forest is an index that would answer with paths that do not
+    /// exist.
+    ///
+    /// The four faults are the ones Listary's path index names (`REVERSE_
+    /// ENGINEERING_REPORT.md` §4.5): a broken chain, a dead ancestor, a
+    /// wrong record kind and a cycle. rgy's chain is the directory table
+    /// (`DirParent`), one pointer per folder, and the entry table
+    /// (`Parent`), one pointer per entry:
+    ///
+    /// * **broken chain** -- a parent pointer that names a folder that is
+    ///   not there;
+    /// * **dead ancestor** -- a parent that the live set has killed: the
+    ///   entry survives its own folder;
+    /// * **wrong record kind** -- a parent that is not a folder;
+    /// * **cycle** -- a chain that never reaches the root.
+    ///
+    /// The walk is bounded by the number of folders, so a cycle is caught
+    /// rather than followed forever. The check is O(d): each folder's
+    /// parent is visited once, because a parent always has a smaller id
+    /// than its child (the tree is written in depth-first order).
+    pub fn validate_forest(&self) -> Result<(), ForestFault> {
+        check_forest(self.dir_parent(), self.dir_entry(), self.kind(), self.parent(), self.n, self.d)
+    }
+}
+
+/// Check a parent chain: `dp` is each folder's parent folder, `de` each
+/// folder's entry, `kind` each entry's kind, `parent` each entry's parent
+/// folder.
+///
+/// The check is a single pass because the tree is written in depth-first
+/// order: a parent always has a smaller id than its child, so the parent's
+/// side is known when the child is reached. A chain that breaks that rule
+/// cannot reach the root -- it is a cycle, or it points forward, which is
+/// the same defect seen from the other side.
+fn check_forest(dp: &[u32], de: &[u32], kind: &[u8], parent: &[u32], n: usize, d: usize) -> Result<(), ForestFault> {
+    for (k, &p_raw) in dp.iter().enumerate().take(d).skip(1) {
+        let p = p_raw as usize;
+        if p >= d {
+            return Err(ForestFault::BrokenChain { folder: k as u32, parent: p_raw });
+        }
+        if p >= k {
+            // The parent is not before the child: the chain is a cycle (or
+            // points forward, which is the same defect seen from the other
+            // side).
+            return Err(ForestFault::Cycle { folder: k as u32 });
+        }
+        // The parent's own entry must be a folder.
+        let pe = de[p] as usize;
+        if pe >= n || kind[pe] & 3 != KIND_DIR {
+            return Err(ForestFault::WrongKind { folder: k as u32, parent: p as u32 });
+        }
+    }
+    // The entries' own parents must name a folder that exists.
+    for (i, &p_raw) in parent.iter().enumerate().take(n) {
+        let p = p_raw as usize;
+        if p >= d {
+            return Err(ForestFault::BrokenChain { folder: i as u32, parent: p_raw });
+        }
+        let pe = de[p] as usize;
+        if pe >= n || kind[pe] & 3 != KIND_DIR {
+            return Err(ForestFault::WrongKind { folder: i as u32, parent: p as u32 });
+        }
+    }
+    Ok(())
+}
+
+/// What is wrong with an index's parent chain.
+///
+/// The four faults are Listary's (`core_db/path_index.rs`): a broken chain,
+/// a dead ancestor, a wrong record kind and a cycle. rgy's chain is the
+/// directory table, so the dead-ancestor fault is the live set's to raise
+/// (see [`crate::live::Live::validate_forest`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForestFault {
+    /// A parent pointer names a folder that is not there.
+    BrokenChain { folder: u32, parent: u32 },
+    /// A parent is not a folder.
+    WrongKind { folder: u32, parent: u32 },
+    /// The chain never reaches the root.
+    Cycle { folder: u32 },
+    /// An entry survives a folder the live set killed.
+    DeadAncestor { entry: u32, folder: u32 },
+}
+
+impl std::fmt::Display for ForestFault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ForestFault::BrokenChain { folder, parent } => write!(f, "broken parent chain: {folder} names the folder {parent}, which is not there"),
+            ForestFault::WrongKind { folder, parent } => write!(f, "wrong record kind: the parent {parent} of {folder} is not a folder"),
+            ForestFault::Cycle { folder } => write!(f, "cycle detected: the chain of {folder} does not reach the root"),
+            ForestFault::DeadAncestor { entry, folder } => write!(f, "dead ancestor: the entry {entry} survives the folder {folder}, which is gone"),
+        }
+    }
 }
 
 /// Section files (this index, content segments): a 4 KiB header (magic,
@@ -1223,6 +1318,101 @@ mod blob_tests {
         assert_eq!(loaded.u, idx.u);
         assert_eq!(Index::saved_event_id(&p), Some(42));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The parent chain of a well-formed index is a forest, and the check
+    /// says so.
+    ///
+    /// The check is the one the parity matrix asks for (row I.2): a forest
+    /// that is not a forest is an index that answers with paths that do not
+    /// exist, and a corrupt index must be detected rather than read.
+    #[test]
+    fn a_built_index_is_a_forest() {
+        use rgy_discovery::walk::{KIND_DIR, KIND_FILE, Listing, NONE, RawEnt};
+        // /a/b/c.txt and /a/d.txt: two folders, a file under each.
+        let mut names = b"a".to_vec();
+        let a = RawEnt { name_off: 0, name_len: 1, kind: KIND_DIR, size: 0, mtime: 1, child: 1 };
+        let d = RawEnt { name_off: 1, name_len: 1, kind: KIND_FILE, size: 2, mtime: 3, child: NONE };
+        let mut inner = b"b".to_vec();
+        let b = RawEnt { name_off: 0, name_len: 1, kind: KIND_DIR, size: 0, mtime: 4, child: 2 };
+        let c = RawEnt { name_off: 1, name_len: 5, kind: KIND_FILE, size: 5, mtime: 6, child: NONE };
+        names.extend_from_slice(b"d");
+        inner.extend_from_slice(b"c.txt");
+        let ls = vec![Listing { id: 0, names, ents: vec![a, d] }, Listing { id: 1, names: inner, ents: vec![b, c] }];
+        let idx = Index::build(ls, 0, 1, b"/");
+        assert_eq!(idx.validate_forest(), Ok(()), "a built index is a forest: {:?}", idx.validate_forest());
+    }
+
+    /// Each of the four faults is caught.
+    ///
+    /// The chain is forged rather than built, because a built index is
+    /// sound by construction: what the check is for is an index whose bytes
+    /// were corrupted, and a check that has never seen a broken chain has
+    /// not been shown to catch one.
+    #[test]
+    fn the_four_faults_are_caught() {
+        use rgy_discovery::walk::KIND_FILE;
+        // A sound chain: three folders, the root first, each parent before
+        // its child, and every parent's entry a folder.
+        let sound_dp = vec![0u32, 0, 1];
+        let sound_de = vec![0u32, 1, 2];
+        let sound_kind = vec![KIND_DIR, KIND_DIR, KIND_DIR];
+        let sound_parent = vec![0u32, 0, 1, 1];
+        assert_eq!(check_forest(&sound_dp, &sound_de, &sound_kind, &sound_parent, 4, 3), Ok(()), "the sound chain passes");
+
+        // A cycle: the second folder is its own parent.
+        let mut dp = sound_dp.clone();
+        dp[2] = 2;
+        assert!(
+            matches!(check_forest(&dp, &sound_de, &sound_kind, &sound_parent, 4, 3), Err(ForestFault::Cycle { folder: 2 })),
+            "a cycle is caught: {:?}",
+            check_forest(&dp, &sound_de, &sound_kind, &sound_parent, 4, 3)
+        );
+
+        // A broken chain: the parent names a folder that is not there.
+        let mut dp = sound_dp.clone();
+        dp[2] = 99;
+        assert!(
+            matches!(check_forest(&dp, &sound_de, &sound_kind, &sound_parent, 4, 3), Err(ForestFault::BrokenChain { folder: 2, parent: 99 })),
+            "a broken chain is caught: {:?}",
+            check_forest(&dp, &sound_de, &sound_kind, &sound_parent, 4, 3)
+        );
+
+        // A wrong record kind: the parent is a file.
+        let mut kind = sound_kind.clone();
+        kind[1] = KIND_FILE;
+        assert!(
+            matches!(check_forest(&sound_dp, &sound_de, &kind, &sound_parent, 4, 3), Err(ForestFault::WrongKind { folder: 2, parent: 1 })),
+            "a file as a parent is caught: {:?}",
+            check_forest(&sound_dp, &sound_de, &kind, &sound_parent, 4, 3)
+        );
+
+        // A broken chain on the entry side: an entry names a folder that is
+        // not there.
+        let mut parent = sound_parent.clone();
+        parent[3] = 42;
+        assert!(
+            matches!(check_forest(&sound_dp, &sound_de, &sound_kind, &parent, 4, 3), Err(ForestFault::BrokenChain { folder: 3, parent: 42 })),
+            "an entry with no parent folder is caught: {:?}",
+            check_forest(&sound_dp, &sound_de, &sound_kind, &parent, 4, 3)
+        );
+    }
+
+    /// A parent that is not a folder is a wrong record kind.
+    #[test]
+    fn a_parent_that_is_not_a_folder_is_caught() {
+        use rgy_discovery::walk::{KIND_FILE, Listing, NONE, RawEnt};
+        // A listing whose child listing is claimed by a file: the file's
+        // entry is not a folder, so the chain through it is wrong.
+        let names = b"a.txt".to_vec();
+        let a = RawEnt { name_off: 0, name_len: 5, kind: KIND_FILE, size: 1, mtime: 1, child: 1 };
+        let ls = vec![
+            Listing { id: 0, names: names.clone(), ents: vec![a] },
+            Listing { id: 1, names, ents: vec![RawEnt { name_off: 0, name_len: 1, kind: KIND_FILE, size: 1, mtime: 2, child: NONE }] },
+        ];
+        let idx = Index::build(ls, 0, 1, b"/");
+        // The build puts the child under the file, and the check says so.
+        assert!(matches!(idx.validate_forest(), Err(ForestFault::WrongKind { .. })), "a file cannot be a parent: {:?}", idx.validate_forest());
     }
 }
 

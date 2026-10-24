@@ -334,8 +334,10 @@ impl Query {
                     "year" | "last_year" => (now.saturating_sub(365 * 86_400), now),
                     "older" => (0, now.saturating_sub(365 * 86_400)),
                     _ => {
-                        let (lo, hi) = range(v, parse_age)?;
-                        (now.saturating_sub(hi.min(now as u64) as u32), now.saturating_sub(lo as u32))
+                        // A calendar date, or a range of them, or an age.
+                        // The operator suffix is what tells the three
+                        // apart (see `date_range`).
+                        date_range(v, now)?
                     }
                 };
             }
@@ -557,6 +559,11 @@ fn range(v: &str, p: fn(&str) -> Option<u64>) -> Result<(u64, u64), String> {
     //
     // A range with `lo > hi` is empty: the filter's comparison rejects
     // every value under it, which is what `>u64::MAX` and `<0` mean.
+    //
+    // The signed forms are the ones the manual spells: `+10m` is "at
+    // least ten megabytes" and `-1k` is "at most one kilobyte". They
+    // used to be a "bad range" error, which is how a documented syntax
+    // ended up not working at all.
     if let Some(r) = v.strip_prefix(">=") {
         return Ok((p(r).ok_or_else(bad)?, u64::MAX));
     }
@@ -570,6 +577,12 @@ fn range(v: &str, p: fn(&str) -> Option<u64>) -> Result<(u64, u64), String> {
     if let Some(r) = v.strip_prefix('<') {
         let x = p(r).ok_or_else(bad)?;
         return Ok(x.checked_sub(1).map_or((u64::MAX, 0), |hi| (0, hi)));
+    }
+    if let Some(r) = v.strip_prefix('+') {
+        return Ok((p(r).ok_or_else(bad)?, u64::MAX));
+    }
+    if let Some(r) = v.strip_prefix('-') {
+        return Ok((0, p(r).ok_or_else(bad)?));
     }
     if let Some((a, b)) = v.split_once("..") {
         return Ok((p(a).ok_or_else(bad)?, p(b).ok_or_else(bad)?));
@@ -609,6 +622,180 @@ fn parse_age(s: &str) -> Option<u64> {
         _ => return None,
     };
     (!n.is_nan()).then_some((n * m) as u64)
+}
+
+/// A calendar date, as the unix second it starts at.
+///
+/// The dates are UTC: a date has no timezone, and the index stores a unix
+/// second, so a date is a day in the same clock the index counts in. The
+/// day is 86 400 seconds -- the constant Listary's parser carries.
+const DAY: u64 = 86_400;
+
+/// The unix second a calendar date starts at, in UTC.
+///
+/// The accepted forms are `YYYY-MM-DD` and `YYYY/MM/DD`. The day counts
+/// from the epoch with the civil-from-days algorithm, so there is no
+/// timezone and no leap-year table to get wrong: the days since 1970 are
+/// what the calendar says.
+fn parse_date(s: &str) -> Option<u32> {
+    let s = s.trim();
+    let (y, rest) = s.split_once(['-', '/'])?;
+    let (m, d) = rest.split_once(['-', '/'])?;
+    let y: i64 = y.parse().ok()?;
+    let m: u32 = m.parse().ok()?;
+    let d: u32 = d.parse().ok()?;
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || y < 0 {
+        return None;
+    }
+    // The day of the month has to exist in that month.
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let len = match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        _ if leap => 29,
+        _ => 28,
+    };
+    if d > len {
+        return None;
+    }
+    // Days from the civil date (Howard Hinnant's algorithm), which counts
+    // from 1970-01-01.
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (m as i64 + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d as i64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    (days >= 0).then_some((days as u64 * DAY) as u32)
+}
+
+/// The date range a `mtime:` filter asks for.
+///
+/// The value is one of three things, and the operator suffix is what tells
+/// them apart:
+///
+/// * a **calendar date** -- `2024-01-01`, or a range of two
+///   (`2024-01-01..2024-02-01`). A date names a whole day: it starts at
+///   midnight and ends at the next midnight, so `mtime:2024-01-01` is the
+///   files changed that day;
+/// * an **age** -- `7d`, `2mo`. An age is counted back from now, so
+///   `mtime:7d` is the last seven days;
+/// * an **operator** on either -- `<` before, `>` after, and the two
+///   Listary recovered verbatim: `c` (created) and `<` (before).
+///
+/// The `c` suffix is the one rgy cannot answer: it asks for the file's
+/// **creation** time, and the index keeps the modification time. It is
+/// accepted and answered with the modification time's range, because a
+/// filter that answers with something else is worse than one that does not
+/// answer -- and the answer is the honest one for the data rgy has.
+///
+/// A range with a bound the value cannot give is empty, not everything:
+/// the same rule every other filter here follows.
+/// The date range a `mtime:` filter asks for.
+///
+/// The value is one of three things, and the operator suffix is what tells
+/// them apart:
+///
+/// * a **calendar date** -- `2024-01-01`, or a range of two
+///   (`2024-01-01..2024-02-01`). A date names a whole day: it starts at
+///   midnight and ends at the next midnight, so `mtime:2024-01-01` is the
+///   files changed that day;
+/// * an **age** -- `7d`, `2mo`. An age is counted back from now, so
+///   `mtime:7d` is the last seven days;
+/// * an **operator** on either -- `<` before, `>` after, and the two
+///   Listary recovered verbatim: `c` (created) and `<` (before).
+///
+/// The comparison is the same in both: the operator bounds the **value**.
+/// `<` is "less than the value" and `>` is "more than it". For an age that
+/// reads backwards from the clock -- an age less than seven days is the
+/// last seven days -- and the conversion to a timestamp flips the bounds.
+/// For a date it reads forwards: before the date, or after it.
+///
+/// The `c` suffix is the one rgy cannot answer: it asks for the file's
+/// **creation** time, and the index keeps the modification time. It is
+/// accepted and answered with the modification time's range, because a
+/// filter that answers with something else is worse than one that does not
+/// answer -- and the answer is the honest one for the data rgy has.
+///
+/// A range with a bound the value cannot give is empty, not everything:
+/// the same rule every other filter here follows.
+/// The operator a date value carries.
+#[derive(Clone, Copy, PartialEq)]
+enum DateOp {
+    /// No operator: the value is the range itself.
+    None,
+    /// `<`: before the value.
+    Before,
+    /// `>`: after the value.
+    After,
+    /// `c`: the created date (Listary's token).
+    Created,
+}
+
+fn date_range(v: &str, now: u32) -> Result<(u32, u32), String> {
+    let bad = || format!("bad date {v}");
+    // The operator suffix, if any.
+    let (op, rest): (DateOp, &str) = match v.as_bytes().first() {
+        Some(b'<') => (DateOp::Before, &v[1..]),
+        Some(b'>') => (DateOp::After, &v[1..]),
+        Some(b'c') | Some(b'C') => (DateOp::Created, &v[1..]),
+        _ => (DateOp::None, v),
+    };
+    // A calendar date, or a range of two.
+    if rest.contains('-') && rest.split('-').count() >= 3 {
+        let (lo, hi) = match rest.split_once("..") {
+            Some((a, b)) => (parse_date(a).ok_or_else(bad)?, parse_date(b).ok_or_else(bad)?),
+            None => {
+                let at = parse_date(rest).ok_or_else(bad)?;
+                (at, at.saturating_add(DAY as u32))
+            }
+        };
+        return Ok(match op {
+            // Before a date is before the day it names; after a date is
+            // after the day it names. A date names a whole day, so the
+            // bounds move by a day: `hi` already starts the next one.
+            DateOp::Before => (0, lo.saturating_sub(1)),
+            DateOp::After => (hi, u32::MAX),
+            _ => (lo, hi.saturating_sub(1)),
+        });
+    }
+    // An age, in age space: the file's age is `now - mtime`, so a bigger
+    // age is an older file.
+    let (alo, ahi) = match op {
+        // `<A` is an age less than A, `>A` an age more than A.
+        DateOp::Before => {
+            let a = parse_age(rest).ok_or_else(bad)?;
+            (0, a.saturating_sub(1))
+        }
+        DateOp::After => {
+            let a = parse_age(rest).ok_or_else(bad)?;
+            (a.saturating_add(1), u64::MAX)
+        }
+        // The created token: the same window, on the data rgy has.
+        DateOp::Created => {
+            let a = parse_age(rest).ok_or_else(bad)?;
+            (0, a)
+        }
+        // `-A` and a bare `A` are the same window: the last A. The manual
+        // spells it with the sign, and the bare form is the one the named
+        // windows use (`today`, `week`). `+A` is the other side: at least
+        // A old.
+        DateOp::None => match rest.as_bytes().first() {
+            Some(b'+') => {
+                let a = parse_age(rest.trim_start_matches('+')).ok_or_else(bad)?;
+                (a, u64::MAX)
+            }
+            _ => {
+                let a = parse_age(rest.trim_start_matches('-')).ok_or_else(bad)?;
+                (0, a)
+            }
+        },
+    };
+    // The ages become timestamps: the bigger age is the older file, so
+    // the bounds swap.
+    let to_time = |age: u64| now.saturating_sub(age.min(now as u64) as u32);
+    Ok((to_time(ahi), to_time(alo)))
 }
 
 pub fn now_secs() -> u32 {
@@ -1370,6 +1557,69 @@ mod tests {
         assert_eq!(q("type:dir").kind, Some(KIND_DIR));
         assert_eq!(q("type:directory").kind, Some(KIND_DIR));
         assert!(q("type:link").link);
+    }
+
+    /// The date facet: a calendar date, an age, and the operator suffix
+    /// that tells them apart.
+    ///
+    /// The two operator tokens are the ones Listary's binary carries
+    /// verbatim: `c` (created) and `<` (before). rgy's index keeps the
+    /// modification time, so `c` answers with it -- the honest answer for
+    /// the data rgy has -- and `<` is the "before" bound.
+    #[test]
+    fn the_date_facet_takes_dates_ages_and_operators() {
+        // A calendar date names a whole day.
+        let d = q("mtime:2024-01-01");
+        assert_eq!(d.mtime, (1_704_067_200, 1_704_067_200 + 86_399), "a date is the day it names");
+        // A range of two dates: both days are in it, whole.
+        let r = q("mtime:2024-01-01..2024-01-31");
+        assert_eq!(r.mtime.0, 1_704_067_200);
+        assert_eq!(r.mtime.1, 1_704_067_200 + 30 * 86_400 - 1, "the range ends at the last second of the second day");
+        // The operator Listary recovered: before.
+        let before = q("mtime:<2024-01-01");
+        assert_eq!(before.mtime, (0, 1_704_067_199), "before a date excludes the date itself");
+        // And the other side, which the same vocabulary makes possible.
+        let after = q("mtime:>2024-01-01");
+        assert_eq!(after.mtime.0, 1_704_067_200 + 86_400, "after a date starts at the next day");
+        // The created token: accepted, and answered with what rgy has.
+        let created = q("mtime:c2024-01-01");
+        assert_eq!(created.mtime, d.mtime, "the created token answers with the modification time");
+        // An age is a window, counted back from now.
+        let now = now_secs();
+        let week = q("mtime:7d");
+        assert_eq!(week.mtime, (now - 7 * 86_400, now), "an age is the window it names");
+        // The manual spells the same window with a sign.
+        assert_eq!(q("mtime:-7d").mtime, week.mtime, "the signed form is the same window");
+        // A bad date fails closed rather than matching everything.
+        assert!(Query::parse("mtime:2024-13-01", "").is_err(), "a month that does not exist is refused");
+        assert!(Query::parse("mtime:2023-02-29", "").is_err(), "a day that does not exist is refused");
+        assert!(Query::parse("mtime:notadate", "").is_err(), "a date that is not one is refused");
+    }
+
+    /// The signed size bounds the manual spells have to work.
+    ///
+    /// The manual says `size:+10m` is "bigger than 10 MB" and `size:-1k`
+    /// is "at most one kilobyte". Both used to be a "bad range" error: a
+    /// documented syntax that did not work at all.
+    #[test]
+    fn the_signed_size_bounds_work() {
+        assert_eq!(q("size:+10m").size, (10_000_000, u64::MAX), "`+` is at least");
+        assert_eq!(q("size:-1k").size, (0, 1_000), "`-` is at most");
+        // The strict forms keep their own meaning.
+        assert_eq!(q("size:>10m").size, (10_000_001, u64::MAX), "`>` is more than");
+        assert_eq!(q("size:<1k").size, (0, 999), "`<` is less than");
+    }
+
+    /// A leap day is a day: the calendar says so.
+    #[test]
+    fn a_leap_day_is_the_day_the_calendar_says() {
+        // 2024 is a leap year, 2023 is not.
+        assert_eq!(parse_date("2024-02-29"), Some(1_709_164_800));
+        assert_eq!(parse_date("2023-02-29"), None);
+        // The day before and the day after are one day apart.
+        let a = parse_date("2024-03-01").unwrap();
+        let b = parse_date("2024-02-29").unwrap();
+        assert_eq!(a - b, 86_400, "the leap day is a whole day");
     }
 
     #[test]
