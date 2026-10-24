@@ -47,7 +47,7 @@ verification on machines this host does not have.
 | Content index (trigram + bloom) | `crates/name-core` (`content`) | ✅ transported from fsearch |
 | Cloud placeholders (never hydrated) | `crates/name-core` (`placeholder`) | ✅ the recall bits on Windows, `SF_DATALESS` in `st_flags` on macOS — asked at the open, so the bytes are never fetched |
 | Confirm via rgx engine + `grep:`/`regex:`/`sym:` | `crates/name-core` (`content`), `crates/rgx-core` | ✅ |
-| rgx engine, TV packs, adapters | `crates/rgx-*` | ✅ upstream's crates, verbatim (re-synced 2026-10-22) |
+| rgx engine, TV packs, adapters | `crates/rgx-*` | ✅ upstream's crates, verbatim (re-synced 2026-10-24, at upstream `a72b898`) |
 | One regex engine (vendored copy deleted) | `crates/name-core` (`regex`) → `rgx-core` | ✅ (`rgx-core` stays `no_std`) |
 | Pack compaction | `crates/rgx-core` (`tv_runtime`) | ✅ opt-in, `--compact` |
 

@@ -46,7 +46,7 @@ impl MmapInner {
         fd: RawFd,
         offset: u64,
     ) -> io::Result<MmapInner> {
-        if std::mem::size_of::<usize>() < 8 && len > std::isize::MAX as usize {
+        if std::mem::size_of::<usize>() < 8 && len > isize::MAX as usize {
             return Err(to_io_error(Error::LengthOverflow).into());
         }
         let page = super::page_size() as u64;
@@ -117,7 +117,7 @@ impl MmapInner {
     }
 
     pub fn map_anon(len: usize, _stack: bool, _populate: bool) -> io::Result<MmapInner> {
-        if std::mem::size_of::<usize>() < 8 && len > std::isize::MAX as usize {
+        if std::mem::size_of::<usize>() < 8 && len > isize::MAX as usize {
             return Err(to_io_error(Error::LengthOverflow).into());
         }
         let map_len = len.max(1);

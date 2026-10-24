@@ -881,9 +881,15 @@ pub fn term_bits(term: u8, hay: &[u8], out: &mut BitMap) {
     #[cfg(target_arch = "aarch64")]
     {
         unsafe { neon_bits(&[term, 0, 0], 1, hay, out) };
-        return;
     }
-    scalar_bits(&[term, 0, 0], 1, hay, out);
+    // The scalar path is the fallback for the targets with no SIMD path, and
+    // on aarch64 the NEON path above has already answered: the line is
+    // unreachable there, and unreachable code is an error under the gate's
+    // `-D warnings`.
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        scalar_bits(&[term, 0, 0], 1, hay, out);
+    }
 }
 
 /// Fill `out` with a bit at every offset of `hay` holding one of the first
@@ -911,9 +917,11 @@ pub fn byte_bits(needles: &[u8; 3], count: usize, hay: &[u8], out: &mut BitMap) 
     #[cfg(target_arch = "aarch64")]
     {
         unsafe { neon_bits(needles, count, hay, out) };
-        return;
     }
-    scalar_bits(needles, count, hay, out);
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        scalar_bits(needles, count, hay, out);
+    }
 }
 
 /// Fill `out` with a bit at every offset of `hay` holding any byte of `needles`,
@@ -953,9 +961,11 @@ pub fn byte_bits_many(needles: &[u8], hay: &[u8], out: &mut BitMap) {
         #[cfg(target_arch = "aarch64")]
         {
             unsafe { neon_bits(&pad, chunk.len(), hay, out) };
-            continue;
         }
-        scalar_bits(&pad, chunk.len(), hay, out);
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            scalar_bits(&pad, chunk.len(), hay, out);
+        }
     }
 }
 
@@ -1100,9 +1110,11 @@ pub fn high_bits(hay: &[u8], out: &mut BitMap) {
     #[cfg(target_arch = "aarch64")]
     {
         unsafe { neon_high_bits(hay, out) };
-        return;
     }
-    scalar_high_bits(hay, 0, out);
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        scalar_high_bits(hay, 0, out);
+    }
 }
 
 /// AVX-2 fill of [`high_bits`]: `_mm256_movemask_epi8` of the raw register
@@ -1210,11 +1222,19 @@ pub fn count_byte(target: u8, data: &[u8]) -> u64 {
     }
     #[cfg(target_arch = "aarch64")]
     {
-        return unsafe { neon_count_byte(target, data) };
+        unsafe { neon_count_byte(target, data) }
     }
-    scalar_count_byte(target, data)
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        scalar_count_byte(target, data)
+    }
 }
 
+// The scalar path is the oracle the tests hold the vector path to, so it
+// stays compiled on every target: on aarch64 the NEON path answers and
+// nothing in a build without the test harness calls this. The warning
+// would stand where the function is the thing that is correct.
+#[allow(dead_code)]
 #[inline]
 fn scalar_count_byte(target: u8, data: &[u8]) -> u64 {
     let mut count = 0u64;
@@ -1604,9 +1624,11 @@ pub fn pair_offsets(needle: &[u8], hay: &[u8], out: &mut Vec<usize>) {
     #[cfg(target_arch = "aarch64")]
     {
         unsafe { neon_pair_offsets(needle, k, hay, out) };
-        return;
     }
-    scalar_pair_offsets(needle, k, hay, out);
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        scalar_pair_offsets(needle, k, hay, out);
+    }
 }
 
 /// Multi-byte paired-byte SIMD bit scanner into [`BitMap`].
@@ -1630,9 +1652,11 @@ pub fn pair_bits(needle: &[u8], hay: &[u8], out: &mut BitMap) {
     #[cfg(target_arch = "aarch64")]
     {
         unsafe { neon_pair_bits(needle, k, hay, out) };
-        return;
     }
-    scalar_pair_bits(needle, k, hay, out);
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        scalar_pair_bits(needle, k, hay, out);
+    }
 }
 
 /// Fill `cands` and `terms` in one haystack pass — the pair scan and the
@@ -2337,6 +2361,10 @@ unsafe fn neon_pair_bits(needle: &[u8], k: usize, hay: &[u8], out: &mut BitMap) 
     }
 }
 
+// The oracle of the paired-byte paths, for the reason `scalar_count_byte`
+// carries: it stays compiled on every target, and a build without the
+// test harness calls nothing here.
+#[allow(dead_code)]
 fn scalar_pair_offsets(needle: &[u8], k: usize, hay: &[u8], out: &mut Vec<usize>) {
     let len = needle.len();
     let b0 = needle[0];
@@ -2357,6 +2385,10 @@ fn scalar_pair_offsets(needle: &[u8], k: usize, hay: &[u8], out: &mut Vec<usize>
     }
 }
 
+// The oracle of the paired-byte paths, for the reason `scalar_count_byte`
+// carries: it stays compiled on every target, and a build without the
+// test harness calls nothing here.
+#[allow(dead_code)]
 fn scalar_pair_bits(needle: &[u8], k: usize, hay: &[u8], out: &mut BitMap) {
     let len = needle.len();
     let b0 = needle[0];
@@ -3234,9 +3266,13 @@ mod mask_tests {
     use alloc::vec;
     use alloc::vec::Vec;
 
-    use super::{
-        scalar_match_bits, BitMap, ByteClass, MaskBranch, MaskTerm, MatchMask, MAX_MASK_TERMS,
-    };
+    use super::{BitMap, ByteClass, MaskBranch, MaskTerm, MatchMask, MAX_MASK_TERMS};
+    // The scalar definition is the oracle the vector path is held against, and
+    // that comparison only exists on x86_64 -- so the *import* is gated with
+    // the test that uses it and not with the function, which is compiled on
+    // every target because it is also the fallback when AVX2 is absent.
+    #[cfg(target_arch = "x86_64")]
+    use super::scalar_match_bits;
 
     /// The offsets a map reports, which is a bitmap's whole contract.
     fn offsets(m: &BitMap) -> Vec<usize> {
@@ -4038,7 +4074,12 @@ mod mask_tests {
 mod bit_tests {
     use alloc::vec::Vec;
 
-    use super::{byte_bits, byte_bits_many, scalar_bits, term_bits, BitMap};
+    use super::{byte_bits, byte_bits_many, term_bits, BitMap};
+    // Same gate as the import above, and for the same reason: the scalar
+    // definition is the oracle, the oracle is compared against the vector
+    // path, and the vector path is x86_64.
+    #[cfg(target_arch = "x86_64")]
+    use super::scalar_bits;
 
     /// The set the map reports, as offsets. Every other test here compares
     /// this, because a bitmap's whole contract is which bits it sets.
@@ -4054,6 +4095,9 @@ mod bit_tests {
             .collect()
     }
 
+    /// The needle list padded to the three bytes the vector kernels take.
+    /// x86_64 only, because the only caller is the vector/scalar comparison.
+    #[cfg(target_arch = "x86_64")]
     fn pad3(needles: &[u8]) -> [u8; 3] {
         [
             needles[0],

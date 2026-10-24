@@ -192,8 +192,15 @@ pub fn classify16(bytes: &[u8; 16]) -> Classified16 {
 
 // --- the pshufb rectangles -------------------------------------------------
 
+// The rectangles are the vector path's tables: the AVX2 module reads them,
+// and the tests read them to pin what each one selects. A target with no
+// vector path has no use for them, and code nobody calls is an error under
+// the gate's `-D warnings` -- which is how a tree that only ever ran on
+// x86_64 stopped at the first warning of an arm64 build.
+
 /// Build the (low-table, high-table) pair for one rectangle of the
 /// high-nibble × low-nibble grid, from a bitmask of nibbles for each.
+#[cfg(any(target_arch = "x86_64", test))]
 const fn rect(lo_set: u16, hi_set: u16) -> ([u8; 16], [u8; 16]) {
     let mut lo = [0u8; 16];
     let mut hi = [0u8; 16];
@@ -207,13 +214,17 @@ const fn rect(lo_set: u16, hi_set: u16) -> ([u8; 16], [u8; 16]) {
 }
 
 /// `0x20`, the space.
+#[cfg(any(target_arch = "x86_64", test))]
 pub(crate) const RECT_SPACE: ([u8; 16], [u8; 16]) = rect(1 << 0x0, 1 << 0x2);
 /// `0x09 0x0A 0x0D` — tab, line feed, carriage return.
+#[cfg(any(target_arch = "x86_64", test))]
 pub(crate) const RECT_CTRL_WS: ([u8; 16], [u8; 16]) =
     rect((1 << 0x9) | (1 << 0xA) | (1 << 0xD), 1 << 0x0);
 /// `0x2C`, the comma.
+#[cfg(any(target_arch = "x86_64", test))]
 pub(crate) const RECT_COMMA: ([u8; 16], [u8; 16]) = rect(1 << 0xC, 1 << 0x2);
 /// `0x3A`, the colon.
+#[cfg(any(target_arch = "x86_64", test))]
 pub(crate) const RECT_COLON: ([u8; 16], [u8; 16]) = rect(1 << 0xA, 1 << 0x3);
 /// `0x5B 0x5D 0x7B 0x7D` — `[ ] { }`.
 ///
@@ -221,9 +232,11 @@ pub(crate) const RECT_COLON: ([u8; 16], [u8; 16]) = rect(1 << 0xA, 1 << 0x3);
 /// *high* nibble, so one rectangle holding both spans two rows, and row 5 then
 /// admits `0x5C` (the backslash) unless row 5 is only lit on low nibbles `B`
 /// and `D`. The low-table half is what pins that down.
+#[cfg(any(target_arch = "x86_64", test))]
 pub(crate) const RECT_BRACKET: ([u8; 16], [u8; 16]) =
     rect((1 << 0xB) | (1 << 0xD), (1 << 0x5) | (1 << 0x7));
 /// `0x22`, the quote.
+#[cfg(any(target_arch = "x86_64", test))]
 pub(crate) const RECT_QUOTE: ([u8; 16], [u8; 16]) = rect(1 << 0x2, 1 << 0x2);
 
 /// Every rectangle with the byte values it is required to select.

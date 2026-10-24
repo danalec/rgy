@@ -99,12 +99,25 @@ fn is_punctuation_or_space(b: u8) -> bool {
 // ---------------------------------------------------------------------------
 
 /// The AVX2 path, or `None` if this CPU cannot run it.
+///
+/// The AVX2 module exists only on x86_64, and on every other target the
+/// answer is `None` for the same reason it is `None` on an x86_64 without the
+/// feature: there is no vector path to run. The helper is defined on every
+/// target so the corpus is the same corpus everywhere -- what changes is the
+/// number of implementations it holds against the oracle.
+#[cfg(target_arch = "x86_64")]
 fn avx2_scan(bytes: &[u8]) -> Option<StructuralIndex> {
     if has_avx2_pclmulqdq() {
         // SAFETY: `has_avx2_pclmulqdq` just reported both features, which is
         // the precondition of `scan_avx2`; see its documentation.
         return Some(unsafe { avx2::scan_avx2(bytes) });
     }
+    None
+}
+
+/// The AVX2 path on a target that has none. See [`avx2_scan`].
+#[cfg(not(target_arch = "x86_64"))]
+fn avx2_scan(_bytes: &[u8]) -> Option<StructuralIndex> {
     None
 }
 
@@ -494,6 +507,13 @@ fn classify16_packs_two_bits_per_byte() {
     assert_eq!(got.code >> 30, 0);
 }
 
+/// The vector classification against the 256-entry table, on every window.
+///
+/// x86_64 only: `classify16_avx2` is the vector counterpart of `classify16`,
+/// and there is no vector counterpart on a target without AVX2 -- the scalar
+/// `classify16` *is* the implementation there, so there is nothing to hold it
+/// against.
+#[cfg(target_arch = "x86_64")]
 #[test]
 fn classify16_avx2_agrees_with_classify16_on_every_window() {
     // Every byte value at every position, so the tables are compared against
@@ -546,6 +566,12 @@ fn prefix_xor_is_an_inclusive_prefix_parity() {
     assert_eq!(prefix_xor(1 << 63), 0x8000_0000_0000_0000);
 }
 
+/// The carry-less-multiply prefix-XOR against the shift chain.
+///
+/// x86_64 only, for the same reason as the classification above: PCLMULQDQ is
+/// the instruction this test compares against a chain of shifts, and the
+/// scalar chain is the only implementation on a target without it.
+#[cfg(target_arch = "x86_64")]
 #[test]
 fn clmul_prefix_xor_agrees_with_the_shift_chain() {
     if !has_avx2_pclmulqdq() {
@@ -617,6 +643,9 @@ fn the_predicate_on_a_small_document_is_what_it_looks_like() {
     assert!(!got.end_in_string);
     assert_eq!(scan(input), got);
     assert_eq!(scan_swar(input), got);
+    // On x86_64 this holds the vector path to the same answer as well; on a
+    // target without AVX2 there is no fourth implementation to compare.
+    #[cfg(target_arch = "x86_64")]
     assert_eq!(avx2_scan(input), Some(got.clone()));
 }
 
@@ -1246,6 +1275,9 @@ fn throughput_probe() {
     measure("scan", &|b| scan(b).structural.count_ones());
     measure("scan_scalar", &|b| scan_scalar(b).structural.count_ones());
     measure("scan_swar", &|b| scan_swar(b).structural.count_ones());
+    // The AVX2 path exists only on x86_64, so on any other target there is a
+    // fourth line missing from this measurement rather than a fourth path.
+    #[cfg(target_arch = "x86_64")]
     if has_avx2_pclmulqdq() {
         // SAFETY: both features were just detected, which is the
         // precondition of `scan_avx2`.
