@@ -67,7 +67,7 @@ verification on machines this host does not have.
 | zen-rs bin / TUI (unchanged behaviour) | `bins/zen-rs`, `bins/search-ui` | ✅ |
 | `rgy-autostart` (login item, per platform) | `crates/autostart` | ✅ startup task / HKCU Run, systemd user unit, launchd agent |
 | The crates on crates.io | `crates/*/Cargo.toml`, `bins/*/Cargo.toml` | ✅ all fourteen published at 0.1.0 on 2026-10-23 — see below |
-| The Listary plan | `docs/listary-parity.toml`, `scripts/listary-parity.py` | ⬜ 6 gaps and 10 degraded rows, each with work and a phase — see below |
+| The Listary plan | `docs/listary-parity.toml`, `scripts/listary-parity.py` | ⬜ 3 gaps and 12 degraded rows, each with work and a phase — see below |
 | Packaging (winget, brew, tarballs) | `scripts/build-release.*`, `scripts/publish-release.*`, `.winget/`, `Formula/` | ✅ machinery in place; **no release published yet** |
 | Release flow (the one-line installers, the Linux build over ssh) | `install.sh`, `install.ps1`, `scripts/release-linux.sh` | ✅ the installers pin the digest of the artifact they install; the pins are release data |
 | Homebrew submission (the pull request to homebrew-core) | `scripts/publish-homebrew.*` | ✅ the machinery; the pull request waits for the first release to exist |
@@ -132,7 +132,7 @@ with the work that closes every gap and the phase it belongs to. It asks a
 different question from the matrix above — that one asks "does this work on
 each OS", this one asks "does rgy do what Listary does".
 
-Six are gaps, ten are degraded, and nineteen are already at parity:
+Three are gaps, twelve are degraded, and twenty are already at parity:
 the NTFS MFT reader, the USN journal monitor, the multi-volume enumeration,
 the folder walker, the atomic index snapshot, the u32-second modification
 time, the fail-closed regex and the parallel scoring came in with the merge
@@ -165,6 +165,19 @@ ranking), `name`, `mtime` or `none`. The choice orders the hits the cap
 kept; it does not pick them — the cap still takes the best by score, so
 `sort:mtime` is "the newest of the best matches", not "the newest
 matches". An unknown choice fails closed, like an unknown `type:`.
+
+**The priority rules.** The table of directory names that decided what a
+place was worth was in the source, and now it is not: the rules live in a
+file beside the index (`<index>.rules`), each a level, a regex and the two
+flags that say who the rule is for. The table is the default rule set, so
+the behaviour that shipped is the behaviour that comes out of the box, and
+a user who writes no rules gets it.
+
+The rules are read when the index is built, so a record's tier is decided
+once and stored with the record — the search reads it per candidate
+instead of replaying the rules for every candidate it looks at. A rule
+that does not parse is an error, not a warning: a rule the user wrote and
+rgy dropped is a rule that does not work.
 
 **The rank key.** The order of the results is now one `u64`, and the
 priority is in its high bits: `Ignored < Low < Normal < Internal < High <

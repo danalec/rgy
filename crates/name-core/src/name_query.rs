@@ -635,12 +635,16 @@ fn find_ci(name: &[u8], q: &[u8]) -> Option<usize> {
         return Some(0);
     }
     let (lower, upper) = (q[0].to_ascii_lowercase(), q[0].to_ascii_uppercase());
+    // The last place the whole query still fits: a first byte further out
+    // than this is a byte the name has and the query does not.
+    let last = name.len() - q.len();
     let mut at = 0usize;
-    while at + q.len() <= name.len() {
+    while at <= last {
+        let window = &name[at..=last];
         let hit = if lower == upper {
-            memchr::memchr(lower, &name[at..]).map(|i| at + i)
+            memchr::memchr(lower, window).map(|i| at + i)
         } else {
-            match (memchr::memchr(lower, &name[at..]).map(|i| at + i), memchr::memchr(upper, &name[at..]).map(|i| at + i)) {
+            match (memchr::memchr(lower, window).map(|i| at + i), memchr::memchr(upper, window).map(|i| at + i)) {
                 (Some(a), Some(b)) => Some(a.min(b)),
                 (Some(a), None) => Some(a),
                 (None, Some(b)) => Some(b),
@@ -1926,6 +1930,21 @@ mod tests {
     fn the_positions_snap_to_the_characters() {
         let t = q("日本");
         assert_eq!(matched_chars("日本語.txt".as_bytes(), &t.tokens), vec![0, 1]);
+    }
+
+    /// The substring matcher looks for the first byte and compares the rest.
+    ///
+    /// The first byte at the very end of the name is not a match: the query
+    /// does not fit there.
+    #[test]
+    fn the_substring_matcher_does_not_run_past_the_name() {
+        assert_eq!(find_ci(b"invoice.pdf", b"invoice"), Some(0));
+        assert_eq!(find_ci(b"INVOICE.pdf", b"invoice"), Some(0));
+        assert_eq!(find_ci(b"my invoice.pdf", b"invoice"), Some(3));
+        // The first byte is there and the rest is not.
+        assert_eq!(find_ci(b"invo", b"invoice"), None);
+        assert_eq!(find_ci(b"inv", b"invoice"), None);
+        assert_eq!(find_ci(b"invoice", b"invoice"), Some(0));
     }
 
     /// `sort:` chooses the order the results come in.

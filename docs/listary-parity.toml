@@ -195,43 +195,43 @@ size = "L"
 id = "P.1"
 name = "User-defined regex priority rules"
 phase = 3
-status = "D"
+status = "P"
 evidence = "§4.6"
 listary = "Rules carry a priority, a regex, and apply_to_folders / apply_to_files, and are attached to paths. The legacy managed contract names the record `FileNameRegexPriorityRule`."
-rgy = "`prior_adjust` is a hard-coded name table in the source: Applications, Library, System, node_modules, target, dot-dirs. It cannot be changed by the user and it does not survive an upgrade."
-work = "A rules list in the configuration, each with a regex, a priority and the two apply flags, evaluated at index time. The hard-coded table becomes the first rule set, so the current behaviour is the default and not a special case."
+rgy = "Done. A rule file beside the index (`<index>.rules`): a level, a regex and the two flags, read at index time. The level is the ladder's (ignored, low, normal, internal, high, highfile), the regex matches a name, and the flags say who the rule is for: `d` the folder whose name matched, `f` the files under it. A line that does not parse is an error, not a warning: a rule the user wrote and rgy dropped is a rule that does not work. The table that used to be in the source is the default rule set, so the current behaviour is the default and not a special case."
+work = "None. The rules are `name_core::rules` and the manual says the format."
 size = "L"
 
 [[capability]]
 id = "P.2"
 name = "Regex extension rules"
 phase = 3
-status = "G"
+status = "D"
 evidence = "§4.6"
 listary = "Extension rules are regex-driven too, with the pattern `(?i)\\.(?:)$` used to detect an empty extension."
-rgy = "Absent. Extensions are matched exactly, by suffix."
-work = "Extension rules alongside the path rules, with the empty-extension pattern as the degenerate case."
+rgy = "Degraded, not absent: the rules are regexes over a name, so an extension rule is a pattern that ends in the extension (`\\.pdf$`), and the degenerate case (an empty extension) is `(?i)\\.(?:)$` against the same names. There is no separate kind of rule for an extension."
+work = "The extension rules as their own kind, with the extension as the thing the pattern is matched against rather than the name."
 size = "S"
 
 [[capability]]
 id = "P.3"
 name = "Parent-chain resolution and rule replay"
 phase = 3
-status = "G"
+status = "D"
 evidence = "§4.5, §4.6"
 listary = "Resolving a record's priority walks the parent chain and replays the rules; the result is then checked against the stored priority, and a broken chain is an error rather than a fallback."
-rgy = "The index stores the tree as DFS ranges (`children`, `descendants`), which give the shape but not a per-record parent chain to walk."
-work = "The index keeps a parent pointer per record, resolution walks it and replays the rules, and the resolved priority is compared with the stored one. This row is why the index work of phase 5 comes first in the dependency order even though it is listed later."
+rgy = "Degraded. The index keeps a parent pointer per record (the `Parent` section), and the resolution walks it: a record's level is the closest rule that matches a name in its chain and applies to it. The rules are replayed once, at index time, and the value stored IS the resolution -- so there is no second path for it to drift from, which is what the check is for. The chain is not validated: a broken one is a broken index, not an error the search reports."
+work = "The parent chain's integrity (the cycle and dead-ancestor checks of row I.2), so a broken chain is an error the index build reports rather than a priority that silently changes."
 size = "L"
 
 [[capability]]
 id = "P.4"
 name = "Ignored records are outside the live set"
 phase = 3
-status = "G"
+status = "D"
 evidence = "§4.5, §4.6"
 listary = "Records at the Ignored tier are excluded from the live set entirely -- they are indexed but not searchable."
-rgy = "Absent. There is no tier below Low, so every indexed entry is searchable."
+rgy = "Degraded. The ladder has the `Ignored` level and a rule can give it, and a record in it ranks last -- but it is still searchable. rgy's live set is the index plus the overlay, and a tier is not a membership."
 work = "The lowest tier of the ladder drops out of the searchable set at query time. The index keeps it, so the rule can be reversed without a rescan."
 size = "S"
 

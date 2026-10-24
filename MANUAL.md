@@ -225,6 +225,39 @@ A bare extension goes in `ext:`; `type:` names kinds.
 and exits 1 — it does not quietly search everything. If you get no
 results and a warning, that is the reason.
 
+### The priority rules
+
+Some places are worth more than others. A file in your `Documents` is worth
+more than the same name in a build directory, and rgy says so without
+being asked — the priority of a place is a rule.
+
+The rules live in a file beside the index, `<index>.rules`, and the index
+is built with them:
+
+```
+# <level> <regex> [flags]
+#   level: ignored | low | normal | internal | high | highfile
+#   flags: f (the files under the folder), d (the folder itself)
+#          both by default
+low  ^node_modules$  fd
+high ^Documents$    fd
+```
+
+The regex matches a **name** — a folder's or a file's. The flags say who
+the rule is for: `d` is the folder whose name matched, `f` is the files
+under it. The level is what the place is worth, and it decides the order
+before the name does: a file in `node_modules` never outranks the same
+name in `Documents`, however well it matches.
+
+There is no file, and the defaults are the rules: `node_modules`,
+`target`, `Caches`, the dot-directories and the macOS bundles are low,
+`Applications` is above normal, and a folder nobody wrote a rule about is
+normal. A line that does not parse is an error — rgy warns and uses the
+defaults rather than dropping the rule you wrote.
+
+The rules are read when the index is built, so a change to them needs a
+new index (`--reindex`).
+
 ### Alternatives and wildcards
 
 | you write | means |

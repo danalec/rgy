@@ -531,7 +531,16 @@ impl Index {
     /// the walk yields nothing rather than failing. Without this the DFS
     /// starts from `by_id[0] == NONE` and indexes past the end of an empty
     /// vector.
-    pub fn build(mut ls: Vec<Listing>, event_id: u64, synced_at: u32, home: &[u8]) -> Index {
+    pub fn build(ls: Vec<Listing>, event_id: u64, synced_at: u32, home: &[u8]) -> Index {
+        Index::build_with_rules(ls, event_id, synced_at, home, &crate::rules::Rules::defaults())
+    }
+
+    /// The index with the user's priority rules.
+    ///
+    /// The rules are read here and baked into the index: a record's tier is
+    /// what its folder is worth, and the search reads that per candidate
+    /// instead of walking the rules again.
+    pub fn build_with_rules(mut ls: Vec<Listing>, event_id: u64, synced_at: u32, home: &[u8], rules: &crate::rules::Rules) -> Index {
         ls.par_iter_mut().for_each(|l| {
             let names = &l.names;
             l.ents.sort_unstable_by(|a, b| {
@@ -669,11 +678,21 @@ impl Index {
             end[p] = end[p].max(end[k]);
         }
         let comps: Vec<&[u8]> = home.split(|&b| b == b'/').filter(|c| !c.is_empty()).collect();
-        let mut prior = vec![0i8; d];
         let mut depth = vec![0u8; d];
         // How many leading components of `home` this dir's path matches;
         // u8::MAX once it diverges.
         let mut hm = vec![0u8; d];
+        // The level each dir is worth, and the level the files under it are
+        // worth: a rule says who it is for, so there are two. A dir takes
+        // the level of the closest rule in its chain that is for folders,
+        // and the files under it the closest that is for files.
+        let mut folder_level = vec![crate::rank::Tier::Normal; d];
+        let mut file_level = vec![crate::rank::Tier::Normal; d];
+        // The level each entry is in, and the offset it is worth in the
+        // score. The level is the tier the ranking compares; the offset is
+        // what the score says about two entries in the same tier.
+        let mut level = vec![crate::rank::Tier::Normal; n];
+        let mut prior = vec![0i8; n];
         for k in 1..d {
             let e = dir_entry[k] as usize;
             let p = parent[e] as usize;
@@ -686,8 +705,23 @@ impl Index {
                 _ => u8::MAX,
             };
             let entered_home = hm[k] as usize == comps.len() && (hm[p] as usize) < comps.len();
-            let adj = prior_adjust(nm, depth[k]) + if entered_home { 15 } else { 0 };
-            prior[k] = (prior[p] as i32 + adj).clamp(-100, 60) as i8;
+            folder_level[k] = rules.level_of(nm, false).unwrap_or(folder_level[p]);
+            file_level[k] = rules.level_of(nm, true).unwrap_or(file_level[p]);
+            let home_bonus = if entered_home { 15 } else { 0 };
+            // The dir itself, and the files under it.
+            level[e] = folder_level[k];
+            prior[e] = (crate::rules::offset(folder_level[k]) + home_bonus).clamp(-100, 60) as i8;
+        }
+        // The files: their own name's rule, or the level of the folder they
+        // are in.
+        for i in 0..n {
+            if kind[i] & 3 == KIND_DIR || i == 0 {
+                continue;
+            }
+            let p = parent[i] as usize;
+            let lvl = rules.level_of(&names[name_off[i] as usize..][..name_len[i] as usize], true).unwrap_or(file_level[p]);
+            level[i] = lvl;
+            prior[i] = crate::rules::offset(lvl).clamp(-100, 60) as i8;
         }
         drop((names, name_off, name_len));
 
@@ -699,24 +733,24 @@ impl Index {
         // (its `record_store.rs` is the largest module in its engine), and
         // the reason is the same: a ranking property that is read per
         // candidate belongs to the candidate.
-        let rank_adj: Vec<i8> = (0..n).map(|i| prior[parent[i] as usize]).collect();
+        let rank_adj: Vec<i8> = prior.clone();
 
-        // The priority tier each entry inherits from its directory, in the
-        // kind byte's free bits (5 to 7).
+        // The priority tier each entry is in, in the kind byte's free bits
+        // (5 to 7).
         //
-        // The tier is a bucket of the prior, and the search reads it once
-        // per candidate. Computing it there cost more than the whole rest
-        // of the ranking key -- 13% of the name bench, measured -- because
-        // the prior it comes from is a load and the tier is a chain of
-        // compares on top of it, right on the path to the key's
-        // comparison. The kind byte is loaded anyway, so the tier rides
-        // along in it, and it sits in the bits the key wants it in, so the
-        // search does not unpack it and repack it.
+        // The tier is the level the rules gave the entry, and the search
+        // reads it once per candidate. Computing it there cost more than
+        // the whole rest of the ranking key -- 13% of the name bench,
+        // measured -- because the prior it comes from is a load and the
+        // tier is a chain of compares on top of it, right on the path to
+        // the key's comparison. The kind byte is loaded anyway, so the tier
+        // rides along in it, and it sits in the bits the key wants it in,
+        // so the search does not unpack it and repack it.
         //
         // The overlay's entries have no index to carry it: the search
         // derives their tier from the prior they carry themselves.
         for i in 0..n {
-            kind[i] |= (crate::rank::Tier::from_prior(rank_adj[i] as i32).bits() as u8) << 5;
+            kind[i] |= (level[i].bits() as u8) << 5;
         }
 
         // Write the blob, freeing each array once its last reader is done:
@@ -1133,68 +1167,6 @@ pub fn char_bit(b: u8) -> u64 {
         b' ' => 1 << 38,
         0x80.. => 1 << 39,
         _ => 1 << 40,
-    }
-}
-
-#[rustfmt::skip]
-const BUNDLE_EXTS: &[&[u8]] = &[
-    b".framework", b".bundle", b".plugin", b".appex", b".kext", b".xpc", b".lproj", b".xcassets", b".photoslibrary",
-    b".musiclibrary", b".tvlibrary", b".imovielibrary", b".dSYM", b".xcarchive", b".sdk", b".platform",
-];
-
-/// How much a directory's name moves everything under it in ranking.
-fn prior_adjust(name: &[u8], depth: u8) -> i32 {
-    if depth == 1 {
-        return match name {
-            b"Users" => 0,
-            b"Applications" => 10,
-            b"Volumes" => -10,
-            b"Library" => -25,
-            b"System" => -40,
-            b"opt" => -25,
-            // A directory whose name says nothing to us is neutral. The
-            // rule is "demote what we recognise as noise", not "demote
-            // what we do not recognise": the default used to be -35, so
-            // an ordinary directory (Documents, Downloads, Projects) sat
-            // BELOW a build directory (node_modules, -30) and a file in
-            // ~/Documents lost to a file in ~/node_modules on a name
-            // match alone. The ranking corpus found it.
-            //
-            // The noise names are noise at any depth, so they are looked
-            // up here too: a top-level `node_modules` is the same build
-            // artefact as one under a project, and the depth-1 table used
-            // to shadow them.
-            _ => noise_adjust(name),
-        };
-    }
-    if name == b"Applications" {
-        return 30;
-    }
-    noise_adjust(name)
-}
-
-/// The directories the table recognises as noise, and what they are worth.
-///
-/// The same at every depth: a `node_modules` at the top of the filesystem
-/// and a `node_modules` inside a project are the same thing.
-fn noise_adjust(name: &[u8]) -> i32 {
-    if name.ends_with(b".app") {
-        return -25;
-    }
-    if BUNDLE_EXTS.iter().any(|x| name.len() > x.len() && name[name.len() - x.len()..].eq_ignore_ascii_case(x)) {
-        return -20;
-    }
-    if name.first() == Some(&b'.') {
-        return -25;
-    }
-    match name {
-        b"Library" => -20,
-        b"Caches" | b"caches" | b"cache" | b"Cache" | b"Logs" | b"DerivedData" | b"CoreSimulator" => -20,
-        b"node_modules" | b"__pycache__" | b"site-packages" | b"Pods" | b"venv" | b"bower_components" => -30,
-        b"target" | b"build" | b"dist" | b"out" | b"vendor" | b"deps" | b"tmp" | b"temp" => -12,
-        b"folders" | b"Containers" | b"Group Containers" => -10,
-        b"Application Support" => -5,
-        _ => 0,
     }
 }
 

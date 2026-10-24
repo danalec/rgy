@@ -598,7 +598,13 @@ fn open_index(root: &str, index: Option<&str>, reindex: bool, max_age: Option<Du
     // position of the walk, and the age limit is what keeps the served index
     // honest.
     let watermark = journal.head;
-    let idx = Index::build(listings, watermark, now_secs(), root.as_bytes());
+    // The user's priority rules, beside the index: `<index>.rules`. No file
+    // is not an error -- the defaults are the rules.
+    let (rules, why) = rgy_name_core::rules::Rules::beside(&index_path);
+    if let Some(why) = why {
+        rgy_engine::errln!("searchd: {why} -- using the default rules");
+    }
+    let idx = Index::build_with_rules(listings, watermark, now_secs(), root.as_bytes(), &rules);
     match persist::save(&idx, &root_path, &index_path) {
         Ok(saved) => rgy_engine::errln!(
             "searchd: indexed {} entries → {}",

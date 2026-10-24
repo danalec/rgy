@@ -23,6 +23,8 @@ pub mod name_query;
 /// `u64` the final order compares.
 pub mod rank;
 pub mod regex;
+/// The user's priority rules: what a name is worth, and who it is for.
+pub mod rules;
 
 /// The comparison fold: ASCII case-fold + NFC (parity row 1.12). The
 /// display and the I/O keep the bytes the filesystem gave; this is what a

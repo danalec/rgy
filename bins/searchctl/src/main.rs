@@ -245,7 +245,15 @@ fn obtain_index(opts: &Opts) -> Result<Index, String> {
             }
         })
         .map_err(|_| "scan cancelled — no index written".to_string())?;
-    let idx = Index::build(listings, 0, now_secs(), opts.root.as_bytes());
+    let idx = {
+        // The user's priority rules, beside the index: `<index>.rules`. No
+        // file is not an error -- the defaults are the rules.
+        let (rules, why) = rgy_name_core::rules::Rules::beside(&index_path);
+        if let Some(why) = why {
+            rgy_engine::errln!("searchctl: {why} -- using the default rules");
+        }
+        Index::build_with_rules(listings, 0, now_secs(), opts.root.as_bytes(), &rules)
+    };
     match persist::save(&idx, &root_path, &index_path) {
         Ok(saved) => rgy_engine::errln!(
             "searchctl: indexed {} entries → {}",
