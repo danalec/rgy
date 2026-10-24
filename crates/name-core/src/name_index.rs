@@ -248,9 +248,8 @@ macro_rules! sec {
         }
     };
 }
-// Re-exported for the Searcher half of query.rs when it lands (PR #6);
-// unused while name_query carries only the parser/scorer.
-#[allow(unused_imports)]
+// Re-exported so the content index can name the same section macro (see
+// `content.rs`), which reads the same blob internals.
 pub(crate) use sec;
 
 impl Index {
