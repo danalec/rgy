@@ -121,6 +121,11 @@ on the known-gaps list fails CI, so a new one cannot appear quietly.
 **[docs/STATUS.md](docs/STATUS.md)** says what is still open, and what each
 remaining limit costs.
 
+The crates are on crates.io, all fourteen at 0.1.0: `rgy-name-core`,
+`rgy-discovery`, `rgy-engine`, `rgy-proto` and the rest. The list, and
+why they carry the `rgy-` prefix, are in
+[docs/STATUS.md](docs/STATUS.md).
+
 ## Related projects
 
 | Project | Repo | What it provides |

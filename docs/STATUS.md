@@ -66,7 +66,7 @@ verification on machines this host does not have.
 | Named pipe / UDS fronts, `--serve` compat, `--tv-dir` | `bins/searchd` | ✅ |
 | zen-rs bin / TUI (unchanged behaviour) | `bins/zen-rs`, `bins/search-ui` | ✅ |
 | `rgy-autostart` (login item, per platform) | `crates/autostart` | ✅ startup task / HKCU Run, systemd user unit, launchd agent |
-| The crates on crates.io | `crates/*/Cargo.toml`, `bins/*/Cargo.toml` | ⬜ renamed to `rgy-*`, every `cargo publish --dry-run` green, **not uploaded** — see below |
+| The crates on crates.io | `crates/*/Cargo.toml`, `bins/*/Cargo.toml` | ✅ all fourteen published at 0.1.0 on 2026-10-23 — see below |
 | Packaging (winget, brew, tarballs) | `scripts/build-release.*`, `scripts/publish-release.*`, `.winget/`, `Formula/` | ✅ machinery in place; **no release published yet** |
 | Release flow (the one-line installers, the Linux build over ssh) | `install.sh`, `install.ps1`, `scripts/release-linux.sh` | ✅ the installers pin the digest of the artifact they install; the pins are release data |
 | Homebrew submission (the pull request to homebrew-core) | `scripts/publish-homebrew.*` | ✅ the machinery; the pull request waits for the first release to exist |
@@ -226,18 +226,18 @@ the three platforms behaving alike.
   `rgx-adapters-*` — at **0.1.0**, confirmed against the crates.io API on
   2026-10-23.
 
-  rgy's own crates are **renamed and prepared, not uploaded**. Checked
-  against the crates.io API on 2026-10-23, `rgy`, `engine`, `proto`,
-  `discovery`, `zen-rs` and `autostart` are all taken, so every crate
-  carries the `rgy-` prefix: `rgy-proto`, `rgy-discovery`,
-  `rgy-name-core`, `rgy-engine`, `rgy-autostart`, the four
-  `rgy-discovery-{windows,linux,macos,freebsd}`, `rgy-discovery-dispatch`,
-  `rgy-searchctl`, `rgy-searchd`, `rgy-search-ui` and `rgy-zen`. The
-  library target names follow the package names (`rgy_discovery`,
-  `rgy_name_core`, …), and that is not cosmetic: a library whose target
-  name stayed `discovery` would collide with the crates.io crate of that
-  name, and two dependencies sharing one lib name is `E0464` **on the
-  consumer's side**, not a warning here. The shipped binaries keep their
+  rgy's own crates are on crates.io too, all fourteen at **0.1.0**:
+  `rgy-proto`, `rgy-discovery`, `rgy-name-core`, `rgy-engine`,
+  `rgy-autostart`, the four `rgy-discovery-{windows,linux,macos,freebsd}`,
+  `rgy-discovery-dispatch`, `rgy-searchctl`, `rgy-searchd`,
+  `rgy-search-ui` and `rgy-zen`. The names carry the `rgy-` prefix
+  because `proto`, `discovery`, `name-core`, `engine`, `autostart` and
+  `zen-rs` are all taken on the registry (checked against the crates.io
+  API on 2026-10-23), and the library target names follow the package
+  names (`rgy_discovery`, `rgy_name_core`, …). That is not cosmetic: the
+  crates.io crate named `discovery` already publishes a library target
+  called `discovery`, and a consumer depending on both would hit E0464
+  **on their side**, not a warning here. The shipped binaries keep their
   names (`searchctl`, `searchd`, `rgy-autostart`); only the package names
   moved.
 
@@ -247,19 +247,11 @@ the three platforms behaving alike.
   more than the shorter one. The project, the repository (`danalec/rgy`)
   and the binaries keep the name `rgy`.
 
-  What is left is the upload, and it is the one irreversible step:
-  crates.io takes a version once and afterwards only lets it be yanked.
-  The manifests, the lockfile and the metadata are in place, and all
-  fourteen crates pass `cargo publish --dry-run` — the three with no
-  internal dependency plainly, the other eleven with a local patch
-  override so that a dependency which is not on the registry yet still
-  resolves. In the real run each crate's dry-run passes on its own,
-  because by then its dependencies are published. The publish itself
-  waits for an explicit go. One gap is known and stated: the
-  `repository` metadata points at `https://github.com/danalec/rgy`,
-  which does not answer yet (404) — the repository still lives only on
-  the private forgejo, and crates.io metadata is fixed at publish time,
-  so the URL is set now and the repository follows.
+  What is left is the repository itself. The `repository` metadata on
+  every crate points at `https://github.com/danalec/rgy`, which does not
+  answer yet (404) — the repository still lives only on the private
+  forgejo, and crates.io metadata is fixed at publish time, so the URL
+  is set now and the repository follows.
 - **The first release.** The packaging is in place — the winget manifest,
   the Homebrew formula, the scripts that build the archives and publish
   them — but nothing has been published yet, so the manifest and the
