@@ -768,9 +768,46 @@ fn handle(req: Request, ctx: &Ctx) -> Vec<Response> {
             }
         },
         Request::Grep { q, limit } => responses.extend(grep(&q, limit, ctx)),
+        Request::Resolve { path } => responses.push(resolve(&path, ctx)),
     }
     warm_stop();
     responses
+}
+
+/// Resolve a path through the lookup surface (parity row I.1).
+///
+/// The five indexes answer it: the `file_path` and `folder_path` indexes
+/// give the path of the entry, and the `folder_backend` index the volume
+/// that owns the folder.
+fn resolve(path: &str, ctx: &Ctx) -> Response {
+    let live_guard = ctx.live.read().unwrap();
+    let index = &live_guard.base;
+    let lookup = rgy_name_core::lookup::Lookup::new(index);
+    let Some(entry) = index.lookup(path.as_bytes()) else {
+        return Response::Error {
+            message: format!("no entry at {path}"),
+        };
+    };
+    let kind = index.kind()[entry as usize] & 3;
+    let folder = kind == rgy_discovery::walk::KIND_DIR;
+    // The backend is the volume that owns the folder; a file has none of
+    // its own, so it inherits the folder's.
+    let backend = if folder {
+        lookup.folder_backend(entry).map_or(0, |b| b.id())
+    } else {
+        // The file's folder is one up: the entry's parent.
+        match index.parent()[entry as usize] {
+            0 => 0,
+            d => lookup
+                .folder_backend(index.dir_entry()[d as usize])
+                .map_or(0, |b| b.id()),
+        }
+    };
+    Response::Resolved {
+        path: String::from_utf8_lossy(&lookup.file_path(entry)).into_owned(),
+        folder,
+        backend,
+    }
 }
 
 fn grep(q: &str, limit: usize, ctx: &Ctx) -> Vec<Response> {
@@ -1636,6 +1673,90 @@ mod tests {
         // A feed that loses its history turns a replay into a relist.
         ctx.set_relisted();
         assert_eq!(ctx.catch_up(), CatchUp::Relisted);
+    }
+
+    /// The lookup surface answers a path (parity row I.1).
+    #[test]
+    fn a_path_resolves_through_the_lookup_surface() {
+        let dir = std::env::temp_dir().join(format!(
+            "rgy-searchd-lookup-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(dir.join("docs/hello.txt"), b"hello\n").unwrap();
+        let root = dir.as_os_str().as_encoded_bytes().to_vec();
+
+        let source = PortableSource::new(root.clone(), 2);
+        let live = Live::with_root(
+            Index::build(source.enumerate().expect("the walk"), 0, 1, b"/"),
+            &root,
+        );
+        let ctx = std::sync::Arc::new(Ctx {
+            root: root.clone(),
+            home: String::new(),
+            tv_dir: None,
+            live: std::sync::RwLock::new(live),
+            catch_up: std::sync::atomic::AtomicU8::new(CATCH_UP_RELISTED),
+            content: std::sync::Mutex::new(None),
+            wants_content: std::sync::atomic::AtomicBool::new(false),
+            sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
+        });
+
+        // The file resolves, and it is a file.
+        let responses = handle(
+            Request::Resolve {
+                path: "/docs/hello.txt".to_string(),
+            },
+            &ctx,
+        );
+        let r = responses.iter().find_map(|r| match r {
+            Response::Resolved {
+                path,
+                folder,
+                backend,
+            } => Some((path.clone(), *folder, *backend)),
+            _ => None,
+        });
+        assert!(r.is_some(), "the path resolves: {responses:?}");
+        let (path, folder, backend) = r.expect("a resolved frame");
+        assert!(
+            path.ends_with("hello.txt"),
+            "the path is the file's: {path}"
+        );
+        assert!(!folder, "it is a file, not a folder");
+        assert_eq!(backend, 0, "the volume that owns it");
+
+        // The folder resolves too, and it is a folder.
+        let responses = handle(
+            Request::Resolve {
+                path: "/docs".to_string(),
+            },
+            &ctx,
+        );
+        let folder = responses.iter().find_map(|r| match r {
+            Response::Resolved { folder, .. } => Some(*folder),
+            _ => None,
+        });
+        assert_eq!(folder, Some(true), "the folder is a folder");
+
+        // A path nobody has is an error, not a wrong answer.
+        let responses = handle(
+            Request::Resolve {
+                path: "/nosuchpath".to_string(),
+            },
+            &ctx,
+        );
+        assert!(
+            responses
+                .iter()
+                .any(|r| matches!(r, Response::Error { .. })),
+            "a path that is not there is an error"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A file that appears after the daemon started has to be findable.

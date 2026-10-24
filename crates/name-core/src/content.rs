@@ -3622,6 +3622,10 @@ pub fn plan(
 /// "don't materialize dataless files" policy keeps iCloud placeholders from
 /// being downloaded just because we searched, and a cloud placeholder is
 /// refused outright: on Windows the open is the download.
+///
+/// Public API of a published crate: a caller outside the grep pipeline that
+/// wants a file it may read gets exactly the file the pipeline would read,
+/// with the same refusals.
 pub fn open_regular(path: &[u8]) -> Option<std::fs::File> {
     match open_sized(path) {
         Open::File(f, _) => Some(f),
@@ -3866,8 +3870,7 @@ fn open_ahead_with(path: &[u8], attrs: &Attrs<'_>) -> Option<std::fs::File> {
         // A placeholder is not opened here either: the index build reads
         // every candidate file, and that read is a download too.
         Open::Placeholder | Open::Unreadable => return None,
-    };
-    // macOS F_RDADVISE: tell the kernel to start reading now. Elsewhere the
+    }; // macOS F_RDADVISE: tell the kernel to start reading now. Elsewhere the
     // plain open is the whole story. Declared inline (no libc dep).
     #[cfg(target_os = "macos")]
     {

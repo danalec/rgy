@@ -26,7 +26,6 @@ pub struct UsnRecord {
     /// and is what a resume point refers to; the reader takes its next start
     /// from the output buffer's leading USN instead of deriving it from these,
     /// so nothing in the read path consumes it.
-    #[allow(dead_code)]
     pub usn: u64,
     pub reason: u32,
     pub file_attributes: u32,
@@ -50,7 +49,6 @@ pub const USN_REASON_JOURNAL_DELETE: u32 = 0x0001_0000;
 /// *request*: the reader asks for every reason (all-ones mask, like
 /// Zen) and the live overlay filters per record against the bits
 /// above. Kept as the documented grouping and for tests.
-#[allow(dead_code)]
 pub const USN_REASON_PATH_RELEVANT: u32 = USN_REASON_FILE_CREATE
     | USN_REASON_FILE_DELETE
     | USN_REASON_RENAME_OLD_NAME

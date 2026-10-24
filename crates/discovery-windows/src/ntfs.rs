@@ -8,17 +8,14 @@
 
 // Kept as a complete reference set for the attribute types and namespaces NTFS
 // defines, even where this indexer only needs one of them today.
-#[allow(dead_code)]
 pub const ATTR_STANDARD_INFORMATION: u32 = 0x10;
 pub const ATTR_ATTRIBUTE_LIST: u32 = 0x20;
 pub const ATTR_FILE_NAME: u32 = 0x30;
-#[allow(dead_code)]
 pub const ATTR_DATA: u32 = 0x80;
 
 /// `$FILE_NAME` namespace values. Higher-quality names win.
 pub const NAMESPACE_POSIX: u8 = 0;
 pub const NAMESPACE_WIN32: u8 = 1;
-#[allow(dead_code)]
 pub const NAMESPACE_DOS: u8 = 2;
 pub const NAMESPACE_WIN32_AND_DOS: u8 = 3;
 
@@ -104,7 +101,6 @@ impl FileNameEntry {
 ///
 /// A faithful mirror of the on-disk header; the unused fields are kept so the
 /// struct still round-trips what NTFS stores.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct FileRecordHeader {
     pub attrs_offset: u16,
@@ -642,7 +638,6 @@ pub const FILE_RECORD_OUTPUT_PREFIX: usize = 12;
 /// 0x25, inside `TotalReserved`. The record size then fell through to a
 /// fallback that computed `4096 << 0` and every scan on a 1 KiB-record volume
 /// walked four times too few records with a four-times-too-wide stride.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct NtfsVolumeData {
     pub volume_serial_number: u64,
@@ -773,8 +768,9 @@ impl NtfsVolumeData {
     /// volume (see [`MFT_SECTOR_SIZE`]), so the only thing a caller can do with
     /// this value is pass it somewhere it must not be parameterised. Kept
     /// because it mirrors the on-disk structure, per the housekeeping rule
-    /// about the other format constants.
-    #[allow(dead_code)]
+    /// about the other format constants, and because it is public API of a
+    /// published crate: a caller reading the volume's own geometry has
+    /// nowhere else to get it.
     pub fn bytes_per_sector(&self) -> usize {
         self.bytes_per_sector as usize
     }

@@ -409,6 +409,16 @@ impl Index {
         self.uname(self.ent_name()[i])
     }
 
+    /// The entries that carry the distinct name `id`.
+    ///
+    /// The name table is the index's own: a name is stored once and the
+    /// entries that carry it point at it. This is what the `file_name` and
+    /// `folder_name` lookups of the lookup surface (parity row I.1) read.
+    pub fn name_ents_of(&self, id: u32) -> Vec<u32> {
+        let (s, e) = (self.name_ents_off()[id as usize] as usize, self.name_ents_off()[id as usize + 1] as usize);
+        self.name_ents()[s..e].to_vec()
+    }
+
     pub fn size_of(&self, i: usize) -> u64 {
         dec_size(self.size_raw()[i])
     }

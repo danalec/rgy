@@ -148,7 +148,7 @@ mod palette {
 const MAX_RESULTS: usize = 20_000;
 /// Keystrokes remembered for the footer sparkline and percentiles.
 /// Mirrors `LatencyMeter`'s window; used by the cap test.
-#[allow(dead_code)]
+#[cfg_attr(not(test), allow(dead_code))]
 const LATENCY_SAMPLES: usize = 64;
 const MIN_WIDTH: usize = 40;
 const MIN_HEIGHT: usize = 8;

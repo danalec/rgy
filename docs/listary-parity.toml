@@ -298,8 +298,8 @@ phase = 5
 status = "D"
 evidence = "§4.5"
 listary = "The core DB carries five indexes: file_name, folder_name, folder_backend (a name mapped to the backend that owns it), file_path and folder_path."
-rgy = "One flat index: interned names, DFS ranges for the tree, a name mask and per-class bitmaps. It answers a name query and a path lookup, and it does not separate files from folders in the lookup surface."
-work = "Split the lookup surface into the five indexes over the same record store. The folder_backend index is the new one: it maps a name to the volume that owns it, which is what a multi-volume search needs."
+rgy = "Done, as a surface over the same store. `name_core::lookup::Lookup` is the five indexes: `file_name` (the files by their basename), `folder_name` (the folders by their basename -- the two are apart, which rgy's flat index was not), `folder_backend` (the volume that owns a folder), `file_path` and `folder_path` (the full path of an entry, read from the index's own chain). It is a view and not a second copy: every lookup reads the bytes the search reads. The daemon answers a `resolve` request through it. What is still missing is the multi-volume case: rgy indexes one tree, so every folder belongs to the volume that tree is on -- the `folder_backend` index has the shape a multi-volume search needs, and the volume is what a second tree would change."
+work = "Several volumes under one index: the `folder_backend` index says which volume owns each folder, and the name and path indexes carry the folders of every volume."
 size = "L"
 
 [[capability]]

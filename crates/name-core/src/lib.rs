@@ -66,6 +66,11 @@ pub mod placeholder;
 /// again.
 pub mod session;
 
+/// The lookup surface: five indexes over one record store (parity row
+/// I.1). `file_name`, `folder_name`, `folder_backend`, `file_path` and
+/// `folder_path`, all reading the same bytes the search reads.
+pub mod lookup;
+
 /// The scan workers' interactive priority: the platform's answer to "this
 /// work is interactive, do not let it wait behind the machine's other work".
 /// Windows has MMCSS, macOS has a QoS class, Linux has the approximation in

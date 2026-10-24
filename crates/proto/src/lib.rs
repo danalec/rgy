@@ -27,6 +27,13 @@ pub enum Request {
     },
     /// Content grep: `{"op":"grep","q":…,"limit":…}` (Phase 4 engine).
     Grep { q: String, limit: usize },
+    /// Resolve a path through the lookup surface: `{"op":"resolve","path":…}`.
+    ///
+    /// The five indexes of the lookup (parity row I.1) answer it: the
+    /// `file_path` and `folder_path` indexes give the path of an entry, the
+    /// `file_name` and `folder_name` indexes the entries that carry a name,
+    /// and the `folder_backend` index the volume that owns a folder.
+    Resolve { path: String },
     /// `{"op":"status"}` — index size, event id, uptime.
     Status,
 }
@@ -84,6 +91,16 @@ pub enum Response {
     },
     /// `{"op":"grep-files","files":[…],"took_us":…}` — content matches.
     GrepFiles { files: Vec<GrepFile>, took_us: u64 },
+    /// `{"op":"resolved","path":…,"folder":…,"backend":…}` — the answer of
+    /// a `resolve` request.
+    ///
+    /// `folder` says whether the path is a folder, and `backend` which
+    /// volume owns it (the `folder_backend` index of parity row I.1).
+    Resolved {
+        path: String,
+        folder: bool,
+        backend: u32,
+    },
     /// `{"op":"error","message":…}` — the request failed; the stream lives.
     Error { message: String },
     /// `{"op":"warning","message":…}` — fail-closed query warning (unknown
@@ -130,6 +147,9 @@ impl Request {
                 q: obj.get("q")?.as_str()?.to_string(),
                 limit,
             }),
+            "resolve" => Some(Request::Resolve {
+                path: obj.get("path")?.as_str()?.to_string(),
+            }),
             "status" => Some(Request::Status),
             _ => None,
         }
@@ -159,6 +179,12 @@ impl Request {
                     r#"{{"op":"grep","q":"{}","limit":{}}}"#,
                     escape_json_string(q),
                     limit
+                )
+            }
+            Request::Resolve { path } => {
+                format!(
+                    r#"{{"op":"resolve","path":"{}"}}"#,
+                    escape_json_string(path)
                 )
             }
             Request::Status => r#"{"op":"status"}"#.to_string(),
@@ -217,6 +243,18 @@ impl Response {
                     r#"{{"op":"grep-files","files":[{}],"took_us":{}}}"#,
                     items.join(","),
                     took_us
+                )
+            }
+            Response::Resolved {
+                path,
+                folder,
+                backend,
+            } => {
+                format!(
+                    r#"{{"op":"resolved","path":"{}","folder":{},"backend":{}}}"#,
+                    escape_json_string(path),
+                    folder,
+                    backend
                 )
             }
             Response::Error { message } => {
@@ -519,6 +557,24 @@ mod tests {
             }
             .to_json(),
             r#"{"op":"search","q":"a","limit":1}"#
+        );
+        // The session id is additive: the request without it is the request
+        // as it was before the field existed.
+        assert_eq!(
+            Request::Search {
+                q: "a".into(),
+                limit: 1,
+                session: Some(7)
+            }
+            .to_json(),
+            r#"{"op":"search","q":"a","limit":1,"session":7}"#
+        );
+        assert_eq!(
+            Request::Resolve {
+                path: "/a/b".into()
+            }
+            .to_json(),
+            r#"{"op":"resolve","path":"/a/b"}"#
         );
         assert_eq!(
             Request::Grep {

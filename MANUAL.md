@@ -349,17 +349,27 @@ resolved. That is the spelling the change feed reports, and the answers
 carry it — so a path in an answer is the path to open, whatever the root
 was written as.
 
-The three requests:
+The four requests:
 
 ```json
 {"op":"search","q":"invoice ext:pdf","limit":50}
 {"op":"grep","q":"regex:fn\\s+list"}
+{"op":"resolve","path":"/home/you/Documents/invoice.pdf"}
 {"op":"status"}
 ```
 
 ```sh
 echo '{"op":"search","q":"invoice"}' | searchd --root ~
 ```
+
+`{"op":"resolve"}` answers with the path of an entry, whether it is a folder,
+and the volume that owns it:
+
+```json
+{"op":"resolved","path":"/home/you/Documents/invoice.pdf","folder":false,"backend":0}
+```
+
+A path the index does not have is an error, not a wrong answer.
 
 `{"op":"status"}` answers with how much is indexed and how the index caught
 up after the last restart:

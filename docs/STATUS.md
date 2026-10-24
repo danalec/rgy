@@ -67,7 +67,7 @@ verification on machines this host does not have.
 | zen-rs bin / TUI (unchanged behaviour) | `bins/zen-rs`, `bins/search-ui` | ✅ |
 | `rgy-autostart` (login item, per platform) | `crates/autostart` | ✅ startup task / HKCU Run, systemd user unit, launchd agent |
 | The crates on crates.io | `crates/*/Cargo.toml`, `bins/*/Cargo.toml` | ✅ all fourteen published at 0.1.0 on 2026-10-23 — see below |
-| The Listary plan | `docs/listary-parity.toml`, `scripts/listary-parity.py` | ⬜ 3 gaps and 11 degraded rows, each with work and a phase — see below |
+| The Listary plan | `docs/listary-parity.toml`, `scripts/listary-parity.py` | ⬜ 0 gaps and 12 degraded rows, each with work and a phase — see below |
 | Packaging (winget, brew, tarballs) | `scripts/build-release.*`, `scripts/publish-release.*`, `.winget/`, `Formula/` | ✅ machinery in place; **no release published yet** |
 | Release flow (the one-line installers, the Linux build over ssh) | `install.sh`, `install.ps1`, `scripts/release-linux.sh` | ✅ the installers pin the digest of the artifact they install; the pins are release data |
 | Homebrew submission (the pull request to homebrew-core) | `scripts/publish-homebrew.*` | ✅ the machinery; the pull request waits for the first release to exist |
@@ -132,7 +132,7 @@ with the work that closes every gap and the phase it belongs to. It asks a
 different question from the matrix above — that one asks "does this work on
 each OS", this one asks "does rgy do what Listary does".
 
-Three are gaps, eleven are degraded, and twenty-one are already at parity:
+None are gaps, twelve are degraded, and twenty-three are already at parity:
 the NTFS MFT reader, the USN journal monitor, the multi-volume enumeration,
 the folder walker, the atomic index snapshot, the u32-second modification
 time, the fail-closed regex and the parallel scoring came in with the merge
@@ -197,6 +197,49 @@ The key costs 6% to 9% of the scan (9 runs at one thread, before and after
 on the same host: 395→424 µs on `^src`, 690→751 µs on `dat$`). That is
 inside the gate's 20%, and it is the price of a ranking that says what the
 user meant.
+
+**The session.** A keystroke does not have to walk the index again. The
+daemon keeps a session per client (the protocol carries the id), and a
+query that narrows the previous one is answered by re-ranking the previous
+result set. The re-rank is exact or it does not happen: the query has to
+be able to match no more entries than the previous one, and the previous
+result set has to be complete — a search that hit its cap did not find
+everything, and the entries the cap dropped may be the ones the next
+keystroke wants. The answers are the answers a fresh search gives, which
+is the whole property, and a test pins it over the keystroke sequences a
+user types.
+
+**The measurement does not support the claim, and the matrix says so.**
+On a 200k-name corpus the re-ranked keystroke is 0.97x the fresh one, and
+the reason is structural: rgy's `full` scan is a linear pass over the
+entry array at about 0.3 ns an entry, while a re-rank visits the
+candidates one by one at about 18 ns — and the name table, which is where
+the cost of a broad query is, is already narrowed by the `NameCache`. So
+the re-rank re-pays what the cache already saved. It is therefore
+guarded: it runs only when the previous set is at most a sixtieth of the
+scope, the same rule the engine's own `selective` plan follows. A session
+is never a pessimisation.
+
+**The replay path is the part that pays.** A query that is the same query
+— the same text and the same filters — is answered from the session's
+answer, with no search at all. The rule is the whole query and not the
+selection alone: a query whose text changed has a different answer, and
+replaying the old one would be a stale answer.
+
+**The four axes of a path.** A word says which part it matches: `name:`,
+`ext:`, `folder:` and `attr:`. The name axis is what a bare word has
+always meant, so the queries that were already there are unchanged. The
+folder axis matches a folder of the path (the name need not hold the
+word), the attribute axis matches the file's attributes by name (`dir`,
+`file`, `link`, `hidden`, `mount`), and the extension axis matches the
+extension of the name. A prefix that is also a filter keeps the filter's
+meaning — `ext:pdf` is the extension, `ext:^pdf` is the extension axis.
+
+**The five lookup indexes** are a surface over the same store, not a second
+copy of it: `file_name` and `folder_name` (the two are apart, which rgy's
+flat index was not), `folder_backend` (the volume that owns a folder),
+`file_path` and `folder_path`. The daemon answers a `resolve` request
+through it.
 
 **A name read in another script.** `nihongo` finds 日本語, `にほんご` finds
 日本語, `zhongwen` finds 中文. The mechanism is Listary's (the pinyin

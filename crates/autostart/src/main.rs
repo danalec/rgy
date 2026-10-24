@@ -619,7 +619,7 @@ fn status_macos(name: &str) {
         println!("  state:   not registered");
         return;
     }
-    println!("  plist:   {}", macos::plist_path_in(&home, name).display());
+    println!("  plist:   {}", macos::plist_path(name).display());
     if let Some(command) = macos::registered_command(&home, name) {
         println!("  command: {command}");
     }

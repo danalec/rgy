@@ -69,7 +69,6 @@ pub struct Volume {
     pub path: String,
     /// Retained for volume identity/debugging; `FileRecordInput` carries no
     /// serial, so nothing in the read path consumes it.
-    #[allow(dead_code)]
     pub serial: u32,
     /// Bytes in one MFT file record segment, from `FSCTL_GET_NTFS_VOLUME_DATA`.
     pub record_size: usize,
