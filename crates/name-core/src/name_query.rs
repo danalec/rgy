@@ -18,7 +18,7 @@ use crate::live::Live;
 use crate::name_index::{BM_DOUBLE, BM_FIRST, BM_SECOND, BM_START, CLASSES, Index, ZONE, Zone, char_bit, start_bit};
 use crate::rank::{RankKey, Score, Tier};
 use rayon::prelude::*;
-use rgy_discovery::walk::{FLAG_HIDDEN, KIND_DIR, KIND_FILE, KIND_LINK};
+use rgy_discovery::walk::{FLAG_HIDDEN, FLAG_MOUNT, KIND_DIR, KIND_FILE, KIND_LINK};
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -45,6 +45,52 @@ pub struct Token {
     pub loose: u64,
     /// `index::start_bit` of the first letter when the token takes typos.
     pub start: u64,
+    /// The axis this token matches on.
+    ///
+    /// A token names a part of the path: the name, the extension, a folder
+    /// of it, or an attribute. The name is the default -- what a bare word
+    /// means -- and the others are named (parity row Q.1).
+    pub axis: Axis,
+}
+
+/// The part of a path a token matches on.
+///
+/// Listary's engine matches against four independent parts of a path --
+/// folder, attribute, name, extension -- and the legacy contract holds a
+/// list of per-folder-part matcher groups (parity row Q.1). A token says
+/// which part it means; the name is the default, because that is what a
+/// bare word means.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Axis {
+    /// The name of the file.
+    Name,
+    /// The extension of the name.
+    Extension,
+    /// A folder of the path.
+    Folder,
+    /// An attribute of the file (its kind, its flags).
+    Attribute,
+}
+
+impl Axis {
+    /// The axis a token names, from the prefix it carries.
+    ///
+    /// The prefixes are the ones Listary's own contract carries:
+    /// `FolderPartMatchers` is a list per folder part, and the query
+    /// grammar's facet prefix is `:`. So the axis is named before the
+    /// colon: `name:`, `ext:`, `folder:` and `attr:`.
+    ///
+    /// `dir:` is not among them: it is rgy's alias of the `in:` filter,
+    /// and the folder axis is `folder:`.
+    pub fn of_prefix(prefix: &str) -> Option<Axis> {
+        match prefix {
+            "name" => Some(Axis::Name),
+            "ext" | "extension" => Some(Axis::Extension),
+            "folder" => Some(Axis::Folder),
+            "attr" | "attribute" => Some(Axis::Attribute),
+            _ => None,
+        }
+    }
 }
 
 impl Token {
@@ -179,40 +225,73 @@ impl Query {
     /// `'x` exact, `^x` prefix, `x$` suffix, `=x` word, `!x` negate, a
     /// quoted run a phrase; filters are
     /// `ext: type: kind: in: size: mtime: re: path: limit: grep: regex: sym:`.
+    ///
+    /// A word may also name the **axis** it matches on, before the colon:
+    /// `name:`, `ext:`, `folder:` and `attr:` (parity row Q.1). A bare word
+    /// is the name axis, which is what it has always meant.
     pub fn parse(s: &str, home: &str) -> Result<Query, String> {
         let mut q = Query { size: (0, u64::MAX), mtime: (0, u32::MAX), limit: 50, ..Default::default() };
         for (word, quoted) in split_words(s) {
-            if let Some((k, v)) = word.split_once(':')
-                && q.filter(k, v, home)?
-            {
-                continue;
-            }
             // A wildcard term is one whole-path glob — never split on `/`
             // (zen-rs: `*/src/*.rs` covers the whole path).
             if word.contains('*') || word.contains('?') {
                 q.push_token(&word);
                 continue;
             }
+            // An axis prefix names the part of the path the word matches
+            // (parity row Q.1): `name:`, `ext:`, `folder:` and `attr:`.
+            //
+            // The prefix is only an axis when the word carries one of the
+            // matcher's own markers, or when the prefix is not also a
+            // filter. `ext:` is both -- it is the extension filter and the
+            // extension axis -- and there the filter wins, because a user
+            // who writes `ext:pdf` means the file's extension exactly. The
+            // axis form is `ext:^pdf` (and the other markers), which says
+            // "the extension, matched this way".
+            let (axis, word) = match word.split_once(':') {
+                Some((k, v)) if !v.is_empty() && !v.contains('/') => {
+                    let marked = v.starts_with(['\'', '^', '=', '!']) || v.ends_with('$');
+                    match Axis::of_prefix(k) {
+                        Some(a) if marked || !q.filter_is(k) => (Some(a), v.to_string()),
+                        _ => (None, word.clone()),
+                    }
+                }
+                _ => (None, word.clone()),
+            };
+            if axis.is_none()
+                && let Some((k, v)) = word.split_once(':')
+            {
+                if q.filter(k, v, home)? {
+                    continue;
+                }
+                // A prefix that is neither a filter nor an axis is a
+                // mistake, and it fails closed: the word would otherwise
+                // become a token, and `nosuchaxis:x` would answer the
+                // files with "x" in the name.
+                if !q.filter_is(k) && Axis::of_prefix(k).is_none() {
+                    return Err(format!("unknown filter {k}"));
+                }
+            }
             for piece in word.split('/').filter(|p| !p.is_empty()) {
-                q.push_token_mode(piece, quoted);
+                q.push_token_mode(piece, quoted, axis);
             }
         }
         Ok(q)
     }
 
     pub fn push_token(&mut self, w: &str) {
-        self.push_token_mode(w, false);
+        self.push_token_mode(w, false, None);
     }
 
     /// Push a token, with the mode the caller already knows: a quoted run
-    /// is a phrase.
+    /// is a phrase, and the axis says which part of the path it matches.
     ///
     /// The markers come after the negation, so `!^x` is a negated prefix
     /// and `!"a b"` a negated phrase. `!` on its own negates the fuzzy
     /// match — `!invoice` is "not close to invoice", which is what the
     /// manual says and what the old code did not do (it negated an exact
     /// match, so `!invoice` still answered `invoce`).
-    fn push_token_mode(&mut self, w: &str, quoted: bool) {
+    fn push_token_mode(&mut self, w: &str, quoted: bool, axis: Option<Axis>) {
         let (mut t, mut negate) = (w, false);
         if let Some(r) = t.strip_prefix('!') {
             (t, negate) = (r, true);
@@ -249,7 +328,15 @@ impl Query {
         let text: Vec<u8> = folded.iter().map(|&b| b.to_ascii_lowercase()).collect();
         let mask = text.iter().fold(0, |m, &b| m | char_bit(b));
         let (loose, start) = if takes_typos(&text, mode) { (mask & !char_bit(text[0]), start_bit(text[0])) } else { (0, 0) };
-        self.tokens.push(Token { text, mask, mode, negate, loose, start });
+        self.tokens.push(Token { text, mask, mode, negate, loose, start, axis: axis.unwrap_or(Axis::Name) });
+    }
+
+    /// Whether `k` names a filter.
+    ///
+    /// Some prefixes are both a filter and an axis (`ext:`), and there the
+    /// filter wins unless the word carries one of the matcher's markers.
+    fn filter_is(&self, k: &str) -> bool {
+        matches!(k, "ext" | "type" | "kind" | "in" | "size" | "mtime" | "modified" | "re" | "path" | "limit" | "grep" | "content" | "regex" | "sym")
     }
 
     /// Apply filter `k:v`; false if `k` is not a filter name.
@@ -444,21 +531,47 @@ impl Query {
             let re_ok = self.name_re.as_ref().is_none_or(|re| re.is_match(name)) && self.path_re.as_ref().is_none_or(|re| re.is_match(path));
             return re_ok.then_some(0);
         }
+        // The tokens are grouped by the axis they match on (parity row
+        // Q.1): the name, the extension, a folder of the path, or an
+        // attribute. A token on the name axis is what the query has always
+        // meant; the others are new.
+        let name_toks: Vec<&Token> = self.tokens.iter().filter(|t| t.axis == Axis::Name).collect();
+        let ext_toks: Vec<&Token> = self.tokens.iter().filter(|t| t.axis == Axis::Extension).collect();
+        let folder_toks: Vec<&Token> = self.tokens.iter().filter(|t| t.axis == Axis::Folder).collect();
+        let attr_toks: Vec<&Token> = self.tokens.iter().filter(|t| t.axis == Axis::Attribute).collect();
         // A hit needs some token in its own name; most paths fail here,
         // before the folders are looked at.
-        let mut pos = self.tokens.iter().filter(|t| !t.negate).peekable();
+        let mut pos = name_toks.iter().copied().filter(|t| !t.negate).peekable();
         let m = crate::name_index::mask_of(name);
         if pos.peek().is_some() && !pos.any(|t| t.fits(m) && token_score(name, None, m, t).is_some()) {
             return None;
         }
-        if self.tokens.iter().any(|t| t.negate && token_matches(name, t)) {
+        if name_toks.iter().any(|t| t.negate && token_matches(name, t)) {
+            return None;
+        }
+        // The extension axis: the token matches the extension of the name,
+        // not the name itself.
+        if let Some(ext) = ext_of(name)
+            && ext_toks.iter().any(|t| t.negate && token_matches(ext, t))
+        {
+            return None;
+        }
+        // The attribute axis: the token matches the file's attributes --
+        // its kind and its flags -- by name (`dir`, `file`, `link`,
+        // `hidden`, `system`).
+        if attr_toks.iter().any(|t| t.negate && attr_matches(t, kind)) {
             return None;
         }
         let d = dirs(&path[..cut]);
         if d.negated {
             return None;
         }
-        let pos: Vec<&Token> = self.tokens.iter().filter(|t| !t.negate).collect();
+        // The folder axis: the token matches a folder of the path, so it
+        // is looked for in the folders and not in the name.
+        if folder_toks.iter().any(|t| t.negate && d.matched(t)) {
+            return None;
+        }
+        let pos: Vec<&Token> = name_toks.iter().copied().filter(|t| !t.negate).collect();
         let all = (1u32 << pos.len()) - 1;
         let (mut got, mut inherited, mut score) = (0u32, 0u32, 0i32);
         for (t, tok) in pos.iter().enumerate() {
@@ -472,6 +585,26 @@ impl Query {
         }
         if !pos.is_empty() && (got == 0 || (got | inherited) != all) {
             return None;
+        }
+        // The extension axis: the token matches the extension of the name.
+        // The extension is the tail after the last dot, without the dot.
+        for t in ext_toks.iter().filter(|t| !t.negate) {
+            let ext = ext_of(name)?;
+            let s = token_score(ext, None, !0, t)?;
+            score += s;
+        }
+        // The attribute axis: the token names an attribute of the file.
+        for t in attr_toks.iter().filter(|t| !t.negate) {
+            if !attr_matches(t, kind) {
+                return None;
+            }
+        }
+        // The folder axis: the token matches a folder of the path. The
+        // folder is looked for among the path's folders, so the token does
+        // not have to be in the name.
+        for t in folder_toks.iter().filter(|t| !t.negate) {
+            let s = d.best_of(t)?;
+            score += s;
         }
         if self.name_re.as_ref().is_some_and(|re| !re.is_match(name)) || self.path_re.as_ref().is_some_and(|re| !re.is_match(path)) {
             return None;
@@ -487,20 +620,75 @@ impl Query {
         let folded = fold::fold(dirs);
         let dirs = &folded[..];
         let comps = || dirs.split(|&b| b == b'/').filter(|c| !c.is_empty());
-        let mut d = DirMatch { negated: false, best: [None; 8] };
+        let mut d = DirMatch { negated: false, best: [None; 8], folders: Vec::new() };
         d.negated = self.tokens.iter().any(|t| t.negate && comps().any(|c| token_matches(c, t)));
         for (t, tok) in self.tokens.iter().filter(|t| !t.negate).enumerate() {
             d.best[t] = comps().filter_map(|c| token_score(c, None, !0, tok)).max();
+        }
+        // The folders are kept for the folder axis (parity row Q.1): a
+        // token on that axis is matched against them, not against the name.
+        // Only a query that has such a token pays for the copy.
+        if self.tokens.iter().any(|t| t.axis == Axis::Folder) {
+            d.folders = comps().map(|c| c.to_vec()).collect();
         }
         d
     }
 }
 
+/// The extension of a name: the tail after the last dot, without the dot.
+///
+/// A name with no dot has no extension, and neither has one whose dot is
+/// the first byte (a dotfile's name is the whole thing).
+fn ext_of(name: &[u8]) -> Option<&[u8]> {
+    let dot = name.iter().rposition(|&b| b == b'.')?;
+    if dot == 0 || dot + 1 >= name.len() {
+        return None;
+    }
+    Some(&name[dot + 1..])
+}
+
+/// Whether a token on the attribute axis names an attribute of the file.
+///
+/// The attributes are the kind (`dir`, `file`, `link`, `other`) and the
+/// flags (`hidden`, `system`, `mount`). The token is the attribute's name,
+/// matched the way every other token is matched.
+fn attr_matches(t: &Token, kind: u8) -> bool {
+    let text = String::from_utf8_lossy(&t.text).to_ascii_lowercase();
+    let flags = kind >> 2;
+    match text.as_str() {
+        "dir" | "folder" | "directory" => kind & 3 == KIND_DIR,
+        "file" => kind & 3 == KIND_FILE,
+        "link" | "symlink" => kind & 3 == KIND_LINK,
+        "other" => kind & 3 == 3,
+        "hidden" => flags & FLAG_HIDDEN != 0,
+        "mount" | "volume" => flags & FLAG_MOUNT != 0,
+        _ => false,
+    }
+}
+
 /// See `Query::dir_match`.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct DirMatch {
     negated: bool,
     best: [Option<i32>; 8],
+    /// The folders of the path, for the folder axis.
+    ///
+    /// Empty unless the query has a token on the folder axis: the folders
+    /// are copied per folder the memo holds, and a query without that axis
+    /// never reads them.
+    folders: Vec<Vec<u8>>,
+}
+
+impl DirMatch {
+    /// Whether a token on the folder axis matches one of the folders.
+    fn matched(&self, t: &Token) -> bool {
+        self.folders.iter().any(|c| token_matches(c, t))
+    }
+
+    /// The best score a token on the folder axis gets among the folders.
+    fn best_of(&self, t: &Token) -> Option<i32> {
+        self.folders.iter().filter_map(|c| token_score(c, None, !0, t)).max()
+    }
 }
 
 /// The real path of `p` (the index holds real paths: /etc is
@@ -1559,6 +1747,73 @@ mod tests {
         assert!(q("type:link").link);
     }
 
+    /// The four axes: the name, the extension, a folder and an attribute.
+    ///
+    /// Listary's engine matches against four independent parts of a path
+    /// (parity row Q.1). A word says which part it means: `name:`,
+    /// `ext:`, `folder:` and `attr:`. A bare word is the name axis, which
+    /// is what it has always meant.
+    #[test]
+    fn a_word_says_which_axis_it_matches() {
+        // The name axis is the default.
+        assert_eq!(q("invoice").tokens[0].axis, Axis::Name);
+        assert_eq!(q("name:invoice").tokens[0].axis, Axis::Name);
+        assert_eq!(q("ext:^pdf").tokens[0].axis, Axis::Extension);
+        assert_eq!(q("folder:documents").tokens[0].axis, Axis::Folder);
+        assert_eq!(q("attr:hidden").tokens[0].axis, Axis::Attribute);
+        // The axis survives the matcher's own markers.
+        assert_eq!(q("ext:^pdf").tokens[0].axis, Axis::Extension);
+        assert_eq!(q("folder:!docs").tokens[0].axis, Axis::Folder);
+        // An unknown prefix is not an axis: it keeps the old meaning.
+        assert!(Query::parse("nosuchaxis:x", "").is_err(), "an unknown prefix is not a filter");
+    }
+
+    /// The extension axis matches the extension, not the name.
+    #[test]
+    fn the_extension_axis_matches_the_extension() {
+        // The axis form carries one of the matcher's markers, so it is not
+        // read as the extension filter.
+        assert!(hit("ext:^pdf", "/a/report.pdf", KIND_FILE, 10));
+        assert!(!hit("ext:^pdf", "/a/pdf-report.txt", KIND_FILE, 10));
+        // The filter form is what it has always been: the extension, and
+        // the whole name is not matched by it.
+        assert!(hit("ext:pdf", "/a/report.pdf", KIND_FILE, 10));
+        assert!(!hit("ext:pdf", "/a/pdf-report.txt", KIND_FILE, 10));
+        // The name axis is the old behaviour: it matches the name, which
+        // includes the extension.
+        assert!(hit("pdf", "/a/pdf-report.txt", KIND_FILE, 10));
+        assert!(hit("pdf", "/a/report.pdf", KIND_FILE, 10));
+    }
+
+    /// The folder axis matches a folder of the path.
+    #[test]
+    fn the_folder_axis_matches_a_folder() {
+        // The word is in the folder, not in the name.
+        assert!(hit("folder:documents", "/x/documents/report.txt", KIND_FILE, 10));
+        assert!(!hit("folder:documents", "/x/report.txt", KIND_FILE, 10));
+        // The name axis does not look in the folders for its own word.
+        assert!(!hit("documents", "/x/documents/report.txt", KIND_FILE, 10));
+    }
+
+    /// The attribute axis matches the file's attributes.
+    #[test]
+    fn the_attribute_axis_matches_the_attributes() {
+        assert!(hit("attr:dir", "/x/report", KIND_DIR, 10));
+        assert!(!hit("attr:dir", "/x/report.txt", KIND_FILE, 10));
+        assert!(hit("attr:file", "/x/report.txt", KIND_FILE, 10));
+        assert!(hit("attr:hidden", "/x/report.txt", KIND_FILE | (FLAG_HIDDEN << 2), 10));
+        assert!(!hit("attr:hidden", "/x/report.txt", KIND_FILE, 10));
+    }
+
+    /// The axes combine: a name word and a folder word are two
+    /// conditions, not one.
+    #[test]
+    fn the_axes_combine() {
+        assert!(hit("invoice folder:documents", "/x/documents/invoice.pdf", KIND_FILE, 10));
+        assert!(!hit("invoice folder:documents", "/x/other/invoice.pdf", KIND_FILE, 10));
+        assert!(!hit("invoice folder:documents", "/x/documents/receipt.pdf", KIND_FILE, 10));
+    }
+
     /// The date facet: a calendar date, an age, and the operator suffix
     /// that tells them apart.
     ///
@@ -2236,7 +2491,7 @@ impl Token {
     /// A token for a lowercase literal a name must contain.
     fn literal(text: Vec<u8>) -> Token {
         let mask = text.iter().fold(0, |m, &b| m | char_bit(b));
-        Token { text, mask, mode: Mode::Exact, negate: false, loose: 0, start: 0 }
+        Token { text, mask, mode: Mode::Exact, negate: false, loose: 0, start: 0, axis: Axis::Name }
     }
 
     /// A stand-in for a name's mask (see `token_score`) from what the name
@@ -3988,7 +4243,8 @@ impl Searcher<'_> {
             for &&(ref path, o) in items {
                 let cut = path.iter().rposition(|&b| b == b'/').unwrap_or(0);
                 let dir = &path[..cut];
-                if let Some(score) = q.match_path_with(path, o.kind, o.size, o.mtime, |_| *memo.entry(dir).or_insert_with(|| q.dir_match(dir))) {
+                if let Some(score) = q.match_path_with(path, o.kind, o.size, o.mtime, |_| memo.entry(dir).or_insert_with(|| q.dir_match(dir)).clone())
+                {
                     let prior = o.prior as i32;
                     let score = score + prior + rank_tweaks(name_flags(&path[cut + 1..]), o.kind, o.mtime, now);
                     // The overlay has no entry in the index, so its key has

@@ -246,8 +246,8 @@ phase = 4
 status = "D"
 evidence = "§5.1, §5.5"
 listary = "The engine matches against four independent parts of a path -- folder, attribute, name, extension -- and the legacy contract holds a list of per-folder-part matcher groups."
-rgy = "The name is one axis; the extension is a filter (`ext:`), the path is a filter (`path:`), and there are no parts and no groups."
-work = "Split the match into the four axes, with a list of matchers per part. The existing name matcher becomes the name axis; the ext filter becomes the extension axis."
+rgy = "Done, and the four axes are independent. A word says which part it matches: `name:`, `ext:`, `folder:` and `attr:` (parity row Q.1). The name axis is what a bare word has always meant, so nothing changes for the queries that were already there. The extension axis matches the extension of the name; the folder axis matches a folder of the path (the name need not hold the word); the attribute axis matches the file's attributes by name (`dir`, `file`, `link`, `hidden`, `mount`). What is still missing is Listary's **per-folder-part matcher groups**: the legacy contract holds a *list* of matcher groups per folder part, so a query can say \"this word matches this folder part, that word matches that one\". rgy's axes are one matcher group each -- the four axes are independent, but each takes a single group."
+work = "A list of matcher groups per axis, so a query can name more than one matcher for the same part: the extension axis with two extensions, the folder axis with a word per group."
 size = "L"
 
 [[capability]]

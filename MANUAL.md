@@ -212,6 +212,23 @@ A filter narrows by a property of the file, not by its name.
 
 A bare extension goes in `ext:`; `type:` names kinds.
 
+**A word can say which part of the path it matches.** A bare word is the
+file's name, which is what it has always meant. The other parts have their
+own prefix:
+
+| prefix | the word matches |
+|---|---|
+| `name:` | the name of the file (the default) |
+| `ext:` | the extension of the name |
+| `folder:` | a folder of the path |
+| `attr:` | an attribute: `dir`, `file`, `link`, `hidden`, `mount` |
+
+So `folder:documents invoice` finds the invoices under a `documents`
+folder, and `attr:dir report` finds the folders named `report`. The
+prefixes that are also filters (`ext:`) keep the filter's meaning unless
+the word carries one of the matcher's own markers: `ext:^pdf` is "the
+extension, starting with pdf", while `ext:pdf` is "the extension is pdf".
+
 `sort:` picks the order the results come in:
 
 | you write | rgy answers in |
