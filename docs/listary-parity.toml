@@ -113,11 +113,11 @@ size = "M"
 id = "S.5"
 name = "Choice of sort key"
 phase = 1
-status = "G"
+status = "P"
 evidence = "§5.3"
 listary = "SortBy is a choice: NoSort, Score, FileName, LastWriteTime."
-rgy = "The order is fixed: score descending, then id ascending."
-work = "A `SortBy` on the query, plumbed through to the final sort, with the default staying Score so nothing that works today changes."
+rgy = "Done. `sort:` in the query picks the order: `score` (the default, the ranking), `name`, `mtime` or `none`. The choice orders the hits the cap kept; it does not pick them -- the cap still takes the best by score, so `sort:mtime` is \"the newest of the best matches\". An unknown choice fails closed, like an unknown `type:`."
+work = "None. The choice is `name_query::SortBy` and the manual says what each one means."
 size = "S"
 
 # ---------------------------------------------------------------------------

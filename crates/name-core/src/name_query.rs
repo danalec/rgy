@@ -87,6 +87,8 @@ pub struct Query {
     pub name_re: Option<regex::bytes::Regex>,
     pub path_re: Option<regex::bytes::Regex>,
     pub limit: usize,
+    /// The order the results come in (`sort:`).
+    pub sort: SortBy,
     /// Content search: handled by the content layer, carried here so one
     /// query string can say everything.
     pub grep: Option<String>,
@@ -109,6 +111,27 @@ pub enum GrepMode {
     Literal,
     Regex,
     Symbol,
+}
+
+/// The order the results come in.
+///
+/// Listary's `SortBy` is a choice (NoSort, Score, FileName, LastWriteTime),
+/// and rgy's is one too: `sort:` in the query.
+///
+/// The choice orders the hits the cap kept; it does not pick them. The cap
+/// still takes the best by score, so `sort:mtime` is "the newest of the
+/// best matches", not "the newest matches".
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
+pub enum SortBy {
+    /// The ranking: the score, with the priority tier above it.
+    #[default]
+    Score,
+    /// The name, ascending.
+    Name,
+    /// The last change, newest first.
+    MTime,
+    /// The index's order.
+    None,
 }
 
 #[rustfmt::skip]
@@ -138,6 +161,7 @@ impl Default for Query {
             size: (0, u64::MAX),
             size_set: false,
             mtime: (0, u32::MAX),
+            sort: SortBy::Score,
             name_re: None,
             path_re: None,
             limit: 50,
@@ -319,6 +343,21 @@ impl Query {
                 }
             },
             "limit" => self.limit = v.parse().map_err(|_| "bad limit")?,
+            "sort" => {
+                // The order the results come in. The cap still picks the
+                // best by score; the sort orders the hits it kept.
+                self.sort = match v {
+                    "score" => SortBy::Score,
+                    "name" => SortBy::Name,
+                    "mtime" | "modified" | "date" => SortBy::MTime,
+                    "none" | "index" => SortBy::None,
+                    _ => {
+                        self.never = true;
+                        self.warnings.push(format!("sort:{v}: unknown"));
+                        SortBy::Score
+                    }
+                };
+            }
             "grep" | "content" => (self.grep, self.grep_mode) = (Some(v.to_string()), GrepMode::Literal),
             "regex" => (self.grep, self.grep_mode) = (Some(v.to_string()), GrepMode::Regex),
             "sym" | "symbol" => (self.grep, self.grep_mode) = (Some(v.to_string()), GrepMode::Symbol),
@@ -570,6 +609,14 @@ pub fn now_secs() -> u32 {
 #[inline(always)]
 pub(crate) fn fold(b: u8) -> u8 {
     b | (((b.wrapping_sub(b'A') < 26) as u8) << 5)
+}
+
+/// The name of a path: the last component.
+fn name_of(path: &[u8]) -> &[u8] {
+    match path.iter().rposition(|&b| b == b'/') {
+        Some(i) => &path[i + 1..],
+        None => path,
+    }
 }
 
 /// The first place in `name` where `q` is, ignoring ASCII case.
@@ -1619,6 +1666,7 @@ mod tests {
         let overlay = |name: &str, score: i32| Hit {
             key: rank_key(Tier::Normal, score, RankKey::NO_ENTRY),
             idx: u32::MAX,
+            mtime: 0,
             over: Some(format!("/new/{name}").into_bytes()),
         };
         let merged = merge_hits(vec![overlay("one", 10), overlay("two", 20), overlay("three", 30)], 50);
@@ -1632,7 +1680,7 @@ mod tests {
     /// of the two scores -- not twice, and not with the worse one.
     #[test]
     fn the_merge_takes_the_best_score_per_entry() {
-        let base = |idx: u32, score: i32| Hit { key: rank_key(Tier::Normal, score, idx), idx, over: None };
+        let base = |idx: u32, score: i32| Hit { key: rank_key(Tier::Normal, score, idx), idx, mtime: 0, over: None };
         let merged = merge_hits(vec![base(7, 10), base(7, 99), base(8, 5)], 50);
         assert_eq!(merged.len(), 2, "entry 7 matched twice but is one entry");
         let seven = merged.iter().find(|h| h.idx == 7).expect("entry 7");
@@ -1645,7 +1693,8 @@ mod tests {
     /// is how a stable-looking result list turns into one that reshuffles.
     #[test]
     fn the_merge_order_is_total_not_map_iteration_order() {
-        let overlay = |name: &str| Hit { key: rank_key(Tier::Normal, 5, RankKey::NO_ENTRY), idx: u32::MAX, over: Some(name.as_bytes().to_vec()) };
+        let overlay =
+            |name: &str| Hit { key: rank_key(Tier::Normal, 5, RankKey::NO_ENTRY), idx: u32::MAX, mtime: 0, over: Some(name.as_bytes().to_vec()) };
         for _ in 0..20 {
             let merged = merge_hits(vec![overlay("/zeta"), overlay("/alpha"), overlay("/mid")], 50);
             let paths: Vec<&[u8]> = merged.iter().map(|h| h.over.as_ref().unwrap().as_slice()).collect();
@@ -1660,8 +1709,8 @@ mod tests {
     fn the_merge_puts_base_entries_first_on_a_tie() {
         let merged = merge_hits(
             vec![
-                Hit { key: rank_key(Tier::Normal, 5, RankKey::NO_ENTRY), idx: u32::MAX, over: Some(b"/new/x".to_vec()) },
-                Hit { key: rank_key(Tier::Normal, 5, 3), idx: 3, over: None },
+                Hit { key: rank_key(Tier::Normal, 5, RankKey::NO_ENTRY), idx: u32::MAX, mtime: 0, over: Some(b"/new/x".to_vec()) },
+                Hit { key: rank_key(Tier::Normal, 5, 3), idx: 3, mtime: 0, over: None },
             ],
             50,
         );
@@ -1877,6 +1926,19 @@ mod tests {
     fn the_positions_snap_to_the_characters() {
         let t = q("日本");
         assert_eq!(matched_chars("日本語.txt".as_bytes(), &t.tokens), vec![0, 1]);
+    }
+
+    /// `sort:` chooses the order the results come in.
+    #[test]
+    fn the_sort_choice_orders_the_hits() {
+        assert_eq!(q("invoice").sort, SortBy::Score, "the score is the default");
+        assert_eq!(q("sort:name").sort, SortBy::Name);
+        assert_eq!(q("sort:mtime").sort, SortBy::MTime);
+        assert_eq!(q("sort:none").sort, SortBy::None);
+        // An unknown choice fails closed, like an unknown `type:`.
+        let bad = q("sort:bogus");
+        assert!(bad.never, "an unknown sort matches nothing");
+        assert!(!bad.warnings.is_empty(), "and says so");
     }
 }
 
@@ -2100,6 +2162,12 @@ pub struct Hit {
     pub key: RankKey,
     /// Base entry, or u32::MAX for an overlay entry (then `over` is its path).
     pub idx: u32,
+    /// The last change, for an overlay entry.
+    ///
+    /// An indexed entry's mtime is read from the index when the query
+    /// sorts by it; only the overlay carries one here, because the index's
+    /// entry is what the search reads it from.
+    pub mtime: u32,
     pub over: Option<Vec<u8>>,
 }
 
@@ -2340,7 +2408,7 @@ fn top_k(n: usize, k: usize, visits: usize, floor: RankKey, visit: impl Fn(std::
         keys.select_nth_unstable_by(k - 1, |a, b| b.cmp(a));
         keys.truncate(k);
     }
-    keys.into_iter().map(|key| Hit { key, idx: key.entry(), over: None }).collect()
+    keys.into_iter().map(|key| Hit { key, idx: key.entry(), mtime: 0, over: None }).collect()
 }
 
 /// Below this many entries carrying a matching name, a `driven` attempt
@@ -2526,9 +2594,44 @@ impl Searcher<'_> {
         }
         let mut hits = self.search_base(q);
         hits.extend(self.search_overlay(q));
-        hits.sort_by(|a, b| b.key.cmp(&a.key).then(a.idx.cmp(&b.idx)));
+        self.sort_hits(&mut hits, q.sort);
         hits.truncate(q.limit);
         hits
+    }
+
+    /// The order the hits come in, for the query's `sort:`.
+    ///
+    /// The choice orders the hits the cap kept; it does not pick them. The
+    /// cap still takes the best by score, so `sort:mtime` is "the newest of
+    /// the best matches", not "the newest matches".
+    fn sort_hits(&self, hits: &mut [Hit], sort: SortBy) {
+        let idx = &self.live.base;
+        match sort {
+            SortBy::Score => hits.sort_by(|a, b| b.key.cmp(&a.key).then(a.idx.cmp(&b.idx))),
+            SortBy::Name => hits.sort_by(|a, b| {
+                let an = match &a.over {
+                    Some(p) => name_of(p),
+                    None => idx.name(a.idx as usize),
+                };
+                let bn = match &b.over {
+                    Some(p) => name_of(p),
+                    None => idx.name(b.idx as usize),
+                };
+                an.cmp(bn).then(a.idx.cmp(&b.idx))
+            }),
+            SortBy::MTime => hits.sort_by(|a, b| {
+                let am = match &a.over {
+                    Some(_) => a.mtime,
+                    None => idx.mtime()[a.idx as usize],
+                };
+                let bm = match &b.over {
+                    Some(_) => b.mtime,
+                    None => idx.mtime()[b.idx as usize],
+                };
+                bm.cmp(&am).then(a.idx.cmp(&b.idx))
+            }),
+            SortBy::None => hits.sort_by_key(|h| h.idx),
+        }
     }
 
     /// The query with its result cap lifted.
@@ -2558,7 +2661,7 @@ impl Searcher<'_> {
         let q = &Self::uncapped(q);
         let mut hits = self.search_base(q);
         hits.extend(self.search_overlay(q));
-        hits.sort_by(|a, b| b.key.cmp(&a.key).then(a.idx.cmp(&b.idx)));
+        self.sort_hits(&mut hits, q.sort);
         hits
     }
 
@@ -3525,7 +3628,12 @@ impl Searcher<'_> {
                     // The overlay has no entry in the index, so its key has
                     // no entry to tie-break on: it loses the tie to a base
                     // entry, the way the merge has always ordered them.
-                    out.push(Hit { key: rank_key(Tier::from_prior(prior), score, RankKey::NO_ENTRY), idx: u32::MAX, over: Some(path.clone()) });
+                    out.push(Hit {
+                        key: rank_key(Tier::from_prior(prior), score, RankKey::NO_ENTRY),
+                        idx: u32::MAX,
+                        mtime: o.mtime,
+                        over: Some(path.clone()),
+                    });
                 }
             }
             out

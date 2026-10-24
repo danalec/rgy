@@ -212,6 +212,15 @@ A filter narrows by a property of the file, not by its name.
 
 A bare extension goes in `ext:`; `type:` names kinds.
 
+`sort:` picks the order the results come in:
+
+| you write | rgy answers in |
+|---|---|
+| `sort:score` | the ranking: the best match first (the default) |
+| `sort:name` | the name, A to Z |
+| `sort:mtime` | the newest first |
+| `sort:none` | the order the index holds |
+
 **An unknown `type:` fails closed.** rgy warns on stderr, returns nothing,
 and exits 1 — it does not quietly search everything. If you get no
 results and a warning, that is the reason.
