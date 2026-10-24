@@ -572,11 +572,41 @@ pub(crate) fn fold(b: u8) -> u8 {
     b | (((b.wrapping_sub(b'A') < 26) as u8) << 5)
 }
 
+/// The first place in `name` where `q` is, ignoring ASCII case.
+///
+/// The query is folded and lowercased, so the name's byte at the match is
+/// either the byte itself or its upper case: the two are searched with
+/// memchr and the rest of the query is compared.
+///
+/// The naive scan compared every byte of the name against every byte of
+/// the query, and this runs per candidate.
 fn find_ci(name: &[u8], q: &[u8]) -> Option<usize> {
     if q.len() > name.len() {
         return None;
     }
-    (0..=name.len() - q.len()).find(|&i| name[i..i + q.len()].iter().zip(q).all(|(&a, &b)| fold(a) == b))
+    if q.is_empty() {
+        return Some(0);
+    }
+    let (lower, upper) = (q[0].to_ascii_lowercase(), q[0].to_ascii_uppercase());
+    let mut at = 0usize;
+    while at + q.len() <= name.len() {
+        let hit = if lower == upper {
+            memchr::memchr(lower, &name[at..]).map(|i| at + i)
+        } else {
+            match (memchr::memchr(lower, &name[at..]).map(|i| at + i), memchr::memchr(upper, &name[at..]).map(|i| at + i)) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            }
+        };
+        let i = hit?;
+        if name[i + 1..i + q.len()].iter().zip(&q[1..]).all(|(&a, &b)| fold(a) == b) {
+            return Some(i);
+        }
+        at = i + 1;
+    }
+    None
 }
 
 #[derive(Clone, Copy, PartialEq)]

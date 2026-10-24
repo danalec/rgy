@@ -132,11 +132,11 @@ size = "S"
 id = "S.6"
 name = "Boyer-Moore with a SWAR memchr pre-filter"
 phase = 2
-status = "G"
+status = "D"
 evidence = "§5.2, §5.8.3"
 listary = "A BM substring matcher whose haystack scan uses the SWAR has-zero-byte test in an 8x unrolled loop, with the alignment term `& 0x38` and a 0x100 alphabet -- memchr before the Horspool loop."
-rgy = "No substring matcher; the name search is fuzzy-only."
-work = "A BM matcher in name-core with the vectorised first-byte scan. The ASCII-specialisation is Listary's own assertion (`pattern.is_ascii()`), not a requirement -- rgy's names are UTF-8, so the matcher has to be byte-safe on non-ASCII rather than refuse it."
+rgy = "The substring matcher (the exact mode and the phrase) searches the first byte's two cases with memchr and compares the rest. The BM's skip table is not there: it earns its keep on haystacks long enough to skip over, and a name is short -- the memchr pre-filter is the whole of the win. The names are UTF-8, so the matcher is byte-safe on non-ASCII rather than refusing it (Listary's own assertion, `pattern.is_ascii()`, is not a requirement here)."
+work = "None for the capability. The BM's Horspool loop would be a slower way of doing what the pre-filter already does on a name's length."
 size = "M"
 
 [[capability]]
