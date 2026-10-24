@@ -205,7 +205,7 @@ A filter narrows by a property of the file, not by its name.
 | `dir:` | the folder it is in | `dir:documents` |
 | `type:` | what kind of thing it is | `type:dir`, `type:link`, `type:image` |
 | `size:` | how big it is | `size:+10m` (bigger than 10 MB), `size:-1k` |
-| `mtime:` | when it changed | `mtime:-7d` (in the last week) |
+| `mtime:` | when it changed | `mtime:-7d` (in the last week), `mtime:today`, `mtime:week`, `mtime:month`, `mtime:year`, `mtime:older` |
 | `in:` | where it is | `in:downloads` |
 | `re:` | the path as a regular expression | `re:\.rs$` |
 | `limit:` | how many hits | `limit:20` |

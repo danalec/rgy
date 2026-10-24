@@ -254,11 +254,11 @@ size = "L"
 id = "Q.2"
 name = "Relative time facets"
 phase = 4
-status = "D"
+status = "P"
 evidence = "§5.1, §5.6"
 listary = "The date filters have named relative windows: last_24_hours, last_week, last_month, last_year, older -- parsed into real time ranges, with the parser carrying the 86400-second day constant."
-rgy = "`mtime:` takes an explicit range only (`mtime:2024-01-01..2024-02-01`). There is no relative window."
-work = "The named windows as facets, resolving to a range at parse time. The parser already carries the date arithmetic; this is a vocabulary, not a mechanism."
+rgy = "Done. `mtime:` takes the named windows -- `today`, `week`, `month`, `year` and `older` (older than a year) -- and resolves them to a range at parse time, with the 86400-second day. The explicit range (`mtime:2024-01-01..2024-02-01`) and the relative age (`mtime:-7d`) are still there; the named windows are a vocabulary on top of them."
+work = "None. The windows are in `name_query`'s `mtime:` filter and the manual lists them."
 size = "S"
 
 [[capability]]

@@ -324,11 +324,20 @@ impl Query {
             "mtime" | "modified" => {
                 // mtime:<7d means "modified within the last 7 days".
                 let now = now_secs();
-                let (lo, hi) = range(v, parse_age)?;
-                self.mtime = (now.saturating_sub(hi.min(now as u64) as u32), now.saturating_sub(lo as u32));
-                if hi == u64::MAX {
-                    self.mtime.0 = 0;
-                }
+                // The named windows: a vocabulary, not a mechanism. The
+                // numbers are the ones Listary's parser carries (the
+                // 86400-second day).
+                self.mtime = match v {
+                    "today" | "last_24_hours" => (now.saturating_sub(86_400), now),
+                    "week" | "last_week" => (now.saturating_sub(7 * 86_400), now),
+                    "month" | "last_month" => (now.saturating_sub(30 * 86_400), now),
+                    "year" | "last_year" => (now.saturating_sub(365 * 86_400), now),
+                    "older" => (0, now.saturating_sub(365 * 86_400)),
+                    _ => {
+                        let (lo, hi) = range(v, parse_age)?;
+                        (now.saturating_sub(hi.min(now as u64) as u32), now.saturating_sub(lo as u32))
+                    }
+                };
             }
             // zen-rs `re:` is a PATH regex (and `path:` is its
             // fsearch alias). An uncompilable pattern fails closed — the
@@ -1922,6 +1931,18 @@ mod tests {
         // A name that did not match has no positions.
         let t = q("zzz");
         assert!(matched_chars(b"report_port.txt", &t.tokens).is_empty());
+    }
+
+    /// The named time windows: a vocabulary, not a mechanism.
+    #[test]
+    fn the_named_time_windows_are_ranges() {
+        let now = now_secs();
+        let today = q("mtime:today");
+        assert_eq!(today.mtime.1, now, "the window ends now");
+        assert!(today.mtime.0 <= now.saturating_sub(86_399), "the window is the last day");
+        let older = q("mtime:older");
+        assert_eq!(older.mtime.0, 0, "older starts at the beginning");
+        assert!(older.mtime.1 < now.saturating_sub(364 * 86_400), "older is older than a year");
     }
 
     /// The positions are characters, not bytes: a name in another script
