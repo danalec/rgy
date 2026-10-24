@@ -795,17 +795,29 @@ fn grep(q: &str, limit: usize, ctx: &Ctx) -> Vec<Response> {
                 // thread that builds it starts then, and a daemon that is
                 // never asked to grep never pays for one.
                 ctx.wants_content.store(true, Ordering::Relaxed);
-                let index = ctx.content.lock().unwrap();
-                let res = content::answer(
-                    &g,
-                    &filt,
-                    &ctx.root,
-                    searcher.live,
-                    ctx.home.as_bytes(),
-                    index.as_ref(),
-                    limit,
-                );
-                for f in res.files {
+                // The index is behind a lock the builder also wants, and
+                // reading a file is I/O the builder must not wait for: the
+                // lock covers the plan (what the index covers and what it
+                // found) and not the reads.
+                let (covered, bare, mut r) = {
+                    let index = ctx.content.lock().unwrap();
+                    content::plan(
+                        &g,
+                        &filt,
+                        &ctx.root,
+                        searcher.live,
+                        ctx.home.as_bytes(),
+                        index.as_ref(),
+                    )
+                };
+                r.files.retain(|f| covered.contains(&f.path));
+                let rest = content::verify_paths(&g, &bare, limit.saturating_sub(r.files.len()));
+                r.files.extend(rest.files);
+                r.read += rest.read;
+                r.skipped.extend(rest.skipped);
+                r.candidates = covered.len() + bare.len();
+                r.complete = r.files.len() < limit && rest.complete;
+                for f in r.files {
                     files.push(GrepFile {
                         path: String::from_utf8_lossy(&f.path).into_owned(),
                         lines: f.lines,

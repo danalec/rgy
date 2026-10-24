@@ -304,9 +304,23 @@ impl Segment {
         self.tri_key().binary_search(&tri).ok().map(|k| self.list_at(k))
     }
 
+    /// The posting list of trigram `k`, or an empty one if the segment's
+    /// bytes do not hold it.
+    ///
+    /// The offsets are read from the file, and nothing checks them against
+    /// the file's length: a truncated or corrupt segment would slice past
+    /// the end and panic. A corrupt index is "no index", not a crash, so
+    /// the bounds are checked here and a list that does not fit reads as
+    /// empty -- which rules the trigram out rather than the search down.
     fn list_at(&self, k: usize) -> List<'_> {
         let o = self.tri_off();
-        let bytes = &self.post()[(o[k] & !FLAGS) as usize..(o[k + 1] & !FLAGS) as usize];
+        let (Some(&a), Some(&b)) = (o.get(k), o.get(k + 1)) else { return List::Bits(&[]) };
+        let (a, b) = ((a & !FLAGS) as usize, (b & !FLAGS) as usize);
+        let post = self.post();
+        if a > b || b > post.len() {
+            return List::Bits(&[]);
+        }
+        let bytes = &post[a..b];
         if o[k] & BITSET != 0 { List::Bits(bytes) } else { List::Var(Var::new(bytes, o[k] & SKIPS != 0)) }
     }
 
@@ -367,6 +381,16 @@ impl Segment {
             for (w, c) in dead.iter_mut().zip(chunks) {
                 *w = u64::from_le_bytes(*c);
             }
+        }
+        // The dead file is a separate file from the segment, and nothing
+        // ties the two together: a stale or foreign one can have more bits
+        // set than the segment has documents. Counting them all would
+        // underflow, so the bits past the last document are dropped --
+        // they name documents that do not exist.
+        if ndocs % 64 != 0 {
+            let last = dead.len() - 1;
+            let keep = ndocs % 64;
+            dead[last] &= (1u64 << keep) - 1;
         }
         let live_docs = ndocs - dead.iter().map(|w| w.count_ones() as usize).sum::<usize>();
         #[rustfmt::skip]
@@ -2718,7 +2742,10 @@ pub fn verify(g: &Grep, paths: &[impl AsRef<[u8]> + Sync], limit: usize) -> Grep
 
 /// `verify` over the paths, with the platform's attributes and without the
 /// note: the note belongs to whoever owns the whole search.
-fn verify_paths(g: &Grep, paths: &[impl AsRef<[u8]> + Sync], limit: usize) -> GrepResult {
+///
+/// Public because the daemon reads the files itself, with the content
+/// index's lock released (`plan` then this).
+pub fn verify_paths(g: &Grep, paths: &[impl AsRef<[u8]> + Sync], limit: usize) -> GrepResult {
     verify_from(g, paths.len(), limit, SCAN_READERS, std::time::Instant::now(), |i| Some(paths[i].as_ref()), &placeholder::attributes).0
 }
 
@@ -3000,12 +3027,29 @@ struct Var<'a> {
 }
 
 impl<'a> Var<'a> {
+    /// A varint list from the segment's bytes.
+    ///
+    /// The skip table's length is read from the bytes, and a corrupt
+    /// segment can claim more than it holds: the table is then empty and
+    /// the list reads as empty, rather than slicing past the end of the
+    /// file. An empty list rules the trigram out, which is what a
+    /// truncated segment deserves -- the search is answered, and it is
+    /// answered "not here".
     fn new(bytes: &'a [u8], skips: bool) -> Var<'a> {
         if !skips {
             return Var { skips: &[], deltas: bytes };
         }
-        let n = u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
-        Var { skips: &bytes[4..4 + 8 * n], deltas: &bytes[4 + 8 * n..] }
+        let Some(n) = bytes.get(..4).and_then(|b| b.try_into().ok()).map(u32::from_le_bytes) else {
+            return Var { skips: &[], deltas: &[] };
+        };
+        let n = n as usize;
+        let Some(end) = 4usize.checked_add(n.saturating_mul(8)) else {
+            return Var { skips: &[], deltas: &[] };
+        };
+        if end > bytes.len() {
+            return Var { skips: &[], deltas: &[] };
+        }
+        Var { skips: &bytes[4..end], deltas: &bytes[end..] }
     }
 
     fn iter(&self) -> Varints<'a> {
@@ -3013,8 +3057,14 @@ impl<'a> Var<'a> {
     }
 
     /// Skip entry `i`: (the content before its run, where the run starts).
+    ///
+    /// A skip table shorter than the walk expects reads as "no run": the
+    /// walk then reads the deltas from the start, which is slower and
+    /// still right.
     fn skip(&self, i: usize) -> (u32, usize) {
-        let e = u64::from_le_bytes(self.skips[8 * i..8 * i + 8].try_into().unwrap());
+        let Some(e) = self.skips.get(8 * i..8 * i + 8).and_then(|b| b.try_into().ok()).map(u64::from_le_bytes) else {
+            return (0, 0);
+        };
         (e as u32, (e >> 32) as usize)
     }
 }
@@ -3064,9 +3114,15 @@ impl<'a> Cursor<'a> {
                 if self.var.skip(mid).0 < x { lo = mid } else { hi = mid }
             }
             let (last, at) = self.var.skip(lo);
-            self.it = Varints { b: &self.var.deltas[at..], last };
-            self.read = (lo + 1) * SKIP;
-            self.next();
+            // The skip table's offsets are read from the file: one that
+            // points past the deltas is a corrupt index, and the walk
+            // continues from where it was rather than slicing past the
+            // end.
+            if let Some(d) = self.var.deltas.get(at..) {
+                self.it = Varints { b: d, last };
+                self.read = (lo + 1) * SKIP;
+                self.next();
+            }
         }
         while self.cur.is_some_and(|c| c < x) {
             self.next();
@@ -3508,9 +3564,44 @@ pub fn scan_paths(root: &[u8], live: &Live, mut q: Query) -> Vec<Vec<u8>> {
 /// partition the universe, so the reads never overlap and their union is
 /// the scan's exact answer; the index is only a way to read less to get it.
 pub fn answer(g: &Grep, q: &Query, root: &[u8], live: &Live, home: &[u8], index: Option<&Content>, limit: usize) -> GrepResult {
+    let (covered, bare, mut r) = plan(g, q, root, live, home, index);
+    // `search`'s files are the covered ones that matched (its grams ruled
+    // out the others); keep only those this scan's universe named, so an
+    // index doc outside it never leaks in. Then read the rest.
+    r.files.retain(|f| covered.contains(&f.path));
+    // `verify_paths`, not `verify`: the note belongs to this search, which
+    // owns both halves of it, so it is written once and says everything.
+    let rest = verify_paths(g, &bare, limit.saturating_sub(r.files.len()));
+    r.files.extend(rest.files);
+    r.read += rest.read;
+    r.skipped.extend(rest.skipped);
+    r.candidates = covered.len() + bare.len();
+    r.complete = r.files.len() < limit && rest.complete;
+    // What was not read, and why: the CLI does not carry the list itself,
+    // so the note is where the user sees it.
+    note_skipped(&r.skipped);
+    r
+}
+
+/// The half of [`answer`] that needs the index: which paths the index
+/// covers, which it does not, and the matches it found on its own.
+///
+/// The caller can drop the index after this and still read the rest of the
+/// files. That matters to the daemon: the index is behind a lock the
+/// builder also wants, and reading a file is I/O the builder must not wait
+/// for. With no index, the whole universe is read.
+pub fn plan(
+    g: &Grep,
+    q: &Query,
+    root: &[u8],
+    live: &Live,
+    home: &[u8],
+    index: Option<&Content>,
+) -> (std::collections::HashSet<Vec<u8>>, Vec<Vec<u8>>, GrepResult) {
     let paths = scan_paths(root, live, q.clone_for_scan());
     let Some(index) = index else {
-        return verify(g, &paths, limit);
+        let r = GrepResult { candidates: paths.len(), ..Default::default() };
+        return (Default::default(), paths, r);
     };
     let mut covered = Vec::new();
     let mut bare = Vec::new();
@@ -3522,23 +3613,8 @@ pub fn answer(g: &Grep, q: &Query, root: &[u8], live: &Live, home: &[u8], index:
         }
     }
     let covered: std::collections::HashSet<Vec<u8>> = covered.into_iter().collect();
-    // `search`'s files are the covered ones that matched (its grams ruled
-    // out the others); keep only those this scan's universe named, so an
-    // index doc outside it never leaks in. Then read the rest.
-    let mut r = index.search(g, q);
-    r.files.retain(|f| covered.contains(&f.path));
-    // `verify_paths`, not `verify`: the note belongs to this search, which
-    // owns both halves of it, so it is written once and says everything.
-    let rest = verify_paths(g, &bare, limit.saturating_sub(r.files.len()));
-    r.files.extend(rest.files);
-    r.read += rest.read;
-    r.skipped.extend(rest.skipped);
-    r.candidates = paths.len();
-    r.complete = r.files.len() < limit && rest.complete;
-    // What was not read, and why: the CLI does not carry the list itself,
-    // so the note is where the user sees it.
-    note_skipped(&r.skipped);
-    r
+    let r = index.search(g, q);
+    (covered, bare, r)
 }
 
 /// Open a path for reading only if it is a regular file, never blocking:
@@ -4326,6 +4402,82 @@ mod grep_pipeline_tests {
         // A word no file holds still answers nothing.
         let none = Grep::new("nothinghere", GrepMode::Literal).expect("grep compiles");
         assert_eq!(content.search(&none, &q).files.len(), 0, "a word no file holds must not answer");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A stale tombstone file must not make the segment claim more dead
+    /// documents than it has.
+    ///
+    /// The dead set is a separate file from the segment, and nothing ties
+    /// the two together: a `.dead` left behind by another segment (or by
+    /// another index) can have more bits set than the segment has
+    /// documents. Counting them all underflows, and the segment then says
+    /// it has a negative number of live documents.
+    #[test]
+    fn a_dead_file_bigger_than_the_segment_is_truncated() {
+        let dir = std::env::temp_dir().join(format!("rgy_dead_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.rs"), b"fn a() {}\n").unwrap();
+        let root = dir.to_string_lossy().into_owned().into_bytes();
+        let src = PortableSource::new(root.clone(), 2);
+        let live = Live::new(Index::build(src.enumerate().unwrap(), 0, 1, b"/"));
+        let idx = dir.join("index");
+        let mut content = Content::open(idx.clone());
+        let docs = wanted(&live, b"", b"/", true, &root);
+        let id = content.alloc_id();
+        let seg = build_segment(&idx, id, &docs, 0..docs.len()).expect("a segment builds");
+        content.push(seg);
+        let seg_id = content.segs[0].id;
+
+        // A dead file that claims 64 documents gone, for a segment with one.
+        std::fs::write(dead_path(&idx, seg_id), u64::MAX.to_le_bytes()).unwrap();
+        let reloaded = Content::open(idx.clone());
+        let live_docs = reloaded.segs[0].live_docs;
+        assert!(
+            live_docs <= reloaded.segs[0].ndocs,
+            "a segment cannot have more live documents than documents: {live_docs} of {}",
+            reloaded.segs[0].ndocs
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A truncated segment must not panic: it reads as "no index".
+    ///
+    /// The posting offsets are read from the file and nothing checks them
+    /// against the file's length. A corrupt segment used to slice past the
+    /// end and panic; now the trigram it names reads as empty, which rules
+    /// it out -- the search is answered, and it is answered "not here".
+    #[test]
+    fn a_truncated_segment_is_answered_not_panicked() {
+        let dir = std::env::temp_dir().join(format!("rgy_trunc_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.rs"), b"fn a() {}\n").unwrap();
+        let root = dir.to_string_lossy().into_owned().into_bytes();
+        let src = PortableSource::new(root.clone(), 2);
+        let live = Live::new(Index::build(src.enumerate().unwrap(), 0, 1, b"/"));
+        let idx = dir.join("index");
+        let mut content = Content::open(idx.clone());
+        let docs = wanted(&live, b"", b"/", true, &root);
+        let id = content.alloc_id();
+        let seg = build_segment(&idx, id, &docs, 0..docs.len()).expect("a segment builds");
+        content.push(seg);
+        let seg_id = content.segs[0].id;
+        // The mapping holds the file open: Windows refuses to rewrite it.
+        drop(content);
+
+        // Cut the segment's bytes in half: the offsets it holds now point
+        // past the end.
+        let path = seg_path(&idx, seg_id);
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::write(&path, &bytes[..bytes.len() / 2]).unwrap();
+
+        let reloaded = Content::open(idx.clone());
+        let g = Grep::new("a", GrepMode::Literal).expect("grep compiles");
+        let q = Query::default();
+        // The answer is "not here" -- not a panic.
+        let _ = reloaded.search(&g, &q);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

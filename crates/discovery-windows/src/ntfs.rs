@@ -457,7 +457,17 @@ pub fn parse_usn_record(buf: &[u8]) -> Option<UsnRecord> {
     // fixture used an empty name so the misread stayed invisible.
     let name_len = u16le(buf, 56) as usize;
     let name_off = u16le(buf, 58) as usize;
-    if name_off + name_len > buf.len() {
+    // The name ends inside the record: a record that says otherwise is not
+    // a record this reader can trust.
+    //
+    // A name that is not empty starts after the header. Without that lower
+    // bound, an offset of zero decodes the 60-byte header as the file name
+    // -- a name that is not a name. An empty name has no offset to check:
+    // the journal writes one for a record that renamed nothing.
+    if name_off + name_len > buf.len()
+        || name_off + name_len > record_len
+        || (name_len > 0 && name_off < USN_HEADER_LEN)
+    {
         return None;
     }
     let name = utf16le_to_string(&buf[name_off..name_off + name_len]);
@@ -860,13 +870,24 @@ pub fn decode_data_runs(runs: &[u8], base_vcn: u64) -> Result<Vec<MftRun>, Strin
 }
 
 /// Decode a little-endian variable-length integer used in NTFS data runs.
+///
+/// The length and the offset in a run header are nibbles, so a corrupt
+/// record can claim up to 15 bytes. The value only holds eight, so the
+/// bytes past the eighth are dropped: shifting by 64 would panic in a debug
+/// build, and in a release build the shift wraps and the byte lands in the
+/// low bits, which is worse -- it is a wrong number that looks like a right
+/// one.
 fn decode_run_int(b: &[u8], signed: bool) -> i64 {
     let mut v = 0i64;
     for (i, &byte) in b.iter().enumerate() {
-        v |= (byte as i64) << (8 * i);
+        let shift = 8 * i;
+        if shift >= 64 {
+            break;
+        }
+        v |= (byte as i64) << shift;
     }
     if signed && !b.is_empty() && (b[b.len() - 1] & 0x80) != 0 {
-        let shift = 8 * b.len();
+        let shift = 8 * b.len().min(8);
         if shift < 64 {
             v -= 1i64 << shift;
         }
@@ -964,6 +985,74 @@ pub(crate) mod testutil {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A run header's length and offset are nibbles, so a corrupt record can
+    /// claim up to 15 bytes for either. The value only holds eight, and the
+    /// bytes past the eighth must be dropped: shifting by 64 panics in a
+    /// debug build, and in a release build the shift wraps and the byte
+    /// lands in the low bits -- a wrong number that looks like a right one.
+    #[test]
+    fn a_run_int_longer_than_eight_bytes_does_not_overflow() {
+        let nine = [0x01u8, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09];
+        assert_eq!(
+            decode_run_int(&nine, false),
+            0x0807_0605_0403_0201,
+            "the first eight bytes are the value"
+        );
+        assert_eq!(
+            decode_run_int(&[0xff; 15], false),
+            -1,
+            "a full-length field saturates"
+        );
+        // The eight-byte value is the last one that fits.
+        let eight = [0x01u8, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+        assert_eq!(decode_run_int(&eight, false), 0x0807_0605_0403_0201);
+    }
+
+    /// The run list is read from the disk, so its lengths are the disk's
+    /// word: a corrupt record must not make the reader panic.
+    #[test]
+    fn a_corrupt_run_list_is_refused_not_panicked() {
+        // A header that claims 15 length bytes and 15 offset bytes, with
+        // only a few bytes behind it.
+        let runs = vec![0xFFu8, 0x01, 0x02, 0x03];
+        let out = decode_data_runs(&runs, 0);
+        assert!(
+            out.is_err() || out.is_ok(),
+            "the reader answers; it does not panic"
+        );
+    }
+
+    /// The USN record's name starts after the header. A record that says
+    /// otherwise is not a record this reader can trust: an offset of zero
+    /// decodes the 60-byte header as the file name.
+    #[test]
+    fn a_usn_name_inside_the_header_is_refused() {
+        let mut buf = vec![0u8; USN_HEADER_LEN + 16];
+        buf[0..4].copy_from_slice(&(USN_HEADER_LEN as u32 + 16).to_le_bytes()); // RecordLength
+        buf[4..6].copy_from_slice(&3u16.to_le_bytes()); // MajorVersion
+        buf[56..58].copy_from_slice(&8u16.to_le_bytes()); // FileNameLength
+        buf[58..60].copy_from_slice(&0u16.to_le_bytes()); // FileNameOffset: the trap
+        assert!(
+            parse_usn_record(&buf).is_none(),
+            "a name that starts inside the header is refused"
+        );
+        // The same record with the name where it belongs parses.
+        buf[58..60].copy_from_slice(&(USN_HEADER_LEN as u16).to_le_bytes());
+        assert!(
+            parse_usn_record(&buf).is_some(),
+            "a name after the header is read"
+        );
+        // An empty name has no offset to check: the journal writes one for
+        // a record that renamed nothing.
+        let mut empty = vec![0u8; USN_HEADER_LEN];
+        empty[0..4].copy_from_slice(&(USN_HEADER_LEN as u32).to_le_bytes());
+        empty[4..6].copy_from_slice(&2u16.to_le_bytes());
+        assert!(
+            parse_usn_record(&empty).is_some(),
+            "a record with an empty name is still a record"
+        );
+    }
 
     #[test]
     fn file_name_value_roundtrip() {

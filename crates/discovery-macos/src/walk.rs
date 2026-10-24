@@ -302,10 +302,24 @@ fn parse_entry(b: &[u8], l: &mut Listing) {
     if common & libc::ATTR_CMN_NAME == 0 {
         return;
     }
+    // The name offset is signed: the kernel writes it relative to the
+    // attribute, and it may be negative. A negative offset (or one that
+    // runs past the entry) is a record this reader cannot trust, and
+    // taking it as an unsigned one wraps the start past the end of the
+    // buffer -- a slice that panics on a value that came from the
+    // kernel.
     let off = rd32(b, f) as i32 as isize;
     let nlen = rd32(b, f + 4) as usize;
-    let start = (f as isize + off) as usize;
-    let name = &b[start..start + nlen.saturating_sub(1)];
+    let Some(start) = (f as isize).checked_add(off).filter(|&s| s >= 0) else {
+        return;
+    };
+    let start = start as usize;
+    let Some(end) = start.checked_add(nlen.saturating_sub(1)) else {
+        return;
+    };
+    let Some(name) = b.get(start..end) else {
+        return;
+    };
     f += 8;
     let mut kind = KIND_OTHER;
     if common & libc::ATTR_CMN_OBJTYPE != 0 {

@@ -145,7 +145,23 @@ impl Watch for InotifyWatch {
                             .cloned()
                             .unwrap_or_default()
                             .join(std::ffi::OsString::from_vec(name.clone()));
-                        let _ = self.add_one(&dir);
+                        // A directory we cannot watch is a directory we will
+                        // never hear about: its whole subtree goes unobserved
+                        // and the live index silently misses it. The batch
+                        // therefore ends in a rescan, which is what the
+                        // watch-limit hit already does (IN_Q_OVERFLOW).
+                        // The error is not dropped: the create is reported
+                        // below, and the rescan is what makes it true.
+                        //
+                        // A directory that is already gone is the other
+                        // case: there is no subtree to miss, and the delete
+                        // that follows covers it. A rescan there would be a
+                        // loop -- a folder created and removed in the same
+                        // breath would ask for one every time.
+                        let gone = dir.symlink_metadata().is_err();
+                        if !gone && self.add_one(&dir).is_err() {
+                            return Ok(ChangeBatch::Rescan);
+                        }
                     }
                     events.push(self.record(wd, &name, REASON_CREATE));
                 }
