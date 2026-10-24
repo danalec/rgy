@@ -3,11 +3,12 @@
 // Transported from fsearch (https://github.com/noahdunnagan/fsearch), MIT
 // licensed, Copyright (c) 2026 Noah Dunnagan. Its notice is in
 // LICENSE-MIT-FSEARCH and in the repository's NOTICE.
-//! Name search query: parse, filter, match, and the scalar ranker.
+//! Name search query: parse, filter, match, and the ranker.
 //!
-//! Transported from fsearch query.rs (parser + scalar scorer half). The
-//! SIMD Searcher/NameCache/top-k half is PR #6 and lands later; this
-//! module carries everything Query::match_path needs.
+//! Transported from fsearch query.rs: the parser and the scalar scorer
+//! half. The SIMD Searcher, the NameCache and the top-k half are this
+//! repository's own work, written on the same design; the module carries
+//! everything `Query::match_path` needs.
 //!
 //! Merged query syntax (docs/design.md §2.1): fsearch's token modes
 //! on top of zen-rs's filter vocabulary.
@@ -1203,6 +1204,22 @@ mod tests {
         let searcher = Searcher { live: &live };
         let hits = searcher.search(&q("chinese"));
         assert!(hits.is_empty(), "a query nobody wrote finds nothing");
+    }
+
+    /// The query cache is dropped once nobody is typing.
+    ///
+    /// A broad query leaves tens of megabytes of spare hit buffers and a
+    /// scored name table behind. They are worth keeping only while the
+    /// user is typing, so a quiet spell gives them back -- and the daemon
+    /// has no idle moment of its own, so a thread of its own does it.
+    #[test]
+    fn the_query_cache_is_dropped_after_a_quiet_spell() {
+        let live = many_live(100);
+        let searcher = Searcher { live: &live };
+        let _ = searcher.search(&q("entry"));
+        assert!(live.names_cache.last.lock().unwrap().is_some(), "a search caches its table");
+        live.names_cache.trim_if_idle(std::time::Duration::from_millis(0));
+        assert!(live.names_cache.last.lock().unwrap().is_none(), "a quiet spell drops it");
     }
 
     /// An index with more entries than the interactive limit, so a count that

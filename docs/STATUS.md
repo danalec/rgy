@@ -194,6 +194,28 @@ same rows spread 1–8% and the comparison is decidable. The A/B behind the
 `RankAdj` section was taken at one thread for that reason: nine runs, best
 of nine, and every row faster by 3.4–4.6%.
 
+#### The content index is dead on both sides
+
+Found on 2026-10-24, and it is a bigger piece than a cleanup.
+
+The trigram content index came in with fsearch's `content.rs`, and its
+**reader** is live: `searchctl` opens `<index>.content/` and hands it to
+`content::answer`, which uses the postings to rule most files out before
+they are read. But nothing in the product ever **writes** it —
+`Content::sync`, `build_segment`, `merge`, `diff`, `changed_dirs`,
+`alloc_id`, `push`, `replace` and `merge_plan` are called only by the
+tests — and the daemon's `grep:` does not read it either: it goes
+`content::scan_paths` + `content::verify`, which is the scan with no
+index. So the directory the CLI looks for is never created, and the
+read-avoidance it was written for is never in effect.
+
+The CLI's own comment says "the daemon keeps it fresh", and that is
+false. Either the daemon writes and reads the index, or the reader goes
+too. The first is the better product — it is the difference between
+reading two gigabytes of a tree and reading fifty megabytes of it — and
+it is the next piece of work. The second is a large deletion of
+fsearch's MIT code and gives up a feature.
+
 #### The limits that are documented
 
 These are not gaps: the matrix says `D`, and the limit is written down

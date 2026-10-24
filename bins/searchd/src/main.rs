@@ -248,6 +248,9 @@ fn main() {
     // keep answering on the last state while an apply is in flight.
     spawn_watch(&ctx, &startup.journal, startup.watermark);
 
+    // Give the query cache back while nobody is typing (the trim thread).
+    spawn_trim(&ctx);
+
     match listen.split_once(':') {
         None if listen == "stdio" => {
             let stdin = std::io::stdin();
@@ -1059,6 +1062,36 @@ fn open_watch(
     _watermark: u64,
 ) -> Option<Box<dyn rgy_discovery::Watch>> {
     None
+}
+
+/// Spawn the trim thread: give the query cache back while nobody is
+/// typing.
+///
+/// The name table a broad query leaves behind is tens of megabytes on a
+/// large index, and it is worth keeping only while the user is typing:
+/// the next query after a pause reads the index again anyway, and the
+/// table is what the pause leaves holding the memory. The daemon has no
+/// idle moment of its own -- it blocks on the next request -- so the
+/// trim is a thread of its own, ticking.
+fn spawn_trim(ctx: &std::sync::Arc<Ctx>) {
+    /// How long the cache has to be unused before it is dropped.
+    const IDLE: std::time::Duration = std::time::Duration::from_secs(30);
+    /// How often the thread looks.
+    const TICK: std::time::Duration = std::time::Duration::from_secs(5);
+
+    let ctx = ctx.clone();
+    let _ = std::thread::Builder::new()
+        .name("searchd-trim".into())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(TICK);
+                // A read guard is enough: the trim only touches the cache's
+                // own locks, and a query reads the table under them.
+                if let Ok(live) = ctx.live.read() {
+                    live.names_cache.trim_if_idle(IDLE);
+                }
+            }
+        });
 }
 
 /// Spawn the live-update thread: build the platform `Watch` for `ctx.root` and
