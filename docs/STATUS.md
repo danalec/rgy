@@ -132,17 +132,35 @@ with the work that closes every gap and the phase it belongs to. It asks a
 different question from the matrix above — that one asks "does this work on
 each OS", this one asks "does rgy do what Listary does".
 
-Sixteen are gaps, eight are degraded, and nine are already at parity: the
-NTFS MFT reader, the USN journal monitor, the multi-volume enumeration,
+Thirteen are gaps, nine are degraded, and thirteen are already at parity:
+the NTFS MFT reader, the USN journal monitor, the multi-volume enumeration,
 the folder walker, the atomic index snapshot, the u32-second modification
 time, the fail-closed regex and the parallel scoring came in with the merge
-or were already here.
+or were already here — and the transliteration shadow below.
+
+**A name read in another script.** `nihongo` finds 日本語, `にほんご` finds
+日本語, `zhongwen` finds 中文. The mechanism is Listary's (the pinyin
+shadow, §5.2 and §6.3), extended to the Japanese scripts, which Listary
+has no data for. The data is the UCD's Unihan readings, generated into
+`readings_table.rs` the way the NFC tables are generated: `kMandarin` for
+the pinyin, `kJapanese` for the kana readings, tone marks dropped. Unihan
+does not carry a kana-to-romaji table, so that one is written by hand, in
+the generator, with the rules a person types by — きって is "kitte",
+しゃ is "sha", スーパー is "suupaa".
+
+Two limits are written down rather than papered over. A name is read
+character by character, so 日本語 is read ニチホンゴ and not the word's
+ニホンゴ: the compound reading belongs to the word, and the UCD does not
+carry it. The fuzzy matcher skips the extra character, so `nihongo` still
+finds it — but that is the matcher's tolerance doing the work, not the
+data. And a character's other readings (日 is also ひ) are not tried.
 
 The scope is the **engine's performance** — the ranking machinery, the
-matchers, the priority, the query surface, the index shape and pinyin. The
-product surface Listary also has (the HTTP API, the suggestion sources, the
-index schedule, the diagnostics) is out of scope: it is features, not
-performance, and it stays in the report rather than in the plan.
+matchers, the priority, the query surface, the index shape and the
+transliteration. The product surface Listary also has (the HTTP API, the
+suggestion sources, the index schedule, the diagnostics) is out of scope:
+it is features, not performance, and it stays in the report rather than in
+the plan.
 
 The phases run in a dependency order, and it is not the order the rows are
 written in:
@@ -158,7 +176,10 @@ written in:
    replay path.
 5. **The index shape** — five indexes over a validated parent-chain
    forest. The on-disk format stays rgy's own.
-6. **Pinyin** — the matcher family and the data behind it.
+6. **Pinyin and the Japanese scripts** — the matcher family and the data
+   behind it. The shadow that carries them is built; the Japanese side
+   keeps two written-down limits (the compound readings of a word, and a
+   character's alternative readings).
 
 The gate (`python scripts/listary-parity.py --check`) fails when a gap has
 no work or no phase, and when a parity claim names no place in the code. It

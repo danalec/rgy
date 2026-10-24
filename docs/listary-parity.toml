@@ -55,7 +55,7 @@ verification = "24/24 quantitative claims re-derived from the artefact"
 3 = { title = "The priority rules", why = "The priority stops being a table in the source and becomes a rule system the user writes. It depends on the parent chain from phase 5, which is why it is written before it is implemented." }
 4 = { title = "The query surface", why = "The grammar, the relative time facets and the replay path. The replay path depends on the incremental session from phase 2." }
 5 = { title = "The index shape", why = "Five indexes over a validated parent-chain forest. The on-disk format stays rgy's own: the format is Listary's choice, not a capability." }
-6 = { title = "Pinyin", why = "The matcher family and the data behind it. The data has to be rebuilt from the syllable inventory, because cnmatch.bin is a legacy artefact the current engine does not read." }
+6 = { title = "Pinyin and the Japanese scripts", why = "The matcher family and the data behind it. The data is rebuilt from the UCD's Unihan readings, because cnmatch.bin is a legacy artefact the current engine does not read. The Japanese scripts ride on the same shadow: a name read in romaji, in kana or in pinyin is the same mechanism." }
 
 
 # ---------------------------------------------------------------------------
@@ -368,35 +368,32 @@ size = "S"
 id = "C.1"
 name = "Pinyin matcher"
 phase = 6
-status = "G"
+status = "P"
 evidence = "§5.2, §6.3"
 listary = "A pinyin matcher works on a UTF-16 shadow string -- a transliteration of the target text into pinyin -- with explicit surrogate handling at every shadow scalar boundary."
-rgy = "Absent. A query in pinyin does not match a name in hanzi."
-work = "The shadow string, the transliteration, and the matcher. The shadow is UTF-16 because the transliteration can be longer than the text it comes from; rgy's internal representation is UTF-8, so the shadow has to be built with the boundary rules the report names."
-size = "L"
-
+rgy = "Done. A name is read in pinyin through a shadow (see `readings`): the Unihan `kMandarin` reading, tone marks dropped. `zhongwen` finds 中文. It is the same shadow that carries the Japanese scripts, and rgy's shadow is UTF-8 with a map back to the source characters, which the UTF-16 one has no use for."
+work = "None for the Chinese side: a character is read in one pinyin, and a Chinese word is read character by character. The Japanese side keeps the limits in the rows below."
+size = "S"
 [[capability]]
 id = "C.2"
 name = "Fuzzy + pinyin combined matcher"
 phase = 6
-status = "G"
+status = "P"
 evidence = "§5.2"
 listary = "A matcher that is fuzzy over the pinyin shadow at the same time."
-rgy = "Absent."
-work = "The combined matcher, once C.1's shadow exists. It is the same fuzzy machinery over a different string, which is why it comes second."
-size = "M"
-
+rgy = "Done, and it is the same code: the fuzzy matcher runs over the shadow, so a pinyin query is matched over the pinyin reading of the name."
+work = "None. The shadow is the combined matcher."
+size = "S"
 [[capability]]
 id = "C.3"
 name = "The pinyin data"
 phase = 6
-status = "G"
+status = "P"
 evidence = "§6.1, §6.2"
 listary = "The Generation-2 engine has the pinyin table compiled in: the 422-syllable Mandarin inventory and a per-character initial-letter table embedded in the binary."
-rgy = "Absent. rgy has an NFC table and no pinyin data."
-work = "Build the two tables from the Mandarin syllable inventory and the initial-letter alphabet. `cnmatch.bin` is a legacy artefact -- the current engine does not read it -- so it is evidence of the syllable set, not a file to ship."
-size = "M"
-
+rgy = "Done. The UCD's Unihan readings (`kMandarin` and `kJapanese`), generated into `readings_table.rs` the way the NFC tables are generated, plus the kana-to-romaji table Unihan does not carry. 411 distinct pinyin readings (Listary has 422 syllables) and 576 kana readings."
+work = "None. The data is generated, so it is reproducible from the UCD."
+size = "S"
 # ---------------------------------------------------------------------------
 # Already at parity
 #
@@ -469,6 +466,36 @@ listary = "Rayon sorts the candidates in parallel; the legacy managed layer sort
 rgy = "Already there: the scan and the query are rayon-parallel (name_query.rs)."
 work = "None. Already at parity."
 size = "S"
+
+# ---------------------------------------------------------------------------
+# The Japanese scripts
+#
+# Listary has pinyin for Chinese. The Japanese scripts ride on the same
+# shadow, and they were asked for: a name in romaji, in hiragana, in
+# katakana or in kanji is the same mechanism read four ways.
+# ---------------------------------------------------------------------------
+
+[[capability]]
+id = "J.1"
+name = "Kana read as romaji"
+phase = 6
+status = "P"
+evidence = "§5.2, §6.3"
+listary = "Listary's pinyin searcher works on a shadow of the text; the Japanese scripts are not in its data."
+rgy = "Done. A kana is read as romaji by the kana table, with the rules a person types by: the small tsu doubles the consonant that follows (きって is kitte), a small ya/yu/yo joins the kana before it (しゃ is sha, きゃ is kya), and the long vowel mark repeats the vowel of the mora before it (スーパー is suupaa)."
+work = "None. The table is in the generator (`gen_readings_table.py`), so it is generated with the rest."
+size = "M"
+
+[[capability]]
+id = "J.2"
+name = "A kanji read in kana"
+phase = 6
+status = "D"
+evidence = "§6.3"
+listary = "Not in Listary's data: its readings are Chinese."
+rgy = "Done, with two limits. The Unihan reading of a character is used (the on-reading, or the kun-reading when there is no on-reading), so 日本語 is read ニチホンゴ rather than the word's ニホンゴ -- the fuzzy matcher skips the extra character, so `nihongo` still finds it. And a character's other readings (日 is also ひ) are not tried."
+work = "The alternative readings of a character, and the compound readings of a word. The first needs the reading table to carry every reading and the matcher to try them; the second needs a word-level dictionary, which is what a Japanese IME has and the UCD does not."
+size = "L"
 
 # ---------------------------------------------------------------------------
 # The report's own residual unknowns

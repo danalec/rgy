@@ -1048,6 +1048,11 @@ pub fn start_hash(b: u8) -> usize {
 
 /// Char classes (`char_bit`).
 pub const CLASSES: usize = 41;
+/// The class of the bytes at U+0080 and above: the UTF-8 of a kana or a
+/// Han character. A name with one of these may be read in another script
+/// (see `readings`), so the class filter cannot reject it on its bytes
+/// alone.
+pub const CLASS_NON_ASCII: usize = 39;
 /// Name bitmaps, per char class: names with that class in their first half
 /// (`BM_FIRST + class`), in their second half (`BM_SECOND + class`). A
 /// query's chars must appear in order, so a name can only match if some

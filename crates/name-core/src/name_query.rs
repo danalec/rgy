@@ -935,9 +935,10 @@ fn token_score(name: &[u8], wide: Wide, m: u64, t: &Token) -> Option<i32> {
     match t.mode {
         Mode::Fuzzy if takes_typos(&t.text, t.mode) => {
             let clean = if t.mask & !m == 0 { fuzzy_score_capped(name, wide, &t.text, 100) } else { None };
-            clean.max(if m & t.start != 0 { typo_score(name, wide, m, &t.text) } else { None })
+            let typo = if m & t.start != 0 { typo_score(name, wide, m, &t.text) } else { None };
+            clean.max(typo).or_else(|| shadow_score(name, &t.text))
         }
-        Mode::Fuzzy => fuzzy_score_capped(name, wide, &t.text, 100),
+        Mode::Fuzzy => fuzzy_score_capped(name, wide, &t.text, 100).or_else(|| shadow_score(name, &t.text)),
         Mode::Exact => find_ci(name, &t.text).map(|p| 40 + if p == 0 { 30 } else { 0 } - (name.len() as i32).min(80) / 3),
         Mode::Prefix => {
             (name.len() >= t.text.len() && name.iter().zip(&t.text).all(|(&a, &b)| fold(a) == b)).then(|| 60 - (name.len() as i32).min(80) / 3)
@@ -945,6 +946,28 @@ fn token_score(name: &[u8], wide: Wide, m: u64, t: &Token) -> Option<i32> {
         Mode::Suffix => (name.len() >= t.text.len() && name[name.len() - t.text.len()..].iter().zip(&t.text).all(|(&a, &b)| fold(a) == b))
             .then(|| 50 - (name.len() as i32).min(80) / 3),
     }
+}
+
+/// The score of the query against the name read in another script.
+///
+/// `nihongo` finds 日本語 and `zhongwen` finds 中文: the name is
+/// transliterated (see [`crate::readings`]) and the query is matched
+/// against that. A name with no kana and no Han character has no
+/// shadow, and the direct match already covers it.
+///
+/// The query says which shadow: an ASCII query is romaji or pinyin, and a
+/// query with kana in it is kana.
+fn shadow_score(name: &[u8], q: &[u8]) -> Option<i32> {
+    use crate::readings::{Script, Shadow};
+    let scripts: &[Script] = if q.iter().all(|&b| b.is_ascii()) { &[Script::Romaji, Script::Pinyin] } else { &[Script::Hiragana, Script::Katakana] };
+    let mut best: Option<i32> = None;
+    for s in scripts {
+        let Some(sh) = Shadow::of(name, *s) else { continue };
+        if let Some(score) = fuzzy_score(&sh.text, q) {
+            best = Some(best.map_or(score, |b: i32| b.max(score)));
+        }
+    }
+    best
 }
 
 #[inline]
@@ -1123,6 +1146,63 @@ mod tests {
         }
         let listing = rgy_discovery::walk::Listing { id: 0, names, ents };
         Live::new(Index::build(vec![listing], 0, 1_700_000_000, b"/"))
+    }
+
+    /// An index with a name written in another script, so the shadow path
+    /// has something to find: `日本語.txt` is read にほんご, and a query in
+    /// romaji or in kana has to reach it.
+    fn cjk_live() -> Live {
+        let mut names = Vec::new();
+        let mut ents = Vec::new();
+        for name in ["日本語.txt", "にほんご.md", "中文.pdf"] {
+            let off = names.len() as u32;
+            names.extend_from_slice(name.as_bytes());
+            ents.push(rgy_discovery::walk::RawEnt {
+                name_off: off,
+                name_len: name.len() as u16,
+                kind: KIND_FILE,
+                size: 10,
+                mtime: 1_700_000_000,
+                child: rgy_discovery::walk::NONE,
+            });
+        }
+        let listing = rgy_discovery::walk::Listing { id: 0, names, ents };
+        Live::new(Index::build(vec![listing], 0, 1_700_000_000, b"/"))
+    }
+
+    /// A name written in one script, found by a query in another.
+    ///
+    /// The four ways a query and a name can be in different scripts:
+    /// romaji over kanji, kana over kanji, romaji over kana, and pinyin over
+    /// hanzi. Each of them is the same shadow, read a different way.
+    #[test]
+    fn a_query_in_another_script_finds_the_name() {
+        let live = cjk_live();
+        let searcher = Searcher { live: &live };
+        for (query, expect) in [
+            ("nihongo", "日本語.txt"),   // romaji over kanji
+            ("にほんご", "にほんご.md"), // kana over kana
+            ("nihongo", "にほんご.md"),  // romaji over kana
+            ("zhongwen", "中文.pdf"),    // pinyin over hanzi
+        ] {
+            let hits = searcher.search(&q(query));
+            let found = hits.iter().any(|h| {
+                let mut buf = Vec::new();
+                live.base.path(h.idx as usize, &mut buf);
+                buf == format!("/{expect}").as_bytes()
+            });
+            assert!(found, "`{query}` finds `{expect}`");
+        }
+    }
+
+    /// A name written in one script is not found by a query in another when
+    /// the two do not correspond: `nihongo` is not `chinese`.
+    #[test]
+    fn a_query_does_not_find_an_unrelated_name() {
+        let live = cjk_live();
+        let searcher = Searcher { live: &live };
+        let hits = searcher.search(&q("chinese"));
+        assert!(hits.is_empty(), "a query nobody wrote finds nothing");
     }
 
     /// An index with more entries than the interactive limit, so a count that
@@ -1553,6 +1633,9 @@ struct TokenBits<'a> {
     /// Typo-taking tokens: names with a word starting with the token's
     /// first letter (or one hashing alike).
     start: Option<&'a [u64]>,
+    /// Names with a byte at U+0080 or above: they may be read in another
+    /// script, and the class filter cannot see that.
+    other: [&'a [u64]; 2],
 }
 
 impl<'a> TokenBits<'a> {
@@ -1572,6 +1655,7 @@ impl<'a> TokenBits<'a> {
             seq: t.text.iter().map(|&b| pair(class(b))).collect(),
             classes: std::iter::once(pair(first)).chain(rest.into_iter().map(|x| x.1)).collect(),
             start: (t.start != 0).then(|| idx.bitmap(BM_START + crate::name_index::start_hash(t.text[0]))),
+            other: pair(crate::name_index::CLASS_NON_ASCII),
         }
     }
 
@@ -1631,7 +1715,13 @@ impl<'a> TokenBits<'a> {
         std::array::from_fn(|j| {
             let clean = (first[j] | second[j]) & all[j];
             let typo = (first[j] | second[j] | first1[j] | second1[j]) & typo[j];
-            (clean | typo, clean, typo)
+            // A name with a byte at U+0080 or above may be read in another
+            // script (see `readings`), and the class filter cannot see
+            // that: it knows the name's bytes, not its readings. So those
+            // names are candidates as well, and the scorer tries the
+            // shadow (`shadow_score`).
+            let other = has(&self.other, j);
+            (clean | typo | other, clean, typo)
         })
     }
 }

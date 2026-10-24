@@ -34,6 +34,12 @@ mod nfc_table;
 #[cfg(test)]
 mod nfc_vectors;
 
+/// Readings: a name transliterated into the scripts a query can be in.
+pub mod readings;
+/// The UCD's Unihan readings (generated): what a Han character is called
+/// in kana, and what it is called in pinyin.
+mod readings_table;
+
 /// fsearch's content index (trigram postings + per-file 5/7-gram bloom).
 /// Kept inside name-core beside `live` for the same reason: it reads the
 /// name index's blob internals (`HDR`/`sec!`) and shares `Query`; a
