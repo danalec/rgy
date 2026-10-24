@@ -154,6 +154,18 @@ searchctl --root ~ "invoice" --json
 By default you get the 50 best matches. Raise it with `--limit 100`, or
 ask for the count with `--count`.
 
+With `--json`, each hit also carries the characters the query matched, so
+a script can show the same span the TUI paints:
+
+```json
+{"path":"/home/you/Documents/invoice_2024.pdf","score":211,"match":[0,1,2,3,4,5,6]}
+```
+
+The `match` array holds the offsets of the characters of the *name* that
+matched, counted from the start of the name. A name that matched through a
+typo, or through its reading in another script, has no `match`: the span
+would be in another text.
+
 ## 5. The query language
 
 A query is a list of words. Every word narrows the answer, and a file has

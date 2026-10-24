@@ -114,6 +114,21 @@ mod palette {
         }
     }
 
+    /// The characters of a name the query matched: the span that earned the
+    /// score. The video's amber; ANSI bright yellow is the same hue at the
+    /// 16-colour palette's saturation.
+    pub fn highlight() -> Color {
+        if truecolor() {
+            Color::Rgb {
+                r: 233,
+                g: 184,
+                b: 92,
+            }
+        } else {
+            Color::Yellow
+        }
+    }
+
     /// Latency figures, the sparkline, first/p50/p90.
     pub fn green() -> Color {
         if truecolor() {
@@ -179,6 +194,9 @@ struct App {
     caret: usize,
     /// Matching paths, best match first (already resolved from hits).
     results: Vec<String>,
+    /// The characters of each result the query matched, so the row can show
+    /// the span that earned the score.
+    matched: Vec<Vec<u32>>,
     /// Matches found before `results` was capped.
     total: usize,
     /// Whether the query carries any filter or search term at all, which
@@ -216,6 +234,7 @@ impl App {
             input: String::new(),
             caret: 0,
             results: Vec::new(),
+            matched: Vec::new(),
             total: 0,
             filtered: false,
             selected: 0,
@@ -242,6 +261,7 @@ impl App {
         // listing every path through the index is cheaper than scoring.
         if !self.filtered {
             self.results.clear();
+            self.matched.clear();
             self.total = self.live.base.n.saturating_sub(1); // skip synthetic root
             let mut out = Vec::new();
             // Entry 0 is the synthetic root; the cap is on the range rather
@@ -266,9 +286,13 @@ impl App {
         // quadratic -- with MAX_RESULTS that is hundreds of millions of
         // comparisons on every keystroke.
         let mut hits: Vec<Hit> = Vec::new();
+        let mut tokens: Vec<rgy_name_core::name_query::Token> = Vec::new();
         if let Ok(alts) = Alternatives::parse(&self.input, &home) {
             let searcher = Searcher { live: &self.live };
             hits = searcher.search_alternatives(&alts.alts, MAX_RESULTS);
+            if let [one] = alts.alts.as_slice() {
+                tokens = one.tokens.clone();
+            }
         }
 
         let mut out = Vec::new();
@@ -282,6 +306,20 @@ impl App {
                 String::from_utf8_lossy(&out).into_owned()
             })
             .collect();
+        // The characters each result matched, so the row can show the span.
+        // With more than one alternative a hit does not say which one it
+        // came from, so the span would be a guess and it is left out.
+        self.matched = if tokens.is_empty() {
+            vec![Vec::new(); self.results.len()]
+        } else {
+            self.results
+                .iter()
+                .map(|p| {
+                    let name = name_of(p);
+                    rgy_name_core::name_query::matched_chars(name.as_bytes(), &tokens)
+                })
+                .collect()
+        };
         self.total = self.results.len();
         self.selected = 0;
         self.top = 0;
@@ -528,7 +566,7 @@ impl App {
 
         let cell = format!(
             "{name}  {dir}",
-            name = fit(name, name_visible).with(palette::ink()),
+            name = self.styled_name(row, name, name_visible),
             dir = elide_tail(&shorten_home(parent_of(path)), dir_width).with(palette::dim())
         );
         if row == self.selected {
@@ -536,6 +574,41 @@ impl App {
         } else {
             cell
         }
+    }
+
+    /// The name, with the characters the query matched in the highlight's
+    /// colour and the rest in the ink.
+    ///
+    /// The matched characters come in runs, and a run is one styled piece:
+    /// an escape sequence per character would cost the frame more than the
+    /// search costs the keystroke.
+    fn styled_name(&self, row: usize, name: &str, visible: usize) -> String {
+        let matched = self.matched.get(row).map(|m| m.as_slice()).unwrap_or(&[]);
+        if matched.is_empty() {
+            return fit(name, visible).with(palette::ink()).to_string();
+        }
+        let mut out = String::new();
+        let mut run: Vec<char> = Vec::new();
+        let mut run_matched = false;
+        let mut chars = 0usize;
+        for c in name.chars() {
+            if chars >= visible {
+                break;
+            }
+            let is_matched = matched.binary_search(&(chars as u32)).is_ok();
+            if is_matched != run_matched && !run.is_empty() {
+                out.push_str(&style_run(&run, run_matched));
+                run.clear();
+            }
+            run_matched = is_matched;
+            run.push(c);
+            chars += 1;
+        }
+        if !run.is_empty() {
+            out.push_str(&style_run(&run, run_matched));
+        }
+        out.extend(std::iter::repeat_n(' ', visible.saturating_sub(chars)));
+        out
     }
 
     /// Footer: the prose, the chart, first/p50/p90. The video has no match
@@ -852,6 +925,17 @@ fn home_dir() -> Option<String> {
         }
     }
     None
+}
+
+/// A run of characters of a name, in the highlight's colour when the query
+/// matched them and in the ink when it did not.
+fn style_run(run: &[char], matched: bool) -> String {
+    let text: String = run.iter().collect();
+    if matched {
+        text.with(palette::highlight()).to_string()
+    } else {
+        text.with(palette::ink()).to_string()
+    }
 }
 
 /// Pad `s` to exactly `width` chars, trimming from the left when it is longer.
@@ -1607,8 +1691,24 @@ mod tests {
         let mut app = app_with("maintenance");
         app.page = 10;
         let cell = app.result_cell(0, 80);
-        assert!(cell.contains("maintenance.rs"));
-        assert!(cell.contains("/src"));
+        // The name is painted in two pieces when the query matched part of
+        // it, so the row is read without the colours.
+        let text = strip_ansi(&cell);
+        assert!(text.contains("maintenance.rs"), "{text}");
+        assert!(text.contains("/src"), "{text}");
+    }
+
+    /// The row knows which characters of the name the query matched, so it
+    /// can paint the span that earned the score.
+    #[test]
+    fn the_result_row_knows_which_characters_matched() {
+        let app = app_with("maintenance");
+        assert!(!app.matched.is_empty(), "the positions are there");
+        assert!(
+            app.matched[0].contains(&0),
+            "the first character matched: {:?}",
+            app.matched[0]
+        );
     }
 
     #[test]

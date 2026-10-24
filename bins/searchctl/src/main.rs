@@ -488,7 +488,32 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
         };
         if json {
             let esc = rgy_proto::escape_json_string(&path);
-            rgy_engine::outln!("{{\"path\":\"{esc}\",\"score\":{}}}", h.score());
+            // The characters the query matched: the span the score came
+            // from. With more than one alternative a hit does not say which
+            // alternative it came from, so the span would be a guess and it
+            // is left out.
+            let matched = match alts.alts.as_slice() {
+                [one] => {
+                    let name = rel.rsplit(['/', '\\']).next().unwrap_or(rel);
+                    let chars =
+                        rgy_name_core::name_query::matched_chars(name.as_bytes(), &one.tokens);
+                    (!chars.is_empty()).then(|| {
+                        chars
+                            .iter()
+                            .map(|c| c.to_string())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    })
+                }
+                _ => None,
+            };
+            match matched {
+                Some(m) => rgy_engine::outln!(
+                    "{{\"path\":\"{esc}\",\"score\":{},\"match\":[{m}]}}",
+                    h.score()
+                ),
+                None => rgy_engine::outln!("{{\"path\":\"{esc}\",\"score\":{}}}", h.score()),
+            }
         } else {
             rgy_engine::outln!("{path}");
         }

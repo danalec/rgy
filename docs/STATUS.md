@@ -67,7 +67,7 @@ verification on machines this host does not have.
 | zen-rs bin / TUI (unchanged behaviour) | `bins/zen-rs`, `bins/search-ui` | ✅ |
 | `rgy-autostart` (login item, per platform) | `crates/autostart` | ✅ startup task / HKCU Run, systemd user unit, launchd agent |
 | The crates on crates.io | `crates/*/Cargo.toml`, `bins/*/Cargo.toml` | ✅ all fourteen published at 0.1.0 on 2026-10-23 — see below |
-| The Listary plan | `docs/listary-parity.toml`, `scripts/listary-parity.py` | ⬜ 9 gaps and 9 degraded rows, each with work and a phase — see below |
+| The Listary plan | `docs/listary-parity.toml`, `scripts/listary-parity.py` | ⬜ 8 gaps and 9 degraded rows, each with work and a phase — see below |
 | Packaging (winget, brew, tarballs) | `scripts/build-release.*`, `scripts/publish-release.*`, `.winget/`, `Formula/` | ✅ machinery in place; **no release published yet** |
 | Release flow (the one-line installers, the Linux build over ssh) | `install.sh`, `install.ps1`, `scripts/release-linux.sh` | ✅ the installers pin the digest of the artifact they install; the pins are release data |
 | Homebrew submission (the pull request to homebrew-core) | `scripts/publish-homebrew.*` | ✅ the machinery; the pull request waits for the first release to exist |
@@ -132,12 +132,21 @@ with the work that closes every gap and the phase it belongs to. It asks a
 different question from the matrix above — that one asks "does this work on
 each OS", this one asks "does rgy do what Listary does".
 
-Nine are gaps, nine are degraded, and seventeen are already at parity:
+Nine are gaps, nine are degraded, and eighteen are already at parity:
 the NTFS MFT reader, the USN journal monitor, the multi-volume enumeration,
 the folder walker, the atomic index snapshot, the u32-second modification
 time, the fail-closed regex and the parallel scoring came in with the merge
 or were already here — and the transliteration shadow, the rank key and the
 matchers below.
+
+**The span that earned the score.** The matchers now say which characters
+they matched, and the UI shows it: the TUI paints the span in the
+highlight's colour and `searchctl --json` carries the characters as a
+`match` array. The positions are computed on demand, for the rows that are
+shown — the scan does not carry them, so the hot path does not pay for
+them. The matcher works on bytes (rgy's index is bytes), so the bytes it
+matched are snapped to the characters they belong to: a character is
+matched whole or not at all.
 
 **The matchers.** A quoted run is a phrase (`"invoice pdf"` is one token and
 the name has to carry the words together, with the space between them) and

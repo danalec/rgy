@@ -641,14 +641,14 @@ fn fuzzy_score_capped(name: &[u8], wide: Wide, q: &[u8], cap: i32) -> Option<i32
         buf[..name.len()].copy_from_slice(name);
         return fuzzy_masked(name, &buf, q, cap);
     }
-    fuzzy_scalar(name, q, cap)
+    fuzzy_scalar::<NoMatch>(name, q, cap, &mut NoMatch)
 }
 
 /// The memchr-based matcher: `fuzzy_masked`'s scalar twin, still the path
 /// for names longer than the 64-byte window. The wide scorer must agree
 /// with this exactly — `tests::sse2_masked_matches_the_scalar_matcher`
 /// pins that.
-fn fuzzy_scalar(name: &[u8], q: &[u8], cap: i32) -> Option<i32> {
+fn fuzzy_scalar<M: Matched>(name: &[u8], q: &[u8], cap: i32, matched: &mut M) -> Option<i32> {
     // Leftmost-ending match: jump to each query byte in turn (memchr is
     // SIMD; most names fail on the first or second byte).
     let mut end = 0;
@@ -658,7 +658,7 @@ fn fuzzy_scalar(name: &[u8], q: &[u8], cap: i32) -> Option<i32> {
         from = end + 1;
     }
     let next = |k: usize, from: usize, to: usize| Some(from + find_folded(&name[from..=to], q[k])?);
-    fuzzy_from(name, q, cap, end, next, |k, to| rfind_folded(&name[..to], q[k]))
+    fuzzy_from(name, q, cap, end, next, |k, to| rfind_folded(&name[..to], q[k]), matched)
 }
 
 /// `fuzzy_score_capped` past the prefix test, for a name of at most 64
@@ -705,7 +705,7 @@ fn fuzzy_masked(name: &[u8], src: &[u8; 64], q: &[u8], cap: i32) -> Option<i32> 
         let x = masks[k] & u64::MAX.checked_shr(64 - to as u32).unwrap_or(0);
         (x != 0).then(|| 63 - x.leading_zeros() as usize)
     };
-    fuzzy_from(name, q, cap, end, next, prev)
+    fuzzy_from(name, q, cap, end, next, prev, &mut NoMatch)
 }
 
 /// The x86_64 arm: the same 64-byte position-mask algorithm on SSE2 (the
@@ -762,22 +762,49 @@ fn fuzzy_masked(name: &[u8], src: &[u8; 64], q: &[u8], cap: i32) -> Option<i32> 
         let x = masks[k] & u64::MAX.checked_shr(64 - to as u32).unwrap_or(0);
         (x != 0).then(|| 63 - x.leading_zeros() as usize)
     };
-    fuzzy_from(name, q, cap, end, next, prev)
+    fuzzy_from(name, q, cap, end, next, prev, &mut NoMatch)
+}
+
+/// Where the matcher writes the bytes it matched.
+///
+/// The search that scores does not want them and does not pay for them
+/// (`NoMatch` is a zero-sized type and the call is compiled out); the one
+/// that shows the span does.
+trait Matched {
+    /// The matcher matched the byte at `at`.
+    fn record(&mut self, at: usize);
+}
+
+/// The matcher that matches nothing down.
+struct NoMatch;
+
+impl Matched for NoMatch {
+    #[inline(always)]
+    fn record(&mut self, _at: usize) {}
+}
+
+impl Matched for Vec<u32> {
+    #[inline(always)]
+    fn record(&mut self, at: usize) {
+        self.push(at as u32);
+    }
 }
 
 /// The rest of `fuzzy_score_capped` once the leftmost-ending match ends at
 /// `end`: `next(k, from, to)` finds query byte k's first place in
 /// from..=to, `prev(k, to)` its last one before `to`.
 #[inline(always)]
-fn fuzzy_from(
+fn fuzzy_from<M: Matched>(
     name: &[u8],
     q: &[u8],
     cap: i32,
     end: usize,
     next: impl Fn(usize, usize, usize) -> Option<usize>,
     prev: impl Fn(usize, usize) -> Option<usize>,
+    matched: &mut M,
 ) -> Option<i32> {
     if q.len() == 1 {
+        matched.record(end);
         return Some(single_score(name, end, cap));
     }
     // Shrink from the right: the latest start that still ends at `end`.
@@ -800,6 +827,7 @@ fn fuzzy_from(
                 score += GAP_START + (at - last - 2) as i32 * GAP_EXT;
             }
         }
+        matched.record(at);
         let prev = if at == 0 { Class::Delim } else { class(name[at - 1]) };
         let mut b = bonus(prev, class(name[at]));
         if run {
@@ -978,6 +1006,12 @@ fn token_score(name: &[u8], wide: Wide, m: u64, t: &Token) -> Option<i32> {
 /// the comma, the plus and the at). A word that matches is the tightest
 /// match there is, so it scores like the exact mode does.
 fn keyword_score(name: &[u8], q: &[u8]) -> Option<i32> {
+    let (start, _) = keyword_span(name, q)?;
+    Some(40 + if start == 0 { 30 } else { 0 } - (name.len() as i32).min(80) / 3)
+}
+
+/// The bytes of the word of `name` that is the query.
+fn keyword_span(name: &[u8], q: &[u8]) -> Option<(usize, usize)> {
     if q.is_empty() {
         return None;
     }
@@ -990,11 +1024,102 @@ fn keyword_score(name: &[u8], q: &[u8]) -> Option<i32> {
         let end = if delim { i } else { i + 1 };
         let word = &name[start..end];
         if word.len() == q.len() && word.iter().zip(q).all(|(&a, &b)| fold(a) == b) {
-            return Some(40 + if start == 0 { 30 } else { 0 } - (name.len() as i32).min(80) / 3);
+            return Some((start, end));
         }
         start = i + 1;
     }
     None
+}
+
+/// The characters of a name that the query matched.
+///
+/// The offsets are in characters from the start of the name: the first
+/// character is 0. The matcher works on bytes, so the bytes it matched are
+/// snapped to the characters they belong to — a character is matched whole
+/// or not at all.
+///
+/// A name that matched through a typo, or through its shadow (the pinyin or
+/// the kana reading), has no positions: the span would be in another text.
+pub fn matched_chars(name: &[u8], tokens: &[Token]) -> Vec<u32> {
+    let mut out: Vec<u32> = Vec::new();
+    for t in tokens.iter().filter(|t| !t.negate) {
+        match t.mode {
+            Mode::Fuzzy => {
+                if let Some(bytes) = fuzzy_matched_bytes(name, &t.text) {
+                    out.extend(chars_of_bytes(name, &bytes));
+                }
+            }
+            Mode::Exact | Mode::Phrase => {
+                if let Some(p) = find_ci(name, &t.text) {
+                    out.extend(chars_of_range(name, p..p + t.text.len()));
+                }
+            }
+            Mode::Prefix => out.extend(chars_of_range(name, 0..t.text.len().min(name.len()))),
+            Mode::Suffix => {
+                let s = name.len().saturating_sub(t.text.len());
+                out.extend(chars_of_range(name, s..name.len()));
+            }
+            Mode::Keyword => {
+                if let Some((s, e)) = keyword_span(name, &t.text) {
+                    out.extend(chars_of_range(name, s..e));
+                }
+            }
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// The characters of `name` that the bytes in `bytes` fall in.
+fn chars_of_bytes(name: &[u8], bytes: &[u32]) -> Vec<u32> {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut chars = 0u32;
+    for (i, b) in name.iter().enumerate() {
+        // A continuation byte is 10xxxxxx: it belongs to the character
+        // before it and is not one of its own.
+        let is_start = b & 0xc0 != 0x80;
+        if bytes.binary_search(&(i as u32)).is_ok() {
+            out.push(if is_start { chars } else { chars - 1 });
+        }
+        if is_start {
+            chars += 1;
+        }
+    }
+    out
+}
+
+/// The characters of `name` that the bytes in `range` fall in.
+fn chars_of_range(name: &[u8], range: std::ops::Range<usize>) -> Vec<u32> {
+    let mut out = Vec::new();
+    let mut chars = 0u32;
+    for (i, b) in name.iter().enumerate() {
+        let is_start = b & 0xc0 != 0x80;
+        if i >= range.start && i < range.end {
+            out.push(if is_start { chars } else { chars - 1 });
+        }
+        if is_start {
+            chars += 1;
+        }
+    }
+    out
+}
+
+/// The bytes a fuzzy match of `q` in `name` covers.
+///
+/// The same match the scorer takes: the prefix when the name starts with
+/// the query, the leftmost-ending match otherwise.
+fn fuzzy_matched_bytes(name: &[u8], q: &[u8]) -> Option<Vec<u32>> {
+    if q.is_empty() {
+        return None;
+    }
+    let off = (name.len() > 1 && name[0] == b'.') as usize;
+    if prefix_score(name, q, 100).is_some() {
+        return Some((off..off + q.len()).map(|i| i as u32).collect());
+    }
+    let mut at = Vec::new();
+    fuzzy_scalar(name, q, 100, &mut at)?;
+    Some(at)
 }
 
 /// The score of the query against the name read in another script.
@@ -1697,6 +1822,31 @@ mod tests {
         assert!(!hit("!invoice", "/p/invoice.pdf", KIND_FILE, 0));
         assert!(!hit("!invoice", "/p/invoce.pdf", KIND_FILE, 0));
         assert!(hit("!invoice", "/p/receipt.pdf", KIND_FILE, 0));
+    }
+
+    /// The positions the matcher matched, in characters.
+    #[test]
+    fn the_matched_characters_are_the_span() {
+        // The fuzzy match is the leftmost one: the "port" of "report".
+        let t = q("port");
+        assert_eq!(matched_chars(b"report_port.txt", &t.tokens), vec![2, 3, 4, 5]);
+        // The word matcher takes the word.
+        let t = q("=port");
+        assert_eq!(matched_chars(b"report_port.txt", &t.tokens), vec![7, 8, 9, 10]);
+        // The phrase takes the words and the space between them.
+        let t = q("\"invoice pdf\"");
+        assert_eq!(matched_chars(b"my invoice pdf file.txt", &t.tokens), vec![3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+        // A name that did not match has no positions.
+        let t = q("zzz");
+        assert!(matched_chars(b"report_port.txt", &t.tokens).is_empty());
+    }
+
+    /// The positions are characters, not bytes: a name in another script
+    /// has the span where the characters are, whole.
+    #[test]
+    fn the_positions_snap_to_the_characters() {
+        let t = q("日本");
+        assert_eq!(matched_chars("日本語.txt".as_bytes(), &t.tokens), vec![0, 1]);
     }
 }
 
@@ -4003,13 +4153,13 @@ mod sse2_wide_tests {
         for name in names {
             for q in queries {
                 let sse = fuzzy_score(name, q);
-                let scalar = fuzzy_scalar(name, q, 100);
+                let scalar = fuzzy_scalar::<NoMatch>(name, q, 100, &mut NoMatch);
                 assert_eq!(sse, scalar, "name={name:?} q={q:?}");
             }
         }
         // Longer-than-window names take the scalar path by construction;
         // pin the window boundary itself.
         let long = b"a".repeat(65);
-        assert_eq!(fuzzy_score(&long, b"a"), fuzzy_scalar(&long, b"a", 100));
+        assert_eq!(fuzzy_score(&long, b"a"), fuzzy_scalar::<NoMatch>(&long, b"a", 100, &mut NoMatch));
     }
 }

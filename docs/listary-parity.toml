@@ -165,11 +165,11 @@ size = "S"
 id = "S.9"
 name = "Matched-position bitmap"
 phase = 2
-status = "G"
+status = "P"
 evidence = "§5.2, §5.5"
 listary = "Every matcher returns the positions it matched as a bitmap, and the fuzzy matcher works on character boundaries rather than bytes -- so the UI can highlight the span that earned the score."
-rgy = "Absent for the name search. `grep:` returns matches for the content engine, but a name hit carries no position, so there is nothing to highlight."
-work = "The matchers return a position bitmap over character boundaries; the CLI and the TUI render the span. This is the row that makes the others visible, and the reason the others are worth building."
+rgy = "Done. The matchers return the characters they matched (`name_query::matched_chars`), and the CLI's `--json` carries them as a `match` array while the TUI paints the span in the highlight's colour. The matcher works on bytes -- rgy's index is bytes -- so the bytes it matched are snapped to the characters they belong to: a character is matched whole or not at all. A name that matched through a typo, or through its shadow, has no positions: the span would be in another text."
+work = "None. The positions are computed on demand, for the rows that are shown; the scan does not carry them, so the hot path does not pay for them."
 size = "M"
 
 [[capability]]
