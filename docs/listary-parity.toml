@@ -5,11 +5,16 @@
 # recovered from the reverse engineering of Listary 7.1.0.45
 # (E:\listari-rea\REVERSE_ENGINEERING_REPORT.md), one column per side.
 #
-# This is the implementation plan. The `work` field of every G and D row
-# says what the change is in rgy's terms and where it lands; the `phase`
-# field says when. The phases run in order, and the order is a dependency
-# order, not a preference.
+# This is the implementation plan, and its scope is the **engine's
+# performance**: the ranking machinery, the matchers, the priority, the
+# query surface, the index shape and pinyin. The product surface Listary
+# also has -- the HTTP API, the suggestion sources, the index schedule,
+# the diagnostics -- is out of scope: it is features, not performance, and
+# it is recorded in the report rather than here.
 #
+# The work field of every G and D row says what the change is in rgy's
+# terms and where it lands; the phase field says when. The phases run
+# in order, and the order is a dependency order, not a preference.#
 # Legend:
 #   P = parity      (rgy has it; the `rgy` field says where)
 #   D = degraded    (rgy has a weaker version; the `work` field says how)
@@ -51,7 +56,6 @@ verification = "24/24 quantitative claims re-derived from the artefact"
 4 = { title = "The query surface", why = "The grammar, the relative time facets and the replay path. The replay path depends on the incremental session from phase 2." }
 5 = { title = "The index shape", why = "Five indexes over a validated parent-chain forest. The on-disk format stays rgy's own: the format is Listary's choice, not a capability." }
 6 = { title = "Pinyin", why = "The matcher family and the data behind it. The data has to be rebuilt from the syllable inventory, because cnmatch.bin is a legacy artefact the current engine does not read." }
-7 = { title = "Product surface", why = "Not algorithm. Listed so that the claim 'Listary beats Everything' is answered whole rather than half." }
 
 
 # ---------------------------------------------------------------------------
@@ -65,11 +69,11 @@ verification = "24/24 quantitative claims re-derived from the artefact"
 id = "S.1"
 name = "Packed 64-bit rank key"
 phase = 1
-status = "G"
+status = "D"
 evidence = "§5.3, §5.8.1"
 listary = "The final ranking key is a bit-packed u64: a 24-bit score field biased by 2^23, a 13-bit fractional field, byte-aligned sub-fields and flag bits."
-rgy = "The sort key is a tuple: an fzf-v1 i32 score descending, then the entry id ascending (name_query.rs)."
-work = "A `RankKey(u64)` in name-core that owns the layout, with the fzf score as its score input; the final sort compares keys, not tuples."
+rgy = "The final order is a tuple: an fzf-v1 i32 score descending, then the entry id ascending (name_query.rs). The top-K selection already packs (score, !idx) into one u64, so the mechanism is there and the final order is what has not caught up."
+work = "Promote the selection key to the ranking key: one u64 the final sort compares, carrying the tier and the axis weights in its high bits, with the fzf score as its score input."
 size = "M"
 
 [[capability]]
@@ -332,6 +336,17 @@ work = "None. Already at parity. The on-disk format differs (disk-index.lydb ver
 size = "S"
 
 [[capability]]
+id = "I.6"
+name = "The ranking adjustment lives in the record"
+phase = 5
+status = "P"
+evidence = "§4.5, §5.8.5"
+listary = "The record store keeps the ranking data in the record: `core_db/record_store.rs` is 58 of the 141 decompiled functions in Generation 2, the largest single component of the engine."
+rgy = "Done. The index carries the location prior each entry inherits from its directory (the `RankAdj` section, one byte per entry), so the search reads a ranking property it reads per candidate from the entry itself, instead of walking to the entry's parent and then to that parent's prior."
+work = "None. Already at parity. Measured on the name bench: 3.4% to 4.6% faster on every row, 9 runs at one thread where the spread is 1-8%. The on-disk format stays rgy's own (`FSIDX013`); what came from the report is the idea, not the format."
+size = "S"
+
+[[capability]]
 id = "I.5"
 name = "Source model with quarantine"
 phase = 5
@@ -381,70 +396,6 @@ listary = "The Generation-2 engine has the pinyin table compiled in: the 422-syl
 rgy = "Absent. rgy has an NFC table and no pinyin data."
 work = "Build the two tables from the Mandarin syllable inventory and the initial-letter alphabet. `cnmatch.bin` is a legacy artefact -- the current engine does not read it -- so it is evidence of the syllable set, not a file to ship."
 size = "M"
-
-# ---------------------------------------------------------------------------
-# Phase 7 -- product surface
-#
-# Not algorithm. Listed because "Listary beats Everything" is a claim
-# about the whole product, and a plan that only covers the engine would
-# leave the claim half-answered. The last row of each phase is the
-# cheapest way to see what a phase actually bought.
-# ---------------------------------------------------------------------------
-
-[[capability]]
-id = "H.1"
-name = "Local HTTP API"
-phase = 7
-status = "G"
-evidence = "§5.6"
-listary = "Listary 7 exposes a local HTTP API, with the port configurable and validated."
-rgy = "Absent. The daemon speaks JSON lines over a named pipe and a unix socket."
-work = "An HTTP listener on the daemon, answering the same protocol over HTTP. The protocol and the framing exist; the transport does not."
-size = "L"
-
-[[capability]]
-id = "H.2"
-name = "Suggestion sources"
-phase = 7
-status = "G"
-evidence = "§5.6"
-listary = "The suggestions draw on Desktop, Downloads, Windows Recent, several chat applications' file folders, and Listary's own history."
-rgy = "Absent."
-work = "A suggestion source that reads a set of well-known directories. The chat-application folders are the interesting half and the noisy half; they belong last."
-size = "M"
-
-[[capability]]
-id = "H.3"
-name = "Index schedule"
-phase = 7
-status = "G"
-evidence = "§4.4, §5.6"
-listary = "A schedule per indexed folder: real-time, daily or weekly, with the next window computed."
-rgy = "Absent. The index is built once and then updated by the watch."
-work = "The schedule model and the window computation, over the indexer that already exists."
-size = "M"
-
-[[capability]]
-id = "H.4"
-name = "Index diagnostics"
-phase = 7
-status = "G"
-evidence = "§5.6"
-listary = "A diagnostics surface over the index: the effective rules, the exclusions, what is not in the index, what is indexed but was not seen, and the searchable item count."
-rgy = "Absent. `searchctl --stats` reports counts; it does not explain them."
-work = "A diagnostics command that answers the questions the index cannot answer about itself. The priority rules of phase 3 are what it has to explain, so it comes after them."
-size = "M"
-
-[[capability]]
-id = "H.5"
-name = "Speed test and usage heatmap"
-phase = 7
-status = "G"
-evidence = "§5.6"
-listary = "A speed test over the index (across files, by name, by type) and a usage heatmap."
-rgy = "Absent in the product. The repository has a benchmark harness (scripts/bench-names.py) that measures the name index from outside -- which is the measurement, but not the in-product one."
-work = "An in-product speed test over the same corpora the harness uses, so the number a user sees is the number the gate measures."
-size = "S"
 
 # ---------------------------------------------------------------------------
 # Already at parity
@@ -549,4 +500,4 @@ affects = "S.1, S.2, S.10"
 [[unknown]]
 id = "U.5"
 text = "The managed assemblies are the legacy generation. The product's current index logic is the native Rust engine; the managed layer is the plugin and service contract."
-affects = "P.1, Q.1, H.1"
+affects = "P.1, Q.1"

@@ -120,6 +120,14 @@ impl BlobMut {
 
 /// The blob's magic.
 ///
+/// `FSIDX013` is `FSIDX012` with the ranking adjustment folded into the
+/// record: an entry carries the location prior it inherits from its
+/// directory, so a search reads it per entry instead of walking to the
+/// parent to find it. An index built before that says something else, so
+/// it is not loaded: a stale index would rank an entry by a prior the
+/// search no longer reads, and the answer would depend on whether the
+/// index had been rebuilt.
+///
 /// `FSIDX012` is `FSIDX011` with the name masks folded: a mask says which
 /// character classes a name holds, and the classes are now the ones of the
 /// *folded* name (see `crate::fold`), because that is the name a query is
@@ -127,7 +135,7 @@ impl BlobMut {
 /// so it is not loaded: a stale index would reject a name whose folded
 /// form holds a class its raw form does not, and the answer would depend
 /// on whether the index had been rebuilt.
-const MAGIC: &[u8; 8] = b"FSIDX012";
+const MAGIC: &[u8; 8] = b"FSIDX013";
 
 #[derive(Clone, Copy)]
 enum Sec {
@@ -136,6 +144,7 @@ enum Sec {
     Names,
     EntName,
     Kind,
+    RankAdj,
     Parent,
     Size,
     Mtime,
@@ -153,7 +162,7 @@ enum Sec {
     Exts,
     Zones,
 }
-const NSEC: usize = 21;
+const NSEC: usize = 22;
 
 pub struct Index {
     map: Blob,
@@ -246,6 +255,10 @@ impl Index {
     // its parent, size (see size_of), mtime.
     sec!(ent_name, Sec::EntName, u32, n);
     sec!(kind, Sec::Kind, u8, n);
+    // Per entry: the location prior it inherits from its directory. The
+    // search reads this per entry, so it lives beside the entry rather
+    // than one hop away in the directory table.
+    sec!(rank_adj, Sec::RankAdj, i8, n);
     sec!(parent, Sec::Parent, u32, n);
     sec!(size_raw, Sec::Size, u32, n);
     sec!(mtime, Sec::Mtime, u32, n);
@@ -670,6 +683,16 @@ impl Index {
         }
         drop((names, name_off, name_len));
 
+        // The location prior each entry inherits from its directory, folded
+        // into the record. The search reads this per entry, and reading it
+        // from the directory table means a dependent load -- the entry's
+        // parent, then that parent's prior -- in the hottest loop there
+        // is. Listary's record store keeps the same thing in the record
+        // (its `record_store.rs` is the largest module in its engine), and
+        // the reason is the same: a ranking property that is read per
+        // candidate belongs to the candidate.
+        let rank_adj: Vec<i8> = (0..n).map(|i| prior[parent[i] as usize]).collect();
+
         // Write the blob, freeing each array once its last reader is done:
         // the build's peak is here, the blob beside the arrays it copies.
         let (off, total) = layout(&section_lens(n, d, u, unames.len()));
@@ -681,6 +704,7 @@ impl Index {
         put(Sec::Names, &unames);
         put(Sec::EntName, as_bytes(&ent_name));
         put(Sec::Kind, &kind[..n]);
+        put(Sec::RankAdj, as_bytes(&rank_adj));
         put(Sec::Parent, as_bytes(&parent[..n]));
         put(Sec::Size, as_bytes(&enc));
         put(Sec::Mtime, as_bytes(&mtime[..n]));
@@ -697,13 +721,13 @@ impl Index {
         drop(dir_entry);
         // Each name's entries best location prior first (then ascending): a
         // search visiting them can stop at the first that cannot make it.
-        ne.par_sort_unstable_by_key(|&e| (ent_name[e as usize], std::cmp::Reverse(prior[parent[e as usize] as usize]), e));
+        ne.par_sort_unstable_by_key(|&e| (ent_name[e as usize], std::cmp::Reverse(rank_adj[e as usize]), e));
         put(Sec::NameEntsOff, as_bytes(&ne_off));
         put(Sec::NameEnts, as_bytes(&ne));
         drop((ne_off, ne));
         let mut name_prior = vec![i8::MIN; u];
         for (i, &k) in ent_name.iter().enumerate().skip(1) {
-            name_prior[k as usize] = name_prior[k as usize].max(prior[parent[i] as usize]);
+            name_prior[k as usize] = name_prior[k as usize].max(rank_adj[i]);
         }
         put(Sec::NamePrior, as_bytes(&name_prior));
         let info: Vec<NameInfo> =
@@ -912,7 +936,7 @@ impl NameInfo {
 fn section_lens(n: usize, d: usize, u: usize, names_len: usize) -> [usize; NSEC] {
     let (n4, d4, u4) = (n * 4, d * 4, (u + 1) * 4);
     let z = n.div_ceil(ZONE) * std::mem::size_of::<Zone>();
-    [u.div_ceil(64) * NBITMAPS * 8, u4, names_len, n4, n, n4, n4, n4, d4, d4, d4, d4, d, d4, u4, n4, u, u * 4, u, 256 * 16, z]
+    [u.div_ceil(64) * NBITMAPS * 8, u4, names_len, n4, n, n, n4, n4, n4, d4, d4, d4, d4, d, d4, u4, n4, u, u * 4, u, 256 * 16, z]
 }
 
 /// Entries per `Zone`.

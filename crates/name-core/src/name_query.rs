@@ -2375,7 +2375,7 @@ impl Searcher<'_> {
             now: now_secs(),
         };
         let entries = |k: u32| &ne[ne_off[k as usize] as usize..ne_off[k as usize + 1] as usize];
-        let (parent, dir_prior, de, dp, en) = (idx.parent(), idx.dir_prior(), idx.dir_entry(), idx.dir_parent(), idx.ent_name());
+        let (parent, de, dp, en) = (idx.parent(), idx.dir_entry(), idx.dir_parent(), idx.ent_name());
         // Whether a folder on the path to dir `d` has a negated token's name.
         let negated = |d: u32, cache: &mut HashMap<u32, bool, crate::name_index::Fx>| {
             let mut chain = Vec::new();
@@ -2408,7 +2408,7 @@ impl Searcher<'_> {
                     let nh = NameHit { score: c.score, bits: 1, flags: c.flags, best: [0; 4] };
                     for &e in entries(c.k).iter().filter(|&&e| (lo..hi).contains(&(e as usize))) {
                         // Entries come best prior first: the rest cannot make it either.
-                        if key(c.score as i32 + dir_prior[parent[e as usize] as usize] as i32 + tweak(c.flags), 0) <= top.floor {
+                        if key(c.score as i32 + idx.rank_adj()[e as usize] as i32 + tweak(c.flags), 0) <= top.floor {
                             break;
                         }
                         if !neg.is_empty() && negated(parent[e as usize], &mut cache) {
@@ -3170,8 +3170,10 @@ impl Scan<'_> {
         if self.live.is_dead(i as u32) {
             return None;
         }
-        let p = idx.parent()[i] as usize;
-        score += idx.dir_prior()[p] as i32 + rank_tweaks(nh.flags, k, mtime, self.now);
+        // The prior the entry inherits from its directory travels with the
+        // entry (see `Index::rank_adj`), so the hot loop reads one byte
+        // instead of the entry's parent and then that parent's prior.
+        score += idx.rank_adj()[i] as i32 + rank_tweaks(nh.flags, k, mtime, self.now);
         let key = key(score, i as u32);
         if key <= floor {
             return None;

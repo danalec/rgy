@@ -47,6 +47,16 @@ against it decides anything. At 4 workers the same code spreads 6.4% -- under
 the threshold -- and a thread-matched measurement is the only kind two hosts,
 or two machines, can be compared on at all.
 
+The other end of the same knob is the one to reach for when the host is
+busy. The same rows measured on a host with other work on it spread
+22–42% at four workers -- wider than the threshold, so the comparison is
+UNDECIDABLE -- and 1–8% at one worker, where it decides. A narrow pool is
+slower and measurable, and an A/B that has to be believed is taken there:
+the `RankAdj` change (the ranking adjustment travels with the entry) was
+measured at one worker, nine runs, best of nine, and every row came out
+3.4–4.6% faster. At four workers on a busy host the same change is inside
+the noise, and the honest report is that it is.
+
 The cost of that choice is in the numbers: the gate's rows are the 4-thread
 ones, which are slower than what the product pays on an idle 32-thread box.
 The gate is a regression detector, not a latency claim.

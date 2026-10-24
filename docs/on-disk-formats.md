@@ -4,14 +4,14 @@ Consumers: this workspace, `zen-c` (C port), and anything that reads
 a saved index without the daemon. Source of truth is the code named below —
 this file is the cross-language contract, not a second implementation.
 
-## FSIDX012 / "ERI v3" target (the name index v2 blob)
+## FSIDX013 / "ERI v3" target (the name index v2 blob)
 
 fsearch's mmap index, the v2 name index in `crates/name-core/src/name_index.rs`.
 One file, mmap-loadable, atomic replace (`*.tmp` + rename):
 
 ```
 offset 0       4096-byte header
-               magic "FSIDX012" (8 bytes)
+               magic "FSIDX013" (8 bytes)
                6 x u64 LE fields:
                  n          entry count
                  d          directory count
@@ -19,8 +19,15 @@ offset 0       4096-byte header
                  names_len  names blob byte length
                  event_id   live-update watermark (FSEvents id / USN)
                  synced_at  unix seconds all changes through which are applied
-offset 4096    the 21 sections, in the order below, each 64-byte aligned
+offset 4096    the 22 sections, in the order below, each 64-byte aligned
 ```
+
+`FSIDX013` is `FSIDX012` with one change: each entry carries the location
+prior it inherits from its directory, so the search reads a ranking
+property that it reads per candidate from the entry itself instead of
+walking to the entry's parent to find it. An index written before that
+says something different about the same file, and is not loaded: it is
+rebuilt.
 
 `FSIDX012` is `FSIDX011` with one change: the name masks describe the
 **folded** name (ASCII case fold plus Unicode NFC), because a mask says
@@ -39,22 +46,23 @@ the order of the `Sec` enum. A reader needs this table and nothing else:
 | 2 | `Names` | `u8` | `names_len` | the names blob |
 | 3 | `EntName` | `u32` | `n` | per entry: its name id |
 | 4 | `Kind` | `u8` | `n` | per entry: `walk::KIND_*` with the `walk::FLAG_*` bits |
-| 5 | `Parent` | `u32` | `n` | per entry: the dir id of its parent |
-| 6 | `Size` | `u32` | `n` | per entry: the size, encoded (`enc_size`) |
-| 7 | `Mtime` | `u32` | `n` | per entry: its mtime, unix seconds |
-| 8 | `DirEntry` | `u32` | `d` | per dir: the entry id of the folder |
-| 9 | `DirStart` | `u32` | `d` | per dir: its first child entry |
-| 10 | `DirLen` | `u32` | `d` | per dir: how many children it has |
-| 11 | `DirEnd` | `u32` | `d` | per dir: the end of its subtree |
-| 12 | `DirPrior` | `i8` | `d` | per dir: its location prior |
-| 13 | `DirParent` | `u32` | `d` | per dir: its parent dir id |
-| 14 | `NameEntsOff` | `u32` | `u1` | per distinct name: its offset in `NameEnts` |
-| 15 | `NameEnts` | `u32` | `n` | the entries of each name, in order |
-| 16 | `NamePrior` | `i8` | `u` | per distinct name: its prior |
-| 17 | `NameInfo` | `NameInfo` | `u` | per distinct name: key, length, stem, head |
-| 18 | `NameExt` | `u8` | `u` | per distinct name: its extension slot |
-| 19 | `Exts` | `[u8; 16]` | `ext_slots` | the extension table |
-| 20 | `Zones` | `Zone` | `zones_len` | what a filter on size, mtime or kind can skip |
+| 5 | `RankAdj` | `i8` | `n` | per entry: the location prior it inherits from its directory |
+| 6 | `Parent` | `u32` | `n` | per entry: the dir id of its parent |
+| 7 | `Size` | `u32` | `n` | per entry: the size, encoded (`enc_size`) |
+| 8 | `Mtime` | `u32` | `n` | per entry: its mtime, unix seconds |
+| 9 | `DirEntry` | `u32` | `d` | per dir: the entry id of the folder |
+| 10 | `DirStart` | `u32` | `d` | per dir: its first child entry |
+| 11 | `DirLen` | `u32` | `d` | per dir: how many children it has |
+| 12 | `DirEnd` | `u32` | `d` | per dir: the end of its subtree |
+| 13 | `DirPrior` | `i8` | `d` | per dir: its location prior |
+| 14 | `DirParent` | `u32` | `d` | per dir: its parent dir id |
+| 15 | `NameEntsOff` | `u32` | `u1` | per distinct name: its offset in `NameEnts` |
+| 16 | `NameEnts` | `u32` | `n` | the entries of each name, in order |
+| 17 | `NamePrior` | `i8` | `u` | per distinct name: its prior |
+| 18 | `NameInfo` | `NameInfo` | `u` | per distinct name: key, length, stem, head |
+| 19 | `NameExt` | `u8` | `u` | per distinct name: its extension slot |
+| 20 | `Exts` | `[u8; 16]` | `ext_slots` | the extension table |
+| 21 | `Zones` | `Zone` | `zones_len` | what a filter on size, mtime or kind can skip |
 
 Two sizes are not in the header and follow from the others: `bits_len`
 (the name bitmaps) and `zones_len`. `u1` is the size of the distinct-name

@@ -12,7 +12,7 @@ verification on machines this host does not have.
 
 | Piece | Where | State |
 |---|---|---|
-| Name index v2 (intern, DFS, bitmaps, mmap blob) | `crates/name-core` (`name_index`) | ✅ from fsearch |
+| Name index v2 (intern, DFS, bitmaps, mmap blob) | `crates/name-core` (`name_index`) | ✅ from fsearch; the blob is `FSIDX013`, and the ranking adjustment each entry inherits from its directory lives in the entry (the `RankAdj` section) rather than one hop away in the directory table — 3.4–4.6% faster on every row of the name bench |
 | Query syntax merge (fsearch tokens + zen-rs filters) | `crates/name-core` (`name_query`) | ✅ `type:`/`dir:`/`size:`/`re:`/globs/\|, fail-closed |
 | fzf-v1 scorer + typos + top-k + NameCache + **SSE2 wide scorer** | `crates/name-core` (`name_query`) | ✅ parity-tested vs scalar |
 | Live overlay | `crates/name-core` (`live`) | ✅ portable `lstat`; the base's root-relative paths and the overlay's openable ones are crossed, so a re-listed folder answers each file once. The daemon merges the overlay through `search_alternatives` and the CLI through `merge_hits`, so **every** live change is answered — the keyed-by-index merge it replaced dropped one change per file and made the CLI index the base with the overlay's `u32::MAX` sentinel (a panic); both paths are pinned by `every_live_change_is_answered` |
@@ -126,17 +126,23 @@ listed gap has been closed and the list forgot.
 
 #### The Listary plan
 
-[docs/listary-parity.md](listary-parity.md) is the plan: 37 capabilities
+[docs/listary-parity.md](listary-parity.md) is the plan: 33 capabilities
 recovered from the reverse engineering of Listary 7.1.0.45, one row each,
 with the work that closes every gap and the phase it belongs to. It asks a
 different question from the matrix above — that one asks "does this work on
 each OS", this one asks "does rgy do what Listary does".
 
-Twenty-two are gaps, seven are degraded, and eight are already at parity:
-the NTFS MFT reader, the USN journal monitor, the multi-volume
-enumeration, the folder walker, the atomic index snapshot, the
-u32-second modification time, the fail-closed regex and the parallel
-scoring came in with the merge or were already here.
+Sixteen are gaps, eight are degraded, and nine are already at parity: the
+NTFS MFT reader, the USN journal monitor, the multi-volume enumeration,
+the folder walker, the atomic index snapshot, the u32-second modification
+time, the fail-closed regex and the parallel scoring came in with the merge
+or were already here.
+
+The scope is the **engine's performance** — the ranking machinery, the
+matchers, the priority, the query surface, the index shape and pinyin. The
+product surface Listary also has (the HTTP API, the suggestion sources, the
+index schedule, the diagnostics) is out of scope: it is features, not
+performance, and it stays in the report rather than in the plan.
 
 The phases run in a dependency order, and it is not the order the rows are
 written in:
@@ -153,13 +159,19 @@ written in:
 5. **The index shape** — five indexes over a validated parent-chain
    forest. The on-disk format stays rgy's own.
 6. **Pinyin** — the matcher family and the data behind it.
-7. **Product surface** — the HTTP API, the suggestion sources, the index
-   schedule and the diagnostics. Not algorithm, but the claim that Listary
-   beats Everything is about the whole product.
 
 The gate (`python scripts/listary-parity.py --check`) fails when a gap has
 no work or no phase, and when a parity claim names no place in the code. It
 does not fail because a gap is open: a gap is the work.
+
+**How the measurements are taken.** The name bench is measured at a fixed
+worker width, and the width decides whether the number means anything. On
+this host the four-thread rows spread 22–42% between runs — wider than the
+20% threshold the gate rules on, so a four-thread comparison here is
+UNDECIDABLE and the script says so rather than guessing. At one thread the
+same rows spread 1–8% and the comparison is decidable. The A/B behind the
+`RankAdj` section was taken at one thread for that reason: nine runs, best
+of nine, and every row faster by 3.4–4.6%.
 
 #### The limits that are documented
 
