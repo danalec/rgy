@@ -118,6 +118,11 @@ const TEXT_EXTS: &[&[u8]] = &[
     b"asm", b"s", b"d", b"cr", b"pas", b"f90", b"cmd", b"service", b"desktop", b"gitignore", b"editorconfig", b"lock", b"sum",
 ];
 
+/// A segment's own contents, the live docs holding them, and the runs of
+/// consecutive gids it holds them in.
+///
+/// Cloning is cheap: the postings live in the mmap, which is shared.
+#[derive(Clone)]
 pub struct Segment {
     map: std::sync::Arc<Blob>,
     pub id: u64,
@@ -1183,7 +1188,7 @@ struct Copies {
 /// How many live docs hold each of a segment's own contents, in bit planes
 /// (bit c of plane k: bit k of content c's count), so that the docs holding
 /// any of a set of contents add up a word at a time.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Counts {
     planes: Vec<Vec<u64>>,
     n: usize,
@@ -4246,6 +4251,81 @@ mod grep_pipeline_tests {
 
         assert_eq!(content.search(&before, &q).files.len(), 0, "the old text is gone");
         assert_eq!(content.search(&after, &q).files.len(), 1, "a directory event must re-list the directory, reaching the edit inside it");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The merge must not change a single answer.
+    ///
+    /// The segments pile up: a batch of files is a segment, and a thousand
+    /// batches are a thousand segments to read on every query. The plan
+    /// groups them and the merge folds a group into one. A merge rewrites
+    /// the postings, renumbers the contents and drops the tombstones, so it
+    /// has every chance of answering something different -- and the answer
+    /// is what the user sees, so "the merge preserves the answer" is the
+    /// only property worth having.
+    ///
+    /// The fixture is built so the plan has something to group: eight
+    /// segments of one tier, each holding its own file.
+    #[test]
+    fn the_merge_keeps_the_answers() {
+        let dir = std::env::temp_dir().join(format!("rgy_merge_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Eight files, each with its own text: eight contents, eight
+        // segments, one per file.
+        for i in 0..8 {
+            std::fs::write(dir.join(format!("f{i}.rs")), format!("fn f{i}() {{ let x = {i}; }}\n").as_bytes()).unwrap();
+        }
+        let root = dir.to_string_lossy().into_owned().into_bytes();
+        let src = PortableSource::new(root.clone(), 2);
+        let live = Live::new(Index::build(src.enumerate().unwrap(), 0, 1, b"/"));
+        let idx = dir.join("index");
+        let mut content = Content::open(idx.clone());
+        let docs = wanted(&live, b"", b"/", true, &root);
+        assert_eq!(docs.len(), 8, "the fixture holds eight files");
+        // One segment per file: the plan groups eight same-tier segments.
+        for i in 0..8 {
+            let id = content.alloc_id();
+            let seg = build_segment(&idx, id, &docs, i..i + 1).expect("a segment builds");
+            content.push(seg);
+        }
+        assert_eq!(content.segs.len(), 8, "eight batches are eight segments");
+
+        let q = Query::default();
+        let names = |c: &Content| -> Vec<String> {
+            let mut v: Vec<String> = c
+                .segs
+                .iter()
+                .flat_map(|s| (0..s.ndocs as u32).map(|d| s.path(d).to_vec()))
+                .map(|p| String::from_utf8_lossy(&p).into_owned())
+                .collect();
+            v.sort();
+            v
+        };
+        let before = names(&content);
+
+        // The plan must have something to group, and the merge must fold it.
+        let ids = content.merge_plan().expect("eight same-tier segments must group");
+        assert_eq!(ids.len(), 8, "the plan groups the whole tier: {ids:?}");
+        let id = content.alloc_id();
+        let segs = content.segments(&ids);
+        let merged = merge(&idx, id, &segs).expect("the merge builds");
+        content.replace(&ids, merged);
+
+        assert_eq!(content.segs.len(), 1, "eight segments became one: {ids:?}");
+        assert_eq!(names(&content), before, "the merge must not change the documents it holds");
+
+        // And the answers are the same: every file still answers its own
+        // text, and nothing else does.
+        for i in 0..8 {
+            let g = Grep::new(&format!("f{i}"), GrepMode::Literal).expect("grep compiles");
+            let got = content.search(&g, &q);
+            assert_eq!(got.files.len(), 1, "f{i} answers for itself and nothing else");
+            assert!(String::from_utf8_lossy(&got.files[0].path).ends_with(&format!("f{i}.rs")), "f{i} is the file");
+        }
+        // A word no file holds still answers nothing.
+        let none = Grep::new("nothinghere", GrepMode::Literal).expect("grep compiles");
+        assert_eq!(content.search(&none, &q).files.len(), 0, "a word no file holds must not answer");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

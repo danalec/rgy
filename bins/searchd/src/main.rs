@@ -1219,9 +1219,32 @@ fn spawn_content(ctx: &std::sync::Arc<Ctx>, dir: std::path::PathBuf) {
                         // the lock released: a search that runs beside it
                         // must not wait for a read of the whole batch.
                         if let Some(seg) = content::build_segment(&dir, id, &todo, 0..n) {
-                            let mut g = ctx.content.lock().unwrap();
-                            if let Some(c) = g.as_mut() {
+                            // The segments pile up: a batch of files is a
+                            // segment, and a thousand batches are a
+                            // thousand segments to read on every query. The
+                            // plan says when enough of them have gathered
+                            // to be worth merging into one.
+                            let (ids, segs, mid) = {
+                                let mut g = ctx.content.lock().unwrap();
+                                let Some(c) = g.as_mut() else { continue };
                                 c.push(seg);
+                                let Some(ids) = c.merge_plan() else { continue };
+                                // The segments are cloned (the postings are
+                                // a shared mmap) so the merge can run with
+                                // the lock released: it reads eight
+                                // segments and writes a new one, and a
+                                // search running beside it must not wait.
+                                let segs: Vec<content::Segment> =
+                                    c.segments(&ids).into_iter().cloned().collect();
+                                let mid = c.alloc_id();
+                                (ids, segs, mid)
+                            };
+                            let refs: Vec<&content::Segment> = segs.iter().collect();
+                            if let Some(merged) = content::merge(&dir, mid, &refs) {
+                                let mut g = ctx.content.lock().unwrap();
+                                if let Some(c) = g.as_mut() {
+                                    c.replace(&ids, merged);
+                                }
                             }
                         }
                     }
