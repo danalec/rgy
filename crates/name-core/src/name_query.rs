@@ -16,6 +16,7 @@
 use crate::fold;
 use crate::live::Live;
 use crate::name_index::{BM_DOUBLE, BM_FIRST, BM_SECOND, BM_START, CLASSES, Index, ZONE, Zone, char_bit, start_bit};
+use crate::rank::{RankKey, Score, Tier};
 use rayon::prelude::*;
 use rgy_discovery::walk::{FLAG_HIDDEN, KIND_DIR, KIND_FILE, KIND_LINK};
 use std::collections::HashMap;
@@ -1410,7 +1411,11 @@ mod tests {
     /// defect was in the merge, not in the matcher.
     #[test]
     fn the_merge_keeps_every_distinct_overlay_entry() {
-        let overlay = |name: &str, score: i32| Hit { score, idx: u32::MAX, over: Some(format!("/new/{name}").into_bytes()) };
+        let overlay = |name: &str, score: i32| Hit {
+            key: rank_key(Tier::Normal, score, RankKey::NO_ENTRY),
+            idx: u32::MAX,
+            over: Some(format!("/new/{name}").into_bytes()),
+        };
         let merged = merge_hits(vec![overlay("one", 10), overlay("two", 20), overlay("three", 30)], 50);
         assert_eq!(merged.len(), 3, "three distinct entries, not one");
         let mut names: Vec<String> = merged.iter().map(|h| String::from_utf8(h.over.clone().expect("overlay")).unwrap()).collect();
@@ -1422,11 +1427,11 @@ mod tests {
     /// of the two scores -- not twice, and not with the worse one.
     #[test]
     fn the_merge_takes_the_best_score_per_entry() {
-        let base = |idx: u32, score: i32| Hit { score, idx, over: None };
+        let base = |idx: u32, score: i32| Hit { key: rank_key(Tier::Normal, score, idx), idx, over: None };
         let merged = merge_hits(vec![base(7, 10), base(7, 99), base(8, 5)], 50);
         assert_eq!(merged.len(), 2, "entry 7 matched twice but is one entry");
         let seven = merged.iter().find(|h| h.idx == 7).expect("entry 7");
-        assert_eq!(seven.score, 99, "the better of the two scores wins");
+        assert_eq!(seven.score(), 99, "the better of the two scores wins");
     }
 
     /// Two overlay entries tying on score must come out in the same order
@@ -1435,7 +1440,7 @@ mod tests {
     /// is how a stable-looking result list turns into one that reshuffles.
     #[test]
     fn the_merge_order_is_total_not_map_iteration_order() {
-        let overlay = |name: &str| Hit { score: 5, idx: u32::MAX, over: Some(name.as_bytes().to_vec()) };
+        let overlay = |name: &str| Hit { key: rank_key(Tier::Normal, 5, RankKey::NO_ENTRY), idx: u32::MAX, over: Some(name.as_bytes().to_vec()) };
         for _ in 0..20 {
             let merged = merge_hits(vec![overlay("/zeta"), overlay("/alpha"), overlay("/mid")], 50);
             let paths: Vec<&[u8]> = merged.iter().map(|h| h.over.as_ref().unwrap().as_slice()).collect();
@@ -1448,7 +1453,13 @@ mod tests {
     /// `u32::MAX` overlay sentinel).
     #[test]
     fn the_merge_puts_base_entries_first_on_a_tie() {
-        let merged = merge_hits(vec![Hit { score: 5, idx: u32::MAX, over: Some(b"/new/x".to_vec()) }, Hit { score: 5, idx: 3, over: None }], 50);
+        let merged = merge_hits(
+            vec![
+                Hit { key: rank_key(Tier::Normal, 5, RankKey::NO_ENTRY), idx: u32::MAX, over: Some(b"/new/x".to_vec()) },
+                Hit { key: rank_key(Tier::Normal, 5, 3), idx: 3, over: None },
+            ],
+            50,
+        );
         assert_eq!(merged[0].idx, 3);
         assert!(merged[1].over.is_some());
     }
@@ -1624,6 +1635,12 @@ impl Token {
 /// A name `Searcher::ranked` scored, and the bound on its entries' scores.
 struct Cand {
     bound: i32,
+    /// The tier of the name's best folder, and so the best tier any of its
+    /// entries is in.
+    ///
+    /// The bound is on the key, and the key starts with the tier, so the
+    /// bound has to carry it too.
+    tier: Tier,
     k: u32,
     score: i16,
     flags: u8,
@@ -1811,10 +1828,24 @@ fn ends_with_fold(name: &[u8], s: &[u8]) -> bool {
 
 /// Fuzzy words this long forgive one typo (see `typo_score`).
 pub struct Hit {
-    pub score: i32,
+    /// The key it was ranked by: the tier, the score, and the tie-break.
+    ///
+    /// The order of the results is the order of these keys (see
+    /// [`crate::rank`]), so the score alone is not what decides a result.
+    pub key: RankKey,
     /// Base entry, or u32::MAX for an overlay entry (then `over` is its path).
     pub idx: u32,
     pub over: Option<Vec<u8>>,
+}
+
+impl Hit {
+    /// The score, in whole points.
+    ///
+    /// The key carries the score in a 24-bit field, so this is the score
+    /// the ranking used, minus the tier that outranks it.
+    pub fn score(&self) -> i32 {
+        self.key.points()
+    }
 }
 
 /// What makes a hit the entry it is, so a merge of `|` alternatives can tell
@@ -1868,7 +1899,7 @@ pub fn merge_hits(all: Vec<Hit>, limit: usize) -> Vec<Hit> {
     for h in all {
         match best.entry(h.id()) {
             Entry::Occupied(mut e) => {
-                if e.get().score < h.score {
+                if e.get().key < h.key {
                     e.insert(h);
                 }
             }
@@ -1879,7 +1910,7 @@ pub fn merge_hits(all: Vec<Hit>, limit: usize) -> Vec<Hit> {
     }
     let mut hits: Vec<Hit> = best.into_values().collect();
     hits.sort_by(|a, b| {
-        b.score.cmp(&a.score).then_with(|| match (&a.over, &b.over) {
+        b.key.cmp(&a.key).then_with(|| match (&a.over, &b.over) {
             (None, None) => a.idx.cmp(&b.idx),
             (Some(x), Some(y)) => x.cmp(y),
             (None, Some(_)) => std::cmp::Ordering::Less,
@@ -1891,22 +1922,37 @@ pub fn merge_hits(all: Vec<Hit>, limit: usize) -> Vec<Hit> {
 }
 struct TopK {
     k: usize,
-    buf: Vec<u64>,
+    buf: Vec<RankKey>,
     /// Keys at or below this cannot get in.
-    floor: u64,
+    floor: RankKey,
 }
 
+/// The key of an entry: the tier it inherits from its directory, its score
+/// and its place in the order.
+///
+/// The tier is the point of the key: a priority that is only a term added
+/// to the score loses to a better name, and the ranking corpus
+/// (`tests/ranking.rs`) says the priority is what the user meant. The name
+/// and attribute tiers are `Normal` until the rules of the next phase set
+/// them.
 #[inline(always)]
-fn key(score: i32, i: u32) -> u64 {
-    (((score as i64 - i32::MIN as i64) as u64) << 32) | (!i) as u64
+fn rank_key(tier: Tier, score: i32, entry: u32) -> RankKey {
+    RankKey::new(tier, Tier::Normal, Tier::Normal, Score::from_points(score), entry)
+}
+
+/// The key of an entry whose tier rides in its kind byte: the path's tier
+/// goes into the key's tier field without being unpacked and repacked.
+#[inline(always)]
+fn entry_key(kind: u8, score: i32, entry: u32) -> RankKey {
+    RankKey::for_entry(kind, Score::from_points(score), entry)
 }
 
 impl TopK {
-    fn new(k: usize, floor: u64) -> TopK {
-        TopK { k, buf: Vec::new(), floor: if k == 0 { u64::MAX } else { floor } }
+    fn new(k: usize, floor: RankKey) -> TopK {
+        TopK { k, buf: Vec::new(), floor: if k == 0 { RankKey::from_bits(u64::MAX) } else { floor } }
     }
     #[inline]
-    fn push(&mut self, key: u64) {
+    fn push(&mut self, key: RankKey) {
         if key > self.floor {
             self.buf.push(key);
             if self.buf.len() >= (2 * self.k).max(64) {
@@ -2005,7 +2051,7 @@ impl<T> Cells<T> {
 /// survivors (merging heaps pairwise costs more than the scan when `k` is
 /// large). Up to INLINE_VISITS entries to `visit` in all take less time
 /// than waking threads.
-fn top_k(n: usize, k: usize, visits: usize, floor: u64, visit: impl Fn(std::ops::Range<usize>, &mut TopK) + Sync) -> Vec<Hit> {
+fn top_k(n: usize, k: usize, visits: usize, floor: RankKey, visit: impl Fn(std::ops::Range<usize>, &mut TopK) + Sync) -> Vec<Hit> {
     let piece = |r: std::ops::Range<usize>| {
         let mut top = TopK::new(k, floor);
         visit(r, &mut top);
@@ -2020,8 +2066,8 @@ fn top_k(n: usize, k: usize, visits: usize, floor: u64, visit: impl Fn(std::ops:
         par_each(pieces, || (), |_, p| piece((p * step).min(n)..((p + 1) * step).min(n)))
     };
     // A full piece's k-th best already bounds the overall k-th from below.
-    let floor = tops.iter().filter(|t| t.buf.len() == k).map(|t| t.floor).max().unwrap_or(0);
-    let mut keys: Vec<u64> = tops.into_iter().flat_map(|t| t.buf).filter(|&x| x >= floor).collect();
+    let floor = tops.iter().filter(|t| t.buf.len() == k).map(|t| t.floor).max().unwrap_or_default();
+    let mut keys: Vec<RankKey> = tops.into_iter().flat_map(|t| t.buf).filter(|&x| x >= floor).collect();
     if keys.len() > k {
         if k == 0 {
             return Vec::new();
@@ -2029,7 +2075,7 @@ fn top_k(n: usize, k: usize, visits: usize, floor: u64, visit: impl Fn(std::ops:
         keys.select_nth_unstable_by(k - 1, |a, b| b.cmp(a));
         keys.truncate(k);
     }
-    keys.into_iter().map(|x| Hit { score: ((x >> 32) as i64 + i32::MIN as i64) as i32, idx: !(x as u32), over: None }).collect()
+    keys.into_iter().map(|key| Hit { key, idx: key.entry(), over: None }).collect()
 }
 
 /// Below this many entries carrying a matching name, a `driven` attempt
@@ -2087,6 +2133,13 @@ const DRIVEN_NAMES: f64 = 20_000.0;
 const DRIVEN_TRIES: usize = 2;
 /// Cheap bounds `ranked` tells apart: BINS of them from -BIN0.
 const BINS: usize = 1024;
+/// The tiers the bins are stacked in: the tier first, then the score.
+///
+/// The key a bound belongs to starts with the tier, so the bins have to be
+/// tier-major: a name whose folders are all demoted cannot beat a name
+/// whose folder is not, whatever their scores say. A bin space that only
+/// held the score would drop the second name for the first one's score.
+const TIER_BINS: usize = 6 * BINS;
 const BIN0: i32 = 256;
 /// `ranked` scores the names best bound first in batches, the first about
 /// this many names, then four times as many each time up to LAST_BATCH;
@@ -2208,7 +2261,7 @@ impl Searcher<'_> {
         }
         let mut hits = self.search_base(q);
         hits.extend(self.search_overlay(q));
-        hits.sort_by(|a, b| b.score.cmp(&a.score).then(a.idx.cmp(&b.idx)));
+        hits.sort_by(|a, b| b.key.cmp(&a.key).then(a.idx.cmp(&b.idx)));
         hits.truncate(q.limit);
         hits
     }
@@ -2240,7 +2293,7 @@ impl Searcher<'_> {
         let q = &Self::uncapped(q);
         let mut hits = self.search_base(q);
         hits.extend(self.search_overlay(q));
-        hits.sort_by(|a, b| b.score.cmp(&a.score).then(a.idx.cmp(&b.idx)));
+        hits.sort_by(|a, b| b.key.cmp(&a.key).then(a.idx.cmp(&b.idx)));
         hits
     }
 
@@ -2436,6 +2489,14 @@ impl Searcher<'_> {
         let space = char_bit(b' ').trailing_zeros() as usize;
         let space = [idx.bitmap(BM_FIRST + space), idx.bitmap(BM_SECOND + space)];
         let tweak = |flags: u8| 10 + if flags & NF_APP != 0 { 25 } else { 0 } - if flags & NF_DOT != 0 { 8 } else { 0 };
+        // The bin a bound falls in: the tier first, then the score.
+        //
+        // The tier is the point. The key a bound belongs to starts with the
+        // tier, so a name whose folders are all demoted cannot beat a name
+        // whose folder is not, whatever their scores say -- and a bin space
+        // that only held the score would drop the second name for the
+        // first one's score.
+        let bin_of = |tier: Tier, bound: i32| tier.bits() as usize * BINS + (bound + BIN0).clamp(0, BINS as i32 - 1) as usize;
         let neg: Vec<&Token> = q.tokens.iter().filter(|t| t.negate).collect();
         let scoped = within.is_some();
         let within = |w: usize| within.map_or(!0, |s| s.bits[w]);
@@ -2456,7 +2517,8 @@ impl Searcher<'_> {
             }
             let score = s.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
             let flags = name_flags(&name) | NF_OK;
-            Some(Cand { bound: score as i32 + prior[k as usize] as i32 + tweak(flags), k, score, flags })
+            let p = prior[k as usize] as i32;
+            Some(Cand { bound: score as i32 + p + tweak(flags), tier: Tier::from_prior(p), k, score, flags })
         };
         // The cheap bound: 24 per char + 8 (16 less if the token starts with
         // a delimiter, which takes no boundary bonus), plus the placement
@@ -2504,10 +2566,10 @@ impl Searcher<'_> {
             }
             out
         };
-        // The entries of `names` that beat `floor` (a `key`). A name's run
+        // The entries of `names` that beat `floor` (a key). A name's run
         // stops once `limit` of its entries are in: that many at most count
         // as work.
-        let visit = |names: &[Cand], floor: u64| {
+        let visit = |names: &[Cand], floor: RankKey| {
             let visits = names.iter().map(|x| entries(x.k).len().min(q.limit)).sum();
             top_k(names.len(), q.limit, visits, floor, |r, top| {
                 let (mut pbuf, mut cache) = (Vec::new(), HashMap::default());
@@ -2515,7 +2577,8 @@ impl Searcher<'_> {
                     let nh = NameHit { score: c.score, bits: 1, flags: c.flags, best: [0; 4] };
                     for &e in entries(c.k).iter().filter(|&&e| (lo..hi).contains(&(e as usize))) {
                         // Entries come best prior first: the rest cannot make it either.
-                        if key(c.score as i32 + idx.rank_adj()[e as usize] as i32 + tweak(c.flags), 0) <= top.floor {
+                        let p = idx.rank_adj()[e as usize] as i32;
+                        if entry_key(idx.kind()[e as usize], c.score as i32 + p + tweak(c.flags), e) <= top.floor {
                             break;
                         }
                         if !neg.is_empty() && negated(parent[e as usize], &mut cache) {
@@ -2528,29 +2591,32 @@ impl Searcher<'_> {
                 }
             })
         };
-        // The best `limit` hits so far, the limit-th one's score (i32::MIN if
-        // fewer) and key (0 if fewer).
+        // The best `limit` hits so far, the limit-th one's bin (i32::MIN if
+        // fewer) and key (the default if fewer).
         let best = |mut hits: Vec<Hit>| {
-            hits.sort_by(|a, b| b.score.cmp(&a.score).then(a.idx.cmp(&b.idx)));
+            hits.sort_by(|a, b| b.key.cmp(&a.key).then(a.idx.cmp(&b.idx)));
             hits.truncate(q.limit);
-            let last = hits.get(q.limit - 1).map(|h| (h.score, key(h.score, h.idx)));
-            let (floor, fkey) = last.unwrap_or((i32::MIN, 0));
+            let last = hits.get(q.limit - 1).map(|h| (bin_of(h.key.path_tier(), h.key.points()) as i32, h.key));
+            let (floor, fkey) = last.unwrap_or((i32::MIN, RankKey::default()));
             (hits, floor, fkey)
         };
         // The names that can start with the token (the only ones that can
         // get a placement bonus), best cheap bound first, with how many fall
         // in each bin.
-        let bin = |b: i32| (b + BIN0).clamp(0, BINS as i32 - 1) as usize;
+        //
+        // A name's bin is its best folder's tier -- the best tier any of its
+        // entries is in -- and its cheap bound.
+        let bin = |bound: i32, k: u32| bin_of(Tier::from_prior(prior[k as usize] as i32), bound);
         let sorted = |got: Vec<(i32, u32)>, h: Vec<u32>| {
-            let mut at = vec![0u32; BINS];
+            let mut at = vec![0u32; TIER_BINS];
             let mut acc = 0;
-            for b in (0..BINS).rev() {
+            for b in (0..TIER_BINS).rev() {
                 at[b] = acc;
                 acc += h[b];
             }
             let mut sorted = vec![(0, 0); got.len()];
             for x in got {
-                let b = bin(x.0);
+                let b = bin(x.0, x.1);
                 sorted[at[b] as usize] = x;
                 at[b] += 1;
             }
@@ -2558,55 +2624,77 @@ impl Searcher<'_> {
         };
         let by_key = idx.by_key();
         // How far a run of batches got: the best hits so far, the limit-th
-        // one's score and key, the bin from which on every name is scored,
+        // one's bin and key, the bin from which on every name is scored,
         // the next batch's size and how much of `by_key.list` is done.
         struct Run {
             hits: Vec<Hit>,
             floor: i32,
-            fkey: u64,
+            fkey: RankKey,
             top: usize,
             want: usize,
             listed: usize,
         }
         // Names with their cheap bounds, best first, and how many per bin.
         type Part = (Vec<(i32, u32)>, Vec<u32>);
+        // The bin a name of `by_key.list` falls in: its key's bound, and the
+        // highest tier a name with that key can be in.
+        //
+        // A name's key is its prior plus its tweak less its length
+        // penalty, so its prior is at most the key plus 34 -- and the tier
+        // is what the prior says. The tier that goes with the key is
+        // therefore an upper bound, and the bound is what a walk needs: the
+        // name is looked at no later than it deserves. It also keeps the
+        // bins monotone in the key, which is the order the list is in.
+        let list_bin = |key: i32| bin_of(Tier::from_prior(key + 34), base + key);
         // Score them best bin first, a batch at a time, until no name left
         // can beat the limit-th entry found. With `complete` false `parts`
         // holds only some of them, the rest bounded by `cover + 29` over
         // base: unless that settles the search, how far it got.
         let run = |parts: Vec<Part>, complete: bool, r: Run| -> Result<Option<Vec<Hit>>, Run> {
             let Run { mut hits, mut floor, mut fkey, mut top, mut want, mut listed } = r;
-            let mut hist = vec![0usize; BINS];
+            let mut hist = vec![0usize; TIER_BINS];
             for (_, h) in &parts {
                 hist.iter_mut().zip(h).for_each(|(a, &b)| *a += b as usize);
             }
             // Names that cannot start with the token get no placement bonus:
             // base + key bounds them. The highest keys come in order, the
             // rest only matter if the floor ends up below them.
-            for (key, &n) in (by_key.cover..=i8::MAX as i32).zip(&by_key.counts) {
-                hist[bin(base + key)] += n as usize;
+            //
+            // The bins are tier-major, and the counts by key cannot say
+            // which tier a name is in, so the histogram is built from the
+            // list itself: it holds every name at or above the cover, and
+            // it is bounded.
+            for &(key, _) in &by_key.list {
+                hist[list_bin(key as i32)] += 1;
             }
-            let mut taken: Vec<usize> = parts.iter().map(|(items, _)| items.iter().take_while(|x| bin(x.0) >= top).count()).collect();
-            let done = |floor: i32, top: usize| floor != i32::MIN && (top == 0 || floor > top as i32 - 1 - BIN0);
+            let mut taken: Vec<usize> = parts.iter().map(|(items, _)| items.iter().take_while(|x| bin(x.0, x.1) >= top).count()).collect();
+            let done = |floor: i32, top: usize| floor != i32::MIN && (top == 0 || floor > top as i32 - 1);
+            // The cheapest bin a name left can be in: the cover (the lowest
+            // name key) over base, in the lowest tier there is. The floor
+            // has to be above it before no name left can settle the search.
+            let cheapest = bin_of(Tier::Ignored, base + by_key.cover) as i32;
             // Without all of them, names bounded by `cover + 29` over base
             // cannot settle it.
-            let least = if complete { 0 } else { bin(base + by_key.cover + 30) };
+            let least = if complete { 0 } else { bin_of(Tier::Ignored, base + by_key.cover + 30) };
             while want <= LAST_BATCH && !done(floor, top) && top > least {
-                let low = if floor == i32::MIN { 0 } else { bin(floor) }.max(least);
+                // The floor as a bin. i32::MIN means no hit yet, and then
+                // every name is worth looking at.
+                let fbin = if floor == i32::MIN { 0 } else { floor as usize };
+                let low = if floor == i32::MIN { 0 } else { floor as usize }.max(least);
                 let (mut cut, mut n) = (top, 0);
                 while cut > low && n < want {
                     cut -= 1;
                     n += hist[cut];
                 }
                 let ends: Vec<usize> =
-                    parts.iter().zip(&taken).map(|((items, _), &a)| a + items[a..].iter().take_while(|x| bin(x.0) >= cut).count()).collect();
-                let lend = listed + by_key.list[listed..].iter().take_while(|x| bin(base + x.0 as i32) >= cut).count();
+                    parts.iter().zip(&taken).map(|((items, _), &a)| a + items[a..].iter().take_while(|x| bin(x.0, x.1) >= cut).count()).collect();
+                let lend = listed + by_key.list[listed..].iter().take_while(|x| list_bin(x.0 as i32) >= cut).count();
                 let one = |p: usize| {
                     let re = q.name_re.clone();
                     let items = &parts[p].0[taken[p]..ends[p]];
                     items
                         .iter()
-                        .filter_map(|&(_, k)| score(k, tb.word(k as usize / 64), re.as_ref()).filter(|c| c.bound >= floor))
+                        .filter_map(|&(_, k)| score(k, tb.word(k as usize / 64), re.as_ref()).filter(|c| bin_of(c.tier, c.bound) >= fbin))
                         .collect::<Vec<_>>()
                 };
                 let mut batch: Vec<Cand> = if n <= INLINE_NAMES {
@@ -2621,7 +2709,7 @@ impl Searcher<'_> {
                         return None;
                     }
                     let x = tb.word(w);
-                    (x.0 >> i & 1 != 0).then(|| score(k, x, re.as_ref())).flatten().filter(|c| c.bound >= floor)
+                    (x.0 >> i & 1 != 0).then(|| score(k, x, re.as_ref())).flatten().filter(|c| bin_of(c.tier, c.bound) >= fbin)
                 }));
                 (taken, listed) = (ends, lend);
                 (hits, floor, fkey) = best(hits.into_iter().chain(visit(&batch, fkey)).collect());
@@ -2631,7 +2719,7 @@ impl Searcher<'_> {
                 // matches: a name table costs no more and typing can narrow
                 // it. So does any try whose first two batches turn up a
                 // handful of hits.
-                if tentative && !(done(floor, top) && floor >= base + by_key.cover) || hits.len() < q.limit / 4 && want > FIRST_BATCH * 4 {
+                if tentative && !(done(floor, top) && floor >= cheapest) || hits.len() < q.limit / 4 && want > FIRST_BATCH * 4 {
                     if !complete {
                         break;
                     }
@@ -2640,7 +2728,7 @@ impl Searcher<'_> {
             }
             // Then, if the floor is low, every other name that can still
             // beat it, in one pass.
-            if done(floor, top) && floor >= base + by_key.cover && (complete || floor > base + by_key.cover + 29) {
+            if done(floor, top) && floor >= cheapest && floor >= least as i32 {
                 return Ok(Some(hits));
             }
             if !complete {
@@ -2649,10 +2737,12 @@ impl Searcher<'_> {
             if floor == i32::MIN {
                 return Ok(None);
             }
+            // The floor as a bin, for the pass over what is left.
+            let fbin = if floor == i32::MIN { 0 } else { floor as usize };
             let scored = |k: usize| {
                 let x = info[k];
                 let placed = x.head == t0;
-                bin(cheap(x)) >= top && (placed || x.key as i32 >= by_key.cover)
+                bin(cheap(x), k as u32) >= top && (placed || x.key as i32 >= by_key.cover)
             };
             let rest = par_each(
                 idx.words.div_ceil(CHUNK_WORDS),
@@ -2669,9 +2759,9 @@ impl Searcher<'_> {
                         while m != 0 {
                             let k = w * 64 + m.trailing_zeros() as usize;
                             m &= m - 1;
-                            if cheap(info[k]) >= floor
+                            if bin_of(Tier::from_prior(prior[k] as i32), cheap(info[k])) >= fbin
                                 && !scored(k)
-                                && let Some(c) = score(k as u32, x, re.as_ref()).filter(|c| c.bound >= floor)
+                                && let Some(c) = score(k as u32, x, re.as_ref()).filter(|c| bin_of(c.tier, c.bound) >= fbin)
                             {
                                 out.push(c);
                             }
@@ -2685,7 +2775,7 @@ impl Searcher<'_> {
             .collect::<Vec<_>>();
             Ok(Some(best(hits.into_iter().chain(visit(&rest, fkey)).collect()).0))
         };
-        let mut from = Run { hits: Vec::new(), floor: i32::MIN, fkey: 0, top: BINS, want: FIRST_BATCH, listed: 0 };
+        let mut from = Run { hits: Vec::new(), floor: i32::MIN, fkey: RankKey::default(), top: TIER_BINS, want: FIRST_BATCH, listed: 0 };
         // A short token first tries the names starting with it that it can
         // find without a pass over every word: those with the highest keys,
         // and those it can match whole (`index::ByKey`). Any other such name
@@ -2697,11 +2787,11 @@ impl Searcher<'_> {
                 let x = info[*k as usize];
                 (x.len as usize == m || x.stem as usize == m) && (x.key as i32) < by_key.cover
             };
-            let (mut got, mut h) = (Vec::new(), vec![0u32; BINS]);
+            let (mut got, mut h) = (Vec::new(), vec![0u32; TIER_BINS]);
             for &k in by_key.heads[t0 as usize].iter().chain(by_key.short[t0 as usize].iter().filter(|k| whole(k))) {
                 if tb.word(k as usize / 64).0 >> (k % 64) & 1 != 0 {
                     let c = cheap(info[k as usize]);
-                    h[bin(c)] += 1;
+                    h[bin_of(Tier::from_prior(prior[k as usize] as i32), c)] += 1;
                     got.push((c, k));
                 }
             }
@@ -2714,7 +2804,7 @@ impl Searcher<'_> {
         let pieces = if idx.words <= INLINE_WORDS { 1 } else { rayon::current_num_threads() * 2 };
         let step = idx.words.div_ceil(pieces);
         let piece = |p: usize| {
-            let (mut got, mut h) = (Vec::new(), vec![0u32; BINS]);
+            let (mut got, mut h) = (Vec::new(), vec![0u32; TIER_BINS]);
             for (w, &s) in start.iter().enumerate().take(((p + 1) * step).min(idx.words)).skip(p * step) {
                 let mut x = s & within(w);
                 if x == 0 {
@@ -2726,7 +2816,7 @@ impl Searcher<'_> {
                     x &= x - 1;
                     if info[k].head == t0 {
                         let c = cheap(info[k]);
-                        h[bin(c)] += 1;
+                        h[bin_of(Tier::from_prior(prior[k] as i32), c)] += 1;
                         got.push((c, k as u32));
                     }
                 }
@@ -2862,7 +2952,7 @@ impl Searcher<'_> {
                 need_dirs: true,
                 now: now_secs(),
             };
-            return Ok(top_k(ents.len(), q.limit, ents.len(), 0, |r, top| {
+            return Ok(top_k(ents.len(), q.limit, ents.len(), RankKey::default(), |r, top| {
                 let (mut pbuf, mut memo) = (Vec::new(), HashMap::<u32, DirMemo, crate::name_index::Fx>::default());
                 let mut hits = HashMap::<u32, Option<NameHit>, crate::name_index::Fx>::default();
                 let re = q.name_re.clone();
@@ -2894,7 +2984,7 @@ impl Searcher<'_> {
         }
         let names = self.score_names(q, pos, neg, None, Some(&NameSet { busy: true, ..NameSet::new(bits) }));
         let scan = Scan { q, live: self.live, names: &names, npos: pos.len(), need_dirs: true, now: now_secs() };
-        Ok(top_k(ents.len(), q.limit, ents.len(), 0, |r, top| {
+        Ok(top_k(ents.len(), q.limit, ents.len(), RankKey::default(), |r, top| {
             let (mut pbuf, mut memo) = (Vec::new(), HashMap::<u32, DirMemo, crate::name_index::Fx>::default());
             let path_re = q.path_re.clone();
             for j in r {
@@ -3165,15 +3255,19 @@ impl Searcher<'_> {
                 let cut = path.iter().rposition(|&b| b == b'/').unwrap_or(0);
                 let dir = &path[..cut];
                 if let Some(score) = q.match_path_with(path, o.kind, o.size, o.mtime, |_| *memo.entry(dir).or_insert_with(|| q.dir_match(dir))) {
-                    let score = score + o.prior as i32 + rank_tweaks(name_flags(&path[cut + 1..]), o.kind, o.mtime, now);
-                    out.push(Hit { score, idx: u32::MAX, over: Some(path.clone()) });
+                    let prior = o.prior as i32;
+                    let score = score + prior + rank_tweaks(name_flags(&path[cut + 1..]), o.kind, o.mtime, now);
+                    // The overlay has no entry in the index, so its key has
+                    // no entry to tie-break on: it loses the tie to a base
+                    // entry, the way the merge has always ordered them.
+                    out.push(Hit { key: rank_key(Tier::from_prior(prior), score, RankKey::NO_ENTRY), idx: u32::MAX, over: Some(path.clone()) });
                 }
             }
             out
         };
         let mut hits = if cands.len() <= OVERLAY_CHUNK { score(&cands) } else { cands.par_chunks(OVERLAY_CHUNK).flat_map_iter(score).collect() };
-        // Best first, equal scores by path (the overlay map's order).
-        hits.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.over.cmp(&b.over)));
+        // Best first, equal keys by path (the overlay map's order).
+        hits.sort_by(|a, b| b.key.cmp(&a.key).then_with(|| a.over.cmp(&b.over)));
         hits.truncate(q.limit);
         hits
     }
@@ -3240,7 +3334,7 @@ impl Scan<'_> {
     /// `None` if it fails a filter or cannot beat `floor`.
     #[inline(always)]
     /// `re` is the caller's own copy of `path_re` (see `score_names`).
-    fn score(&self, i: usize, nh: NameHit, memo: DirMemo, floor: u64, pbuf: &mut Vec<u8>, re: Option<&regex::bytes::Regex>) -> Option<u64> {
+    fn score(&self, i: usize, nh: NameHit, memo: DirMemo, floor: RankKey, pbuf: &mut Vec<u8>, re: Option<&regex::bytes::Regex>) -> Option<RankKey> {
         let idx = &self.live.base;
         let q = self.q;
         let k = idx.kind()[i];
@@ -3280,8 +3374,15 @@ impl Scan<'_> {
         // The prior the entry inherits from its directory travels with the
         // entry (see `Index::rank_adj`), so the hot loop reads one byte
         // instead of the entry's parent and then that parent's prior.
-        score += idx.rank_adj()[i] as i32 + rank_tweaks(nh.flags, k, mtime, self.now);
-        let key = key(score, i as u32);
+        //
+        // The prior is also what says which *tier* the entry is in, and the
+        // tier is in the high bits of the key: a priority that is only a
+        // term added to the score loses to a better name, and the corpus
+        // (`tests/ranking.rs`) says the priority is what the user meant.
+        // The tier rides in the kind byte, which is read anyway.
+        let prior = idx.rank_adj()[i] as i32;
+        score += prior + rank_tweaks(nh.flags, k, mtime, self.now);
+        let key = entry_key(k, score, i as u32);
         if key <= floor {
             return None;
         }
@@ -3324,7 +3425,7 @@ impl Scan<'_> {
                 && z.min_mtime <= q.mtime.1
                 && q.kind.is_none_or(|k| z.kinds & (1 << k) != 0 || (q.apps && z.kinds & (1 << KIND_LINK) != 0))
         };
-        top_k(hi - lo, q.limit, hi - lo, 0, |r, top| {
+        top_k(hi - lo, q.limit, hi - lo, RankKey::default(), |r, top| {
             let (mut pbuf, re) = (Vec::new(), q.path_re.clone());
             let (mut a, b) = (lo + r.start, lo + r.end);
             while a < b {
@@ -3368,7 +3469,7 @@ impl Scan<'_> {
         let idx = &self.live.base;
         let (ne_off, ne, parent) = (idx.name_ents_off(), idx.name_ents(), idx.parent());
         let ok: Vec<(u32, NameHit)> = self.names.iter().filter(|(_, h)| h.flags & NF_OK != 0).collect();
-        top_k(ok.len(), self.q.limit, self.names.ok_entries, 0, |r, top| {
+        top_k(ok.len(), self.q.limit, self.names.ok_entries, RankKey::default(), |r, top| {
             let (mut pbuf, mut memo) = (Vec::new(), HashMap::<u32, DirMemo, crate::name_index::Fx>::default());
             let re = self.q.path_re.clone();
             for &(id, nh) in &ok[r] {

@@ -670,7 +670,7 @@ fn handle(req: Request, ctx: &Ctx) -> Vec<Response> {
                         };
                         WireHit {
                             path: full,
-                            score: h.score,
+                            score: h.score(),
                         }
                     })
                     .collect();

@@ -19,6 +19,9 @@ pub mod live;
 pub mod name_index;
 /// fsearch's query parser/scorer with the zen-rs filter vocabulary merged.
 pub mod name_query;
+/// The ranking key: the priority ladder, the fixed-point score, and the one
+/// `u64` the final order compares.
+pub mod rank;
 pub mod regex;
 
 /// The comparison fold: ASCII case-fold + NFC (parity row 1.12). The

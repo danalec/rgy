@@ -120,6 +120,14 @@ impl BlobMut {
 
 /// The blob's magic.
 ///
+/// `FSIDX014` is `FSIDX013` with the priority tier folded into the entry's
+/// kind byte: the tier the entry inherits from its directory rides in the
+/// bits the kind byte did not use, so the search reads it with the kind it
+/// reads anyway. An index built before that says something else, so it is
+/// not loaded: a stale index would rank every entry by the tier its kind
+/// byte used to hold, and the answer would depend on whether the index had
+/// been rebuilt.
+///
 /// `FSIDX013` is `FSIDX012` with the ranking adjustment folded into the
 /// record: an entry carries the location prior it inherits from its
 /// directory, so a search reads it per entry instead of walking to the
@@ -135,7 +143,7 @@ impl BlobMut {
 /// so it is not loaded: a stale index would reject a name whose folded
 /// form holds a class its raw form does not, and the answer would depend
 /// on whether the index had been rebuilt.
-const MAGIC: &[u8; 8] = b"FSIDX013";
+const MAGIC: &[u8; 8] = b"FSIDX014";
 
 #[derive(Clone, Copy)]
 enum Sec {
@@ -693,6 +701,24 @@ impl Index {
         // candidate belongs to the candidate.
         let rank_adj: Vec<i8> = (0..n).map(|i| prior[parent[i] as usize]).collect();
 
+        // The priority tier each entry inherits from its directory, in the
+        // kind byte's free bits (5 to 7).
+        //
+        // The tier is a bucket of the prior, and the search reads it once
+        // per candidate. Computing it there cost more than the whole rest
+        // of the ranking key -- 13% of the name bench, measured -- because
+        // the prior it comes from is a load and the tier is a chain of
+        // compares on top of it, right on the path to the key's
+        // comparison. The kind byte is loaded anyway, so the tier rides
+        // along in it, and it sits in the bits the key wants it in, so the
+        // search does not unpack it and repack it.
+        //
+        // The overlay's entries have no index to carry it: the search
+        // derives their tier from the prior they carry themselves.
+        for i in 0..n {
+            kind[i] |= (crate::rank::Tier::from_prior(rank_adj[i] as i32).bits() as u8) << 5;
+        }
+
         // Write the blob, freeing each array once its last reader is done:
         // the build's peak is here, the blob beside the arrays it copies.
         let (off, total) = layout(&section_lens(n, d, u, unames.len()));
@@ -1126,12 +1152,32 @@ fn prior_adjust(name: &[u8], depth: u8) -> i32 {
             b"Library" => -25,
             b"System" => -40,
             b"opt" => -25,
-            _ => -35,
+            // A directory whose name says nothing to us is neutral. The
+            // rule is "demote what we recognise as noise", not "demote
+            // what we do not recognise": the default used to be -35, so
+            // an ordinary directory (Documents, Downloads, Projects) sat
+            // BELOW a build directory (node_modules, -30) and a file in
+            // ~/Documents lost to a file in ~/node_modules on a name
+            // match alone. The ranking corpus found it.
+            //
+            // The noise names are noise at any depth, so they are looked
+            // up here too: a top-level `node_modules` is the same build
+            // artefact as one under a project, and the depth-1 table used
+            // to shadow them.
+            _ => noise_adjust(name),
         };
     }
     if name == b"Applications" {
         return 30;
     }
+    noise_adjust(name)
+}
+
+/// The directories the table recognises as noise, and what they are worth.
+///
+/// The same at every depth: a `node_modules` at the top of the filesystem
+/// and a `node_modules` inside a project are the same thing.
+fn noise_adjust(name: &[u8]) -> i32 {
     if name.ends_with(b".app") {
         return -25;
     }

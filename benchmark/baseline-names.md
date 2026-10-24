@@ -3,11 +3,19 @@
 ## How this table is measured
 
 Host: AMD Ryzen 9 7950X3D (16 cores / 32 logical), Windows 11 Pro N
-10.0.26300. Measured on 2026-10-23.
+10.0.26300. Measured on 2026-10-24, from the commit the rank key lands
+on — the code before it.
 
     python scripts/bench-names.py measure --runs 7 --threads 4 \
         --names 200000 --names 5000000 --gate 200000 \
         --out benchmark/baseline-names.csv
+
+It is the same code the previous recording took, and the machine measured
+it slower the second time: the `dat$` and `file` rows came out at 174 µs
+and 175 µs on the 23rd and at 188 µs and 185 µs on the 24th, for a
+difference in the machine's state and not in the code. A reference taken
+while the machine was in another state is not a reference, so it was taken
+again from the same commit, and the gate reads a change against that.
 
 The bench under it is `cargo run --release -p rgy-engine --example name_bench`:
 a fixed synthetic corpus, 30 timed rounds after 3 warmup rounds, and the
@@ -69,27 +77,27 @@ Corpus: 200,000 names, 4 threads, best of 7 runs.
 
 | query | hits | min µs | med µs | p90 µs | spread | plan |
 |---|---|---|---|---|---|---|
-| `'report_00000.pdf` | 1 | 0 | 0 | 1 | — | selective |
-| `^src` | 57,000 | 101 | 120 | 136 | 7% | full |
-| `dat$` | 114,000 | 174 | 195 | 212 | 4% | full |
-| `f1` | 80,547 | 148 | 159 | 180 | 5% | full |
-| `file` | 114,000 | 175 | 196 | 206 | 4% | full |
-| `mod` | 57,000 | 101 | 122 | 136 | 8% | full |
-| `rep` | 29,000 | 66 | 84 | 98 | 8% | full |
-| `report` | 29,000 | 68 | 85 | 100 | 3% | full |
+| `'report_00000.pdf` | 1 | 0 | 0 | 0 | — | selective |
+| `^src` | 57,000 | 110 | 134 | 158 | 16% | full |
+| `dat$` | 114,000 | 188 | 212 | 234 | 5% | full |
+| `f1` | 80,547 | 161 | 173 | 195 | 4% | full |
+| `file` | 114,000 | 185 | 212 | 236 | 7% | full |
+| `mod` | 57,000 | 110 | 136 | 167 | 13% | full |
+| `rep` | 29,000 | 78 | 99 | 127 | 14% | full |
+| `report` | 29,000 | 72 | 96 | 124 | 13% | full |
 
 Corpus: 5,000,000 names, 4 threads, best of 7 runs.
 
 | query | hits | min µs | med µs | p90 µs | spread | plan |
 |---|---|---|---|---|---|---|
 | `'report_00000.pdf` | 1 | 1 | 1 | 1 | — | selective |
-| `^src` | 1,428,000 | 2562 | 4199 | 4605 | 39% | full |
-| `dat$` | 2,856,000 | 5619 | 7593 | 7965 | 17% | full |
-| `f1` | 1,639,704 | 3065 | 5016 | 5129 | 28% | full |
-| `file` | 2,856,000 | 4224 | 4560 | 4719 | 8% | full |
-| `mod` | 1,428,000 | 3254 | 4387 | 4619 | 12% | full |
-| `rep` | 716,000 | 1719 | 2787 | 2912 | 52% | full |
-| `report` | 716,000 | 1568 | 1649 | 1820 | 5% | full |
+| `^src` | 1,428,000 | 2501 | 2624 | 3158 | 2% | full |
+| `dat$` | 2,856,000 | 4371 | 4553 | 5551 | 1% | full |
+| `f1` | 1,639,704 | 2876 | 2980 | 3405 | 2% | full |
+| `file` | 2,856,000 | 4341 | 4574 | 5496 | 3% | full |
+| `mod` | 1,428,000 | 2509 | 2616 | 3252 | 2% | full |
+| `rep` | 716,000 | 1582 | 1642 | 2020 | 1% | full |
+| `report` | 716,000 | 1564 | 1682 | 2060 | 3% | full |
 
 <!-- END: bench-names-table -->
 

@@ -12,7 +12,7 @@ verification on machines this host does not have.
 
 | Piece | Where | State |
 |---|---|---|
-| Name index v2 (intern, DFS, bitmaps, mmap blob) | `crates/name-core` (`name_index`) | ✅ from fsearch; the blob is `FSIDX013`, and the ranking adjustment each entry inherits from its directory lives in the entry (the `RankAdj` section) rather than one hop away in the directory table — 3.4–4.6% faster on every row of the name bench |
+| Name index v2 (intern, DFS, bitmaps, mmap blob) | `crates/name-core` (`name_index`) | ✅ from fsearch; the blob is `FSIDX014`, the ranking adjustment each entry inherits from its directory lives in the entry (the `RankAdj` section) rather than one hop away in the directory table — 3.4–4.6% faster on every row of the name bench — and the priority tier that entry inherits rides in the kind byte the search reads anyway |
 | Query syntax merge (fsearch tokens + zen-rs filters) | `crates/name-core` (`name_query`) | ✅ `type:`/`dir:`/`size:`/`re:`/globs/\|, fail-closed |
 | fzf-v1 scorer + typos + top-k + NameCache + **SSE2 wide scorer** | `crates/name-core` (`name_query`) | ✅ parity-tested vs scalar |
 | Live overlay | `crates/name-core` (`live`) | ✅ portable `lstat`; the base's root-relative paths and the overlay's openable ones are crossed, so a re-listed folder answers each file once. The daemon merges the overlay through `search_alternatives` and the CLI through `merge_hits`, so **every** live change is answered — the keyed-by-index merge it replaced dropped one change per file and made the CLI index the base with the overlay's `u32::MAX` sentinel (a panic); both paths are pinned by `every_live_change_is_answered` |
@@ -67,7 +67,7 @@ verification on machines this host does not have.
 | zen-rs bin / TUI (unchanged behaviour) | `bins/zen-rs`, `bins/search-ui` | ✅ |
 | `rgy-autostart` (login item, per platform) | `crates/autostart` | ✅ startup task / HKCU Run, systemd user unit, launchd agent |
 | The crates on crates.io | `crates/*/Cargo.toml`, `bins/*/Cargo.toml` | ✅ all fourteen published at 0.1.0 on 2026-10-23 — see below |
-| The Listary plan | `docs/listary-parity.toml`, `scripts/listary-parity.py` | ⬜ 22 gaps and 7 degraded rows, each with work and a phase — see below |
+| The Listary plan | `docs/listary-parity.toml`, `scripts/listary-parity.py` | ⬜ 11 gaps and 9 degraded rows, each with work and a phase — see below |
 | Packaging (winget, brew, tarballs) | `scripts/build-release.*`, `scripts/publish-release.*`, `.winget/`, `Formula/` | ✅ machinery in place; **no release published yet** |
 | Release flow (the one-line installers, the Linux build over ssh) | `install.sh`, `install.ps1`, `scripts/release-linux.sh` | ✅ the installers pin the digest of the artifact they install; the pins are release data |
 | Homebrew submission (the pull request to homebrew-core) | `scripts/publish-homebrew.*` | ✅ the machinery; the pull request waits for the first release to exist |
@@ -126,17 +126,36 @@ listed gap has been closed and the list forgot.
 
 #### The Listary plan
 
-[docs/listary-parity.md](listary-parity.md) is the plan: 33 capabilities
+[docs/listary-parity.md](listary-parity.md) is the plan: 35 capabilities
 recovered from the reverse engineering of Listary 7.1.0.45, one row each,
 with the work that closes every gap and the phase it belongs to. It asks a
 different question from the matrix above — that one asks "does this work on
 each OS", this one asks "does rgy do what Listary does".
 
-Thirteen are gaps, nine are degraded, and thirteen are already at parity:
+Eleven are gaps, nine are degraded, and fifteen are already at parity:
 the NTFS MFT reader, the USN journal monitor, the multi-volume enumeration,
 the folder walker, the atomic index snapshot, the u32-second modification
 time, the fail-closed regex and the parallel scoring came in with the merge
-or were already here — and the transliteration shadow below.
+or were already here — and the transliteration shadow and the rank key below.
+
+**The rank key.** The order of the results is now one `u64`, and the
+priority is in its high bits: `Ignored < Low < Normal < Internal < High <
+HighFile`, the ladder Listary's disk-search priority uses (§4.6). A priority
+that is only a term added to the score loses to a better name — `config.json`
+in `node_modules` beat `configuration.txt` in `Documents` — and the ranking
+corpus (`crates/name-core/tests/ranking.rs`) is what says so. That corpus is
+the instrument the repo did not have: the name bench measures how long a
+query takes and says nothing about whether the answer is the right one.
+
+The tier is read from the index, not computed: computing it cost 13% of the
+scan, because the prior it comes from is a load and the tier is a chain of
+compares on top of it. The tier rides in the kind byte the search reads
+anyway, and the index format is `FSIDX014` because of it.
+
+The key costs 6% to 9% of the scan (9 runs at one thread, before and after
+on the same host: 395→424 µs on `^src`, 690→751 µs on `dat$`). That is
+inside the gate's 20%, and it is the price of a ranking that says what the
+user meant.
 
 **A name read in another script.** `nihongo` finds 日本語, `にほんご` finds
 日本語, `zhongwen` finds 中文. The mechanism is Listary's (the pinyin

@@ -488,7 +488,7 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
         };
         if json {
             let esc = rgy_proto::escape_json_string(&path);
-            rgy_engine::outln!("{{\"path\":\"{esc}\",\"score\":{}}}", h.score);
+            rgy_engine::outln!("{{\"path\":\"{esc}\",\"score\":{}}}", h.score());
         } else {
             rgy_engine::outln!("{path}");
         }

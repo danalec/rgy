@@ -61,7 +61,7 @@ A snapshot of one walk, stored in one file.
   over *names*, not over entries.
 - `Index::lookup(path)` finds an entry by its root-relative path.
 - `Index::path(i, out)` writes the root-relative path of entry `i`.
-- `Index::save` / `Index::load` are the FSIDX012 format
+- `Index::save` / `Index::load` are the FSIDX014 format
   ([`on-disk-formats.md`](on-disk-formats.md)).
 
 ## The overlay (`live`)
