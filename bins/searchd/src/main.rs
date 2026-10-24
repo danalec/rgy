@@ -102,6 +102,21 @@ struct Ctx {
     /// watch thread corrects it to "relisted" when the feed loses its
     /// history, because then nothing was replayed.
     catch_up: std::sync::atomic::AtomicU8,
+    /// The content index, when the daemon has built one.
+    ///
+    /// The trigram postings are what let a `grep:` rule most files out
+    /// before they are read: with the index the search opens the
+    /// candidates, without it the search opens everything the name filters
+    /// name. The daemon builds it the first time a content search asks for
+    /// it -- a daemon that is never asked to grep never pays for it.
+    ///
+    /// It is behind a lock of its own: the thread that builds it takes the
+    /// lock for the cheap half (what should be indexed) and the search
+    /// takes it for the postings.
+    content: std::sync::Mutex<Option<content::Content>>,
+    /// Set when a content search has been asked for: what tells the
+    /// content thread there is something to build an index for.
+    wants_content: std::sync::atomic::AtomicBool,
 }
 
 impl Ctx {
@@ -231,6 +246,16 @@ fn main() {
     let root = absolute_root(&root);
 
     let startup = open_index(&root, index.as_deref(), reindex, max_age);
+    // The content index lives beside the name index: `<index>.content/`,
+    // which is where the CLI looks for it.
+    let content_dir = {
+        let root_path = std::path::PathBuf::from(&root);
+        let base = match index.as_deref() {
+            Some(p) => std::path::PathBuf::from(p),
+            None => persist::default_index_path(&root_path),
+        };
+        base.with_extension("content")
+    };
     let ctx = std::sync::Arc::new(Ctx {
         root: root.as_bytes().to_vec(),
         home: std::env::var("USERPROFILE")
@@ -242,6 +267,8 @@ fn main() {
             CatchUp::Replayed => CATCH_UP_REPLAYED,
             CatchUp::Relisted => CATCH_UP_RELISTED,
         }),
+        content: std::sync::Mutex::new(None),
+        wants_content: std::sync::atomic::AtomicBool::new(false),
     });
 
     // Keep the index fresh as the tree changes (the Watch thread); queries
@@ -250,6 +277,10 @@ fn main() {
 
     // Give the query cache back while nobody is typing (the trim thread).
     spawn_trim(&ctx);
+
+    // Keep the content index fresh, once something asks for one (the
+    // content thread).
+    spawn_content(&ctx, content_dir);
 
     match listen.split_once(':') {
         None if listen == "stdio" => {
@@ -749,8 +780,25 @@ fn grep(q: &str, limit: usize, ctx: &Ctx) -> Vec<Response> {
                 let Ok(g) = Grep::new(&pat, mode) else {
                     continue;
                 };
-                let paths = content::scan_paths(&ctx.root, searcher.live, filt);
-                let res = content::verify(&g, &paths, limit);
+                // The content index, when the daemon has one: the postings
+                // rule most files out before they are read, and the files
+                // the index cannot vouch for are read anyway. The union is
+                // the scan's exact answer either way.
+                //
+                // The first content search is what asks for an index: the
+                // thread that builds it starts then, and a daemon that is
+                // never asked to grep never pays for one.
+                ctx.wants_content.store(true, Ordering::Relaxed);
+                let index = ctx.content.lock().unwrap();
+                let res = content::answer(
+                    &g,
+                    &filt,
+                    &ctx.root,
+                    searcher.live,
+                    ctx.home.as_bytes(),
+                    index.as_ref(),
+                    limit,
+                );
                 for f in res.files {
                     files.push(GrepFile {
                         path: String::from_utf8_lossy(&f.path).into_owned(),
@@ -1094,6 +1142,87 @@ fn spawn_trim(ctx: &std::sync::Arc<Ctx>) {
         });
 }
 
+/// Spawn the content thread: keep the content index fresh, so a `grep:`
+/// reads less.
+///
+/// The index is the trigram postings of the tree's files. With it, the
+/// grams rule most files out before they are read; without it, the search
+/// reads every candidate the name filters name. The daemon is the only
+/// process that lives long enough to pay for building it, so it is the one
+/// that builds it -- but only once a content search has asked for one: a
+/// daemon that is never asked to grep never pays for the index either.
+///
+/// The build reads the files it indexes, so it goes in batches: a burst
+/// that reads the whole disk would make every keystroke of a search running
+/// beside it slower.
+fn spawn_content(ctx: &std::sync::Arc<Ctx>, dir: std::path::PathBuf) {
+    /// How many files a batch indexes.
+    const BATCH: usize = 512;
+    /// How long the thread waits between batches.
+    const TICK: std::time::Duration = std::time::Duration::from_millis(50);
+
+    let ctx = ctx.clone();
+    let _ = std::thread::Builder::new()
+        .name("searchd-content".into())
+        .spawn(move || {
+            // Nothing to build until a content search asks for one.
+            while !ctx.wants_content.load(Ordering::Relaxed) {
+                std::thread::sleep(TICK);
+            }
+            let _ = std::thread::Builder::new()
+                .name("searchd-content".into())
+                .spawn(move || {
+                    // Nothing to build until a content search asks for one.
+                    while !ctx.wants_content.load(Ordering::Relaxed) {
+                        std::thread::sleep(TICK);
+                    }
+                    loop {
+                        let live = match ctx.live.read() {
+                            Ok(l) => l,
+                            Err(_) => break,
+                        };
+                        // What should be indexed there: the cheap half,
+                        // over the metadata the live index already holds.
+                        // The root's tree, so a file that appeared while
+                        // the daemon was off is in the batch too.
+                        let wants = content::wants(
+                            &live,
+                            ctx.home.as_bytes(),
+                            &[],
+                            std::slice::from_ref(&ctx.root),
+                            &ctx.root,
+                        );
+                        drop(live);
+                        let todo = {
+                            let mut g = ctx.content.lock().unwrap();
+                            let c = g.get_or_insert_with(|| content::Content::open(dir.clone()));
+                            let todo = c.diff(wants);
+                            let n = todo.len().min(BATCH);
+                            if n == 0 {
+                                None
+                            } else {
+                                let id = c.alloc_id();
+                                Some((todo, id, n))
+                            }
+                        };
+                        let Some((todo, id, n)) = todo else {
+                            std::thread::sleep(TICK);
+                            continue;
+                        };
+                        // The build reads the files, so it happens with
+                        // the lock released: a search that runs beside it
+                        // must not wait for a read of the whole batch.
+                        if let Some(seg) = content::build_segment(&dir, id, &todo, 0..n) {
+                            let mut g = ctx.content.lock().unwrap();
+                            if let Some(c) = g.as_mut() {
+                                c.push(seg);
+                            }
+                        }
+                    }
+                });
+        });
+}
+
 /// Spawn the live-update thread: build the platform `Watch` for `ctx.root` and
 /// apply its change batches to `ctx.live`, taking the write lock *per batch*
 /// so queries interleave (holding it across the feed would block them all).
@@ -1410,6 +1539,8 @@ mod tests {
             tv_dir: None,
             live: std::sync::RwLock::new(Live::new(Index::build(Vec::new(), 0, 0, b"/"))),
             catch_up: std::sync::atomic::AtomicU8::new(CATCH_UP_REPLAYED),
+            content: std::sync::Mutex::new(None),
+            wants_content: std::sync::atomic::AtomicBool::new(false),
         });
         assert_eq!(ctx.catch_up(), CatchUp::Replayed);
 
@@ -1467,6 +1598,8 @@ mod tests {
             tv_dir: None,
             live: std::sync::RwLock::new(live),
             catch_up: std::sync::atomic::AtomicU8::new(CATCH_UP_RELISTED),
+            content: std::sync::Mutex::new(None),
+            wants_content: std::sync::atomic::AtomicBool::new(false),
         });
 
         let responses = handle(
@@ -1487,6 +1620,73 @@ mod tests {
             hits.iter().any(|h| h.path.ends_with("late.txt")),
             "the new file must be answered; hits={hits:?}"
         );
+    }
+
+    /// A content search answers the same with a content index as without it.
+    ///
+    /// The index is the trigram postings: with it the search opens the
+    /// candidates, without it the search opens everything the name filters
+    /// name. The union is the scan's exact answer either way, and that is
+    /// the property that has to hold when the daemon reads its own index.
+    #[test]
+    fn a_content_search_answers_the_same_with_an_index() {
+        let dir = std::env::temp_dir().join("rgy-searchd-content-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("hello.txt"), b"hello world\n").unwrap();
+        let root = dir.to_string_lossy().into_owned().into_bytes();
+
+        let source = PortableSource::new(root.clone(), 2);
+        let live = Live::with_root(
+            Index::build(source.enumerate().expect("the walk"), 0, 1, b"/"),
+            &root,
+        );
+        let ctx = std::sync::Arc::new(Ctx {
+            root: root.clone(),
+            home: String::new(),
+            tv_dir: None,
+            live: std::sync::RwLock::new(live),
+            catch_up: std::sync::atomic::AtomicU8::new(CATCH_UP_RELISTED),
+            content: std::sync::Mutex::new(None),
+            wants_content: std::sync::atomic::AtomicBool::new(false),
+        });
+        let names = |rs: Vec<Response>| -> Vec<String> {
+            rs.iter()
+                .filter_map(|r| match r {
+                    Response::GrepFiles { files, .. } => {
+                        Some(files.iter().map(|f| f.path.clone()).collect::<Vec<_>>())
+                    }
+                    _ => None,
+                })
+                .flatten()
+                .collect()
+        };
+
+        let before = names(grep("hello", 10, &ctx));
+        assert!(
+            before.iter().any(|p| p.ends_with("hello.txt")),
+            "{before:?}"
+        );
+
+        // Now the daemon has an index: build one over the same tree and
+        // answer again.
+        let mut c = rgy_name_core::content::Content::open(dir.join("content"));
+        let n = c.sync(
+            &ctx.live.read().unwrap(),
+            b"",
+            &[],
+            std::slice::from_ref(&root),
+            &root,
+        );
+        assert!(n > 0, "the index holds the file");
+        *ctx.content.lock().unwrap() = Some(c);
+
+        let after = names(grep("hello", 10, &ctx));
+        assert_eq!(
+            before, after,
+            "the index changes what is read, not what is answered"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Two files that appear after the daemon started both have to be
@@ -1540,6 +1740,8 @@ mod tests {
             tv_dir: None,
             live: std::sync::RwLock::new(live),
             catch_up: std::sync::atomic::AtomicU8::new(CATCH_UP_RELISTED),
+            content: std::sync::Mutex::new(None),
+            wants_content: std::sync::atomic::AtomicBool::new(false),
         });
 
         let responses = handle(

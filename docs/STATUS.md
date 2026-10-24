@@ -241,27 +241,34 @@ same rows spread 1–8% and the comparison is decidable. The A/B behind the
 `RankAdj` section was taken at one thread for that reason: nine runs, best
 of nine, and every row faster by 3.4–4.6%.
 
-#### The content index is dead on both sides
+#### The content index is alive on both sides
 
-Found on 2026-10-24, and it is a bigger piece than a cleanup.
+Found on 2026-10-24, and it was a bigger piece than a cleanup.
 
 The trigram content index came in with fsearch's `content.rs`, and its
-**reader** is live: `searchctl` opens `<index>.content/` and hands it to
+**reader** was live: `searchctl` opens `<index>.content/` and hands it to
 `content::answer`, which uses the postings to rule most files out before
-they are read. But nothing in the product ever **writes** it —
+they are read. But nothing in the product ever **wrote** it —
 `Content::sync`, `build_segment`, `merge`, `diff`, `changed_dirs`,
-`alloc_id`, `push`, `replace` and `merge_plan` are called only by the
-tests — and the daemon's `grep:` does not read it either: it goes
+`alloc_id`, `push`, `replace` and `merge_plan` were called only by the
+tests — and the daemon's `grep:` did not read it either: it went
 `content::scan_paths` + `content::verify`, which is the scan with no
-index. So the directory the CLI looks for is never created, and the
-read-avoidance it was written for is never in effect.
+index. So the directory the CLI looks for was never created, and the
+read-avoidance it was written for was never in effect.
 
-The CLI's own comment says "the daemon keeps it fresh", and that is
-false. Either the daemon writes and reads the index, or the reader goes
-too. The first is the better product — it is the difference between
-reading two gigabytes of a tree and reading fifty megabytes of it — and
-it is the next piece of work. The second is a large deletion of
-fsearch's MIT code and gives up a feature.
+Both halves are now in the daemon:
+
+- the **`grep:`** goes through `content::answer` with the daemon's index,
+  so the postings rule the files out and only the candidates are opened;
+- a **content thread** builds and keeps the index. It starts when the
+  first content search asks for one — a daemon that is never asked to
+  grep never pays for it — and it builds in batches, because the build
+  reads the files it indexes and a burst that reads the whole disk would
+  make every keystroke of a search running beside it slower.
+
+The CLI's comment ("the daemon keeps it fresh") is true now. The union is
+the scan's exact answer either way: the index answers for the files it
+holds a fresh doc for, and every other candidate is read from disk.
 
 #### The limits that are documented
 
