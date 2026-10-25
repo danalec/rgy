@@ -154,7 +154,7 @@ impl Session {
         // The session's entries are only good for the index they were
         // matched against. A different revision is a different index, and
         // the entries mean something else now.
-        let revision = searcher.live.base.event_id;
+        let revision = searcher.live.revision;
         match self.rerank(searcher, q, revision) {
             Some(hits) => {
                 self.reranked.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -299,7 +299,7 @@ impl Session {
         // previous answer is the answer.
         if let Some(last) = self.last.lock().unwrap().as_ref()
             && last.key == key
-            && last.revision == searcher.live.base.event_id
+            && last.revision == searcher.live.revision
             && let Some(hits) = &last.answer
         {
             self.reranked.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -597,6 +597,29 @@ mod tests {
         let second = session.search_replaying_facets(&searcher, &q("entry ext:txt"));
         assert!(session.last_reranked(), "the query did not change, so the answer was replayed");
         assert_eq!(paths(&second), paths(&first), "the replay answers the same as the search");
+    }
+
+    /// A session is dropped when the overlay moves.
+    ///
+    /// The index's own event id is fixed when the index is built, so it
+    /// cannot say that the overlay moved: the session held one, and a
+    /// session answered before a change was answered from after it -- a
+    /// stale answer, in a session whose whole point is the answer.
+    #[test]
+    fn a_session_is_dropped_when_the_overlay_moves() {
+        let mut live = live(200);
+        let session = Session::new(1);
+        let query = q("entry");
+        {
+            let searcher = Searcher { live: &live };
+            let first = session.search_replaying_facets(&searcher, &query);
+            assert!(!first.is_empty(), "the search answers something");
+        }
+        // The overlay moves.
+        live.apply_events(&[]);
+        let searcher = Searcher { live: &live };
+        let _after = session.search_replaying_facets(&searcher, &query);
+        assert!(!session.last_reranked(), "the session was answered from a result set the overlay moved past");
     }
 
     /// A query whose text changed is searched again.

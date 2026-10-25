@@ -106,6 +106,13 @@ pub struct Live {
     pub flat: Flat,
     /// The last change-feed id fully applied.
     pub event_id: u64,
+    /// How many times the overlay changed.
+    ///
+    /// The index's own event id is fixed when the index is built, so it
+    /// cannot say that the overlay moved: a session answered before a
+    /// change would still be answered from after it. This one moves with
+    /// the overlay, and it is what a session holds.
+    pub revision: u64,
     /// The folders added or removed since the list was last drained; the
     /// content index re-syncs these whole subtrees.
     pub trees: Vec<Vec<u8>>,
@@ -169,6 +176,7 @@ impl Live {
             over: BTreeMap::new(),
             flat: Flat::default(),
             event_id,
+            revision: 0,
             trees: Vec::new(),
             names_cache: Default::default(),
             synced_at,
@@ -425,6 +433,7 @@ impl Live {
     /// The memory half of [`Live::apply_dir`]: diff what was read into what
     /// is here.
     pub fn apply(&mut self, mut f: Fetched) -> Applied {
+        self.revision += 1;
         if f.blocked {
             return Applied::Done;
         }
@@ -523,6 +532,7 @@ impl Live {
     /// this index speaks `/`, so the separators are normalized first and the
     /// folder is taken at the last separator of either kind.
     pub fn apply_events(&mut self, events: &[rgy_discovery::UsnRecord]) {
+        self.revision += 1;
         let mut dirs: Vec<Vec<u8>> = Vec::new();
         for e in events {
             let p: Vec<u8> = e.name.as_bytes().iter().map(|&b| if b == b'\\' { b'/' } else { b }).collect();
