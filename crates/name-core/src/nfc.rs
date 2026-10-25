@@ -112,7 +112,12 @@ fn is_nfc(s: &str) -> bool {
 }
 
 /// The canonical combining class of `cp`: 0 for a starter.
-fn ccc(cp: u32) -> u8 {
+///
+/// Public to the crate: the highlight maps the folded name's characters
+/// back to the raw name's, and it needs to know which of the raw's
+/// characters are the marks that were composed into the character before
+/// them.
+pub(crate) fn ccc(cp: u32) -> u8 {
     match CCC.binary_search_by(|&(lo, hi, _)| {
         if cp < lo {
             std::cmp::Ordering::Greater

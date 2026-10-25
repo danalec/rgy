@@ -702,6 +702,13 @@ impl Index {
         // what the score says about two entries in the same tier.
         let mut level = vec![crate::rank::Tier::Normal; n];
         let mut prior = vec![0i8; n];
+        // The home bonus each dir carries, inherited by the dirs under it.
+        //
+        // The bonus says "this is under the user's home", and everything
+        // under the home is under it: the old prior inherited it down the
+        // tree, and the rules replaced that inheritance with their own
+        // (the level, which is inherited too) -- and the bonus with it.
+        let mut home_bonus = vec![0i8; d];
         for k in 1..d {
             let e = dir_entry[k] as usize;
             let p = parent[e] as usize;
@@ -716,10 +723,10 @@ impl Index {
             let entered_home = hm[k] as usize == comps.len() && (hm[p] as usize) < comps.len();
             folder_level[k] = rules.level_of(nm, false).unwrap_or(folder_level[p]);
             file_level[k] = rules.level_of(nm, true).unwrap_or(file_level[p]);
-            let home_bonus = if entered_home { 15 } else { 0 };
+            home_bonus[k] = if entered_home { 15 } else { home_bonus[p] };
             // The dir itself, and the files under it.
             level[e] = folder_level[k];
-            prior[e] = (crate::rules::offset(folder_level[k]) + home_bonus).clamp(-100, 60) as i8;
+            prior[e] = (crate::rules::offset(folder_level[k]) + home_bonus[k] as i32).clamp(-100, 60) as i8;
         }
         // The files: their own name's rule, or the level of the folder they
         // are in.
@@ -730,7 +737,7 @@ impl Index {
             let p = parent[i] as usize;
             let lvl = rules.level_of(&names[name_off[i] as usize..][..name_len[i] as usize], true).unwrap_or(file_level[p]);
             level[i] = lvl;
-            prior[i] = crate::rules::offset(lvl).clamp(-100, 60) as i8;
+            prior[i] = (crate::rules::offset(lvl) + home_bonus[p] as i32).clamp(-100, 60) as i8;
         }
         drop((names, name_off, name_len));
 
@@ -785,7 +792,11 @@ impl Index {
         drop(blocks);
         put(Sec::DirEnd, as_bytes(&end));
         drop(end);
-        put(Sec::DirPrior, as_bytes(&prior));
+        // The prior of each DIR, not of each entry: the section is read per
+        // directory (an entry the overlay added takes the prior of the
+        // directory it is in), and the entries and the directories are
+        // numbered apart. The per-entry prior is in `Sec::RankAdj`.
+        put(Sec::DirPrior, as_bytes(&dir_entry.iter().map(|&e| prior[e as usize]).collect::<Vec<_>>()));
         put(Sec::DirParent, as_bytes(&dir_entry.iter().map(|&e| parent[e as usize]).collect::<Vec<_>>()));
         drop(dir_entry);
         // Each name's entries best location prior first (then ascending): a
@@ -1490,5 +1501,87 @@ mod path_tests {
         let mut out = Vec::new();
         idx.path(entry as usize, &mut out);
         assert_eq!(String::from_utf8_lossy(&out), "/docs/notes.txt");
+    }
+}
+
+#[cfg(test)]
+mod prior_tests {
+    use super::*;
+    use rgy_discovery::walk::{KIND_DIR, KIND_FILE, Listing, NONE, RawEnt};
+
+    /// A tree where the folders and the entries are numbered apart, and
+    /// where the home holds a folder that holds a file.
+    ///
+    /// The file "alpha.txt" sorts before the folder "home", so the folder
+    /// is the second entry and the second directory: a directory's number
+    /// and its entry's number are two different things, and a section that
+    /// mixes them reads the wrong prior.
+    ///
+    /// The tree is:
+    ///
+    /// ```text
+    /// /alpha.txt
+    /// /home/invoice.txt
+    /// /home/docs/invoice.txt
+    /// ```
+    fn tree() -> Index {
+        let listings = vec![
+            Listing {
+                id: 0,
+                names: b"alpha.txthome".to_vec(),
+                ents: vec![
+                    RawEnt { name_off: 0, name_len: 9, kind: KIND_FILE, size: 3, mtime: 7, child: NONE },
+                    RawEnt { name_off: 9, name_len: 4, kind: KIND_DIR, size: 0, mtime: 7, child: 1 },
+                ],
+            },
+            Listing {
+                id: 1,
+                names: b"docsinvoice.txt".to_vec(),
+                ents: vec![
+                    RawEnt { name_off: 0, name_len: 4, kind: KIND_DIR, size: 0, mtime: 7, child: 2 },
+                    RawEnt { name_off: 4, name_len: 11, kind: KIND_FILE, size: 3, mtime: 7, child: NONE },
+                ],
+            },
+            Listing {
+                id: 2,
+                names: b"invoice.txt".to_vec(),
+                ents: vec![RawEnt { name_off: 0, name_len: 11, kind: KIND_FILE, size: 3, mtime: 7, child: NONE }],
+            },
+        ];
+        Index::build(listings, 0, 1, b"/home")
+    }
+
+    /// Everything under the home is under it, and the bonus says so.
+    ///
+    /// The bonus used to be inherited down the tree. The rules replaced
+    /// that inheritance with their own -- the level, which is inherited
+    /// too -- and the bonus with it: the files under a folder inside the
+    /// home lost the fifteen points the home folder itself still had.
+    #[test]
+    fn the_home_bonus_reaches_the_files_under_the_home() {
+        let idx = tree();
+        let under = idx.lookup(b"/home/invoice.txt").expect("the file under the home resolves") as usize;
+        let deeper = idx.lookup(b"/home/docs/invoice.txt").expect("the file under the folder in the home resolves") as usize;
+        let outside = idx.lookup(b"/alpha.txt").expect("the file outside the home resolves") as usize;
+        assert_eq!(idx.rank_adj()[under], 15, "the file under the home carries the bonus");
+        assert_eq!(idx.rank_adj()[deeper], 15, "the file under a folder in the home carries it too");
+        assert_eq!(idx.rank_adj()[outside], 0, "the file outside it does not");
+    }
+
+    /// The directory's prior is the prior of that directory.
+    ///
+    /// The section is read per directory -- an entry the overlay added
+    /// takes the prior of the directory it is in -- and it was written with
+    /// the per-entry array, so a directory read the prior of whatever entry
+    /// happened to carry its number. Here the two are not the same: the
+    /// home folder is the second directory and the third entry.
+    #[test]
+    fn the_directory_prior_is_the_prior_of_that_directory() {
+        let idx = tree();
+        let home = idx.lookup(b"/home").expect("the home folder resolves") as usize;
+        let d = idx.dir_of(home as u32).expect("the home folder is a directory") as usize;
+        assert_eq!(idx.dir_prior()[d], 15, "the directory carries the prior of its entry");
+        let root = idx.dir_of(0).expect("the root is a directory") as usize;
+        assert_eq!(idx.dir_prior()[root], 0, "the root carries nothing");
     }
 }

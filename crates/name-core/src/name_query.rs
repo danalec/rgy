@@ -654,14 +654,17 @@ fn ext_of(name: &[u8]) -> Option<&[u8]> {
 /// matched the way every other token is matched.
 fn attr_matches(t: &Token, kind: u8) -> bool {
     let text = String::from_utf8_lossy(&t.text).to_ascii_lowercase();
-    let flags = kind >> 2;
+    // The flags live in the kind byte itself, above the two bits that hold
+    // the kind (`kind & 3`). They are tested where they sit: shifting the
+    // byte first would look for the hidden flag in bit 4 and the mount flag
+    // in bit 5, and nothing would ever match.
     match text.as_str() {
         "dir" | "folder" | "directory" => kind & 3 == KIND_DIR,
         "file" => kind & 3 == KIND_FILE,
         "link" | "symlink" => kind & 3 == KIND_LINK,
         "other" => kind & 3 == 3,
-        "hidden" => flags & FLAG_HIDDEN != 0,
-        "mount" | "volume" => flags & FLAG_MOUNT != 0,
+        "hidden" => kind & FLAG_HIDDEN != 0,
+        "mount" | "volume" => kind & FLAG_MOUNT != 0,
         _ => false,
     }
 }
@@ -1506,34 +1509,163 @@ fn keyword_span(name: &[u8], q: &[u8]) -> Option<(usize, usize)> {
 /// A name that matched through a typo, or through its shadow (the pinyin or
 /// the kana reading), has no positions: the span would be in another text.
 pub fn matched_chars(name: &[u8], tokens: &[Token]) -> Vec<u32> {
+    // The comparison runs on the fold of the name (docs/design.md 6.6,
+    // rule 2), and so does the highlight: the token is folded, so a name
+    // the filesystem stored in NFD has to be folded here as well. Without
+    // it the comparison misses a name that does match, and the row shows
+    // no span at all.
+    let folded = fold::fold(name);
     let mut out: Vec<u32> = Vec::new();
     for t in tokens.iter().filter(|t| !t.negate) {
+        // A token on another axis matched another part of the path -- the
+        // folder, the attribute, the extension. It says nothing about the
+        // name, so it highlights nothing in it.
+        if t.axis != Axis::Name {
+            continue;
+        }
         match t.mode {
             Mode::Fuzzy => {
-                if let Some(bytes) = fuzzy_matched_bytes(name, &t.text) {
-                    out.extend(chars_of_bytes(name, &bytes));
+                if let Some(bytes) = fuzzy_matched_bytes(&folded, &t.text) {
+                    out.extend(chars_of_bytes(&folded, &bytes));
                 }
             }
             Mode::Exact | Mode::Phrase => {
-                if let Some(p) = find_ci(name, &t.text) {
-                    out.extend(chars_of_range(name, p..p + t.text.len()));
+                if let Some(p) = find_ci(&folded, &t.text) {
+                    out.extend(chars_of_range(&folded, p..p + t.text.len()));
                 }
             }
-            Mode::Prefix => out.extend(chars_of_range(name, 0..t.text.len().min(name.len()))),
+            Mode::Prefix => {
+                // The prefix has to be the prefix. A token that matched
+                // through a folder of the path did not match the name's
+                // first bytes, and highlighting them would be a lie.
+                if starts_with_ci(&folded, &t.text) {
+                    out.extend(chars_of_range(&folded, 0..t.text.len().min(folded.len())));
+                }
+            }
             Mode::Suffix => {
-                let s = name.len().saturating_sub(t.text.len());
-                out.extend(chars_of_range(name, s..name.len()));
+                if ends_with_ci(&folded, &t.text) {
+                    let s = folded.len().saturating_sub(t.text.len());
+                    out.extend(chars_of_range(&folded, s..folded.len()));
+                }
             }
             Mode::Keyword => {
-                if let Some((s, e)) = keyword_span(name, &t.text) {
-                    out.extend(chars_of_range(name, s..e));
+                if let Some((s, e)) = keyword_span(&folded, &t.text) {
+                    out.extend(chars_of_range(&folded, s..e));
                 }
             }
         }
     }
+    // The positions are the folded name's characters, and the caller shows
+    // the raw one.
+    let mut out = raw_positions(name, &folded, out);
     out.sort_unstable();
     out.dedup();
     out
+}
+
+/// Whether `name` starts with `q`, ignoring ASCII case.
+///
+/// The query is folded and lowercased, so only the name's case is in
+/// question.
+fn starts_with_ci(name: &[u8], q: &[u8]) -> bool {
+    q.len() <= name.len() && name[..q.len()].iter().zip(q).all(|(a, b)| a.to_ascii_lowercase() == *b)
+}
+
+/// Whether `name` ends with `q`, ignoring ASCII case.
+fn ends_with_ci(name: &[u8], q: &[u8]) -> bool {
+    q.len() <= name.len() && name[name.len() - q.len()..].iter().zip(q).all(|(a, b)| a.to_ascii_lowercase() == *b)
+}
+
+/// The raw name's characters that the folded name's characters stand for.
+///
+/// The fold composes: the raw name "cafe" plus a combining acute is five
+/// characters, and the folded "café" is four. The folded character came
+/// from the raw's base character and the marks that followed it, so it
+/// maps to the base character -- and the marks belong to the same glyph,
+/// so they are highlighted with it.
+///
+/// The walk is honest about the cases it cannot follow: when the two
+/// names do not line up (Hangul, where the fold composes two starters),
+/// the answer is no positions at all. A span in the wrong place is worse
+/// than no span.
+fn raw_positions(raw: &[u8], folded: &[u8], positions: Vec<u32>) -> Vec<u32> {
+    if positions.is_empty() {
+        return positions;
+    }
+    // The fold did nothing: the positions are already the raw's.
+    if raw == &*folded {
+        return positions;
+    }
+    let mut out = Vec::with_capacity(positions.len());
+    let mut wanted = positions.into_iter().peekable();
+    let mut raw_char = 0u32;
+    let mut folded_char = 0u32;
+    let mut ri = 0usize;
+    let mut fi = 0usize;
+    while fi < folded.len() {
+        // The folded character at `fi` came from the raw character at
+        // `ri`, and from the marks that followed it.
+        while wanted.peek().is_some_and(|w| *w < folded_char) {
+            wanted.next();
+        }
+        if wanted.peek().is_some_and(|w| *w == folded_char) {
+            wanted.next();
+            out.push(raw_char);
+            // The marks are part of the same glyph.
+            let mut m = ri + utf8_len(raw[ri]);
+            let mut k = raw_char + 1;
+            while m < raw.len() && combining_class(raw, m) != 0 {
+                out.push(k);
+                k += 1;
+                m += utf8_len(raw[m]);
+            }
+        }
+        // Advance the raw past the base and the marks that were composed
+        // with it.
+        let mut next = ri + utf8_len(raw[ri]);
+        let mut marks = 0u32;
+        while next < raw.len() && combining_class(raw, next) != 0 {
+            next += utf8_len(raw[next]);
+            marks += 1;
+        }
+        ri = next;
+        raw_char += 1 + marks;
+        fi += utf8_len(folded[fi]);
+        folded_char += 1;
+    }
+    // The two names did not line up: the answer is no positions.
+    if raw_char != raw.iter().filter(|b| **b & 0xc0 != 0x80).count() as u32 {
+        return Vec::new();
+    }
+    out
+}
+
+/// The length in bytes of the UTF-8 character that starts with `b`.
+fn utf8_len(b: u8) -> usize {
+    if b < 0x80 {
+        1
+    } else if b >> 5 == 0b110 {
+        2
+    } else if b >> 4 == 0b1110 {
+        3
+    } else if b >> 3 == 0b11110 {
+        4
+    } else {
+        1
+    }
+}
+
+/// The canonical combining class of the character at `at`.
+///
+/// Zero for a starter, and for a byte that is not text.
+fn combining_class(bytes: &[u8], at: usize) -> u8 {
+    let Some(&b) = bytes.get(at) else { return 0 };
+    let len = utf8_len(b).min(bytes.len() - at);
+    let Ok(text) = std::str::from_utf8(&bytes[at..at + len]) else {
+        return 0;
+    };
+    let Some(c) = text.chars().next() else { return 0 };
+    crate::nfc::ccc(c as u32)
 }
 
 /// The characters of `name` that the bytes in `bytes` fall in.
@@ -1801,8 +1933,33 @@ mod tests {
         assert!(hit("attr:dir", "/x/report", KIND_DIR, 10));
         assert!(!hit("attr:dir", "/x/report.txt", KIND_FILE, 10));
         assert!(hit("attr:file", "/x/report.txt", KIND_FILE, 10));
-        assert!(hit("attr:hidden", "/x/report.txt", KIND_FILE | (FLAG_HIDDEN << 2), 10));
+        assert!(hit("attr:hidden", "/x/report.txt", KIND_FILE | FLAG_HIDDEN, 10));
         assert!(!hit("attr:hidden", "/x/report.txt", KIND_FILE, 10));
+    }
+
+    /// The flags sit in the kind byte, above the two bits that hold the
+    /// kind, and they are read where they sit.
+    ///
+    /// The test above used to pass `FLAG_HIDDEN << 2`, which is the bit the
+    /// shifted lookup was looking at: the shift was in the code and in the
+    /// fixture, so the two cancelled and the bug was invisible. The flag is
+    /// the flag here, and a file that is hidden and not a directory is
+    /// hidden.
+    #[test]
+    fn the_attribute_flags_are_read_where_they_sit() {
+        // Hidden, and a file besides.
+        assert!(hit("attr:hidden", "/x/report.txt", KIND_FILE | FLAG_HIDDEN, 10));
+        assert!(!hit("attr:hidden", "/x/report.txt", KIND_FILE | FLAG_MOUNT, 10));
+        // A mount point, and not hidden.
+        assert!(hit("attr:mount", "/x/mnt", KIND_DIR | FLAG_MOUNT, 10));
+        assert!(!hit("attr:mount", "/x/mnt", KIND_DIR | FLAG_HIDDEN, 10));
+        // The kind and the flags do not tread on each other: a hidden
+        // directory is a directory.
+        assert!(hit("attr:dir", "/x/mnt", KIND_DIR | FLAG_HIDDEN | FLAG_MOUNT, 10));
+        assert!(hit("attr:hidden", "/x/mnt", KIND_DIR | FLAG_HIDDEN | FLAG_MOUNT, 10));
+        // The old lookup would have found the hidden flag of this one: the
+        // shift put it in bit 4, where the code was looking.
+        assert!(!hit("attr:hidden", "/x/report.txt", KIND_FILE | (FLAG_HIDDEN << 2), 10));
     }
 
     /// The axes combine: a name word and a folder word are two
@@ -2436,6 +2593,58 @@ mod tests {
         // A name that did not match has no positions.
         let t = q("zzz");
         assert!(matched_chars(b"report_port.txt", &t.tokens).is_empty());
+    }
+
+    /// The prefix highlights the name's first bytes only when the name
+    /// starts with them.
+    ///
+    /// A prefix token that matched through a folder of the path did not
+    /// match the name's first bytes, and highlighting them anyway was a
+    /// lie about where the score came from.
+    #[test]
+    fn a_prefix_highlights_the_name_only_when_the_name_starts_with_it() {
+        let t = q("^src");
+        assert_eq!(matched_chars(b"src/main.rs", &t.tokens), vec![0, 1, 2]);
+        assert!(matched_chars(b"main.rs", &t.tokens).is_empty(), "the name does not start with the token, so it has no span");
+    }
+
+    /// The suffix is the same: it has to be the suffix.
+    #[test]
+    fn a_suffix_highlights_the_name_only_when_the_name_ends_with_it() {
+        let t = q("pdf$");
+        assert_eq!(matched_chars(b"invoice.pdf", &t.tokens), vec![8, 9, 10]);
+        assert!(matched_chars(b"pdf_invoice.txt", &t.tokens).is_empty());
+    }
+
+    /// A token on another axis says nothing about the name.
+    ///
+    /// `folder:documents` matches a folder of the path. The name of a
+    /// file called "documents.txt" is not that folder, and highlighting
+    /// the name's bytes for it would be a lie.
+    #[test]
+    fn a_token_on_another_axis_highlights_nothing_in_the_name() {
+        let t = q("folder:documents");
+        assert!(matched_chars(b"documents.txt", &t.tokens).is_empty(), "the folder token does not speak about the name");
+        let t = q("attr:hidden");
+        assert!(matched_chars(b"hidden.txt", &t.tokens).is_empty());
+    }
+
+    /// The span is the name's characters, in a name the filesystem stored
+    /// in NFD.
+    ///
+    /// macOS stores "café" as "cafe" plus a combining acute. The token is
+    /// folded, so the comparison has to be on the folded name -- and the
+    /// positions have to come back to the raw one, which has one character
+    /// more.
+    #[test]
+    fn the_span_is_the_raw_name_s_characters_in_a_decomposed_name() {
+        let t = q("café");
+        // "cafe" plus a combining acute, then ".txt".
+        let raw = "cafe\u{301}.txt".as_bytes();
+        assert_eq!(matched_chars(raw, &t.tokens), vec![0, 1, 2, 3, 4]);
+        // The same name, already composed: the same span.
+        let t = q("café");
+        assert_eq!(matched_chars("café.txt".as_bytes(), &t.tokens), vec![0, 1, 2, 3]);
     }
 
     /// The named time windows: a vocabulary, not a mechanism.
