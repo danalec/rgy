@@ -62,6 +62,65 @@ fn grep_op_finds_content() {
     );
 }
 
+/// The session answers with the number of hits the request asked for.
+///
+/// The request carries a limit and the query carries its own; the session
+/// path used to ignore the request's and answer with the query's default,
+/// so a request for two hits came back with every hit there was.
+#[test]
+fn the_session_answers_with_the_limit_the_request_asked_for() {
+    let dir = fixture_dir("dsess");
+    text_tree(&dir);
+    let root = dir.to_str().unwrap();
+
+    let reqs = concat!(
+        r#"{"op":"search","q":"a","limit":2}"#,
+        "\n",
+        r#"{"op":"search","q":"a","limit":2,"session":7}"#,
+        "\n",
+        r#"{"op":"search","q":"a","limit":2,"session":7}"#,
+        "\n",
+    );
+    let (code, out, err) = run_stdin(&searchd(), &["--root", root], reqs);
+    assert_eq!(code, 0, "stderr={err}");
+    let hits: Vec<&str> = out
+        .lines()
+        .filter(|l| l.contains("\"op\":\"hits\""))
+        .collect();
+    assert_eq!(hits.len(), 3, "three searches, three answers; got {out}");
+    for h in &hits {
+        assert_eq!(
+            h.matches("\"path\":").count(),
+            2,
+            "the answer holds two hits; got {h}"
+        );
+    }
+}
+
+/// A client that writes a UTF-8 BOM before its first request gets it
+/// answered.
+///
+/// The BOM is not JSON, so the first request used to be answered with
+/// "malformed request" and the client's first keystroke went unanswered.
+#[test]
+fn a_client_that_writes_a_bom_still_gets_its_first_answer() {
+    let dir = fixture_dir("dbom");
+    text_tree(&dir);
+    let root = dir.to_str().unwrap();
+
+    let req = format!("\u{feff}{}\n", r#"{"op":"search","q":"hello","limit":10}"#);
+    let (code, out, err) = run_stdin(&searchd(), &["--root", root], &req);
+    assert_eq!(code, 0, "stderr={err}");
+    assert!(
+        out.contains("\"op\":\"hits\"") && out.contains("hello.txt"),
+        "the first request is answered; got {out}"
+    );
+    assert!(
+        !out.contains("malformed"),
+        "the BOM is not a malformed request; got {out}"
+    );
+}
+
 #[test]
 fn malformed_request_errors_and_does_not_hang() {
     let dir = fixture_dir("dbad");

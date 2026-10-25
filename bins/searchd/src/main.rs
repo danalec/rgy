@@ -124,7 +124,14 @@ struct Ctx {
     /// own: the protocol carries it, so two clients (two windows of the
     /// TUI) do not share a session and neither one's keystrokes disturb
     /// the other's.
-    sessions: std::sync::Mutex<std::collections::HashMap<u64, rgy_name_core::session::Session>>,
+    ///
+    /// The session is held behind an `Arc`, because the search takes it out
+    /// of the map and runs with the map's lock dropped: the lock is held
+    /// for the length of a search otherwise, and every client would wait
+    /// for every other client's keystroke.
+    sessions: std::sync::Mutex<
+        std::collections::HashMap<u64, std::sync::Arc<rgy_name_core::session::Session>>,
+    >,
 }
 
 impl Ctx {
@@ -171,11 +178,36 @@ impl Ctx {
         if alts.len() != 1 {
             return searcher.search_alternatives(alts, limit);
         }
+        // The request's own cap becomes the query's cap, the way it does
+        // without a session: the query's `limit:` is the query's, and the
+        // request carries one too. The session path used to ignore the
+        // request's, and answered with the query's default -- a request
+        // for ten hits came back with fifty.
+        let mut q = alts[0].clone();
+        q.limit = limit;
+        // The session is taken out of the map under the lock and the lock is
+        // dropped before the search. The search is the slow part, and a lock
+        // held across it makes every client wait for every other client's
+        // keystroke -- which is the opposite of what a session is for.
+        let session = {
+            let mut sessions = self.sessions.lock().unwrap();
+            sessions
+                .entry(id)
+                .or_insert_with(|| std::sync::Arc::new(rgy_name_core::session::Session::new(id)))
+                .clone()
+        };
+        session.search_replaying_facets(searcher, &q)
+    }
+
+    /// Drop the sessions that have been idle for `idle`.
+    ///
+    /// The map grew by one entry for every id a client ever used, and a
+    /// client that reconnects with a new id leaves one behind for every
+    /// connection it ever made. A session nobody has used for a while is
+    /// worth nothing: the next query reads the index again anyway.
+    fn trim_sessions(&self, idle: std::time::Duration) {
         let mut sessions = self.sessions.lock().unwrap();
-        let session = sessions
-            .entry(id)
-            .or_insert_with(|| rgy_name_core::session::Session::new(id));
-        session.search_replaying_facets(searcher, &alts[0])
+        sessions.retain(|_, s| !s.idle_for(idle));
     }
 }
 
@@ -669,6 +701,11 @@ fn run_stream(input: impl BufRead, mut out: impl Write, ctx: &std::sync::Arc<Ctx
     }
     for line in input.lines() {
         let Ok(line) = line else { break };
+        // A client that writes a UTF-8 BOM before its first request would
+        // lose that request: the BOM is not JSON, so the answer would be
+        // "malformed request" and the client's first keystroke would go
+        // unanswered.
+        let line = line.trim_start_matches('\u{feff}');
         if line.trim().is_empty() {
             continue;
         }
@@ -1240,6 +1277,10 @@ fn spawn_trim(ctx: &std::sync::Arc<Ctx>) {
                 if let Ok(live) = ctx.live.read() {
                     live.names_cache.trim_if_idle(IDLE);
                 }
+                // The sessions go with it: a client that reconnects with a
+                // new id would otherwise leave a session behind for every
+                // connection it ever made.
+                ctx.trim_sessions(IDLE);
             }
         });
 }
@@ -1271,80 +1312,72 @@ fn spawn_content(ctx: &std::sync::Arc<Ctx>, dir: std::path::PathBuf) {
             while !ctx.wants_content.load(Ordering::Relaxed) {
                 std::thread::sleep(TICK);
             }
-            let _ = std::thread::Builder::new()
-                .name("searchd-content".into())
-                .spawn(move || {
-                    // Nothing to build until a content search asks for one.
-                    while !ctx.wants_content.load(Ordering::Relaxed) {
-                        std::thread::sleep(TICK);
+            loop {
+                let live = match ctx.live.read() {
+                    Ok(l) => l,
+                    Err(_) => break,
+                };
+                // What should be indexed there: the cheap half,
+                // over the metadata the live index already holds.
+                // The root's tree, so a file that appeared while
+                // the daemon was off is in the batch too.
+                let wants = content::wants(
+                    &live,
+                    ctx.home.as_bytes(),
+                    &[],
+                    std::slice::from_ref(&ctx.root),
+                    &ctx.root,
+                );
+                drop(live);
+                let todo = {
+                    let mut g = ctx.content.lock().unwrap();
+                    let c = g.get_or_insert_with(|| content::Content::open(dir.clone()));
+                    let todo = c.diff(wants);
+                    let n = todo.len().min(BATCH);
+                    if n == 0 {
+                        None
+                    } else {
+                        let id = c.alloc_id();
+                        Some((todo, id, n))
                     }
-                    loop {
-                        let live = match ctx.live.read() {
-                            Ok(l) => l,
-                            Err(_) => break,
-                        };
-                        // What should be indexed there: the cheap half,
-                        // over the metadata the live index already holds.
-                        // The root's tree, so a file that appeared while
-                        // the daemon was off is in the batch too.
-                        let wants = content::wants(
-                            &live,
-                            ctx.home.as_bytes(),
-                            &[],
-                            std::slice::from_ref(&ctx.root),
-                            &ctx.root,
-                        );
-                        drop(live);
-                        let todo = {
-                            let mut g = ctx.content.lock().unwrap();
-                            let c = g.get_or_insert_with(|| content::Content::open(dir.clone()));
-                            let todo = c.diff(wants);
-                            let n = todo.len().min(BATCH);
-                            if n == 0 {
-                                None
-                            } else {
-                                let id = c.alloc_id();
-                                Some((todo, id, n))
-                            }
-                        };
-                        let Some((todo, id, n)) = todo else {
-                            std::thread::sleep(TICK);
-                            continue;
-                        };
-                        // The build reads the files, so it happens with
-                        // the lock released: a search that runs beside it
-                        // must not wait for a read of the whole batch.
-                        if let Some(seg) = content::build_segment(&dir, id, &todo, 0..n) {
-                            // The segments pile up: a batch of files is a
-                            // segment, and a thousand batches are a
-                            // thousand segments to read on every query. The
-                            // plan says when enough of them have gathered
-                            // to be worth merging into one.
-                            let (ids, segs, mid) = {
-                                let mut g = ctx.content.lock().unwrap();
-                                let Some(c) = g.as_mut() else { continue };
-                                c.push(seg);
-                                let Some(ids) = c.merge_plan() else { continue };
-                                // The segments are cloned (the postings are
-                                // a shared mmap) so the merge can run with
-                                // the lock released: it reads eight
-                                // segments and writes a new one, and a
-                                // search running beside it must not wait.
-                                let segs: Vec<content::Segment> =
-                                    c.segments(&ids).into_iter().cloned().collect();
-                                let mid = c.alloc_id();
-                                (ids, segs, mid)
-                            };
-                            let refs: Vec<&content::Segment> = segs.iter().collect();
-                            if let Some(merged) = content::merge(&dir, mid, &refs) {
-                                let mut g = ctx.content.lock().unwrap();
-                                if let Some(c) = g.as_mut() {
-                                    c.replace(&ids, merged);
-                                }
-                            }
+                };
+                let Some((todo, id, n)) = todo else {
+                    std::thread::sleep(TICK);
+                    continue;
+                };
+                // The build reads the files, so it happens with
+                // the lock released: a search that runs beside it
+                // must not wait for a read of the whole batch.
+                if let Some(seg) = content::build_segment(&dir, id, &todo, 0..n) {
+                    // The segments pile up: a batch of files is a
+                    // segment, and a thousand batches are a
+                    // thousand segments to read on every query. The
+                    // plan says when enough of them have gathered
+                    // to be worth merging into one.
+                    let (ids, segs, mid) = {
+                        let mut g = ctx.content.lock().unwrap();
+                        let Some(c) = g.as_mut() else { continue };
+                        c.push(seg);
+                        let Some(ids) = c.merge_plan() else { continue };
+                        // The segments are cloned (the postings are
+                        // a shared mmap) so the merge can run with
+                        // the lock released: it reads eight
+                        // segments and writes a new one, and a
+                        // search running beside it must not wait.
+                        let segs: Vec<content::Segment> =
+                            c.segments(&ids).into_iter().cloned().collect();
+                        let mid = c.alloc_id();
+                        (ids, segs, mid)
+                    };
+                    let refs: Vec<&content::Segment> = segs.iter().collect();
+                    if let Some(merged) = content::merge(&dir, mid, &refs) {
+                        let mut g = ctx.content.lock().unwrap();
+                        if let Some(c) = g.as_mut() {
+                            c.replace(&ids, merged);
                         }
                     }
-                });
+                }
+            }
         });
 }
 

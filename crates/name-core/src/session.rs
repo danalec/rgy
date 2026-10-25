@@ -49,7 +49,7 @@
 //! the same scorers, the same filters. A session that cannot re-rank
 //! exactly is not used at all.
 
-use crate::name_query::{Hit, NameKey, Query, Searcher};
+use crate::name_query::{Hit, NameKey, Query, Searcher, SortBy};
 
 /// How much more a re-rank's visit costs than a step of the linear scan.
 ///
@@ -166,8 +166,14 @@ impl Session {
                 let complete = base.len() + over.len() < q.limit;
                 let mut hits = base;
                 hits.extend(over);
+                // The answer is stored AFTER the sort and the cap: the
+                // replay path hands it back as it is, so an answer kept
+                // before the cap was the unsorted, over-long list of the
+                // two halves -- a different order and a different length
+                // from the one a fresh search gives.
+                let hits = self.sort_and_cap(searcher, q, hits);
                 self.fill(searcher, q, revision, &hits, complete);
-                self.sort_and_cap(searcher, q, hits)
+                hits
             }
         }
     }
@@ -244,6 +250,16 @@ impl Session {
         if g.as_ref().is_some_and(|s| s.at.elapsed() > idle) {
             *g = None;
         }
+    }
+
+    /// Whether the session has been idle for `idle`.
+    ///
+    /// The daemon asks this of every session it keeps and drops the ones
+    /// that have not been used. A session with no result set is idle: it
+    /// holds nothing, and the next query reads the index anyway.
+    pub fn idle_for(&self, idle: std::time::Duration) -> bool {
+        let g = self.last.lock().unwrap();
+        g.as_ref().is_none_or(|s| s.at.elapsed() > idle)
     }
 
     /// The facet selection: the part of the query that is not the text the
@@ -374,6 +390,20 @@ struct Filters {
     globs: Vec<(bool, Vec<u8>)>,
     /// The path regex, as its text: the compiled form is not comparable.
     path_re: Option<String>,
+    /// The folder the query asks for (`in:`).
+    ///
+    /// The scope is a filter, and a query that changes it asks a different
+    /// question: `invoice` and `invoice in:sub2` do not have the same
+    /// answer, so the session must not hand the second one the answer of
+    /// the first.
+    scope: Option<Vec<u8>>,
+    /// The order the hits come in (`sort:`).
+    ///
+    /// The order is part of the answer, and a query that changes it asks
+    /// for the same hits in a different order.
+    sort: SortBy,
+    /// How many hits the query asks for (`limit:`).
+    limit: usize,
 }
 
 impl SessionKey {
@@ -390,6 +420,9 @@ impl SessionKey {
                 mtime: q.mtime,
                 globs: q.globs.clone(),
                 path_re: q.path_re.as_ref().map(|r| r.as_str().to_string()),
+                scope: q.scope.clone(),
+                sort: q.sort,
+                limit: q.limit,
             },
         }
     }
@@ -594,6 +627,65 @@ mod tests {
         // The selection changed: the filter is a different one.
         session.search_replaying_facets(&searcher, &q("entry ext:pdf"));
         assert!(!session.last_reranked(), "the selection changed, so the search ran again");
+    }
+
+    /// A replayed answer is the answer a fresh search gives.
+    ///
+    /// The session stored the answer before the sort and the cap, so the
+    /// replay handed back the two halves of the result set as they came:
+    /// unsorted, and longer than the query asked for. The order is part of
+    /// the answer, and so is the length.
+    #[test]
+    fn a_replayed_answer_is_the_answer_a_fresh_search_gives() {
+        let live = live(200);
+        let searcher = Searcher { live: &live };
+        let session = Session::new(1);
+        let query = q("entry");
+        let fresh = searcher.search(&query);
+        let first = session.search(&searcher, &query);
+        let replayed = session.search_replaying_facets(&searcher, &query);
+        assert_eq!(first.len(), fresh.len(), "the session answers what a fresh search gives");
+        assert_eq!(replayed.len(), fresh.len(), "the replay keeps the length of the answer");
+        let order: Vec<u32> = fresh.iter().map(|h| h.idx).collect();
+        let replay_order: Vec<u32> = replayed.iter().map(|h| h.idx).collect();
+        assert_eq!(order, replay_order, "the replay keeps the order of the answer");
+    }
+
+    /// A changed scope is a new search.
+    ///
+    /// `entry` and `entry in:sub2` do not have the same answer, and the
+    /// scope was not part of the session's key: the second query replayed
+    /// the answer of the first, which is a stale answer.
+    #[test]
+    fn a_changed_scope_is_searched_again() {
+        let live = live(200);
+        let searcher = Searcher { live: &live };
+        let session = Session::new(1);
+        session.search_replaying_facets(&searcher, &q("entry"));
+        session.search_replaying_facets(&searcher, &q("entry in:sub2"));
+        assert!(!session.last_reranked(), "the scope changed, so the search ran again");
+    }
+
+    /// A changed order is a new search: the order is part of the answer.
+    #[test]
+    fn a_changed_order_is_searched_again() {
+        let live = live(200);
+        let searcher = Searcher { live: &live };
+        let session = Session::new(1);
+        session.search_replaying_facets(&searcher, &q("entry"));
+        session.search_replaying_facets(&searcher, &q("entry sort:mtime"));
+        assert!(!session.last_reranked(), "the order changed, so the search ran again");
+    }
+
+    /// A changed cap is a new search.
+    #[test]
+    fn a_changed_cap_is_searched_again() {
+        let live = live(200);
+        let searcher = Searcher { live: &live };
+        let session = Session::new(1);
+        session.search_replaying_facets(&searcher, &q("entry"));
+        session.search_replaying_facets(&searcher, &q("entry limit:5"));
+        assert!(!session.last_reranked(), "the cap changed, so the search ran again");
     }
 
     /// The selection is the filters, without the text.
