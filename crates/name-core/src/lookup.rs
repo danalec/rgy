@@ -49,12 +49,23 @@ impl Backend {
 /// The five indexes over one record store.
 pub struct Lookup<'a> {
     index: &'a Index,
+    /// The name ids of the files and of the folders, sorted by name.
+    ///
+    /// Built when the name indexes are asked for. The pass over the
+    /// entries and the two sorts are the price of the surface, and a
+    /// caller that only wants the backend does not pay it: the daemon
+    /// resolves a path per request, and the resolution wants the path and
+    /// the volume, not the name indexes.
+    names: std::sync::OnceLock<Names>,
+}
+
+/// The two name indexes: the names of the files and the names of the
+/// folders, each sorted by the name's bytes.
+struct Names {
     /// The name ids of the files, sorted by name.
-    file_names: Vec<u32>,
+    files: Vec<u32>,
     /// The name ids of the folders, sorted by name.
-    folder_names: Vec<u32>,
-    /// The volume that owns each folder.
-    folder_backends: Vec<Backend>,
+    folders: Vec<u32>,
 }
 
 impl<'a> Lookup<'a> {
@@ -66,28 +77,35 @@ impl<'a> Lookup<'a> {
     /// entries point at it -- so a name several entries carry is one name
     /// here, and the entries behind it come from the index's own
     /// name-to-entries table.
+    ///
+    /// The pass happens when the name indexes are asked for, not here.
     pub fn new(index: &'a Index) -> Lookup<'a> {
-        let mut file_names = Vec::new();
-        let mut folder_names = Vec::new();
-        for i in 0..index.n {
-            let kind = index.kind()[i] & 3;
-            match kind {
-                KIND_DIR => folder_names.push(index.ent_name()[i]),
-                KIND_FILE | KIND_LINK => file_names.push(index.ent_name()[i]),
-                _ => {}
+        Lookup { index, names: std::sync::OnceLock::new() }
+    }
+
+    /// The two name indexes, built once.
+    fn names(&self) -> &Names {
+        self.names.get_or_init(|| {
+            let mut file_names = Vec::new();
+            let mut folder_names = Vec::new();
+            for i in 0..self.index.n {
+                let kind = self.index.kind()[i] & 3;
+                match kind {
+                    KIND_DIR => folder_names.push(self.index.ent_name()[i]),
+                    KIND_FILE | KIND_LINK => file_names.push(self.index.ent_name()[i]),
+                    _ => {}
+                }
             }
-        }
-        // The names are sorted by the name's bytes -- the index's own
-        // order, the one the path resolution walks -- so the lookup is a
-        // binary search over the same order.
-        let by_name = |a: &u32, b: &u32| index.uname(*a).cmp(index.uname(*b));
-        file_names.sort_unstable_by(by_name);
-        file_names.dedup();
-        folder_names.sort_unstable_by(by_name);
-        folder_names.dedup();
-        // Every folder belongs to the volume the tree is on.
-        let folder_backends = vec![Backend(0); folder_names.len()];
-        Lookup { index, file_names, folder_names, folder_backends }
+            // The names are sorted by the name's bytes -- the index's own
+            // order, the one the path resolution walks -- so the lookup is
+            // a binary search over the same order.
+            let by_name = |a: &u32, b: &u32| self.index.uname(*a).cmp(self.index.uname(*b));
+            file_names.sort_unstable_by(by_name);
+            file_names.dedup();
+            folder_names.sort_unstable_by(by_name);
+            folder_names.dedup();
+            Names { files: file_names, folders: folder_names }
+        })
     }
 
     /// The `file_name` index: the files whose name is `name`.
@@ -95,23 +113,27 @@ impl<'a> Lookup<'a> {
     /// The answer is the entries, not the name: a name several files carry
     /// is one name in the index and several entries here.
     pub fn file_name(&self, name: &[u8]) -> Vec<u32> {
-        self.entries_of(&self.file_names, name)
+        self.entries_of(&self.names().files, name, false)
     }
 
     /// The `folder_name` index: the folders whose name is `name`.
     ///
     /// Only the folders: a file with that name is not in this index.
     pub fn folder_name(&self, name: &[u8]) -> Vec<u32> {
-        self.entries_of(&self.folder_names, name)
+        self.entries_of(&self.names().folders, name, true)
     }
 
     /// The `folder_backend` index: the volume that owns the folder.
     ///
     /// The folder is named by its entry index, the way the index holds it.
+    /// A file is not a folder and owns no volume of its own -- it is on
+    /// the volume of the folder it is in, and the caller asks about that
+    /// folder.
+    ///
+    /// rgy indexes one tree, so the volume is the one the tree is on.
     pub fn folder_backend(&self, entry: u32) -> Option<Backend> {
-        let name = self.index.ent_name()[entry as usize];
-        let at = self.folder_names.binary_search_by(|probe| self.index.uname(*probe).cmp(self.index.uname(name))).ok()?;
-        self.folder_backends.get(at).copied()
+        let kind = *self.index.kind().get(entry as usize)?;
+        (kind & 3 == KIND_DIR).then_some(Backend(0))
     }
 
     /// The `file_path` index: the full path of the file at `entry`.
@@ -133,14 +155,24 @@ impl<'a> Lookup<'a> {
     /// The names are sorted, so this is a binary search over the range of
     /// the names that start with the same bytes; the entries behind each
     /// name come from the index's own name-to-entries table.
-    fn entries_of(&self, names: &[u32], name: &[u8]) -> Vec<u32> {
+    ///
+    /// The kind is checked on the way out: the name table holds every
+    /// entry that carries the name, files and folders alike, and the file
+    /// index is not supposed to answer with a folder.
+    fn entries_of(&self, names: &[u32], name: &[u8], want_dir: bool) -> Vec<u32> {
         let at = names.partition_point(|&n| self.index.uname(n) < name);
-        names[at..].iter().take_while(|&&n| self.index.uname(n) == name).flat_map(|&n| self.index.name_ents_of(n)).collect()
+        names[at..]
+            .iter()
+            .take_while(|&&n| self.index.uname(n) == name)
+            .flat_map(|&n| self.index.name_ents_of(n))
+            .filter(|&e| (self.index.kind()[e as usize] & 3 == KIND_DIR) == want_dir)
+            .collect()
     }
 
     /// The number of names in each of the two name indexes.
     pub fn counts(&self) -> (usize, usize) {
-        (self.file_names.len(), self.folder_names.len())
+        let n = self.names();
+        (n.files.len(), n.folders.len())
     }
 }
 
@@ -217,5 +249,44 @@ mod tests {
         assert_eq!(l.counts().0, 1, "one distinct name");
         // The entries behind it come from the index's own table.
         assert_eq!(l.file_name(b"a.txt").len(), 2, "both entries carry the name");
+    }
+
+    /// A name a file and a folder share is in both indexes, and each
+    /// index answers with its own kind.
+    ///
+    /// The name table holds every entry that carries the name, files and
+    /// folders alike, and the file index is not supposed to answer with a
+    /// folder -- or the folder index with a file.
+    #[test]
+    fn a_name_a_file_and_a_folder_share_is_in_both_indexes() {
+        let listings = vec![Listing {
+            id: 0,
+            names: b"docs".to_vec(),
+            ents: vec![
+                RawEnt { name_off: 0, name_len: 4, kind: KIND_DIR, size: 0, mtime: 1, child: NONE },
+                RawEnt { name_off: 0, name_len: 4, kind: KIND_FILE, size: 1, mtime: 1, child: NONE },
+            ],
+        }];
+        let idx = Index::build(listings, 0, 1, b"/");
+        let l = Lookup::new(&idx);
+        let files = l.file_name(b"docs");
+        assert_eq!(files.len(), 1, "the file index answers with the file");
+        assert_eq!(idx.kind()[files[0] as usize] & 3, KIND_FILE);
+        let folders = l.folder_name(b"docs");
+        assert_eq!(folders.len(), 1, "the folder index answers with the folder");
+        assert_eq!(idx.kind()[folders[0] as usize] & 3, KIND_DIR);
+    }
+
+    /// A file owns no volume, and an entry that is not there is not an
+    /// answer.
+    #[test]
+    fn a_file_owns_no_volume_and_a_missing_entry_is_not_an_answer() {
+        let idx = index();
+        let l = Lookup::new(&idx);
+        let docs = idx.lookup(b"/docs").expect("the folder resolves");
+        let notes = idx.lookup(b"/docs/notes.txt").expect("the file resolves");
+        assert_eq!(l.folder_backend(docs), Some(Backend(0)), "the folder belongs to the volume");
+        assert_eq!(l.folder_backend(notes), None, "a file owns no volume of its own");
+        assert_eq!(l.folder_backend(u32::MAX), None, "an entry that is not there is not an answer");
     }
 }

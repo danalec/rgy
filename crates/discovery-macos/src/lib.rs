@@ -27,6 +27,7 @@ mod walk;
 
 pub mod event;
 pub mod feed;
+pub mod record;
 
 pub use event::{
     Event, HISTORY_DONE, ITEM_IS_DIR, KERNEL_DROPPED, MUST_SCAN_SUBDIRS, USER_DROPPED,

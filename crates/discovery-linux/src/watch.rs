@@ -158,8 +158,14 @@ impl Watch for InotifyWatch {
                         // that follows covers it. A rescan there would be a
                         // loop -- a folder created and removed in the same
                         // breath would ask for one every time.
+                        //
+                        // The whole tree is watched, not just the folder:
+                        // a directory created with content (`mkdir -p a/b/c`,
+                        // a clone, an unpack) has folders under it that were
+                        // made before the watch on it existed, and a watch
+                        // on the folder alone would miss all of them.
                         let gone = dir.symlink_metadata().is_err();
-                        if !gone && self.add_one(&dir).is_err() {
+                        if !gone && self.add_tree(&dir).is_err() {
                             return Ok(ChangeBatch::Rescan);
                         }
                     }
@@ -172,6 +178,22 @@ impl Watch for InotifyWatch {
                     self.pending_old = Some(self.record(wd, &name, REASON_RENAME_OLD));
                 }
                 if mask & libc::IN_MOVED_TO != 0 {
+                    if mask & libc::IN_ISDIR != 0 {
+                        // A directory moved into the tree brings its subtree
+                        // with it, and the subtree has to be watched: the
+                        // watches are on the paths, so a tree that was moved
+                        // from elsewhere has none.
+                        let dir = self
+                            .watches
+                            .get(&wd)
+                            .cloned()
+                            .unwrap_or_default()
+                            .join(std::ffi::OsString::from_vec(name.clone()));
+                        let gone = dir.symlink_metadata().is_err();
+                        if !gone && self.add_tree(&dir).is_err() {
+                            return Ok(ChangeBatch::Rescan);
+                        }
+                    }
                     if let Some(mut old) = self.pending_old.take() {
                         let _ = cookie;
                         old.reason = REASON_RENAME_OLD;
@@ -189,6 +211,88 @@ impl Drop for InotifyWatch {
     fn drop(&mut self) {
         unsafe {
             libc::close(self.fd);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A temporary directory of the test's own.
+    fn temp(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "rgy-inotify-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Wait for the watch to report something.
+    fn wait_for(w: &mut InotifyWatch) -> Vec<UsnRecord> {
+        for _ in 0..100 {
+            match w.next_batch() {
+                Ok(ChangeBatch::Events(evs)) if !evs.is_empty() => return evs,
+                _ => std::thread::sleep(std::time::Duration::from_millis(20)),
+            }
+        }
+        Vec::new()
+    }
+
+    /// The paths the watch is on.
+    fn watched(w: &InotifyWatch) -> Vec<String> {
+        w.watches
+            .values()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// A directory created with content under it is watched all the way
+    /// down.
+    ///
+    /// The folders under it were made before the watch on it existed --
+    /// `mkdir -p a/b/c` makes all three at once -- and a watch on the
+    /// folder alone would miss all of them.
+    #[test]
+    fn a_directory_created_with_content_is_watched_all_the_way_down() {
+        let root = temp("created");
+        let mut w = InotifyWatch::new(&root).expect("the watch opens");
+        std::fs::create_dir_all(root.join("a/b/c")).unwrap();
+        let events = wait_for(&mut w);
+        assert!(!events.is_empty(), "the create arrives");
+        let watched = watched(&w);
+        for want in ["a", "a/b", "a/b/c"] {
+            assert!(
+                watched.iter().any(|p| p.ends_with(want)),
+                "the watch covers {want}; watched: {watched:?}"
+            );
+        }
+    }
+
+    /// A directory moved into the tree is watched all the way down.
+    ///
+    /// The watches are on the paths, and a tree moved in from elsewhere has
+    /// none.
+    #[test]
+    fn a_directory_moved_into_the_tree_is_watched_all_the_way_down() {
+        let root = temp("moved-into");
+        let outside = temp("moved-from");
+        std::fs::create_dir_all(outside.join("x/y")).unwrap();
+        let mut w = InotifyWatch::new(&root).expect("the watch opens");
+        std::fs::rename(outside.join("x"), root.join("x")).unwrap();
+        let events = wait_for(&mut w);
+        assert!(!events.is_empty(), "the move arrives");
+        let watched = watched(&w);
+        for want in ["x", "x/y"] {
+            assert!(
+                watched.iter().any(|p| p.ends_with(want)),
+                "the watch covers {want}; watched: {watched:?}"
+            );
         }
     }
 }

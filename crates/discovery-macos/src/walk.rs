@@ -221,12 +221,19 @@ fn push(l: Listing, ctx: &Ctx) {
     ctx.out[slot].lock().unwrap().push(l);
 }
 
-fn rd32(b: &[u8], at: usize) -> u32 {
-    u32::from_ne_bytes(b[at..at + 4].try_into().unwrap())
+/// The 32-bit word at `at`, if the buffer holds it.
+///
+/// The records come from the kernel, and a record shorter than the fields
+/// it claims to hold is one this reader cannot trust. Reading it anyway
+/// panics on a value the kernel wrote, which is the worst place for a
+/// panic: the walk of a volume the user is looking at.
+fn rd32_at(b: &[u8], at: usize) -> Option<u32> {
+    crate::record::word32(b, at)
 }
 
-fn rd64(b: &[u8], at: usize) -> u64 {
-    u64::from_ne_bytes(b[at..at + 8].try_into().unwrap())
+/// The 64-bit word at `at`, if the buffer holds it.
+fn rd64_at(b: &[u8], at: usize) -> Option<u64> {
+    crate::record::word64(b, at)
 }
 
 /// Returns false if the directory could not be opened.
@@ -270,31 +277,38 @@ fn list_fd(fd: i32, l: &mut Listing) {
             }
             // Size the listing exactly: 8M entries' worth of growth slack
             // would be ~150 MB at the scan's peak.
-            let (mut p, mut bytes) = (0usize, 0usize);
-            for _ in 0..n {
-                let (b, common) = (&buf[p..], rd32(buf, p + 4));
+            // The records the kernel wrote, as byte ranges: a record that
+            // does not fit in the buffer ends the listing, and the walk
+            // reads the ones it can trust.
+            let recs = crate::record::records(buf, n as usize);
+            let mut bytes = 0usize;
+            for &(start, end) in &recs {
+                let (b, common) = (&buf[start..end], rd32_at(buf, start + 4).unwrap_or(0));
                 if common & libc::ATTR_CMN_NAME != 0 {
                     let f = if common & ATTR_CMN_ERROR != 0 { 28 } else { 24 };
-                    bytes += (rd32(b, f + 4) as usize).saturating_sub(1);
+                    if let Some(nlen) = rd32_at(b, f + 4) {
+                        bytes += (nlen as usize).saturating_sub(1);
+                    }
                 }
-                p += rd32(b, 0) as usize;
             }
-            l.ents.reserve_exact(n as usize);
+            l.ents.reserve_exact(recs.len());
             l.names.reserve_exact(bytes);
-            let mut p = 0usize;
-            for _ in 0..n {
-                let len = rd32(buf, p) as usize;
-                parse_entry(&buf[p..p + len], l);
-                p += len;
+            for &(start, end) in &recs {
+                parse_entry(&buf[start..end], l);
             }
         }
     });
 }
 
 fn parse_entry(b: &[u8], l: &mut Listing) {
-    let common = rd32(b, 4);
-    let dirattr = rd32(b, 12);
-    let fileattr = rd32(b, 16);
+    // Every word is checked: the record comes from the kernel, and one
+    // shorter than the fields it claims to hold is one this reader cannot
+    // trust. The entry is dropped, and the walk carries on.
+    let Some(common) = rd32_at(b, 4) else {
+        return;
+    };
+    let dirattr = rd32_at(b, 12).unwrap_or(0);
+    let fileattr = rd32_at(b, 16).unwrap_or(0);
     let mut f = 24;
     if common & ATTR_CMN_ERROR != 0 {
         f += 4;
@@ -308,8 +322,12 @@ fn parse_entry(b: &[u8], l: &mut Listing) {
     // taking it as an unsigned one wraps the start past the end of the
     // buffer -- a slice that panics on a value that came from the
     // kernel.
-    let off = rd32(b, f) as i32 as isize;
-    let nlen = rd32(b, f + 4) as usize;
+    let Some(off) = rd32_at(b, f).map(|v| v as i32 as isize) else {
+        return;
+    };
+    let Some(nlen) = rd32_at(b, f + 4).map(|v| v as usize) else {
+        return;
+    };
     let Some(start) = (f as isize).checked_add(off).filter(|&s| s >= 0) else {
         return;
     };
@@ -323,7 +341,10 @@ fn parse_entry(b: &[u8], l: &mut Listing) {
     f += 8;
     let mut kind = KIND_OTHER;
     if common & libc::ATTR_CMN_OBJTYPE != 0 {
-        kind = match rd32(b, f) {
+        let Some(t) = rd32_at(b, f) else {
+            return;
+        };
+        kind = match t {
             1 => KIND_FILE,
             2 => KIND_DIR,
             5 => KIND_LINK,
@@ -333,32 +354,47 @@ fn parse_entry(b: &[u8], l: &mut Listing) {
     }
     let mut mtime = 0u32;
     if common & libc::ATTR_CMN_MODTIME != 0 {
-        mtime = (rd64(b, f) as i64).clamp(0, u32::MAX as i64) as u32;
+        let Some(t) = rd64_at(b, f) else {
+            return;
+        };
+        mtime = (t as i64).clamp(0, u32::MAX as i64) as u32;
         f += 16;
     }
     let mut flags = 0;
     if common & libc::ATTR_CMN_FLAGS != 0 {
-        flags = rd32(b, f);
+        let Some(fl) = rd32_at(b, f) else {
+            return;
+        };
+        flags = fl;
         if flags & libc::UF_HIDDEN != 0 {
             kind |= FLAG_HIDDEN;
         }
         f += 4;
     }
     if dirattr & libc::ATTR_DIR_ENTRYCOUNT != 0 {
-        if rd32(b, f) == 0 && flags & SF_FIRMLINK == 0 {
+        let Some(count) = rd32_at(b, f) else {
+            return;
+        };
+        if count == 0 && flags & SF_FIRMLINK == 0 {
             kind |= MAYBE_EMPTY;
         }
         f += 4;
     }
     if dirattr & libc::ATTR_DIR_MOUNTSTATUS != 0 {
-        if rd32(b, f) & (libc::DIR_MNTSTATUS_MNTPOINT | DIR_MNTSTATUS_TRIGGER) != 0 {
+        let Some(mnt) = rd32_at(b, f) else {
+            return;
+        };
+        if mnt & (libc::DIR_MNTSTATUS_MNTPOINT | DIR_MNTSTATUS_TRIGGER) != 0 {
             kind |= FLAG_MOUNT;
         }
         f += 4;
     }
     let mut size = 0u64;
     if fileattr & libc::ATTR_FILE_DATALENGTH != 0 {
-        size = rd64(b, f);
+        let Some(s) = rd64_at(b, f) else {
+            return;
+        };
+        size = s;
     }
     if name.is_empty() || name.len() > u16::MAX as usize {
         return;

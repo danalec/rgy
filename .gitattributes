@@ -43,6 +43,13 @@
 # a checkout that rewrote them would rewrite the rules themselves.
 .gitattributes text eol=lf
 Cargo.lock text eol=lf
+# The licence files are text like the rest. The audit reads them, and a
+# checkout that rewrote them would leave the tree depending on the
+# reader's autocrlf -- one of them came out of a checkout with the
+# endings mixed.
+COPYING text eol=lf
+NOTICE text eol=lf
+LICENSE* text eol=lf
 # The workflow files carry shell inside YAML: a `run: |` block is a shell
 # script, and a CRLF one has a carriage return at the end of every command.
 # On a unix runner that is "command not found" for the first line.

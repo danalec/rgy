@@ -861,28 +861,19 @@ fn parse_date(s: &str) -> Option<u32> {
     (days >= 0).then_some((days as u64 * DAY) as u32)
 }
 
-/// The date range a `mtime:` filter asks for.
-///
-/// The value is one of three things, and the operator suffix is what tells
-/// them apart:
-///
-/// * a **calendar date** -- `2024-01-01`, or a range of two
-///   (`2024-01-01..2024-02-01`). A date names a whole day: it starts at
-///   midnight and ends at the next midnight, so `mtime:2024-01-01` is the
-///   files changed that day;
-/// * an **age** -- `7d`, `2mo`. An age is counted back from now, so
-///   `mtime:7d` is the last seven days;
-/// * an **operator** on either -- `<` before, `>` after, and the two
-///   Listary recovered verbatim: `c` (created) and `<` (before).
-///
-/// The `c` suffix is the one rgy cannot answer: it asks for the file's
-/// **creation** time, and the index keeps the modification time. It is
-/// accepted and answered with the modification time's range, because a
-/// filter that answers with something else is worse than one that does not
-/// answer -- and the answer is the honest one for the data rgy has.
-///
-/// A range with a bound the value cannot give is empty, not everything:
-/// the same rule every other filter here follows.
+/// The operator a date value carries.
+#[derive(Clone, Copy, PartialEq)]
+enum DateOp {
+    /// No operator: the value is the range itself.
+    None,
+    /// `<`: before the value.
+    Before,
+    /// `>`: after the value.
+    After,
+    /// `c`: the created date (Listary's token).
+    Created,
+}
+
 /// The date range a `mtime:` filter asks for.
 ///
 /// The value is one of three things, and the operator suffix is what tells
@@ -911,19 +902,6 @@ fn parse_date(s: &str) -> Option<u32> {
 ///
 /// A range with a bound the value cannot give is empty, not everything:
 /// the same rule every other filter here follows.
-/// The operator a date value carries.
-#[derive(Clone, Copy, PartialEq)]
-enum DateOp {
-    /// No operator: the value is the range itself.
-    None,
-    /// `<`: before the value.
-    Before,
-    /// `>`: after the value.
-    After,
-    /// `c`: the created date (Listary's token).
-    Created,
-}
-
 fn date_range(v: &str, now: u32) -> Result<(u32, u32), String> {
     let bad = || format!("bad date {v}");
     // The operator suffix, if any.
