@@ -648,14 +648,26 @@ impl Query {
         if folder_toks.iter().any(|t| t.negate && d.matched(t)) {
             return None;
         }
-        let pos: Vec<&Token> = name_toks.iter().copied().filter(|t| !t.negate).collect();
+        // The name-axis tokens, each with the place it has among the
+        // positive tokens.
+        //
+        // The place matters: `dir_match` fills the memo by that place, so a
+        // token that is not the first positive one has to look up its own
+        // slot and not the one before it. The two lined up only while every
+        // positive token was a name token.
+        let mut pos: Vec<(usize, &Token)> = Vec::new();
+        for (at, tok) in self.tokens.iter().filter(|t| !t.negate).enumerate() {
+            if tok.axis == Axis::Name {
+                pos.push((at, tok));
+            }
+        }
         let all = (1u32 << pos.len()) - 1;
         let (mut got, mut inherited, mut score) = (0u32, 0u32, 0i32);
-        for (t, tok) in pos.iter().enumerate() {
+        for (t, (slot, tok)) in pos.iter().enumerate() {
             if let Some(s) = token_score(name, None, m, tok) {
                 got |= 1 << t;
                 score += s;
-            } else if let Some(s) = d.best[t] {
+            } else if let Some(s) = d.best[*slot] {
                 inherited |= 1 << t;
                 score += s * 3 / 4;
             }
@@ -2067,6 +2079,130 @@ mod tests {
         assert_eq!(hits.len(), 1, "the entry under the folder matches");
     }
 
+    /// A name token asks the memo about its own slot.
+    ///
+    /// The overlay's folder memo holds the best folder score per positive
+    /// token, and the place a token has among the positive ones is what
+    /// says which slot is its. The name-axis tokens were numbered among
+    /// themselves instead, so a query with a token on another axis before
+    /// them asked the memo about a different token -- and the answer
+    /// changed: the word the folder carried was asked of the wrong slot,
+    /// and the file under the folder stopped answering.
+    #[test]
+    fn a_name_token_asks_the_memo_about_its_own_slot() {
+        let live = axis_tree();
+        let s = Searcher { live: &live };
+        // The extension token comes first, so the folder's word is not in
+        // the first slot.
+        let query = "ext:^txt docs invoice";
+        assert!(hit(query, "/docs/invoice.txt", KIND_FILE, 10), "the overlay inherits the folder's word");
+        let hits = s.search(&q(query));
+        assert_eq!(hits.len(), 1, "the index inherits it too");
+    }
+
+    /// A bare word is still answered by a folder of the path.
+    ///
+    /// This is what a bare word has always meant -- the word is the file's
+    /// name, or a folder above it -- and the two paths have to agree on it:
+    /// the overlay inherits the folder's word, and so did the index.
+    #[test]
+    fn a_bare_word_is_inherited_from_a_folder() {
+        let live = axis_tree();
+        let s = Searcher { live: &live };
+        assert!(hit("invoice docs", "/docs/invoice.txt", KIND_FILE, 10), "the overlay inherits the folder's word");
+        let hits = s.search(&q("invoice docs"));
+        assert_eq!(hits.len(), 1, "the index inherits it too");
+    }
+
+    /// The name that matches a folder token has to be a candidate.
+    ///
+    /// The folder token is answered by the memo, and the memo is built out
+    /// of the name table: the folder's own name hit is what carries the
+    /// token's bit. So the names that match a folder token have to be
+    /// candidates -- and the table's candidates were the names that could
+    /// match a name-axis token, and the folder's own name matches none.
+    #[test]
+    fn the_name_that_matches_a_folder_token_is_a_candidate() {
+        let live = axis_tree();
+        let s = Searcher { live: &live };
+        let query = q("folder:docs invoice");
+        let pos: Vec<&Token> = query.tokens.iter().filter(|t| !t.negate).collect();
+        let neg: Vec<&Token> = query.tokens.iter().filter(|t| t.negate).collect();
+        let scored = s.names(&query, &pos, &neg, 0, s.live.base.n);
+        let axes = query.axes();
+        let carried = scored.names.iter().any(|(_, h)| h.bits as u32 & axes.folder == axes.folder);
+        assert!(carried, "the name that matches the folder token is in the table");
+    }
+
+    /// The scan that walks the table answers the folder axis, and the same
+    /// answer the driven scan gives.
+    ///
+    /// There are two scans: the driven one, which walks the path of every
+    /// candidate it finds, and the one that walks the name table. The
+    /// driven one always got the folder axis right; the other one did not,
+    /// because the folder's own name was not among the table's candidates
+    /// -- so the memo had no bit for the folder token, and the answer was
+    /// nothing where the driven scan said one hit.
+    ///
+    /// Two answers to one question, and a question they answer differently
+    /// is a bug in one of them.
+    #[test]
+    fn the_table_scan_answers_the_folder_axis() {
+        let live = axis_tree();
+        let s = Searcher { live: &live };
+        let query = q("folder:docs invoice");
+        let pos: Vec<&Token> = query.tokens.iter().filter(|t| !t.negate).collect();
+        let neg: Vec<&Token> = query.tokens.iter().filter(|t| t.negate).collect();
+        let scored = s.names(&query, &pos, &neg, 0, s.live.base.n);
+        let axes = query.axes();
+        let scan = Scan {
+            q: &query,
+            live: &live,
+            names: &scored.names,
+            npos: pos.len(),
+            need_dirs: true,
+            all: all_mask(pos.len(), &axes),
+            axes,
+            now: now_secs(),
+        };
+        let driven = s.search(&query);
+        let table = scan.selective(1, s.live.base.n);
+        assert_eq!(driven.len(), 1, "the driven scan finds the entry under the folder");
+        assert_eq!(table.len(), driven.len(), "the table scan answers the same");
+    }
+
+    /// And the negated folder token, which poisons the memo of the folder
+    /// it matches.
+    ///
+    /// `folder:!docs invoice` says "the invoice, not under a folder named
+    /// docs". The poisoned memo is what says so, and the memo is built out
+    /// of the folder's own name hit -- so the negated folder's name has to
+    /// be a candidate as well, or the rejection never happens.
+    #[test]
+    fn the_table_scan_answers_the_negated_folder_axis() {
+        let live = axis_tree();
+        let s = Searcher { live: &live };
+        let query = q("folder:!docs invoice");
+        let pos: Vec<&Token> = query.tokens.iter().filter(|t| !t.negate).collect();
+        let neg: Vec<&Token> = query.tokens.iter().filter(|t| t.negate).collect();
+        let scored = s.names(&query, &pos, &neg, 0, s.live.base.n);
+        let axes = query.axes();
+        let scan = Scan {
+            q: &query,
+            live: &live,
+            names: &scored.names,
+            npos: pos.len(),
+            need_dirs: true,
+            all: all_mask(pos.len(), &axes),
+            axes,
+            now: now_secs(),
+        };
+        let driven = s.search(&query);
+        let table = scan.selective(1, s.live.base.n);
+        assert_eq!(driven.len(), 0, "the entry under the folder docs is rejected");
+        assert_eq!(table.len(), driven.len(), "the table scan answers the same");
+    }
+
     /// The attribute axis matches the entry's kind.
     ///
     /// The attribute is the kind byte -- the kind and the flags -- and the
@@ -2096,6 +2232,196 @@ mod tests {
         // which file, the extension says what it has to be.
         let hits = s.search(&q("ext:^txt invoice"));
         assert_eq!(hits.len(), 1, "the invoice.txt matches");
+    }
+
+    /// More negated tokens than a bitmask can hold.
+    ///
+    /// The parser caps the positive tokens at eight, but a negated token
+    /// is not capped: the bitmask that used to carry them overflowed at
+    /// the thirty-third, and the shift panicked -- in a debug build,
+    /// which is what the CI runs, and in the daemon, which is a service
+    /// that dies with it.
+    #[test]
+    fn more_negated_tokens_than_a_bitmask_holds() {
+        let live = axis_tree();
+        let s = Searcher { live: &live };
+        let negs: Vec<String> = (0..40).map(|i| format!("!w{i}")).collect();
+        let hits = s.search(&q(&negs.join(" ")));
+        // Nothing is named w0..w39, so every entry answers.
+        assert_eq!(hits.len(), 3, "the query answers every entry");
+    }
+
+    /// And a negated token still rejects its own name, wherever it sits.
+    ///
+    /// The rejection happens in the scan, so the names a negated token
+    /// matches have to be candidates: the prefilter has to carry the
+    /// token that rejects them, or the rejection never happens.
+    #[test]
+    fn a_negated_token_among_many_still_rejects_its_name() {
+        let live = axis_tree();
+        let s = Searcher { live: &live };
+        let mut negs: Vec<String> = (0..40).map(|i| format!("!w{i}")).collect();
+        negs[32] = "!invoice".to_string();
+        let hits = s.search(&q(&negs.join(" ")));
+        assert_eq!(hits.len(), 2, "the entry named invoice.txt is rejected, and the other two answer");
+    }
+
+    /// The attribute axis asks the entry's kind, and it combines with the
+    /// other axes: `attr:file invoice` is a file named invoice.
+    ///
+    /// The attribute token is not a name, so it cannot be the one that
+    /// drives the scan: driving on it selects nothing, and the query
+    /// answers "nothing" instead of the file.
+    #[test]
+    fn the_attribute_axis_combines_with_a_name() {
+        let live = axis_tree();
+        let s = Searcher { live: &live };
+        let hits = s.search(&q("attr:file invoice"));
+        assert_eq!(hits.len(), 1, "the file named invoice.txt is the answer");
+        // And the kind is the question: no folder is named invoice.
+        assert!(s.search(&q("attr:dir invoice")).is_empty(), "no folder is named invoice");
+        // The attribute alone asks nothing of the name.
+        assert_eq!(s.search(&q("attr:file")).len(), 2, "the two files answer");
+    }
+
+    /// The extension axis is the name's own extension.
+    ///
+    /// The folder "backup.txt" has the extension txt, and the file under it
+    /// is "invoice.md" -- which does not. A folder's name cannot satisfy
+    /// the extension axis of the entries under it: that is what the folder
+    /// axis is for.
+    #[test]
+    fn the_extension_axis_is_the_name_own_extension() {
+        let live = ext_tree();
+        let s = Searcher { live: &live };
+        // The two names that end in txt: the folder and the file. Both are
+        // the entry's own name, so both have the extension.
+        assert_eq!(s.search(&q("ext:^txt")).len(), 2, "the folder backup.txt and the file invoice.txt");
+        assert_eq!(s.search(&q("ext:^md")).len(), 1, "the file named invoice.md");
+        // With a name word as well: the file under the folder whose name
+        // ends in txt does not have the extension txt.
+        let hits = s.search(&q("ext:^txt invoice"));
+        assert_eq!(hits.len(), 1, "the extension is the name's own, so only invoice.txt answers");
+    }
+
+    /// A negated folder token is about the path's folders, not the name.
+    ///
+    /// `folder:!docs` says "not under a folder named docs": the file
+    /// "docs.txt" is beside that folder, not under it, so it answers.
+    #[test]
+    fn a_negated_folder_token_is_not_a_negated_name() {
+        let live = axis_tree();
+        let s = Searcher { live: &live };
+        let hits = s.search(&q("folder:!docs"));
+        assert_eq!(hits.len(), 2, "the folder docs and the file docs.txt answer; the one under docs does not");
+    }
+
+    /// The same word on another axis is another question.
+    ///
+    /// The name table is cached under what it depends on, and the axis is
+    /// part of that: "docs" is the name, "folder:docs" is a folder of the
+    /// path, and the table for one is not the table for the other.
+    #[test]
+    fn the_same_word_on_another_axis_is_another_table() {
+        let live = axis_tree();
+        let s = Searcher { live: &live };
+        // The name "docs" answers the folder and the file.
+        assert_eq!(s.search(&q("docs")).len(), 2, "the folder and the file are named docs");
+        // The folder axis answers only what is under the folder.
+        let hits = s.search(&q("folder:docs"));
+        assert_eq!(hits.len(), 1, "only the entry under the folder docs answers");
+    }
+
+    /// The index path and the overlay path have to answer the same.
+    ///
+    /// The overlay answers by matching the path it is given; the index
+    /// answers by the name table and the memo. They are two answers to
+    /// one question, and a question they answer differently is a bug in
+    /// one of them.
+    #[test]
+    fn the_index_path_and_the_overlay_path_agree() {
+        use rgy_discovery::walk::{KIND_DIR, KIND_FILE, Listing, NONE, RawEnt};
+        // root: docs/ (dir), invoice/ (dir), docs.txt, invoice.txt
+        // docs/invoice.txt, invoice/child.txt
+        let listings = vec![
+            Listing {
+                id: 0,
+                names: b"docsdocs.txtinvoiceinvoice.txt".to_vec(),
+                ents: vec![
+                    RawEnt { name_off: 0, name_len: 4, kind: KIND_DIR, size: 0, mtime: 7, child: 1 },
+                    RawEnt { name_off: 4, name_len: 8, kind: KIND_FILE, size: 3, mtime: 7, child: NONE },
+                    RawEnt { name_off: 12, name_len: 7, kind: KIND_DIR, size: 0, mtime: 7, child: 2 },
+                    RawEnt { name_off: 19, name_len: 11, kind: KIND_FILE, size: 3, mtime: 7, child: NONE },
+                ],
+            },
+            Listing {
+                id: 1,
+                names: b"invoice.txt".to_vec(),
+                ents: vec![RawEnt { name_off: 0, name_len: 11, kind: KIND_FILE, size: 3, mtime: 7, child: NONE }],
+            },
+            Listing {
+                id: 2,
+                names: b"child.txt".to_vec(),
+                ents: vec![RawEnt { name_off: 0, name_len: 9, kind: KIND_FILE, size: 3, mtime: 7, child: NONE }],
+            },
+        ];
+        let live = Live::new(Index::build(listings, 0, 1_700_000_000, b"/"));
+        let s = Searcher { live: &live };
+        let paths = ["/docs/invoice.txt", "/invoice/child.txt", "/docs.txt", "/invoice.txt"];
+        for query in [
+            "!invoice",
+            "folder:!docs",
+            "!docs",
+            "attr:dir invoice",
+            "ext:^txt invoice",
+            "folder:docs invoice",
+            // A bare word is answered by a folder of the path, and the two
+            // paths have to agree on that too.
+            "invoice docs",
+            "docs invoice",
+            // The extension axis is the name's own extension, so the folder's
+            // extension cannot answer it.
+            "ext:^txt docs",
+        ] {
+            let hits = s.search(&q(query));
+            let mut names: Vec<String> = hits
+                .iter()
+                .map(|h| {
+                    let mut p = Vec::new();
+                    live.base.path(h.idx as usize, &mut p);
+                    String::from_utf8_lossy(&p).to_string()
+                })
+                .collect();
+            names.sort();
+            for path in paths {
+                let over = hit(query, path, KIND_FILE, 10);
+                let by_index = names.iter().any(|n| n == path);
+                assert_eq!(over, by_index, "the two paths disagree on {query} for {path}: overlay says {over}, index says {by_index}");
+            }
+        }
+    }
+
+    /// A tree with a folder "backup.txt" holding "invoice.md", and a file
+    /// "invoice.txt" beside it: the folder's name ends in txt, the file
+    /// under it does not.
+    fn ext_tree() -> Live {
+        use rgy_discovery::walk::{KIND_DIR, KIND_FILE, Listing, NONE, RawEnt};
+        let listings = vec![
+            Listing {
+                id: 0,
+                names: b"backup.txtinvoice.txt".to_vec(),
+                ents: vec![
+                    RawEnt { name_off: 0, name_len: 10, kind: KIND_DIR, size: 0, mtime: 7, child: 1 },
+                    RawEnt { name_off: 10, name_len: 11, kind: KIND_FILE, size: 3, mtime: 7, child: NONE },
+                ],
+            },
+            Listing {
+                id: 1,
+                names: b"invoice.md".to_vec(),
+                ents: vec![RawEnt { name_off: 0, name_len: 10, kind: KIND_FILE, size: 3, mtime: 7, child: NONE }],
+            },
+        ];
+        Live::new(Index::build(listings, 0, 1_700_000_000, b"/"))
     }
 
     /// The axes combine: a name word and a folder word are two
@@ -2989,12 +3315,22 @@ fn name_hit(idx: &Index, q: &Query, pos: &[&Token], neg: &[&Token], re: Option<&
     // Whether every token is on the name axis: then this is the scoring it
     // always was, and it costs the same.
     let plain = pos.iter().all(|t| t.axis == Axis::Name) && neg.iter().all(|t| t.axis == Axis::Name);
+    // Whether the name answered one of the name-axis tokens.
+    //
+    // A query that asks for a name is answered by a name: the name has to
+    // carry one of the name-axis tokens, even when a folder above carries
+    // the others. The overlay says the same (see `match_path`), and the two
+    // paths have to agree on it -- a query that names a file is not a query
+    // that names a folder with that file under it.
+    let mut got_name = false;
     if plain {
         for (t, tok) in pos.iter().enumerate() {
             if tok.fits(m)
                 && let Some(s) = token_score(&name, wide, m, tok)
             {
                 h.bits |= 1 << t;
+                // Every positive token is a name token here.
+                got_name = true;
                 let s16 = s.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
                 h.score = h.score.saturating_add(s16);
                 if t < 4 {
@@ -3021,6 +3357,7 @@ fn name_hit(idx: &Index, q: &Query, pos: &[&Token], neg: &[&Token], re: Option<&
             };
             if let Some(s) = scored {
                 h.bits |= 1 << t;
+                got_name |= tok.axis == Axis::Name;
                 let s16 = s.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
                 // A folder token's score is the folder's, and the scan adds it:
                 // counting it here would count it twice.
@@ -3035,25 +3372,45 @@ fn name_hit(idx: &Index, q: &Query, pos: &[&Token], neg: &[&Token], re: Option<&
     }
     // A negated extension token is about the extension; every other negated
     // token is about the name.
-    if neg.iter().any(|t| match t.axis {
-        Axis::Extension => ext_of(&name).is_some_and(|e| token_matches(e, t)),
-        _ => token_matches(&name, t),
-    }) {
+    //
+    // A negated FOLDER token is about neither: it is about the folders of
+    // the path, so it rejects what is under a folder it matches, and the
+    // memo is what carries that. The name is asked anyway -- it is how a
+    // directory learns that its own name matches -- but the answer does
+    // not reject the entry, because an entry's name is not a folder of
+    // its path.
+    let mut neg_name = false;
+    let mut neg_dir = false;
+    for t in neg {
+        match t.axis {
+            Axis::Extension => neg_name |= ext_of(&name).is_some_and(|e| token_matches(e, t)),
+            Axis::Folder => neg_dir |= token_matches(&name, t),
+            _ => neg_name |= token_matches(&name, t),
+        }
+    }
+    if neg_name {
         h.flags |= NF_NEG;
+    }
+    if neg_dir {
+        h.flags |= NF_NEG_DIR;
     }
     // Whether the query asks anything of the name: the name-axis tokens
     // and the extension ones (the extension is part of the name). A query
     // with no such token asks nothing, and every name is a candidate --
     // the scan decides.
     let name_asks = pos.iter().any(|t| matches!(t.axis, Axis::Name | Axis::Extension));
+    // And whether it asks for a name: a name-axis token has to be answered
+    // by the name itself.
+    let name_pos = pos.iter().any(|t| t.axis == Axis::Name);
     let ok = (pos.is_empty() || !name_asks || h.bits != 0)
+        && (!name_pos || got_name)
         && h.flags & NF_NEG == 0
         && (q.exts.is_empty() || ext_ok(&name, &q.exts))
         && re.is_none_or(|re| re.is_match(&name));
     if ok {
         h.flags |= NF_OK;
     }
-    (ok || h.bits != 0 || h.flags & NF_NEG != 0).then_some(h)
+    (ok || h.bits != 0 || h.flags & (NF_NEG | NF_NEG_DIR) != 0).then_some(h)
 }
 
 /// Lowercased literals one of which starts every match of `re` (so a name
@@ -4251,7 +4608,17 @@ impl Searcher<'_> {
         // Rarest first. A rare name can still hold too much (a big folder:
         // "developer" is ~/Developer); found out early, the next one gets a
         // try.
-        let mut order: Vec<usize> = (0..pos.len()).filter(|&t| est(pos[t]) <= DRIVEN_NAMES).collect();
+        //
+        // Only a token that is matched against the NAME may drive: the
+        // driver's prefilter says which names hold the token, and a token
+        // on the extension is at the name's end and a token on the
+        // attribute is not a name at all -- so driving on one of those
+        // selects the wrong names (or none), and the query answers
+        // something the other token would not. The folder axis is a name
+        // too: a folder's own name is in the table, and its subtree comes
+        // with it.
+        let mut order: Vec<usize> =
+            (0..pos.len()).filter(|&t| matches!(pos[t].axis, Axis::Name | Axis::Folder) && est(pos[t]) <= DRIVEN_NAMES).collect();
         order.sort_by(|&a, &b| est(pos[a]).total_cmp(&est(pos[b])));
         for t in order.into_iter().take(DRIVEN_TRIES) {
             match self.drive(q, pos, neg, lo, hi, t) {
@@ -4376,6 +4743,15 @@ impl Searcher<'_> {
                     let i = ents[j] as usize;
                     let Some(nh) = hit(en[i]).filter(|h| h.flags & NF_OK != 0 && (j < first || h.bits >> t & 1 == 0)) else { continue };
                     let m = scan.memo_of(parent[i], &mut memo, &mut hit);
+                    // The axes are the entry's own question -- its kind, its
+                    // extension, the folder it is under -- and the scan that
+                    // walks the table asks it per entry. The driven scan
+                    // asked it too: it does not walk the table, and without
+                    // the question a folder's extension satisfied the
+                    // extension axis of the files under it.
+                    if !scan.axes.plain && !scan.axes_ok(i, &nh, &m) {
+                        continue;
+                    }
                     if let Some(key) = scan.score(i, nh, m, top.floor, &mut pbuf, q.path_re.as_ref()) {
                         top.push(key);
                     }
@@ -4408,6 +4784,11 @@ impl Searcher<'_> {
                 let i = ents[j] as usize;
                 let Some(nh) = names.get(en[i]).filter(|h| h.flags & NF_OK != 0 && (j < first || h.bits >> t & 1 == 0)) else { continue };
                 let m = scan.memo_of(parent[i], &mut memo, &mut |k| names.get(k));
+                // The axes are the entry's own question, and the driven scan
+                // asks it per entry too (see the other branch).
+                if !scan.axes.plain && !scan.axes_ok(i, &nh, &m) {
+                    continue;
+                }
                 if let Some(key) = scan.score(i, nh, m, top.floor, &mut pbuf, path_re.as_ref()) {
                     top.push(key);
                 }
@@ -4496,23 +4877,32 @@ impl Searcher<'_> {
         // names that could match it, and a negated one rejects them --
         // so the names a negated token matches have to be candidates too,
         // or the rejection never happens.
-        let mut name_toks = 0u32;
-        for (t, tok) in pos.iter().enumerate() {
-            if tok.axis == Axis::Name {
-                name_toks |= 1 << t;
-            }
-        }
-        let mut neg_name_toks = 0u32;
-        for (t, tok) in neg.iter().enumerate() {
-            if tok.axis == Axis::Name {
-                neg_name_toks |= 1 << (pos.len() + t);
-            }
-        }
+        //
+        // They are LISTS, not bitmasks. The parser caps the positive tokens
+        // at eight, but it does not cap the negated ones -- and a bitmask
+        // of them overflows at the thirty-third: a panic in a debug build,
+        // and a wrong bit in a release one.
+        let name_idx: Vec<usize> = pos.iter().enumerate().filter(|(_, tok)| tok.axis == Axis::Name).map(|(t, _)| t).collect();
+        let neg_name_idx: Vec<usize> = neg.iter().enumerate().filter(|(_, tok)| tok.axis == Axis::Name).map(|(t, _)| pos.len() + t).collect();
+        // The names a FOLDER token matches are candidates too, of either
+        // sign. The folder axis is answered by the memo, and the memo is
+        // built out of the folder's own name hit: the folder's name carries
+        // the token's bit into the memo, and a negated one poisons it. So
+        // the folder's name has to be in the table -- and the table's
+        // candidates were the names that could match a name-axis token, and
+        // the folder's own name matches none. Without it the folder axis
+        // was answered by nothing, and only the driven scan (which walks
+        // the path) got it right.
+        let folder_idx: Vec<usize> = pos.iter().enumerate().filter(|(_, tok)| tok.axis == Axis::Folder).map(|(t, _)| t).collect();
+        let neg_folder_idx: Vec<usize> = neg.iter().enumerate().filter(|(_, tok)| tok.axis == Axis::Folder).map(|(t, _)| pos.len() + t).collect();
         // Whether the query asks anything of the name: the name-axis
         // tokens and the extension ones (the extension is part of the
         // name). A query with no such token asks nothing, and every name
         // is a candidate -- the scan decides.
         let name_asks = pos.iter().any(|t| matches!(t.axis, Axis::Name | Axis::Extension));
+        // And whether it asks for a name: a name-axis token has to be answered
+        // by the name itself.
+        let name_pos = pos.iter().any(|t| t.axis == Axis::Name);
         // Whether every token is on the name axis: then the scoring is the
         // scoring it always was, and it costs the same.
         let plain = name_asks && pos.iter().all(|t| t.axis == Axis::Name) && neg.iter().all(|t| t.axis == Axis::Name);
@@ -4560,6 +4950,15 @@ impl Searcher<'_> {
                     false => name_flags(&name),
                 };
                 let mut h = NameHit { score: 0, bits: 0, flags, best: [0; 4] };
+                // Whether the name answered one of the name-axis tokens.
+                //
+                // A query that asks for a name is answered by a name: the
+                // name has to carry one of the name-axis tokens, even when
+                // a folder above carries the others. The overlay says the
+                // same (see `match_path`), and the two paths have to agree
+                // on it -- a query that names a file is not a query that
+                // names a folder with that file under it.
+                let mut got_name = false;
                 if plain {
                     // Every token is on the name axis: this is the scoring it
                     // always was, and it costs the same. The axis is read per
@@ -4572,6 +4971,8 @@ impl Searcher<'_> {
                             && let Some(s) = token_score(&name, wide, tok.known_mask(bit(clean), bit(typo), spaced), tok)
                         {
                             h.bits |= 1 << t;
+                            // Every positive token is a name token here.
+                            got_name = true;
                             let s16 = s.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
                             h.score = h.score.saturating_add(s16);
                             if t < 4 {
@@ -4614,6 +5015,7 @@ impl Searcher<'_> {
                         };
                         if let Some(s) = scored {
                             h.bits |= 1 << t;
+                            got_name |= tok.axis == Axis::Name;
                             let s16 = s.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
                             // A folder token's score is the folder's, and the scan
                             // adds it: counting it here would count it twice.
@@ -4627,15 +5029,27 @@ impl Searcher<'_> {
                     }
                 }
                 // A negated extension token is about the extension; every
-                // other negated token is about the name.
-                if neg.iter().zip(&per[pos.len()..]).any(|(t, p)| {
-                    bit(p.0[j].0)
-                        && match t.axis {
-                            Axis::Extension => ext_of(&name).is_some_and(|e| token_matches(e, t)),
-                            _ => token_matches(&name, t),
-                        }
-                }) {
+                // other negated token is about the name. A negated FOLDER
+                // token is about the path's folders: it poisons the memo
+                // of the directory whose name it matches, and it does not
+                // reject the entry whose own name it matches.
+                let mut neg_name = false;
+                let mut neg_dir = false;
+                for (t, p) in neg.iter().zip(&per[pos.len()..]) {
+                    if !bit(p.0[j].0) {
+                        continue;
+                    }
+                    match t.axis {
+                        Axis::Extension => neg_name |= ext_of(&name).is_some_and(|e| token_matches(e, t)),
+                        Axis::Folder => neg_dir |= token_matches(&name, t),
+                        _ => neg_name |= token_matches(&name, t),
+                    }
+                }
+                if neg_name {
                     h.flags |= NF_NEG;
+                }
+                if neg_dir {
+                    h.flags |= NF_NEG_DIR;
                 }
                 // As a file match it must hit a token and pass name filters;
                 // as a folder on someone's path, the raw token bits matter.
@@ -4643,7 +5057,12 @@ impl Searcher<'_> {
                 // A query whose tokens are all on other axes -- an
                 // attribute, a folder -- asks nothing of the name, so every
                 // name is a candidate and the scan decides.
+                //
+                // And a query that asks for a name is answered by a name:
+                // the name has to carry one of the name-axis tokens, even
+                // when a folder above carries the others (see `name_hit`).
                 let ok = (pos.is_empty() || !name_asks || h.bits != 0)
+                    && (!name_pos || got_name)
                     && h.flags & NF_NEG == 0
                     && (q.exts.is_empty() || ext_ok_k(k, &name))
                     && tails.as_ref().is_none_or(|t| t.iter().any(|t| ends_with_fold(&name, t)))
@@ -4652,7 +5071,7 @@ impl Searcher<'_> {
                     h.flags |= NF_OK;
                     *ok_entries += (ne_off[k + 1] - ne_off[k]) as usize;
                 }
-                (ok || h.bits != 0 || h.flags & NF_NEG != 0).then_some(h)
+                (ok || h.bits != 0 || h.flags & (NF_NEG | NF_NEG_DIR) != 0).then_some(h)
             };
         // One chunk of name ids: its words of the bitset and rank, and its
         // hits in id order (into a spare buffer). Words with candidates go
@@ -4697,22 +5116,31 @@ impl Searcher<'_> {
                         // name-axis token. A token on another axis does not
                         // narrow them: the extension is at the name's end,
                         // and an attribute is not a name.
-                        let mut any =
-                            per.iter().enumerate().take(toks.len()).filter(|(t, _)| name_toks & (1 << t) != 0).fold(0, |a, (_, p)| a | p.0[j].0);
+                        let mut any = 0;
+                        for &i in &name_idx {
+                            any |= per[i].0[j].0;
+                        }
                         // With no name-axis token every name is a candidate,
                         // unless a name filter says which can pass.
-                        if name_toks == 0 {
+                        if name_idx.is_empty() {
                             let re = re_bits.as_ref().map_or(!0, |f| f.iter().fold(0, |a, t| a | t.word(w).0));
                             any |= !0 >> (64 - (idx.u - w * 64).min(64)) & ext_word(w) & re;
                         } else {
                             // The names a negated token matches are rejected
                             // by the scan, so they have to be candidates too.
-                            any |= per
-                                .iter()
-                                .enumerate()
-                                .take(toks.len())
-                                .filter(|(t, _)| neg_name_toks & (1 << t) != 0)
-                                .fold(0, |a, (_, p)| a | p.0[j].0);
+                            for &i in &neg_name_idx {
+                                any |= per[i].0[j].0;
+                            }
+                            // And the names a folder token matches: the
+                            // folder's own name is what the memo is built
+                            // out of, so without it the folder axis has
+                            // nothing to answer it.
+                            for &i in &folder_idx {
+                                any |= per[i].0[j].0;
+                            }
+                            for &i in &neg_folder_idx {
+                                any |= per[i].0[j].0;
+                            }
                             if by_ext && any != 0 {
                                 any &= ext_word(w);
                             }
@@ -4934,7 +5362,23 @@ impl Scan<'_> {
         let mut score = nh.score as i32;
         if self.need_dirs {
             let all = self.all;
-            if memo.bits == u32::MAX || (nh.bits as u32 | memo.bits) & all != all {
+            // Who may answer which token.
+            //
+            // The name is the entry's own name: it answers the name-axis
+            // tokens and the extension-axis ones (the extension is part of
+            // the name), and it does not answer the folder axis -- a
+            // folder's own name is not a folder of its own path.
+            //
+            // The memo is a folder of the path, by its own name. It answers
+            // the folder-axis tokens -- a folder of the path is what a
+            // folder token asks for -- and the name-axis ones too: a bare
+            // word has always meant the file's name *or* a folder above it,
+            // and the overlay says the same, so the two paths have to agree
+            // on it. It does not answer the extension axis: the extension is
+            // the name's own, so a folder's extension cannot satisfy the
+            // extension of the file under it.
+            let covered = (nh.bits as u32 & all & !self.axes.folder) | (memo.bits & (self.axes.folder | self.axes.name));
+            if memo.bits == u32::MAX || covered & all != all {
                 return None;
             }
             for t in 0..self.npos {
@@ -5100,7 +5544,12 @@ static MEMO_POOL: std::sync::Mutex<Vec<Vec<DirMemo>>> = std::sync::Mutex::new(Ve
 /// every name the same.
 #[derive(PartialEq)]
 pub struct NameKey {
-    tokens: Vec<(Vec<u8>, Mode, bool)>,
+    /// The tokens, with the axis each one matches on.
+    ///
+    /// The axis is part of it: the same word on another axis scores the
+    /// name differently -- `ext:^txt` is the extension, `txt` is the name
+    /// -- and a table built for one is not the table for the other.
+    tokens: Vec<(Vec<u8>, Mode, bool, Axis)>,
     exts: Vec<Vec<u8>>,
     name_re: Option<String>,
     /// The entry range whose names alone were scored, if not all.
@@ -5111,7 +5560,7 @@ impl NameKey {
     /// The key of `q`, with the scope whose names alone were scored.
     pub fn of(q: &Query, scope: Option<(usize, usize)>) -> NameKey {
         NameKey {
-            tokens: q.tokens.iter().map(|t| (t.text.clone(), t.mode, t.negate)).collect(),
+            tokens: q.tokens.iter().map(|t| (t.text.clone(), t.mode, t.negate, t.axis)).collect(),
             exts: q.exts.clone(),
             name_re: q.name_re.as_ref().map(|r| r.as_str().to_string()),
             scope,
@@ -5129,6 +5578,8 @@ impl NameKey {
             && self.tokens.iter().zip(&prev.tokens).all(|(a, b)| {
                 a.1 == b.1
                     && a.2 == b.2
+                    // The same word on another axis is another question.
+                    && a.3 == b.3
                     && if a.2 {
                         a.0 == b.0
                     } else if a.1 == Mode::Suffix {
@@ -5194,7 +5645,10 @@ impl DirMemo {
     #[inline]
     fn own(hit: Option<NameHit>) -> DirMemo {
         match hit {
-            Some(h) if h.flags & NF_NEG != 0 => DirMemo { bits: u32::MAX, best: [0; 4] },
+            // A negated token that matches this dir's name rejects what is
+            // under it -- and a negated FOLDER token is exactly that: it
+            // rejects the folders' children, not the dir itself.
+            Some(h) if h.flags & (NF_NEG | NF_NEG_DIR) != 0 => DirMemo { bits: u32::MAX, best: [0; 4] },
             Some(h) => DirMemo { bits: h.bits as u32, best: h.best },
             None => DirMemo::default(),
         }
@@ -5430,6 +5884,14 @@ const NF_OK: u8 = 1;
 const NF_DOT: u8 = 2;
 const NF_NEG: u8 = 8;
 const NF_APP: u8 = 4;
+/// A negated FOLDER token matched this name.
+///
+/// The folder axis is about the path's folders, so a negated folder token
+/// rejects what is under a folder it matches -- and the memo is what
+/// carries that. The entry's own name is not a folder of its path, so
+/// this flag does not reject the entry: it poisons the memo of the
+/// directory whose name it is.
+const NF_NEG_DIR: u8 = 16;
 
 fn name_flags(name: &[u8]) -> u8 {
     let mut f = 0;
