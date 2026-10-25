@@ -5025,7 +5025,7 @@ impl Scan<'_> {
                     // name -> entries list walks. The indirection stays: the
                     // 5M rows are bound by match volume, not by this load.
                     let s = dense[ent_name[i] as usize];
-                    if s.flags & NF_OK == 0 && self.axes.asks_name {
+                    if s.flags & NF_OK == 0 {
                         continue;
                     }
                     let nh = NameHit { score: s.score, bits: s.bits, flags: s.flags, best: [0; 4] };
