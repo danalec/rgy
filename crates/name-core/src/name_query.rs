@@ -1571,7 +1571,7 @@ fn raw_positions(raw: &[u8], folded: &[u8], positions: Vec<u32>) -> Vec<u32> {
         return positions;
     }
     // The fold did nothing: the positions are already the raw's.
-    if raw == &*folded {
+    if raw == folded {
         return positions;
     }
     let mut out = Vec::with_capacity(positions.len());

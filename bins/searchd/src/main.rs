@@ -709,7 +709,7 @@ fn run_stream(input: impl BufRead, mut out: impl Write, ctx: &std::sync::Arc<Ctx
         if line.trim().is_empty() {
             continue;
         }
-        let responses = match Request::from_json(&line) {
+        let responses = match Request::from_json(line) {
             None => vec![Response::Error {
                 message: "malformed request".into(),
             }],
