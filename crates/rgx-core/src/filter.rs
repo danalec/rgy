@@ -261,9 +261,10 @@ fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
     if needle.is_empty() {
         return true;
     }
-    let haystack = haystack.to_ascii_lowercase();
-    let needle = needle.to_ascii_lowercase();
-    haystack.contains(&needle)
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .any(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
 /// A number, if the text is one.
