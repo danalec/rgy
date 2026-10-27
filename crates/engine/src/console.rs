@@ -36,7 +36,16 @@
 //! On every platform other than Windows this is a no-op: the streams are
 //! left exactly as they were.
 
+// The wide path is the Windows one: the text is converted to UTF-16 and
+// written with `WriteConsoleW`. On every other platform the bytes go out
+// as they are, and these two names are not used.
+#[cfg(all(feature = "std", windows))]
+use alloc::string::String;
+#[cfg(all(feature = "std", windows))]
+use alloc::vec::Vec;
+#[cfg(feature = "std")]
 use std::io::{self, Write};
+#[cfg(feature = "std")]
 use std::sync::OnceLock;
 
 /// How one output stream is written.
@@ -66,13 +75,16 @@ pub fn mode_for(is_console: bool, utf8_codepage: bool) -> Mode {
 }
 
 /// What the console said about the two output streams.
+#[cfg(feature = "std")]
 struct State {
     stdout: Mode,
     stderr: Mode,
 }
 
+#[cfg(feature = "std")]
 static STATE: OnceLock<State> = OnceLock::new();
 
+#[cfg(feature = "std")]
 fn state() -> &'static State {
     STATE.get_or_init(detect)
 }
@@ -86,6 +98,7 @@ fn state() -> &'static State {
 /// Nothing here fails, prompts, or changes an exit code: a console that
 /// cannot be reconfigured leaves the program running with the wide
 /// fallback in place of the code page.
+#[cfg(feature = "std")]
 pub fn init() -> Mode {
     state().stdout
 }
@@ -97,6 +110,7 @@ pub fn init() -> Mode {
 /// keystrokes with the input code page, so without this an accented
 /// character typed into a query arrives as the legacy page's bytes. Only
 /// a console is touched -- a piped stdin is left alone.
+#[cfg(feature = "std")]
 pub fn init_with_input() -> Mode {
     let mode = state().stdout;
     #[cfg(windows)]
@@ -112,6 +126,7 @@ pub fn init_with_input() -> Mode {
 /// The bytes are the program's own UTF-8. Nothing is transcoded unless the
 /// console refused the UTF-8 code page, in which case the text goes out
 /// as UTF-16 through `WriteConsoleW`.
+#[cfg(feature = "std")]
 pub struct Console<W> {
     inner: W,
     mode: Mode,
@@ -121,6 +136,7 @@ pub struct Console<W> {
     handle: sys::Handle,
 }
 
+#[cfg(feature = "std")]
 impl<W> Console<W> {
     fn new(inner: W, mode: Mode, handle: sys::Handle) -> Self {
         #[cfg(not(windows))]
@@ -134,6 +150,7 @@ impl<W> Console<W> {
     }
 }
 
+#[cfg(feature = "std")]
 impl<W: Write> Write for Console<W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match self.mode {
@@ -147,6 +164,7 @@ impl<W: Write> Write for Console<W> {
     }
 }
 
+#[cfg(feature = "std")]
 #[cfg(windows)]
 impl<W: Write> Console<W> {
     /// The fallback path: the console did not take the UTF-8 code page, so
@@ -168,6 +186,7 @@ impl<W: Write> Console<W> {
     }
 }
 
+#[cfg(feature = "std")]
 #[cfg(not(windows))]
 impl<W: Write> Console<W> {
     /// Unreachable on this platform: the mode is never [`Mode::Utf16`]
@@ -179,6 +198,7 @@ impl<W: Write> Console<W> {
 }
 
 /// Standard output, written so a Windows console renders it as UTF-8.
+#[cfg(feature = "std")]
 pub fn stdout() -> Console<std::io::Stdout> {
     #[cfg(windows)]
     let handle = {
@@ -191,6 +211,7 @@ pub fn stdout() -> Console<std::io::Stdout> {
 }
 
 /// Standard error, written so a Windows console renders it as UTF-8.
+#[cfg(feature = "std")]
 pub fn stderr() -> Console<std::io::Stderr> {
     #[cfg(windows)]
     let handle = {
@@ -210,6 +231,7 @@ pub fn stderr() -> Console<std::io::Stderr> {
 ///
 /// The newline is part of the same write, the way `println!` does it: a
 /// line that another thread could split in half is not a line.
+#[cfg(feature = "std")]
 #[macro_export]
 macro_rules! outln {
     ($($arg:tt)*) => {{
@@ -225,6 +247,7 @@ macro_rules! outln {
 /// Print to standard error the way the console can render it.
 ///
 /// The counterpart of `eprintln!`; see [`outln!`].
+#[cfg(feature = "std")]
 #[macro_export]
 macro_rules! errln {
     ($($arg:tt)*) => {{
@@ -245,6 +268,7 @@ macro_rules! errln {
 /// `crates/discovery-windows/src/lib.rs` for why), and a dependency edge
 /// is the owner's decision, not this crate's. These four calls are all in
 /// kernel32, which every Windows process already links.
+#[cfg(feature = "std")]
 #[cfg(windows)]
 mod sys {
     use std::ffi::c_void;
@@ -328,6 +352,7 @@ mod sys {
 
 /// The stub for every platform that is not Windows: there is no code page
 /// there, so there is nothing to detect and nothing to change.
+#[cfg(feature = "std")]
 #[cfg(not(windows))]
 mod sys {
     /// No handle to speak of: the wide path does not exist here.
@@ -335,6 +360,7 @@ mod sys {
 }
 
 /// Read the console's state and switch its code page when there is one.
+#[cfg(feature = "std")]
 #[cfg(windows)]
 fn detect() -> State {
     use std::os::windows::io::AsRawHandle;
@@ -352,6 +378,7 @@ fn detect() -> State {
 }
 
 /// Everywhere else the terminal is UTF-8 already.
+#[cfg(feature = "std")]
 #[cfg(not(windows))]
 fn detect() -> State {
     State {
@@ -363,6 +390,8 @@ fn detect() -> State {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
+    use alloc::vec::Vec;
 
     #[test]
     fn a_pipe_keeps_its_bytes() {
@@ -398,7 +427,7 @@ mod tests {
     fn a_handle_that_is_not_a_console_is_not_one() {
         // The platform's own test, exercised where it can be: a handle that
         // is not a console is recognised as one.
-        #[cfg(windows)]
+        #[cfg(all(windows, feature = "std"))]
         assert!(!sys::is_console(std::ptr::null_mut()));
     }
 }

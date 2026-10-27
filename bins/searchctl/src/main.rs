@@ -49,6 +49,9 @@ fn usage(code: i32) -> ! {
          options:\n  \
            --root <dir>       tree to index (default: .)\n  \
            --limit <n>        max hits (default: 50)\n  \
+           --threads <n>      workers for the scan and the query\n                \
+           (default: 4 for the scan, the machine's cores for the query;\n    \
+           RGY_NUM_THREADS sets both)\n  \
            --json             one JSON object per hit\n  \
            --count            print the match count, not the ranked hits\n  \
            --explain           report the query plan on stderr\n  \
@@ -104,6 +107,7 @@ fn main() {
     let mut count = false;
     let mut explain = false;
     let mut max_age: Option<std::time::Duration> = None;
+    let mut threads: Option<usize> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -126,6 +130,15 @@ fn main() {
             "--reindex" => reindex = true,
             "--count" => count = true,
             "--explain" => explain = true,
+            "--threads" => {
+                i += 1;
+                threads = Some(
+                    args.get(i)
+                        .and_then(|s| s.parse::<usize>().ok())
+                        .filter(|&n| n > 0)
+                        .unwrap_or_else(|| usage(2)),
+                );
+            }
             "--max-age" => {
                 i += 1;
                 max_age = Some(
@@ -162,6 +175,7 @@ fn main() {
         count,
         explain,
         max_age,
+        threads,
     };
     if let Err(e) = run(&opts, &query) {
         rgy_engine::errln!("searchctl: {e}");
@@ -180,6 +194,26 @@ struct Opts {
     /// Report which execution path answered, on stderr.
     explain: bool,
     max_age: Option<std::time::Duration>,
+    /// How many workers the scan and the query use. `None` keeps each
+    /// one's own default.
+    threads: Option<usize>,
+}
+
+/// The width the scan and the query use.
+///
+/// The flag wins; then the environment (`RGY_NUM_THREADS`), which is the
+/// project's own setting and says how wide everything is; then each one's
+/// own default — four for the scan (the config's default), and the machine's
+/// own core count for the query, which is what the pool it replaced did.
+fn widths(threads: Option<usize>) -> (usize, usize) {
+    // The environment is asked once, so the two widths cannot come from
+    // two different answers.
+    let set = threads.or_else(rgy_par::configured);
+    let query = set.unwrap_or_else(rgy_par::workers).max(1);
+    let scan = set
+        .unwrap_or(rgy_discovery::PortableSource::DEFAULT_THREADS)
+        .max(1);
+    (scan, query)
 }
 
 /// Load a usable index for this root, or build one and save it.
@@ -219,10 +253,12 @@ fn obtain_index(opts: &Opts) -> Result<Index, String> {
     // The platform walk where one exists (docs/design.md §2.2),
     // the portable walk where none does or where the native one refuses —
     // no privileges needed either way, the selector falls back on its own.
-    let source = source_for(
-        opts.root.as_bytes().to_vec(),
-        rgy_discovery::PortableSource::DEFAULT_THREADS,
-    );
+    let (scan_threads, query_threads) = widths(opts.threads);
+    // The query's workers: the width the user asked for, the environment's,
+    // or the machine's own count — whichever it is, pinned here so every
+    // parallel path in the process agrees on it.
+    rgy_par::set_workers(query_threads);
+    let source = source_for(opts.root.as_bytes().to_vec(), scan_threads);
     // A scan of a large tree is seconds of silence otherwise, which reads as
     // a hang. One line every `REPORT_EVERY`; the count is a real tally of
     // directories listed and entries seen, never an estimate. The callback

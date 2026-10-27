@@ -8,6 +8,24 @@
 //! the protocol is small enough that a dependency would be the bigger
 //! surface. Field names are the fsearch op model; rgx `--serve` translates
 //! to the same engine calls behind a compatibility front.
+//!
+//! The crate is `no_std`: the protocol is bytes on a wire, and a type that
+//! only ever describes bytes has no business carrying a filesystem. The
+//! one thing `std` was giving it — `f64::from_str` — is a float parser
+//! this crate now owns ([`num_value`]), because the numbers the protocol
+//! carries are integers anyway.
+
+#![no_std]
+
+extern crate alloc;
+/// The test macros: `vec!`, `format!`, `assert_eq!`.
+#[cfg(test)]
+#[macro_use]
+extern crate std;
+
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 
 /// A request line: an op plus its arguments.
 #[derive(Debug, Clone, PartialEq)]
@@ -530,7 +548,111 @@ fn num(b: &[char], i: usize) -> Option<(Json, usize)> {
         return None;
     }
     let s: String = b[start..i].iter().collect();
-    Some((Json::Num(s.parse().ok()?), i))
+    Some((Json::Num(num_value(&s)?), i))
+}
+
+/// The number in the text, as the protocol's `f64`.
+///
+/// `f64::from_str` is `std`-only, so this is the crate's own parser. It
+/// is not a float library: it reads the JSON number grammar of RFC 8259
+/// §6 -- a sign, an integer part, a fraction, an exponent -- and nothing
+/// else. `inf`, `NaN` and a leading `+` are not JSON, and are refused.
+///
+/// An integer is accumulated digit by digit, so every integer a JSON line
+/// can carry (up to 2^53) survives the trip exactly; a number with a
+/// fraction or an exponent is scaled by multiplication, because `powi` and
+/// `powf` are `std` as well.
+fn num_value(s: &str) -> Option<f64> {
+    let b = s.as_bytes();
+    let mut i = 0usize;
+    let neg = match b.first() {
+        Some(b'-') => {
+            i = 1;
+            true
+        }
+        _ => false,
+    };
+    let mut mant = 0.0f64;
+    let mut digits = false;
+    while let Some(&d) = b.get(i) {
+        if !d.is_ascii_digit() {
+            break;
+        }
+        mant = mant * 10.0 + f64::from(d - b'0');
+        i += 1;
+        digits = true;
+    }
+    let mut exp = 0i32;
+    if b.get(i) == Some(&b'.') {
+        i += 1;
+        while let Some(&d) = b.get(i) {
+            if !d.is_ascii_digit() {
+                break;
+            }
+            mant = mant * 10.0 + f64::from(d - b'0');
+            exp -= 1;
+            i += 1;
+            digits = true;
+        }
+    }
+    if !digits {
+        return None;
+    }
+    if matches!(b.get(i), Some(b'e') | Some(b'E')) {
+        i += 1;
+        let esign: i32 = match b.get(i) {
+            Some(b'+') => {
+                i += 1;
+                1
+            }
+            Some(b'-') => {
+                i += 1;
+                -1
+            }
+            _ => 1,
+        };
+        let mut e = 0i32;
+        let mut edigits = false;
+        while let Some(&d) = b.get(i) {
+            if !d.is_ascii_digit() {
+                break;
+            }
+            e = e.saturating_mul(10).saturating_add(i32::from(d - b'0'));
+            i += 1;
+            edigits = true;
+        }
+        if !edigits {
+            return None;
+        }
+        exp = exp.saturating_add(esign.saturating_mul(e));
+    }
+    if i != b.len() {
+        return None;
+    }
+    // The scaling is a loop, so the exponent is bounded: a number that
+    // asks for 10^400 is already past the end of `f64`, and the loop that
+    // would take it there is not worth running.
+    let mut v = mant;
+    let mut e = exp;
+    while e > 0 {
+        if e > 400 {
+            return Some(if neg {
+                f64::NEG_INFINITY
+            } else {
+                f64::INFINITY
+            });
+        }
+        v *= 10.0;
+        e -= 1;
+    }
+    while e < 0 {
+        if e < -400 {
+            return Some(if neg { -0.0 } else { 0.0 });
+        }
+        v /= 10.0;
+        e += 1;
+    }
+    Some(if neg { -v } else { v })
 }
 
 fn skip_ws(b: &[char], mut i: usize) -> usize {

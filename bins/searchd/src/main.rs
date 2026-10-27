@@ -215,13 +215,16 @@ impl Ctx {
 /// for help, 2 for the rg convention's "bad invocation".
 fn usage(code: i32) -> ! {
     rgy_engine::errln!(
-        "searchd [--root <dir>] [--index <file>] [--reindex] [--max-age <dur>]\n         [--tv-dir <store>] [--listen stdio|uds:<path>|pipe:<name>] [--serve]\n\n\
+        "searchd [--root <dir>] [--index <file>] [--reindex] [--max-age <dur>]\n         [--tv-dir <store>] [--listen stdio|uds:<path>|pipe:<name>] [--serve]\n         [--threads <n>]\n\n\
          proto framing (default): one JSON request per line\n  \
            {{\"op\":\"search\",\"q\":\"...\",\"limit\":50}}\n  \
            {{\"op\":\"grep\",\"q\":\"...\"}}\n  \
            {{\"op\":\"status\"}}\n  \
          --serve: rgx compat — a JSON argv-array per line, answers framed\n  \
-           by {{\"rgx\":\"begin\"}}/{{\"rgx\":\"end\"}} with rg --json match lines."
+           by {{\"rgx\":\"begin\"}}/{{\"rgx\":\"end\"}} with rg --json match lines.\n\n\
+         --threads: workers for the scan and the query (default: 4 for the\n\
+         scan, the machine's cores for the query; RGY_NUM_THREADS sets\n\
+         both)."
     );
     std::process::exit(code);
 }
@@ -267,6 +270,7 @@ fn main() {
     let mut index: Option<String> = None;
     let mut reindex = false;
     let mut max_age: Option<Duration> = None;
+    let mut threads: Option<usize> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -298,6 +302,15 @@ fn main() {
                 listen = args.get(i).cloned().unwrap_or_else(|| usage(2));
             }
             "--serve" => serve = true,
+            "--threads" => {
+                i += 1;
+                threads = Some(
+                    args.get(i)
+                        .and_then(|s| s.parse::<usize>().ok())
+                        .filter(|&n| n > 0)
+                        .unwrap_or_else(|| usage(2)),
+                );
+            }
             "-h" | "--help" => usage(0),
             other => {
                 rgy_engine::errln!("searchd: unknown argument {other}");
@@ -315,7 +328,21 @@ fn main() {
     // path.
     let root = absolute_root(&root);
 
-    let startup = open_index(&root, index.as_deref(), reindex, max_age);
+    // The width the scan and the query use. The flag wins; then the
+    // environment (`RGY_NUM_THREADS`), which is the project's own setting
+    // and says how wide everything is; then each one's own default -- four
+    // for the scan (the config's default), and the machine's own core
+    // count for the query, which is what the pool it replaced did.
+    //
+    // The environment is asked once, so the two widths cannot come from
+    // two different answers.
+    let set = threads.or_else(rgy_par::configured);
+    let query_threads = set.unwrap_or_else(rgy_par::workers).max(1);
+    let scan_threads = set.unwrap_or(PortableSource::DEFAULT_THREADS).max(1);
+    // Pinned here so every parallel path in the daemon agrees on the width.
+    rgy_par::set_workers(query_threads);
+
+    let startup = open_index(&root, index.as_deref(), reindex, max_age, scan_threads);
     // The content index lives beside the name index: `<index>.content/`,
     // which is where the CLI looks for it.
     let content_dir = {
@@ -558,7 +585,13 @@ fn startup_plan(watermark: u64, journal: &Journal) -> Startup {
 /// replayed. A journal that no longer covers it (it wrapped, or it was
 /// recreated) cannot replay the gap, so the tree is walked again — and said
 /// to be.
-fn open_index(root: &str, index: Option<&str>, reindex: bool, max_age: Option<Duration>) -> Ready {
+fn open_index(
+    root: &str,
+    index: Option<&str>,
+    reindex: bool,
+    max_age: Option<Duration>,
+    threads: usize,
+) -> Ready {
     let root_path = std::path::PathBuf::from(root);
     let index_path = match index {
         Some(p) => std::path::PathBuf::from(p),
@@ -629,10 +662,7 @@ fn open_index(root: &str, index: Option<&str>, reindex: bool, max_age: Option<Du
 
     // The platform walk where one exists (docs/design.md §2.2),
     // the portable walk where none does or where the native one refuses.
-    let source = rgy_discovery_dispatch::source_for(
-        root.as_bytes().to_vec(),
-        PortableSource::DEFAULT_THREADS,
-    );
+    let source = rgy_discovery_dispatch::source_for(root.as_bytes().to_vec(), threads);
     // The first thing a daemon does is walk a tree it was pointed at, and
     // that is the longest silent stretch in the program. Report it, and let
     // Ctrl-C stop it cleanly instead of killing the daemon mid-build.
@@ -1188,11 +1218,9 @@ fn open_watch(
     _journal: &Journal,
     _watermark: u64,
 ) -> Option<Box<dyn rgy_discovery::Watch>> {
-    use std::os::unix::ffi::OsStrExt;
-    let path = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(root));
-    Some(Box::new(
-        rgy_discovery_linux::InotifyWatch::new(&path).ok()?,
-    ))
+    // The root is the bytes the filesystem gave, and the watch takes them
+    // the same way: a Unix path is not a UTF-8 string.
+    Some(Box::new(rgy_discovery_linux::InotifyWatch::new(root).ok()?))
 }
 
 /// The macOS feed: FSEvents, pulled.

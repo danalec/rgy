@@ -108,10 +108,12 @@ def bench_command(names: int) -> list[str]:
 def run_once(names: int, threads: int) -> list[dict]:
     """One run of the bench, as the rows it printed."""
     env = dict(os.environ)
-    # Rayon's global pool reads this. The bench measures a parallel scan, so
-    # the pool's width is part of what is being measured, and an unpinned
-    # width is how a table stops being comparable.
-    env["RAYON_NUM_THREADS"] = str(threads)
+    # The worker width the measurement is taken at. The bench measures a
+    # parallel scan, so the width is part of what is being measured, and
+    # an unpinned width is how a table stops being comparable. The name
+    # is the crate's own (`RGY_NUM_THREADS`); the width is the user's,
+    # and this is where the bench says what it wants.
+    env["RGY_NUM_THREADS"] = str(threads)
     proc = subprocess.run(
         bench_command(names), cwd=ROOT, capture_output=True, text=True, env=env
     )

@@ -109,7 +109,12 @@ fn search_paths(live: &Live, root: &str, query_str: &str) -> Result<Vec<String>,
 /// rejoins the root for display (the UI does it too).
 #[cfg(windows)]
 fn build_index(volume: &Volume) -> Result<(Index, indexer::IndexStats), String> {
-    let indexer = Indexer::new(volume);
+    // The escape hatch that forces the record path instead of the streamed
+    // one is read here, not inside the backend: the backend is a library,
+    // and a library that reads the environment is a library that cannot be
+    // tested.
+    let streamed = std::env::var_os("ERS_USE_RECORDS").is_none();
+    let indexer = Indexer::with_records(volume, streamed);
     let mut last = std::time::Instant::now();
     let (rows, stats) = indexer
         .scan_rows(&mut |done, total, _limit| {

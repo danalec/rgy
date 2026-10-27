@@ -7,6 +7,9 @@
 //! stays available beside it.
 
 use std::path::Path;
+use std::string::{String, ToString};
+use std::vec;
+use std::vec::Vec;
 
 use rgx_core::tv::query::SearchConfig;
 use rgx_core::tv_runtime::searcher::search_store;

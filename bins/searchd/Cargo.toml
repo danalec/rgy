@@ -23,6 +23,9 @@ rgy-discovery = { path = "../../crates/discovery", version = "0.1.0" }
 rgy-discovery-dispatch = { path = "../../crates/discovery-dispatch", version = "0.1.0" }
 rgy-engine = { path = "../../crates/engine", version = "0.1.0" }
 rgy-name-core = { path = "../../crates/name-core", version = "0.1.0" }
+# The parallelism's width: the user picks it, the environment can override
+# it, and every parallel path in the daemon agrees on it.
+rgy-par = { path = "../../crates/par", version = "0.1.0" }
 rgy-proto = { path = "../../crates/proto", version = "0.1.0" }
 # rgx --serve front reads argv arrays with rgx's own JSON parser.
 rgx-core = { path = "../../crates/rgx-core", version = "0.1.0" }

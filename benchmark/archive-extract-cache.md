@@ -10,7 +10,7 @@ RAR / 7z / tar.* / brotli / zstd / lz4 / xz / lzma fixtures). The cost is
 adapter extraction, and the extraction cache (`--cache`) is off by default.
 Does the cache pay, and when?
 
-**Protocol.** Per AGENTS.md §9 rule 4: minimum of N timed runs per cell,
+**Protocol.** Per AGENTS.md §10 rule 4: minimum of N timed runs per cell,
 2 discarded warmups per cell, spawn floor measured with the same method
 (`rgx --version`) and reported so it can be subtracted. The count gate runs
 before any timing is believed: pattern `RGXFIXTURE` over `crates/` must sum

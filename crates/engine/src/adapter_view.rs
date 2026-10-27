@@ -36,7 +36,7 @@ pub const UPSTREAM_VIEW_ENV: &str = "RGX_ADAPTER_VIEW";
 /// something unknown is not a reason to read the other one.
 ///
 /// `None` means neither name was set, and the caller is left alone.
-fn policy_from(own: Option<&str>, upstream: Option<&str>) -> Option<rgx_core::Policy> {
+pub fn policy_from(own: Option<&str>, upstream: Option<&str>) -> Option<rgx_core::Policy> {
     let value = own.or(upstream)?.trim();
     Some(match value {
         "render" | "rendered" | "adapter" => rgx_core::Policy::Render,
@@ -46,6 +46,7 @@ fn policy_from(own: Option<&str>, upstream: Option<&str>) -> Option<rgx_core::Po
 }
 
 /// The policy the environment asks for, or `None` when neither name is set.
+#[cfg(feature = "std")]
 pub fn resolve() -> Option<rgx_core::Policy> {
     let own = std::env::var(VIEW_ENV).ok();
     let upstream = std::env::var(UPSTREAM_VIEW_ENV).ok();
@@ -56,6 +57,7 @@ pub fn resolve() -> Option<rgx_core::Policy> {
 ///
 /// Called once, at startup, by the binaries that search. With neither name
 /// set this does nothing, and rgx-core's own resolution stands.
+#[cfg(feature = "std")]
 pub fn apply() {
     let own = std::env::var(VIEW_ENV).ok();
     let upstream = std::env::var(UPSTREAM_VIEW_ENV).ok();
@@ -63,7 +65,11 @@ pub fn apply() {
 }
 
 /// The same, from values rather than from the environment.
-fn apply_from(own: Option<&str>, upstream: Option<&str>) {
+///
+/// The values are the caller's: a caller that read them somewhere else
+/// (a config file, a flag, a test) hands them over and the policy is the
+/// same one the environment would have asked for.
+pub fn apply_from(own: Option<&str>, upstream: Option<&str>) {
     if let Some(p) = policy_from(own, upstream) {
         rgx_core::set_policy(p);
     }

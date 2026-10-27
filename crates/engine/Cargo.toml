@@ -12,12 +12,28 @@ keywords = ["search", "engine", "daemon"]
 categories = ["command-line-utilities", "filesystem"]
 readme = "../../README.md"
 
+[features]
+default = ["std"]
+# The threads, the clock, the environment and the filesystem: what the
+# warm window's spinner, the console and the pack store need. Without it
+# the crate is `core` plus `alloc`, and what is left is the decisions --
+# when the window opens, which policy the environment asks for, how a
+# console is written -- without the effects.
+std = ["rgx-core/std", "rgx-core/tv-runtime"]
 
 [dependencies]
+# The vendored rgx-core: the policy the adapter view resolves to, and (with
+# the `std` feature) the pack store the daemon greps in. Without the
+# default features it is `no_std` + `alloc`, which is what the engine's
+# own `no_std` configuration needs.
+rgx-core = { path = "../rgx-core", version = "0.1.0", default-features = false }
+
+[dev-dependencies]
+# The examples measure the name engine against the discovery seam's
+# blocks. They are not the library's own dependencies: the library does
+# not walk anything.
 rgy-discovery = { path = "../discovery", version = "0.1.0" }
 rgy-name-core = { path = "../name-core", version = "0.1.0" }
-# TV pack store (tv/ + tv_runtime/) as the daemon corpus store.
-rgx-core = { path = "../rgx-core", version = "0.1.0", features = ["tv-runtime"] }
 
 [[example]]
 name = "name_bench"
