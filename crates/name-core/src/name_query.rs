@@ -17,9 +17,12 @@ use crate::fold;
 use crate::live::Live;
 use crate::name_index::{BM_DOUBLE, BM_FIRST, BM_SECOND, BM_START, CLASSES, Index, ZONE, Zone, char_bit, start_bit};
 use crate::rank::{RankKey, Score, Tier};
-use rayon::prelude::*;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
+use hashbrown::HashMap;
 use rgy_discovery::walk::{FLAG_HIDDEN, FLAG_MOUNT, KIND_DIR, KIND_FILE, KIND_LINK};
-use std::collections::HashMap;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Mode {
@@ -105,6 +108,42 @@ pub struct Axes<'a> {
     /// of the name) ask something of the name; a query with no such token
     /// asks nothing, and every name is a candidate -- the scan decides.
     pub asks_name: bool,
+    /// The attribute tokens, compiled to the kind byte: the kinds an entry
+    /// may have (bit `k` for kind `k`), the flags it must carry and the
+    /// flags it must not.
+    ///
+    /// The scan asks the attributes once per candidate, so they are asked
+    /// as three bit tests instead of a string compare per token -- and the
+    /// kinds are what a zone of the index says it holds, so a run of
+    /// entries none of which has an allowed kind is skipped whole.
+    pub kinds: u8,
+    pub flags_req: u8,
+    pub flags_forbid: u8,
+}
+
+impl Axes<'_> {
+    /// Whether an entry with kind byte `k` answers the attribute tokens.
+    #[inline(always)]
+    fn attrs_ok(&self, k: u8) -> bool {
+        (self.kinds >> (k & 3)) & 1 != 0 && k & self.flags_req == self.flags_req && k & self.flags_forbid == 0
+    }
+}
+
+/// Every kind (`kind & 3`) an entry can have.
+const ALL_KINDS: u8 = 0b1111;
+
+/// What an attribute token asks of the kind byte: the kinds it allows and
+/// the flag it needs. `None` for a word that names no attribute.
+fn attr_spec(t: &Token) -> Option<(u8, u8)> {
+    Some(match t.text.as_slice() {
+        b"dir" | b"folder" | b"directory" => (1 << KIND_DIR, 0),
+        b"file" => (1 << KIND_FILE, 0),
+        b"link" | b"symlink" => (1 << KIND_LINK, 0),
+        b"other" => (1 << 3, 0),
+        b"hidden" => (ALL_KINDS, FLAG_HIDDEN),
+        b"mount" | b"volume" => (ALL_KINDS, FLAG_MOUNT),
+        _ => return None,
+    })
 }
 
 /// The bits the name table's bitmap and the memo can carry.
@@ -173,8 +212,8 @@ pub struct Query {
     /// meaningless, so it fails the filter rather than passing it).
     pub size_set: bool,
     pub mtime: (u32, u32),
-    pub name_re: Option<regex::bytes::Regex>,
-    pub path_re: Option<regex::bytes::Regex>,
+    pub name_re: Option<crate::regex::Regex>,
+    pub path_re: Option<crate::regex::Regex>,
     pub limit: usize,
     /// The order the results come in (`sort:`).
     pub sort: SortBy,
@@ -327,12 +366,19 @@ impl Query {
     /// The bits are the positions of the positive tokens, which is the
     /// index space the name table's bitmap and the directory memo use.
     pub fn axes(&self) -> Axes<'_> {
-        let mut a = Axes::default();
+        let mut a = Axes { kinds: ALL_KINDS, ..Axes::default() };
         let mut t = 0u32;
         for tok in &self.tokens {
             if tok.negate {
                 if tok.axis == Axis::Attribute {
                     a.neg_attrs.push(tok);
+                    // A word that names no attribute matches nothing, so
+                    // its negation rejects nothing.
+                    match attr_spec(tok) {
+                        Some((k, 0)) => a.kinds &= !k,
+                        Some((_, f)) => a.flags_forbid |= f,
+                        None => {}
+                    }
                 }
                 continue;
             }
@@ -343,6 +389,15 @@ impl Query {
                 Axis::Attribute => {
                     a.attr |= 1 << t;
                     a.attrs.push(tok);
+                    // A word that names no attribute matches nothing, and
+                    // a positive one that matches nothing admits nothing.
+                    match attr_spec(tok) {
+                        Some((k, f)) => {
+                            a.kinds &= k;
+                            a.flags_req |= f;
+                        }
+                        None => a.kinds = 0,
+                    }
                 }
             }
             t += 1;
@@ -413,7 +468,26 @@ impl Query {
     /// Some prefixes are both a filter and an axis (`ext:`), and there the
     /// filter wins unless the word carries one of the matcher's markers.
     fn filter_is(&self, k: &str) -> bool {
-        matches!(k, "ext" | "type" | "kind" | "in" | "size" | "mtime" | "modified" | "re" | "path" | "limit" | "grep" | "content" | "regex" | "sym")
+        matches!(
+            k,
+            "ext"
+                | "type"
+                | "kind"
+                | "in"
+                | "dir"
+                | "size"
+                | "mtime"
+                | "modified"
+                | "re"
+                | "path"
+                | "limit"
+                | "sort"
+                | "grep"
+                | "content"
+                | "regex"
+                | "sym"
+                | "symbol"
+        )
     }
 
     /// Apply filter `k:v`; false if `k` is not a filter name.
@@ -510,7 +584,7 @@ impl Query {
             // alternative matches nothing and a warning is recorded — same
             // as a positive `re:` that rejects everything rather than
             // silently admitting everything.
-            "re" | "path" => match regex::bytes::Regex::new(&format!("(?i){v}")) {
+            "re" | "path" => match crate::regex::Regex::new(&format!("(?i){v}")) {
                 Ok(r) => self.path_re = Some(r),
                 Err(e) => {
                     self.never = true;
@@ -563,34 +637,15 @@ impl Query {
     /// `match_path`, with the folder half (`dir_match` of the path's folder
     /// part) supplied by the caller, who can memoize it per folder.
     pub fn match_path_with(&self, path: &[u8], kind: u8, size: u64, mtime: u32, dirs: impl FnOnce(&[u8]) -> DirMatch) -> Option<i32> {
-        if self.never {
-            return None;
-        }
-        // Every comparison runs on the fold of the path (docs/design.md
-        // 6.6, rule 2): a name typed in NFC has to match one the
-        // filesystem stored in NFD. The path the caller holds is the one
-        // that is displayed and opened; this is the view for comparison.
-        let folded = fold::fold(path);
-        let path = &folded[..];
         // `type:link` is orthogonal to kind (zen-rs): a reparse
         // point / symlink. On fsearch's walk the symlink kind carries it;
         // a combined `type:dir type:link` needs a backend reparse flag and
         // matches nothing until one exists.
-        if self.link && kind & 3 != KIND_LINK {
-            return None;
-        }
-        if let Some(s) = &self.scope
-            && !(path.starts_with(s) && path.get(s.len()) == Some(&b'/'))
-        {
-            return None;
-        }
-        let cut = path.iter().rposition(|&b| b == b'/').unwrap_or(0);
-        let name = &path[cut + 1..];
         // `size:` bounds are statements about files: a directory satisfies
         // NO size bound rather than all of them (zen-rs).
-        if name.is_empty()
+        if self.never
+            || (self.link && kind & 3 != KIND_LINK)
             || !self.kind_ok(kind)
-            || (!self.exts.is_empty() && !ext_ok(name, &self.exts))
             || (self.size_set && kind & 3 == KIND_DIR)
             || size < self.size.0
             || size > self.size.1
@@ -599,103 +654,117 @@ impl Query {
         {
             return None;
         }
+        // The attribute axis: the token matches the file's attributes --
+        // its kind and its flags -- by name (`dir`, `file`, `link`,
+        // `hidden`, `mount`).
+        for t in &self.tokens {
+            if t.axis == Axis::Attribute && t.negate == attr_matches(t, kind) {
+                return None;
+            }
+        }
+        // Every comparison runs on the fold of the path (docs/design.md
+        // 6.6, rule 2): a name typed in NFC has to match one the
+        // filesystem stored in NFD. The path the caller holds is the one
+        // that is displayed and opened; this is the view for comparison.
+        let folded = fold::fold(path);
+        let path = &folded[..];
+        if let Some(s) = &self.scope
+            && !(path.starts_with(s) && path.get(s.len()) == Some(&b'/'))
+        {
+            return None;
+        }
+        let cut = path.iter().rposition(|&b| b == b'/').unwrap_or(0);
+        let name = &path[cut + 1..];
+        if name.is_empty() || (!self.exts.is_empty() && !ext_ok(name, &self.exts)) {
+            return None;
+        }
         for (neg, pat) in &self.globs {
             if *neg == glob_match(pat, path) {
                 return None;
             }
         }
         if self.tokens.is_empty() {
-            let re_ok = self.name_re.as_ref().is_none_or(|re| re.is_match(name)) && self.path_re.as_ref().is_none_or(|re| re.is_match(path));
+            let re_ok =
+                self.name_re.as_ref().is_none_or(|re| re.is_match_bytes(name)) && self.path_re.as_ref().is_none_or(|re| re.is_match_bytes(path));
             return re_ok.then_some(0);
         }
         // The tokens are grouped by the axis they match on (parity row
         // Q.1): the name, the extension, a folder of the path, or an
-        // attribute. A token on the name axis is what the query has always
-        // meant; the others are new.
-        let name_toks: Vec<&Token> = self.tokens.iter().filter(|t| t.axis == Axis::Name).collect();
-        let ext_toks: Vec<&Token> = self.tokens.iter().filter(|t| t.axis == Axis::Extension).collect();
-        let folder_toks: Vec<&Token> = self.tokens.iter().filter(|t| t.axis == Axis::Folder).collect();
-        let attr_toks: Vec<&Token> = self.tokens.iter().filter(|t| t.axis == Axis::Attribute).collect();
-        // A hit needs some token in its own name; most paths fail here,
-        // before the folders are looked at.
-        let mut pos = name_toks.iter().copied().filter(|t| !t.negate).peekable();
-        let m = crate::name_index::mask_of(name);
-        if pos.peek().is_some() && !pos.any(|t| t.fits(m) && token_score(name, None, m, t).is_some()) {
-            return None;
-        }
-        if name_toks.iter().any(|t| t.negate && token_matches(name, t)) {
-            return None;
-        }
-        // The extension axis: the token matches the extension of the name,
-        // not the name itself.
-        if let Some(ext) = ext_of(name)
-            && ext_toks.iter().any(|t| t.negate && token_matches(ext, t))
-        {
-            return None;
-        }
-        // The attribute axis: the token matches the file's attributes --
-        // its kind and its flags -- by name (`dir`, `file`, `link`,
-        // `hidden`, `system`).
-        if attr_toks.iter().any(|t| t.negate && attr_matches(t, kind)) {
-            return None;
-        }
-        let d = dirs(&path[..cut]);
-        if d.negated {
-            return None;
-        }
-        // The folder axis: the token matches a folder of the path, so it
-        // is looked for in the folders and not in the name.
-        if folder_toks.iter().any(|t| t.negate && d.matched(t)) {
-            return None;
-        }
-        // The name-axis tokens, each with the place it has among the
-        // positive tokens.
+        // attribute. A hit with name-axis tokens needs some token in its
+        // own name; most paths fail here, before the folders are looked at.
         //
-        // The place matters: `dir_match` fills the memo by that place, so a
-        // token that is not the first positive one has to look up its own
-        // slot and not the one before it. The two lined up only while every
-        // positive token was a name token.
-        let mut pos: Vec<(usize, &Token)> = Vec::new();
-        for (at, tok) in self.tokens.iter().filter(|t| !t.negate).enumerate() {
-            if tok.axis == Axis::Name {
-                pos.push((at, tok));
+        // The place a token has among the positive tokens matters:
+        // `dir_match` fills the memo by that place, so a token that is not
+        // the first positive one has to look up its own slot and not the
+        // one before it.
+        let m = crate::name_index::mask_of(name);
+        let (mut has_pos_name, mut got, mut missing_name, mut need_folder, mut score) = (false, 0u32, 0u32, 0u32, 0i32);
+        for (slot, tok) in self.tokens.iter().filter(|t| !t.negate).enumerate() {
+            match tok.axis {
+                Axis::Name => {
+                    has_pos_name = true;
+                    if tok.fits(m)
+                        && let Some(s) = token_score(name, None, m, tok)
+                    {
+                        got |= 1 << slot;
+                        score += s;
+                    } else {
+                        missing_name |= 1 << slot;
+                    }
+                }
+                Axis::Folder => need_folder |= 1 << slot,
+                Axis::Extension | Axis::Attribute => {}
             }
         }
-        let all = (1u32 << pos.len()) - 1;
-        let (mut got, mut inherited, mut score) = (0u32, 0u32, 0i32);
-        for (t, (slot, tok)) in pos.iter().enumerate() {
-            if let Some(s) = token_score(name, None, m, tok) {
-                got |= 1 << t;
-                score += s;
-            } else if let Some(s) = d.best[*slot] {
-                inherited |= 1 << t;
-                score += s * 3 / 4;
-            }
-        }
-        if !pos.is_empty() && (got == 0 || (got | inherited) != all) {
+        if has_pos_name && got == 0 {
             return None;
         }
-        // The extension axis: the token matches the extension of the name.
-        // The extension is the tail after the last dot, without the dot.
-        for t in ext_toks.iter().filter(|t| !t.negate) {
-            let ext = ext_of(name)?;
-            let s = token_score(ext, None, !0, t)?;
-            score += s;
+        let mut has_dir_neg = false;
+        for t in &self.tokens {
+            if !t.negate {
+                // The extension axis: the token matches the extension of the
+                // name (the tail after the last dot, without the dot).
+                if t.axis == Axis::Extension {
+                    let ext = ext_of(name)?;
+                    score += token_score(ext, None, !0, t)?;
+                }
+                continue;
+            }
+            match t.axis {
+                Axis::Name => {
+                    has_dir_neg = true;
+                    if token_matches(name, t) {
+                        return None;
+                    }
+                }
+                Axis::Folder => has_dir_neg = true,
+                Axis::Extension => {
+                    if ext_of(name).is_some_and(|ext| token_matches(ext, t)) {
+                        return None;
+                    }
+                }
+                Axis::Attribute => {}
+            }
         }
-        // The attribute axis: the token names an attribute of the file.
-        for t in attr_toks.iter().filter(|t| !t.negate) {
-            if !attr_matches(t, kind) {
+        if missing_name != 0 || need_folder != 0 || has_dir_neg {
+            let d = dirs(&path[..cut]);
+            if d.negated {
                 return None;
             }
+            let mut miss = missing_name;
+            while miss != 0 {
+                let slot = miss.trailing_zeros() as usize;
+                miss &= miss - 1;
+                score += d.best[slot]? * 3 / 4;
+            }
+            let mut fld = need_folder;
+            while fld != 0 {
+                let slot = fld.trailing_zeros() as usize;
+                fld &= fld - 1;
+                score += d.best[slot]?;
+            }
         }
-        // The folder axis: the token matches a folder of the path. The
-        // folder is looked for among the path's folders, so the token does
-        // not have to be in the name.
-        for t in folder_toks.iter().filter(|t| !t.negate) {
-            let s = d.best_of(t)?;
-            score += s;
-        }
-        if self.name_re.as_ref().is_some_and(|re| !re.is_match(name)) || self.path_re.as_ref().is_some_and(|re| !re.is_match(path)) {
+        if self.name_re.as_ref().is_some_and(|re| !re.is_match_bytes(name)) || self.path_re.as_ref().is_some_and(|re| !re.is_match_bytes(path)) {
             return None;
         }
         Some(score)
@@ -709,16 +778,12 @@ impl Query {
         let folded = fold::fold(dirs);
         let dirs = &folded[..];
         let comps = || dirs.split(|&b| b == b'/').filter(|c| !c.is_empty());
-        let mut d = DirMatch { negated: false, best: [None; 8], folders: Vec::new() };
-        d.negated = self.tokens.iter().any(|t| t.negate && comps().any(|c| token_matches(c, t)));
+        let mut d = DirMatch { negated: false, best: [None; 8] };
+        d.negated = self.tokens.iter().any(|t| t.negate && matches!(t.axis, Axis::Name | Axis::Folder) && comps().any(|c| token_matches(c, t)));
         for (t, tok) in self.tokens.iter().filter(|t| !t.negate).enumerate() {
-            d.best[t] = comps().filter_map(|c| token_score(c, None, !0, tok)).max();
-        }
-        // The folders are kept for the folder axis (parity row Q.1): a
-        // token on that axis is matched against them, not against the name.
-        // Only a query that has such a token pays for the copy.
-        if self.tokens.iter().any(|t| t.axis == Axis::Folder) {
-            d.folders = comps().map(|c| c.to_vec()).collect();
+            if matches!(tok.axis, Axis::Name | Axis::Folder) {
+                d.best[t] = comps().filter_map(|c| token_score(c, None, !0, tok)).max();
+            }
         }
         d
     }
@@ -741,46 +806,28 @@ fn ext_of(name: &[u8]) -> Option<&[u8]> {
 /// The attributes are the kind (`dir`, `file`, `link`, `other`) and the
 /// flags (`hidden`, `system`, `mount`). The token is the attribute's name,
 /// matched the way every other token is matched.
+#[inline(always)]
 fn attr_matches(t: &Token, kind: u8) -> bool {
-    let text = String::from_utf8_lossy(&t.text).to_ascii_lowercase();
     // The flags live in the kind byte itself, above the two bits that hold
     // the kind (`kind & 3`). They are tested where they sit: shifting the
     // byte first would look for the hidden flag in bit 4 and the mount flag
     // in bit 5, and nothing would ever match.
-    match text.as_str() {
-        "dir" | "folder" | "directory" => kind & 3 == KIND_DIR,
-        "file" => kind & 3 == KIND_FILE,
-        "link" | "symlink" => kind & 3 == KIND_LINK,
-        "other" => kind & 3 == 3,
-        "hidden" => kind & FLAG_HIDDEN != 0,
-        "mount" | "volume" => kind & FLAG_MOUNT != 0,
+    match t.text.as_slice() {
+        b"dir" | b"folder" | b"directory" => kind & 3 == KIND_DIR,
+        b"file" => kind & 3 == KIND_FILE,
+        b"link" | b"symlink" => kind & 3 == KIND_LINK,
+        b"other" => kind & 3 == 3,
+        b"hidden" => kind & FLAG_HIDDEN != 0,
+        b"mount" | b"volume" => kind & FLAG_MOUNT != 0,
         _ => false,
     }
 }
 
 /// See `Query::dir_match`.
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub struct DirMatch {
     negated: bool,
     best: [Option<i32>; 8],
-    /// The folders of the path, for the folder axis.
-    ///
-    /// Empty unless the query has a token on the folder axis: the folders
-    /// are copied per folder the memo holds, and a query without that axis
-    /// never reads them.
-    folders: Vec<Vec<u8>>,
-}
-
-impl DirMatch {
-    /// Whether a token on the folder axis matches one of the folders.
-    fn matched(&self, t: &Token) -> bool {
-        self.folders.iter().any(|c| token_matches(c, t))
-    }
-
-    /// The best score a token on the folder axis gets among the folders.
-    fn best_of(&self, t: &Token) -> Option<i32> {
-        self.folders.iter().filter_map(|c| token_score(c, None, !0, t)).max()
-    }
 }
 
 /// The real path of `p` (the index holds real paths: /etc is
@@ -788,17 +835,23 @@ impl DirMatch {
 /// (~4 us), as much as a whole search in a small folder, and searches in
 /// one folder come in a row (typing): the last answer holds for a second,
 /// less than the index takes to see most changes anyway.
+///
+/// The resolution is the seam's: it is a platform call, and this crate has
+/// no `std` to make it with. Where there is no filesystem to ask — a
+/// bare-metal target — the path stays as the caller gave it, because a
+/// path that depends on a filesystem is not a path the index can hold.
 fn real_path(p: String) -> String {
-    static LAST: std::sync::Mutex<Option<(String, String, std::time::Instant)>> = std::sync::Mutex::new(None);
+    static LAST: crate::sync::Mutex<Option<(String, String, u64)>> = crate::sync::Mutex::new(None);
     let mut last = LAST.lock().unwrap();
+    let now = crate::clock::unix_millis();
     if let Some((from, to, at)) = &*last
         && *from == p
-        && at.elapsed() < std::time::Duration::from_secs(1)
+        && now.saturating_sub(*at) < 1000
     {
         return to.clone();
     }
-    let to = std::fs::canonicalize(&p).map_or_else(|_| p.clone(), |c| c.to_string_lossy().into_owned());
-    *last = Some((p, to.clone(), std::time::Instant::now()));
+    let to = rgy_discovery::file::canonicalize(p.as_bytes()).map_or_else(|| p.clone(), |c| String::from_utf8_lossy(&c).into_owned());
+    *last = Some((p, to.clone(), now));
     to
 }
 
@@ -816,7 +869,7 @@ fn split_words(s: &str) -> Vec<(String, bool)> {
             }
             ' ' if !quoted => {
                 if !cur.is_empty() {
-                    out.push((std::mem::take(&mut cur), was_quoted));
+                    out.push((core::mem::take(&mut cur), was_quoted));
                     was_quoted = false;
                 }
             }
@@ -1057,7 +1110,27 @@ fn date_range(v: &str, now: u32) -> Result<(u32, u32), String> {
 }
 
 pub fn now_secs() -> u32 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as u32)
+    // The clock is the crate's own: `clock_gettime(2)` on unix and
+    // `GetSystemTimeAsFileTime` on Windows, declared in `crate::clock`. It
+    // reads the same wall clock `SystemTime` did, in every build -- a
+    // build without a clock would answer 0, and 0 is the epoch: the
+    // `mtime:` filter would then ask for files from 1970 and the idle
+    // trim would have nothing to compare against.
+    crate::clock::unix_secs()
+}
+
+/// The unix millisecond, for the idle timers.
+///
+/// Milliseconds and not seconds: a table scored a fraction of a second
+/// ago is not idle yet, and a clock that can only say "the same second"
+/// cannot tell the two apart -- it would drop the cache while the user is
+/// still typing.
+///
+/// The wall clock is not monotonic, so a clock that steps backwards reads
+/// as "not idle". That is the safe direction: the cache is kept a little
+/// longer than it should be, rather than dropped while it is wanted.
+pub fn now_millis() -> u64 {
+    crate::clock::unix_millis()
 }
 
 #[inline(always)]
@@ -1096,9 +1169,9 @@ fn find_ci(name: &[u8], q: &[u8]) -> Option<usize> {
     while at <= last {
         let window = &name[at..=last];
         let hit = if lower == upper {
-            memchr::memchr(lower, window).map(|i| at + i)
+            rgx_core::memchr::memchr(lower, window).map(|i| at + i)
         } else {
-            match (memchr::memchr(lower, window).map(|i| at + i), memchr::memchr(upper, window).map(|i| at + i)) {
+            match (rgx_core::memchr::memchr(lower, window).map(|i| at + i), rgx_core::memchr::memchr(upper, window).map(|i| at + i)) {
                 (Some(a), Some(b)) => Some(a.min(b)),
                 (Some(a), None) => Some(a),
                 (None, Some(b)) => Some(b),
@@ -1202,10 +1275,10 @@ fn fuzzy_scalar<M: Matched>(name: &[u8], q: &[u8], cap: i32, matched: &mut M) ->
 /// memchr's scans, which cost several times more per name tried.
 #[cfg(target_arch = "aarch64")]
 fn fuzzy_masked(name: &[u8], src: &[u8; 64], q: &[u8], cap: i32) -> Option<i32> {
-    use std::arch::aarch64::*;
+    use core::arch::aarch64::*;
     let valid = u64::MAX.checked_shr(64 - name.len() as u32).unwrap_or(0);
     // Safety (here and below): NEON is part of aarch64; loads stay in `src`.
-    let v: [uint8x16_t; 4] = std::array::from_fn(|i| unsafe {
+    let v: [uint8x16_t; 4] = core::array::from_fn(|i| unsafe {
         let x = vld1q_u8(src.as_ptr().add(16 * i));
         vorrq_u8(x, vandq_u8(vcltq_u8(vsubq_u8(x, vdupq_n_u8(b'A')), vdupq_n_u8(26)), vdupq_n_u8(0x20)))
     });
@@ -1250,11 +1323,11 @@ fn fuzzy_masked(name: &[u8], src: &[u8; 64], q: &[u8], cap: i32) -> Option<i32> 
 /// than the NEON weight/pairwise-add scheme.
 #[cfg(target_arch = "x86_64")]
 fn fuzzy_masked(name: &[u8], src: &[u8; 64], q: &[u8], cap: i32) -> Option<i32> {
-    use std::arch::x86_64::*;
+    use core::arch::x86_64::*;
     let valid = u64::MAX.checked_shr(64 - name.len() as u32).unwrap_or(0);
     // Fold each 16-byte chunk to lowercase ASCII, wrapping like the NEON
     // arm: `(x - 'A') < 26` unsigned then `x | 0x20`.
-    let v: [__m128i; 4] = std::array::from_fn(|i| unsafe {
+    let v: [__m128i; 4] = core::array::from_fn(|i| unsafe {
         let x = _mm_loadu_si128(src.as_ptr().add(16 * i) as *const __m128i);
         let t = _mm_sub_epi8(x, _mm_set1_epi8(b'A' as i8));
         // Unsigned (x - 'A') < 26 via the xor-0x80 signed-compare trick.
@@ -1425,13 +1498,13 @@ fn prefix_score(name: &[u8], q: &[u8], cap: i32) -> Option<i32> {
 /// First byte of `s` that folds to `c` (an already-lowercased query byte).
 #[inline(always)]
 fn find_folded(s: &[u8], c: u8) -> Option<usize> {
-    if c.is_ascii_lowercase() { memchr::memchr2(c, c - 32, s) } else { memchr::memchr(c, s) }
+    if c.is_ascii_lowercase() { rgx_core::memchr::memchr2(c, c - 32, s) } else { rgx_core::memchr::memchr(c, s) }
 }
 
 /// Last byte of `s` that folds to `c`.
 #[inline(always)]
 fn rfind_folded(s: &[u8], c: u8) -> Option<usize> {
-    if c.is_ascii_lowercase() { memchr::memrchr2(c, c - 32, s) } else { memchr::memrchr(c, s) }
+    if c.is_ascii_lowercase() { rgx_core::memchr::memrchr2(c, c - 32, s) } else { rgx_core::memchr::memrchr(c, s) }
 }
 
 /// `fuzzy_score` for a one-byte query matched at `i`: the general scoring
@@ -1463,7 +1536,7 @@ fn single_score(name: &[u8], i: usize, cap: i32) -> i32 {
 fn typo_score(name: &[u8], wide: Wide, m: u64, q: &[u8]) -> Option<i32> {
     let mut best = typo_at(name, wide, (name.len() > 1 && name[0] == b'.') as usize, q);
     if m & char_bit(b' ') != 0 {
-        for sp in memchr::memchr_iter(b' ', name) {
+        for sp in rgx_core::memchr::memchr_iter(b' ', name) {
             best = best.max(typo_at(name, wide, sp + 1, q));
         }
     }
@@ -1728,7 +1801,7 @@ fn utf8_len(b: u8) -> usize {
 fn combining_class(bytes: &[u8], at: usize) -> u8 {
     let Some(&b) = bytes.get(at) else { return 0 };
     let len = utf8_len(b).min(bytes.len() - at);
-    let Ok(text) = std::str::from_utf8(&bytes[at..at + len]) else {
+    let Ok(text) = core::str::from_utf8(&bytes[at..at + len]) else {
         return 0;
     };
     let Some(c) = text.chars().next() else { return 0 };
@@ -1737,14 +1810,23 @@ fn combining_class(bytes: &[u8], at: usize) -> u8 {
 
 /// The characters of `name` that the bytes in `bytes` fall in.
 fn chars_of_bytes(name: &[u8], bytes: &[u32]) -> Vec<u32> {
+    if name.is_ascii() {
+        return bytes.to_vec();
+    }
     let mut out = Vec::with_capacity(bytes.len());
     let mut chars = 0u32;
+    let mut bi = 0usize;
     for (i, b) in name.iter().enumerate() {
         // A continuation byte is 10xxxxxx: it belongs to the character
         // before it and is not one of its own.
         let is_start = b & 0xc0 != 0x80;
-        if bytes.binary_search(&(i as u32)).is_ok() {
+        let idx = i as u32;
+        while bi < bytes.len() && bytes[bi] < idx {
+            bi += 1;
+        }
+        if bi < bytes.len() && bytes[bi] == idx {
             out.push(if is_start { chars } else { chars - 1 });
+            bi += 1;
         }
         if is_start {
             chars += 1;
@@ -1754,8 +1836,11 @@ fn chars_of_bytes(name: &[u8], bytes: &[u32]) -> Vec<u32> {
 }
 
 /// The characters of `name` that the bytes in `range` fall in.
-fn chars_of_range(name: &[u8], range: std::ops::Range<usize>) -> Vec<u32> {
-    let mut out = Vec::new();
+fn chars_of_range(name: &[u8], range: core::ops::Range<usize>) -> Vec<u32> {
+    if name.is_ascii() {
+        return (range.start as u32..range.end as u32).collect();
+    }
+    let mut out = Vec::with_capacity(range.len());
     let mut chars = 0u32;
     for (i, b) in name.iter().enumerate() {
         let is_start = b & 0xc0 != 0x80;
@@ -1797,10 +1882,19 @@ fn fuzzy_matched_bytes(name: &[u8], q: &[u8]) -> Option<Vec<u32>> {
 /// query with kana in it is kana.
 fn shadow_score(name: &[u8], q: &[u8]) -> Option<i32> {
     use crate::readings::{Script, Shadow};
-    let scripts: &[Script] = if q.iter().all(|&b| b.is_ascii()) { &[Script::Romaji, Script::Pinyin] } else { &[Script::Hiragana, Script::Katakana] };
+    if !name.iter().any(|&b| b >= 0xE3) {
+        return None;
+    }
+    let is_ascii = q.is_ascii();
+    let scripts: &[Script] = if is_ascii { &[Script::Romaji, Script::Pinyin] } else { &[Script::Hiragana, Script::Katakana] };
     let mut best: Option<i32> = None;
     for s in scripts {
-        let Some(sh) = Shadow::of(name, *s) else { continue };
+        let Some(sh) = Shadow::of(name, *s) else {
+            if !is_ascii {
+                break;
+            }
+            continue;
+        };
         if let Some(score) = fuzzy_score(&sh.text, q) {
             best = Some(best.map_or(score, |b: i32| b.max(score)));
         }
@@ -1831,15 +1925,39 @@ fn ext_ok(name: &[u8], exts: &[Vec<u8>]) -> bool {
 /// (zen-rs rule — the pattern was lowercased at parse). `pat` must
 /// contain a wildcard (that is the only way a term becomes a glob).
 fn glob_match(pat: &[u8], path: &[u8]) -> bool {
-    fn go(p: &[u8], s: &[u8]) -> bool {
-        match p.first() {
-            None => s.is_empty(),
-            Some(&b'*') => (0..=s.len()).any(|i| go(&p[1..], &s[i..])),
-            Some(&b'?') => !s.is_empty() && go(&p[1..], &s[1..]),
-            Some(&c) => !s.is_empty() && fold(s[0]) == c && go(&p[1..], &s[1..]),
+    let (mut pi, mut si) = (0usize, 0usize);
+    let mut star: Option<(usize, usize)> = None;
+    while si < path.len() {
+        match pat.get(pi) {
+            Some(&b'*') => {
+                while pat.get(pi) == Some(&b'*') {
+                    pi += 1;
+                }
+                if pi == pat.len() {
+                    return true;
+                }
+                star = Some((pi, si));
+            }
+            Some(&b'?') => {
+                pi += 1;
+                si += 1;
+            }
+            Some(&c) if fold(path[si]) == c => {
+                pi += 1;
+                si += 1;
+            }
+            _ => {
+                let Some((sp, ss)) = &mut star else { return false };
+                *ss += 1;
+                si = *ss;
+                pi = *sp;
+            }
         }
     }
-    go(pat, path)
+    while pat.get(pi) == Some(&b'*') {
+        pi += 1;
+    }
+    pi == pat.len()
 }
 
 /// True when the text after a glued `|` re-enters query syntax: another
@@ -1852,9 +1970,32 @@ fn starts_query_syntax(s: &str) -> bool {
     }
     let t = s.strip_prefix('!').or_else(|| s.strip_prefix('-')).unwrap_or(s);
     t.split_once(':').is_some_and(|(k, _)| {
-        ["ext", "dir", "type", "kind", "in", "size", "mtime", "modified", "re", "path", "limit", "grep", "content", "regex", "sym"]
-            .iter()
-            .any(|p| k.eq_ignore_ascii_case(p))
+        [
+            "name",
+            "ext",
+            "extension",
+            "folder",
+            "attr",
+            "attribute",
+            "dir",
+            "type",
+            "kind",
+            "in",
+            "size",
+            "mtime",
+            "modified",
+            "re",
+            "path",
+            "limit",
+            "sort",
+            "grep",
+            "content",
+            "regex",
+            "sym",
+            "symbol",
+        ]
+        .iter()
+        .any(|p| k.eq_ignore_ascii_case(p))
     })
 }
 
@@ -1866,12 +2007,11 @@ fn split_alternatives(input: &str) -> Vec<&str> {
     let mut parts = Vec::new();
     let mut start = 0usize;
     let mut prev_pipe = None;
-    let bytes: Vec<(usize, char)> = input.char_indices().collect();
-    for (idx, &(i, ch)) in bytes.iter().enumerate() {
+    for (i, ch) in input.char_indices() {
         if ch != '|' {
             continue;
         }
-        let after: String = bytes[idx + 1..].iter().map(|&(_, c)| c).collect();
+        let after = &input[i + 1..];
         // Inside a `re:` pattern the `|` belongs to the regex, unless what
         // follows re-enters query syntax.
         let seg = &input[start..i];
@@ -1880,7 +2020,7 @@ fn split_alternatives(input: &str) -> Vec<&str> {
             let key = &seg[word_start..colon];
             let key = key.strip_prefix('!').or_else(|| key.strip_prefix('-')).unwrap_or(key);
             key.eq_ignore_ascii_case("re") || key.eq_ignore_ascii_case("regex")
-        }) && !starts_query_syntax(&after);
+        }) && !starts_query_syntax(after);
         if in_re {
             continue;
         }
@@ -1929,6 +2069,10 @@ impl Alternatives {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::format;
+    use alloc::string::String;
+    use alloc::vec;
+    use alloc::vec::Vec;
 
     fn q(s: &str) -> Query {
         Query::parse(s, "").expect("parses")
@@ -2401,6 +2545,36 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_overlay_scan_answers_non_name_axes_and_negated_attrs() {
+        use rgy_discovery::walk::{KIND_FILE, Listing};
+        let mut live = Live::new(Index::build(vec![Listing { id: 0, names: Vec::new(), ents: Vec::new() }], 0, 1_700_000_000, b"/"));
+        for path in [b"/docs/invoice.txt".as_slice(), b"/docs/dir.txt".as_slice()] {
+            let o = crate::live::OEnt::new(path, KIND_FILE, 10, 7);
+            live.flat.masks.push(o.mask);
+            live.flat.items.push((path.to_vec(), o));
+        }
+        let s = Searcher { live: &live };
+        assert_eq!(s.search(&q("folder:docs")).len(), 2, "overlay prefilter keeps folder-axis queries");
+        assert_eq!(s.search(&q("attr:file")).len(), 2, "overlay prefilter keeps attr-axis queries");
+        assert_eq!(s.search(&q("attr:!dir dir")).len(), 1, "negated attr:dir does not reject a file named dir.txt in overlay");
+
+        let idx_live = axis_tree();
+        let idx_s = Searcher { live: &idx_live };
+        assert_eq!(idx_s.search(&q("attr:!file docs")).len(), 1, "negated attr:file does not reject a folder named docs in index");
+        let all_cands: Vec<(u32, u32)> = (1..idx_live.base.n as u32).map(|i| (i, idx_live.base.ent_name()[i as usize])).collect();
+        assert_eq!(
+            idx_s.rerank_entries(&q("attr:dir"), &all_cands).len(),
+            idx_s.search(&q("attr:dir")).len(),
+            "rerank_entries enforces non-name axes"
+        );
+        assert_eq!(
+            idx_s.rerank_entries(&q("folder:docs invoice"), &all_cands).len(),
+            idx_s.search(&q("folder:docs invoice")).len(),
+            "rerank_entries enforces folder axis"
+        );
+    }
+
     /// A tree with a folder "backup.txt" holding "invoice.md", and a file
     /// "invoice.txt" beside it: the folder's name ends in txt, the file
     /// under it does not.
@@ -2608,7 +2782,7 @@ mod tests {
         let searcher = Searcher { live: &live };
         let _ = searcher.search(&q("entry"));
         assert!(live.names_cache.last.lock().unwrap().is_some(), "a search caches its table");
-        live.names_cache.trim_if_idle(std::time::Duration::from_millis(0));
+        live.names_cache.trim_if_idle(core::time::Duration::from_millis(0));
         assert!(live.names_cache.last.lock().unwrap().is_none(), "a quiet spell drops it");
     }
 
@@ -2933,6 +3107,13 @@ mod tests {
     fn size_bounds_exclude_directories() {
         assert!(!hit("size:>0", "/a/b", KIND_DIR, 5));
         assert!(hit("size:>0", "/a/b.txt", KIND_FILE, 5));
+        // The index scan path (`Searcher::search`) must also exclude
+        // directories when any `size:` bound is set, including `size:<10kb`
+        // and `size:>=0`.
+        let live = axis_tree();
+        let s = Searcher { live: &live };
+        assert_eq!(s.search(&q("size:<10kb")).len(), 2, "only the two files in axis_tree match size:<10kb");
+        assert_eq!(s.search(&q("size:>=0")).len(), 2, "only the two files in axis_tree match size:>=0");
     }
 
     /// `>` and `>=` are different questions and had been answering both as
@@ -3210,6 +3391,11 @@ struct TokenBits<'a> {
     /// Typo-taking tokens: names with a word starting with the token's
     /// first letter (or one hashing alike).
     start: Option<&'a [u64]>,
+    /// Extension-axis tokens: every matching name must contain a dot, and
+    /// a typo match starts after that dot rather than at a word start of
+    /// the whole name.
+    dot: Option<[&'a [u64]; 2]>,
+    typo_ext: bool,
     /// Names with a byte at U+0080 or above: they may be read in another
     /// script, and the class filter cannot see that.
     other: [&'a [u64]; 2],
@@ -3228,10 +3414,13 @@ impl<'a> TokenBits<'a> {
             (0..CLASSES).filter(|&c| c != first && t.mask & (1 << c) != 0).map(|c| (counts[c], pair(c))).collect();
         rest.extend((0..CLASSES).filter(|&c| twice & (1 << c) != 0).map(|c| (doubles[c], [idx.bitmap(BM_DOUBLE + c); 2])));
         rest.sort_by_key(|x| x.0);
+        let is_ext = t.axis == Axis::Extension;
         TokenBits {
             seq: t.text.iter().map(|&b| pair(class(b))).collect(),
-            classes: std::iter::once(pair(first)).chain(rest.into_iter().map(|x| x.1)).collect(),
-            start: (t.start != 0).then(|| idx.bitmap(BM_START + crate::name_index::start_hash(t.text[0]))),
+            classes: core::iter::once(pair(first)).chain(rest.into_iter().map(|x| x.1)).collect(),
+            start: (t.start != 0 && !is_ext).then(|| idx.bitmap(BM_START + crate::name_index::start_hash(t.text[0]))),
+            dot: is_ext.then(|| pair(class(b'.'))),
+            typo_ext: t.start != 0 && is_ext,
             other: pair(crate::name_index::CLASS_NON_ASCII),
         }
     }
@@ -3257,8 +3446,13 @@ impl<'a> TokenBits<'a> {
     fn words<const B: usize>(&self, w: usize) -> [(u64, u64, u64); B] {
         let has = |b: &[&[u64]; 2], j: usize| b[0][w + j] | b[1][w + j];
         let none = |x: &[[u64; B]]| x.iter().flatten().fold(0, |a, &b| a | b) == 0;
-        let mut all: [u64; B] = std::array::from_fn(|j| has(&self.classes[0], j));
-        let typo: [u64; B] = self.start.map_or([0; B], |s| std::array::from_fn(|j| s[w + j] & all[j]));
+        let mut all: [u64; B] = core::array::from_fn(|j| has(&self.classes[0], j));
+        if let Some(d) = &self.dot {
+            for (j, a) in all.iter_mut().enumerate() {
+                *a &= has(d, j);
+            }
+        }
+        let typo: [u64; B] = if self.typo_ext { all } else { self.start.map_or([0; B], |s| core::array::from_fn(|j| s[w + j] & all[j])) };
         // Names with every class so far, and typo-able ones missing one.
         let mut one = [0; B];
         for b in &self.classes[1..] {
@@ -3274,7 +3468,7 @@ impl<'a> TokenBits<'a> {
         // Names whose first half holds the token so far, and names where
         // the token so far ends in the second half; then the same with one
         // char left out, for typo-able names.
-        let (mut first, mut second): ([u64; B], _) = (std::array::from_fn(|j| all[j] | one[j]), [0; B]);
+        let (mut first, mut second): ([u64; B], _) = (core::array::from_fn(|j| all[j] | one[j]), [0; B]);
         let (mut first1, mut second1) = ([0; B], [0; B]);
         for (k, b) in self.seq.iter().enumerate() {
             if none(&[first, second, first1, second1]) {
@@ -3289,7 +3483,7 @@ impl<'a> TokenBits<'a> {
                 first[j] &= b0;
             }
         }
-        std::array::from_fn(|j| {
+        core::array::from_fn(|j| {
             let clean = (first[j] | second[j]) & all[j];
             let typo = (first[j] | second[j] | first1[j] | second1[j]) & typo[j];
             // A name with a byte at U+0080 or above may be read in another
@@ -3297,7 +3491,7 @@ impl<'a> TokenBits<'a> {
             // that: it knows the name's bytes, not its readings. So those
             // names are candidates as well, and the scorer tries the
             // shadow (`shadow_score`).
-            let other = has(&self.other, j);
+            let other = self.dot.as_ref().map_or_else(|| has(&self.other, j), |d| has(&self.other, j) & has(d, j));
             (clean | typo | other, clean, typo)
         })
     }
@@ -3305,7 +3499,7 @@ impl<'a> TokenBits<'a> {
 
 /// What `score_names` holds for name `k`, scored on its own (from its mask
 /// rather than the bitmaps): the same hit, or None for the same names.
-fn name_hit(idx: &Index, q: &Query, pos: &[&Token], neg: &[&Token], re: Option<&regex::bytes::Regex>, k: u32) -> Option<NameHit> {
+fn name_hit(idx: &Index, q: &Query, pos: &[&Token], neg: &[&Token], re: Option<&crate::regex::Regex>, k: u32) -> Option<NameHit> {
     // The name is folded for the comparison: the index keeps the bytes the
     // filesystem gave, and a query typed in NFC has to match one stored in
     // NFD (parity row 1.12).
@@ -3347,7 +3541,7 @@ fn name_hit(idx: &Index, q: &Query, pos: &[&Token], neg: &[&Token], re: Option<&
             // either.
             let scored = match tok.axis {
                 Axis::Name => tok.fits(m).then(|| token_score(&name, wide, m, tok)).flatten(),
-                Axis::Extension => ext_of(&name).and_then(|e| token_score(e, None, m, tok)),
+                Axis::Extension => ext_of(&name).and_then(|e| token_score(e, None, !0, tok)),
                 // A folder token is matched by a folder of the path, and the
                 // memo carries it from the folder's name: the name's own hit
                 // carries the bit so the memo can pick it up, and the score is
@@ -3383,9 +3577,14 @@ fn name_hit(idx: &Index, q: &Query, pos: &[&Token], neg: &[&Token], re: Option<&
     let mut neg_dir = false;
     for t in neg {
         match t.axis {
+            Axis::Name => {
+                let hit = token_matches(&name, t);
+                neg_name |= hit;
+                neg_dir |= hit;
+            }
             Axis::Extension => neg_name |= ext_of(&name).is_some_and(|e| token_matches(e, t)),
             Axis::Folder => neg_dir |= token_matches(&name, t),
-            _ => neg_name |= token_matches(&name, t),
+            Axis::Attribute => {}
         }
     }
     if neg_name {
@@ -3402,11 +3601,13 @@ fn name_hit(idx: &Index, q: &Query, pos: &[&Token], neg: &[&Token], re: Option<&
     // And whether it asks for a name: a name-axis token has to be answered
     // by the name itself.
     let name_pos = pos.iter().any(|t| t.axis == Axis::Name);
+    let ext_mask: u8 = pos.iter().enumerate().fold(0, |acc, (t, tok)| if tok.axis == Axis::Extension { acc | (1 << t) } else { acc });
     let ok = (pos.is_empty() || !name_asks || h.bits != 0)
         && (!name_pos || got_name)
+        && h.bits & ext_mask == ext_mask
         && h.flags & NF_NEG == 0
         && (q.exts.is_empty() || ext_ok(&name, &q.exts))
-        && re.is_none_or(|re| re.is_match(&name));
+        && re.is_none_or(|re| re.is_match_bytes(&name));
     if ok {
         h.flags |= NF_OK;
     }
@@ -3415,29 +3616,15 @@ fn name_hit(idx: &Index, q: &Query, pos: &[&Token], neg: &[&Token], re: Option<&
 
 /// Lowercased literals one of which starts every match of `re` (so a name
 /// it matches contains it), if the regex has a short list of them.
-fn re_literals(re: &regex::bytes::Regex) -> Option<Vec<Vec<u8>>> {
-    let hir = regex_syntax::ParserBuilder::new().utf8(false).build().parse(re.as_str()).ok()?;
-    let mut lits: Vec<Vec<u8>> =
-        regex_syntax::hir::literal::Extractor::new().extract(&hir).literals()?.iter().map(|l| l.as_bytes().to_ascii_lowercase()).collect();
-    lits.sort();
-    lits.dedup();
-    lits.iter().all(|l| !l.is_empty()).then_some(lits)
+fn re_literals(re: &crate::regex::Regex) -> Option<Vec<Vec<u8>>> {
+    crate::regex::prefix_literals(re.pattern())
 }
 
 /// Lowercased literals one of which ends every path `re` matches, if it is
 /// anchored at the end ("swift$") and they hold no '/': then a match's own
 /// name, the path's last part, ends with one of them.
-fn path_suffixes(re: &regex::bytes::Regex) -> Option<Vec<Vec<u8>>> {
-    use regex_syntax::hir::{Look, literal::ExtractKind};
-    let hir = regex_syntax::ParserBuilder::new().utf8(false).build().parse(re.as_str()).ok()?;
-    if !hir.properties().look_set_suffix().contains(Look::End) {
-        return None;
-    }
-    let seq = regex_syntax::hir::literal::Extractor::new().kind(ExtractKind::Suffix).extract(&hir);
-    let mut lits: Vec<Vec<u8>> = seq.literals()?.iter().map(|l| l.as_bytes().to_ascii_lowercase()).collect();
-    lits.sort();
-    lits.dedup();
-    lits.iter().all(|l| !l.is_empty() && !l.contains(&b'/')).then_some(lits)
+fn path_suffixes(re: &crate::regex::Regex) -> Option<Vec<Vec<u8>>> {
+    crate::regex::suffix_literals(re.pattern())
 }
 
 /// Does `name` end with `s` (lowercase), ignoring ASCII case?
@@ -3519,9 +3706,9 @@ impl Hit {
 /// hits share `idx`, so two of them tying on score would otherwise come out
 /// in a different order on every run.
 pub fn merge_hits(all: Vec<Hit>, limit: usize) -> Vec<Hit> {
-    use std::collections::hash_map::Entry;
+    use hashbrown::hash_map::Entry;
 
-    let mut best: std::collections::HashMap<HitId, Hit> = std::collections::HashMap::with_capacity(all.len());
+    let mut best: hashbrown::HashMap<HitId, Hit> = hashbrown::HashMap::with_capacity(all.len());
     for h in all {
         match best.entry(h.id()) {
             Entry::Occupied(mut e) => {
@@ -3539,8 +3726,8 @@ pub fn merge_hits(all: Vec<Hit>, limit: usize) -> Vec<Hit> {
         b.key.cmp(&a.key).then_with(|| match (&a.over, &b.over) {
             (None, None) => a.idx.cmp(&b.idx),
             (Some(x), Some(y)) => x.cmp(y),
-            (None, Some(_)) => std::cmp::Ordering::Less,
-            (Some(_), None) => std::cmp::Ordering::Greater,
+            (None, Some(_)) => core::cmp::Ordering::Less,
+            (Some(_), None) => core::cmp::Ordering::Greater,
         })
     });
     hits.truncate(limit);
@@ -3604,72 +3791,12 @@ impl TopK {
 /// caller runs any still queued when it is done) returns at once: no one
 /// waits for a thread to wake, and no thread sits on a share of the work
 /// while it does. `state` is each thread's scratch.
-fn par_each<S, T: Send>(n: usize, state: impl Fn() -> S + Sync, f: impl Fn(&mut S, usize) -> T + Sync) -> Vec<T> {
-    use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
-    let out = Cells::new((0..n).map(|_| None));
-    let next = AtomicUsize::new(0);
-    let work = || {
-        // The scan is interactive work: the worker takes the platform's
-        // priority before it takes any entries. On Linux that is the
-        // approximation of MMCSS (affinity plus nice), a no-op where the
-        // platform has its own mechanism, and once per thread -- a setup
-        // cost, never a per-entry one.
-        crate::scan_priority::apply();
-        let mut st = state();
-        loop {
-            let i = next.fetch_add(1, Relaxed);
-            if i >= n {
-                break;
-            }
-            // Safety: the counter hands each index to one thread only.
-            unsafe { out.set(i, Some(f(&mut st, i))) };
-        }
-    };
-    // Helpers still to queue (each one queues the next).
-    let left = AtomicUsize::new((rayon::current_num_threads() - 1).min(n.saturating_sub(1)));
-    fn helper<'s>(s: &rayon::Scope<'s>, left: &'s AtomicUsize, next: &'s AtomicUsize, n: usize, work: &'s (dyn Fn() + Sync)) {
-        s.spawn(move |s| {
-            if next.load(Relaxed) < n {
-                if left.fetch_sub(1, Relaxed) > 1 {
-                    helper(s, left, next, n, work);
-                }
-                work();
-            }
-        });
-    }
-    rayon::scope(|s| {
-        if left.load(Relaxed) > 0 {
-            helper(s, &left, &next, n, &work);
-        }
-        work();
-    });
-    out.0.into_iter().map(|x| x.into_inner().unwrap()).collect()
-}
-
-/// One value per index that threads read and write without locks: each
-/// index belongs to one thread at a time (in `par_each`, the one the
-/// counter handed it to).
-struct Cells<T>(Vec<std::cell::UnsafeCell<T>>);
-
-unsafe impl<T: Send> Sync for Cells<T> {}
-
-impl<T> Cells<T> {
-    fn new(v: impl Iterator<Item = T>) -> Cells<T> {
-        Cells(v.map(std::cell::UnsafeCell::new).collect())
-    }
-
-    /// Safety: no other thread uses index `i` meanwhile.
-    unsafe fn set(&self, i: usize, v: T) {
-        unsafe { *self.0[i].get() = v };
-    }
-
-    /// Safety: no other thread uses index `i` meanwhile.
-    unsafe fn take(&self, i: usize) -> T
-    where
-        T: Default,
-    {
-        unsafe { std::mem::take(&mut *self.0[i].get()) }
-    }
+///
+/// The pool is `rgy-par`'s: the same shape, the same width, and a width
+/// the user chooses. What this adds is the worker's setup -- the platform's
+/// interactive priority, once per worker, before it takes any index.
+fn par_each<S: Send, T: Send>(n: usize, state: impl Fn() -> S + Sync, f: impl Fn(&mut S, usize) -> T + Sync) -> Vec<T> {
+    rgy_par::each_index_prepared(n, crate::scan_priority::apply, state, f)
 }
 
 /// Top `k` over `0..n` items with keys above `floor`: a few contiguous
@@ -3677,8 +3804,8 @@ impl<T> Cells<T> {
 /// survivors (merging heaps pairwise costs more than the scan when `k` is
 /// large). Up to INLINE_VISITS entries to `visit` in all take less time
 /// than waking threads.
-fn top_k(n: usize, k: usize, visits: usize, floor: RankKey, visit: impl Fn(std::ops::Range<usize>, &mut TopK) + Sync) -> Vec<Hit> {
-    let piece = |r: std::ops::Range<usize>| {
+fn top_k(n: usize, k: usize, visits: usize, floor: RankKey, visit: impl Fn(core::ops::Range<usize>, &mut TopK) + Sync) -> Vec<Hit> {
+    let piece = |r: core::ops::Range<usize>| {
         let mut top = TopK::new(k, floor);
         visit(r, &mut top);
         top.cut();
@@ -3687,7 +3814,7 @@ fn top_k(n: usize, k: usize, visits: usize, floor: RankKey, visit: impl Fn(std::
     let tops: Vec<TopK> = if visits <= INLINE_VISITS {
         vec![piece(0..n)]
     } else {
-        let pieces = (rayon::current_num_threads() * 4).min(n.max(1));
+        let pieces = (rgy_par::workers() * 4).min(n.max(1));
         let step = n.div_ceil(pieces).max(1);
         par_each(pieces, || (), |_, p| piece((p * step).min(n)..((p + 1) * step).min(n)))
     };
@@ -3805,8 +3932,8 @@ pub enum Plan {
     Full,
 }
 
-impl std::fmt::Display for Plan {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for Plan {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Plan::FailClosed => write!(f, "fail-closed"),
             Plan::Empty => write!(f, "empty-scope"),
@@ -3819,31 +3946,54 @@ impl std::fmt::Display for Plan {
     }
 }
 
-thread_local! {
+// The plan the last search took, and the strategies it declined.
+//
+// This is the `--explain` surface: a diagnostic, not part of the search.
+// It is thread-local because the decision points are all on the calling
+// thread, even though the scan itself fans out.
+//
+// The `std` build: thread-local storage is what keeps the plan on the
+// thread that decided it.
+#[cfg(feature = "std")]
+std::thread_local! {
     /// The plan taken by the most recent search on this thread. Thread-local
     /// rather than a field on `Searcher` so no call site has to change, and so
     /// `search(&self)` keeps taking `&self` — every decision point is on the
     /// calling thread even though the scan itself fans out.
-    static LAST_PLAN: std::cell::Cell<Option<Plan>> = const { std::cell::Cell::new(None) };
+    static LAST_PLAN: core::cell::Cell<Option<Plan>> = const { core::cell::Cell::new(None) };
     /// Strategies the query *reached for* and then declined, in order.
     ///
     /// Without this, a fast path that is guessed and rejected looks identical
     /// to one that never applied — and "never applied" and "always rejected"
     /// are very different findings about the code.
-    static ATTEMPTS: std::cell::RefCell<Vec<&'static str>> = const { std::cell::RefCell::new(Vec::new()) };
+    static ATTEMPTS: core::cell::RefCell<Vec<&'static str>> = const { core::cell::RefCell::new(Vec::new()) };
 }
 
+#[cfg(feature = "std")]
 fn note_plan(p: Plan) {
     LAST_PLAN.with(|c| c.set(Some(p)));
 }
 
+#[cfg(feature = "std")]
 fn note_attempt(name: &'static str) {
     ATTEMPTS.with(|a| a.borrow_mut().push(name));
 }
 
+#[cfg(feature = "std")]
 fn attempts_reset() {
     ATTEMPTS.with(|a| a.borrow_mut().clear());
 }
+
+/// Without thread-local storage there is nowhere for the plan to live, and
+/// the diagnostic is not worth a lock: the search itself does not change.
+#[cfg(not(feature = "std"))]
+fn note_plan(_p: Plan) {}
+
+#[cfg(not(feature = "std"))]
+fn note_attempt(_name: &'static str) {}
+
+#[cfg(not(feature = "std"))]
+fn attempts_reset() {}
 
 impl Searcher<'_> {
     /// The plan the most recent search **on this thread** took.
@@ -3852,16 +4002,34 @@ impl Searcher<'_> {
     /// decision points write, so it reports the path that actually returned —
     /// a `ranked` that bailed out and fell through shows up as what ran, not
     /// as what was tried.
+    ///
+    /// The `std` build: the plan lives in thread-local storage.
+    #[cfg(feature = "std")]
     pub fn last_plan() -> Option<Plan> {
-        LAST_PLAN.with(std::cell::Cell::get)
+        LAST_PLAN.with(core::cell::Cell::get)
+    }
+
+    /// Without thread-local storage there is no plan to report.
+    #[cfg(not(feature = "std"))]
+    pub fn last_plan() -> Option<Plan> {
+        None
     }
 
     /// Strategies the last search tried and declined, in order.
     ///
     /// A non-empty entry for a path `last_plan` never reports is the tell:
     /// the path is reached, its precondition holds, and it still declines.
+    ///
+    /// The `std` build: the attempts live in thread-local storage.
+    #[cfg(feature = "std")]
     pub fn rejected_attempts() -> Vec<&'static str> {
         ATTEMPTS.with(|a| a.borrow().clone())
+    }
+
+    /// Without thread-local storage there are no attempts to report.
+    #[cfg(not(feature = "std"))]
+    pub fn rejected_attempts() -> Vec<&'static str> {
+        Vec::new()
     }
 }
 
@@ -3920,17 +4088,14 @@ impl Searcher<'_> {
             npos: pos.len(),
             // The folder tokens need the memo: a folder of the path is what
             // satisfies them.
-            need_dirs: pos.len() > 1 || !neg.is_empty() || axes.folder != 0,
+            need_dirs: axes.name.count_ones() > 1 || axes.folder != 0 || neg.iter().any(|t| matches!(t.axis, Axis::Name | Axis::Folder)),
             all: all_mask(pos.len(), &axes),
             axes,
             now: now_secs(),
         };
-        // The dir memo is the same one the scan would build: the folder
-        // tokens need it, and it is what tells a folder match from a name
-        // match. The re-rank builds it per candidate (the same way the
-        // `selective` plan does), so it does not need the whole tree's
-        // memo.
-        let _ = scored.memo.get_or_init(|| self.dir_tokens(&scored.names));
+        let dense = scored.names.all.then(|| scored.names.dense(&self.live.base));
+        // The dir memo is built per candidate (the same way the `selective`
+        // plan does), so the re-rank does not build the whole tree's memo.
         // The entries are re-scored in parallel, the way the scan scores
         // them: a sequential loop over the candidates would make the
         // re-rank slower than the scan it replaces, on a machine with more
@@ -3945,11 +4110,23 @@ impl Searcher<'_> {
                 }
                 // The entry's name must still match: the query narrowed, so
                 // some of the old matches no longer do.
-                let Some(nh) = scored.names.get(name) else { continue };
+                let nh = match dense {
+                    Some(d) => {
+                        let s = d[name as usize];
+                        NameHit { score: s.score, bits: s.bits, flags: s.flags, best: [0; 4] }
+                    }
+                    None => {
+                        let Some(nh) = scored.names.get(name) else { continue };
+                        nh
+                    }
+                };
                 if nh.flags & NF_OK == 0 {
                     continue;
                 }
                 let m = if s.need_dirs { s.memo_of(self.live.base.parent()[i], &mut memo, &mut |k| scored.names.get(k)) } else { DirMemo::default() };
+                if !s.axes.plain && !s.axes_ok(i, &nh, &m) {
+                    continue;
+                }
                 if let Some(k) = s.score(i, nh, m, top.floor, &mut pbuf, re.as_ref()) {
                     top.push(k);
                 }
@@ -4094,7 +4271,7 @@ impl Searcher<'_> {
     /// disagree with the list it counts. Keyed on `Hit::idx` this returns 1
     /// for any query matching only entries added since the last compaction.
     pub fn count_alternatives(&self, alts: &[Query]) -> usize {
-        let mut seen: std::collections::HashSet<HitId> = std::collections::HashSet::new();
+        let mut seen: hashbrown::HashSet<HitId> = hashbrown::HashSet::new();
         for alt in alts {
             for h in self.search_uncapped(alt) {
                 seen.insert(h.id());
@@ -4141,14 +4318,14 @@ impl Searcher<'_> {
             live: self.live,
             names: &scored.names,
             npos: pos.len(),
-            need_dirs: pos.len() > 1 || !neg.is_empty() || axes.folder != 0,
+            need_dirs: axes.name.count_ones() > 1 || axes.folder != 0 || neg.iter().any(|t| matches!(t.axis, Axis::Name | Axis::Folder)),
             all: all_mask(pos.len(), &axes),
             axes,
             now: now_secs(),
         };
         // Step 2: score entries. Few candidates: just the entries carrying a
         // matching name. Many: one sequential pass over every entry.
-        let fast = !scored.names.all && !FULL_PASS.load(std::sync::atomic::Ordering::Relaxed);
+        let fast = !scored.names.all && !FULL_PASS.load(core::sync::atomic::Ordering::Relaxed);
         if fast && (scored.names.ok_entries as u64) * SELECTIVE_VISIT_RATIO <= (hi - lo) as u64 {
             note_plan(Plan::Selective);
             return s.selective(lo, hi);
@@ -4171,11 +4348,13 @@ impl Searcher<'_> {
         let mut pos = q.tokens.iter().filter(|t| !t.negate);
         let (Some(t), None) = (pos.next(), pos.next()) else { return None };
         if t.mode != Mode::Fuzzy
-            || t.axis != Axis::Name
+            || !q.tokens.iter().all(|t| t.axis == Axis::Name)
             || q.kind.is_some()
-            || q.size != (0, u64::MAX)
+            || q.link
+            || q.size_set
             || q.mtime != (0, u32::MAX)
             || q.path_re.is_some()
+            || !q.globs.is_empty()
             || q.limit == 0
         {
             return None;
@@ -4214,6 +4393,9 @@ impl Searcher<'_> {
         // No `note_attempt` here: this is not a path reached and rejected, it
         // is one deliberately not considered, and saying otherwise on every
         // `--explain` would be noise.
+        //
+        // The `std` build: the environment is where the switch lives.
+        #[cfg(feature = "std")]
         std::env::var_os("RGY_FORCE_RANKED")?;
         if est >= RANKED_MIN {
             return Some((t, false));
@@ -4267,7 +4449,7 @@ impl Searcher<'_> {
         let within = |w: usize| within.map_or(!0, |s| s.bits[w]);
         // Name k, given its word's `TokenBits::word`: its hit and the bound
         // on its entries.
-        let score = |k: u32, (_, clean, typo): (u64, u64, u64), re: Option<&regex::bytes::Regex>| -> Option<Cand> {
+        let score = |k: u32, (_, clean, typo): (u64, u64, u64), re: Option<&crate::regex::Regex>| -> Option<Cand> {
             let (w, i) = (k as usize / 64, k % 64);
             // The name is folded: a query typed in NFC has to match a name
             // the filesystem stored in NFD (parity row 1.12).
@@ -4275,7 +4457,7 @@ impl Searcher<'_> {
             let spaced = (space[0][w] | space[1][w]) >> i & 1 != 0;
             let s = token_score(&name, wide, t.known_mask(clean >> i & 1 != 0, typo >> i & 1 != 0, spaced), t)?;
             if !(q.exts.is_empty() || ext_ok(&name, &q.exts))
-                || re.is_some_and(|re| !re.is_match(&name))
+                || re.is_some_and(|re| !re.is_match_bytes(&name))
                 || neg.iter().any(|t| token_matches(&name, t))
             {
                 return None;
@@ -4570,7 +4752,7 @@ impl Searcher<'_> {
             }
         }
         // Otherwise all of them, from a pass over the words in pieces.
-        let pieces = if idx.words <= INLINE_WORDS { 1 } else { rayon::current_num_threads() * 2 };
+        let pieces = if idx.words <= INLINE_WORDS { 1 } else { rgy_par::workers() * 2 };
         let step = idx.words.div_ceil(pieces);
         let piece = |p: usize| {
             let (mut got, mut h) = (Vec::new(), vec![0u32; TIER_BINS]);
@@ -4642,7 +4824,7 @@ impl Searcher<'_> {
         // (from above `lo` too: the scope's own ancestors). Past SELECTIVE
         // entries in all, give up, or as soon as the chunks so far (handed
         // out in order; a sixteenth at least) say twice that many are coming.
-        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
+        use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
         let chunks = idx.words.div_ceil(CHUNK_WORDS);
         let (seen, quit, early) = (AtomicUsize::new(0), AtomicBool::new(false), AtomicBool::new(false));
         let over = || quit.load(Relaxed);
@@ -4799,7 +4981,7 @@ impl Searcher<'_> {
     /// The name table for this query: cached for a repeat of the last one
     /// (the second, longer page of results), narrowed from the last one when
     /// this query only extends it (typing), else scored from scratch.
-    fn names(&self, q: &Query, pos: &[&Token], neg: &[&Token], lo: usize, hi: usize) -> std::sync::Arc<Scored> {
+    fn names(&self, q: &Query, pos: &[&Token], neg: &[&Token], lo: usize, hi: usize) -> alloc::sync::Arc<Scored> {
         // A small `in:` scope scores just the names found in it.
         let scope = (q.scope.is_some() && hi - lo <= self.live.base.u / 4).then_some((lo, hi));
         let key = NameKey::of(q, scope);
@@ -4811,11 +4993,11 @@ impl Searcher<'_> {
         }
         let from = prev.as_ref().filter(|p| key.narrows(&p.key)).map(|p| &p.names);
         let within = scope.filter(|_| from.is_none()).map(|(lo, hi)| self.scope_names(lo, hi));
-        let scored = std::sync::Arc::new(Scored {
-            at: std::time::Instant::now(),
+        let scored = alloc::sync::Arc::new(Scored {
+            at: now_millis(),
             key,
             names: self.score_names(q, pos, neg, from, within.as_deref()),
-            memo: std::sync::OnceLock::new(),
+            memo: crate::sync::OnceCell::new(),
         });
         *self.live.names_cache.last.lock().unwrap() = Some(scored.clone());
         scored
@@ -4824,7 +5006,7 @@ impl Searcher<'_> {
     /// Bitset of the names of entries `lo..hi` (a folder's subtree) and of
     /// the folder and its ancestors, whose names folder tokens match. The
     /// last one is kept: searches in a folder tend to come in a row.
-    fn scope_names(&self, lo: usize, hi: usize) -> std::sync::Arc<NameSet> {
+    fn scope_names(&self, lo: usize, hi: usize) -> alloc::sync::Arc<NameSet> {
         let mut cache = self.live.names_cache.scope.lock().unwrap();
         if let Some((r, set)) = &*cache
             && *r == (lo, hi)
@@ -4843,7 +5025,7 @@ impl Searcher<'_> {
             set(en[de[d as usize] as usize]);
             d = dp[d as usize];
         }
-        let set = std::sync::Arc::new(NameSet::new(bits));
+        let set = alloc::sync::Arc::new(NameSet::new(bits));
         *cache = Some(((lo, hi), set.clone()));
         set
     }
@@ -4854,7 +5036,8 @@ impl Searcher<'_> {
         let idx = &self.live.base;
         // A `path:` anchored at the end says how a match's own name ends.
         let tails = q.path_re.as_ref().and_then(path_suffixes);
-        if pos.is_empty() && neg.is_empty() && q.exts.is_empty() && q.name_re.is_none() && tails.is_none() {
+        let any_non_attr = pos.iter().chain(neg).any(|t| t.axis != Axis::Attribute);
+        if !any_non_attr && q.exts.is_empty() && q.name_re.is_none() && tails.is_none() {
             // Every name passes with score 0; only its flags differ.
             return NameTable::new(Vec::new(), Vec::new(), Vec::new(), idx.n, true);
         }
@@ -4863,46 +5046,27 @@ impl Searcher<'_> {
         // table, so only names with an allowed extension matter.
         let by_ext = pos.len() == 1 && neg.is_empty() && !q.exts.is_empty();
         let toks: Vec<TokenBits> = pos.iter().chain(neg).map(|t| TokenBits::new(idx, t)).collect();
-        // The name-axis tokens, of either sign: the candidates are the
-        // names that could match one of them.
-        //
-        // A token on another axis says nothing about the name's start --
-        // the extension is at its end, and an attribute is not a name at
-        // all -- so it does not narrow the candidates. A query with no
-        // name-axis token asks nothing of the names, and every name is a
-        // candidate: the folder, the attribute and the extension decide
-        // the answer, and the name only has to be there.
-        //
-        // The two signs are kept apart: a positive token selects the
-        // names that could match it, and a negated one rejects them --
-        // so the names a negated token matches have to be candidates too,
-        // or the rejection never happens.
+        // The name-axis and extension-axis tokens, and the folder-axis and
+        // negated tokens: the candidates are the names that could match one
+        // of them.
         //
         // They are LISTS, not bitmasks. The parser caps the positive tokens
         // at eight, but it does not cap the negated ones -- and a bitmask
         // of them overflows at the thirty-third: a panic in a debug build,
         // and a wrong bit in a release one.
-        let name_idx: Vec<usize> = pos.iter().enumerate().filter(|(_, tok)| tok.axis == Axis::Name).map(|(t, _)| t).collect();
-        let neg_name_idx: Vec<usize> = neg.iter().enumerate().filter(|(_, tok)| tok.axis == Axis::Name).map(|(t, _)| pos.len() + t).collect();
-        // The names a FOLDER token matches are candidates too, of either
-        // sign. The folder axis is answered by the memo, and the memo is
-        // built out of the folder's own name hit: the folder's name carries
-        // the token's bit into the memo, and a negated one poisons it. So
-        // the folder's name has to be in the table -- and the table's
-        // candidates were the names that could match a name-axis token, and
-        // the folder's own name matches none. Without it the folder axis
-        // was answered by nothing, and only the driven scan (which walks
-        // the path) got it right.
+        let pos_name_ext_idx: Vec<usize> =
+            pos.iter().enumerate().filter(|(_, tok)| matches!(tok.axis, Axis::Name | Axis::Extension)).map(|(t, _)| t).collect();
         let folder_idx: Vec<usize> = pos.iter().enumerate().filter(|(_, tok)| tok.axis == Axis::Folder).map(|(t, _)| t).collect();
-        let neg_folder_idx: Vec<usize> = neg.iter().enumerate().filter(|(_, tok)| tok.axis == Axis::Folder).map(|(t, _)| pos.len() + t).collect();
+        let neg_check_idx: Vec<usize> = neg.iter().enumerate().filter(|(_, tok)| tok.axis != Axis::Attribute).map(|(t, _)| pos.len() + t).collect();
         // Whether the query asks anything of the name: the name-axis
         // tokens and the extension ones (the extension is part of the
         // name). A query with no such token asks nothing, and every name
         // is a candidate -- the scan decides.
-        let name_asks = pos.iter().any(|t| matches!(t.axis, Axis::Name | Axis::Extension));
+        let name_asks = !pos_name_ext_idx.is_empty();
         // And whether it asks for a name: a name-axis token has to be answered
         // by the name itself.
         let name_pos = pos.iter().any(|t| t.axis == Axis::Name);
+        let ext_mask: u8 = pos.iter().enumerate().fold(0, |acc, (t, tok)| if tok.axis == Axis::Extension { acc | (1 << t) } else { acc });
         // Whether every token is on the name axis: then the scoring is the
         // scoring it always was, and it costs the same.
         let plain = name_asks && pos.iter().all(|t| t.axis == Axis::Name) && neg.iter().all(|t| t.axis == Axis::Name);
@@ -4938,141 +5102,153 @@ impl Searcher<'_> {
         // `TokenBits::words`). `re` is the task's own copy of `name_re`:
         // sharing one regex's cache pool across threads costs more than the
         // match.
-        let score_one =
-            |k: usize, i: u32, per: &[Pair], j: usize, spaced: bool, re: Option<&regex::bytes::Regex>, ok_entries: &mut usize| -> Option<NameHit> {
-                // The name is folded: a query typed in NFC has to match a
-                // name the filesystem stored in NFD (parity row 1.12).
-                let (name, wide) = idx.uname_folded(k as u32);
-                let (w, bit) = (k / 64, |x: u64| x >> i & 1 != 0);
-                // A filter alone reads no name for its flags.
-                let flags = match pos.is_empty() {
-                    true => (if bit(dot[w]) { NF_DOT } else { 0 }) | (if bit(app[w]) { NF_APP } else { 0 }),
-                    false => name_flags(&name),
-                };
-                let mut h = NameHit { score: 0, bits: 0, flags, best: [0; 4] };
-                // Whether the name answered one of the name-axis tokens.
-                //
-                // A query that asks for a name is answered by a name: the
-                // name has to carry one of the name-axis tokens, even when
-                // a folder above carries the others. The overlay says the
-                // same (see `match_path`), and the two paths have to agree
-                // on it -- a query that names a file is not a query that
-                // names a folder with that file under it.
-                let mut got_name = false;
-                if plain {
-                    // Every token is on the name axis: this is the scoring it
-                    // always was, and it costs the same. The axis is read per
-                    // token, and a query that does not use the axes pays
-                    // nothing for the privilege -- and the name table is
-                    // built once per search, over every name in the index.
-                    for (t, tok) in pos.iter().enumerate() {
-                        let (fits, clean, typo) = per[t].0[j];
-                        if bit(fits)
-                            && let Some(s) = token_score(&name, wide, tok.known_mask(bit(clean), bit(typo), spaced), tok)
-                        {
-                            h.bits |= 1 << t;
-                            // Every positive token is a name token here.
-                            got_name = true;
-                            let s16 = s.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-                            h.score = h.score.saturating_add(s16);
-                            if t < 4 {
-                                h.best[t] = s16.max(0);
-                            }
-                        }
-                    }
-                } else {
-                    for (t, tok) in pos.iter().enumerate() {
-                        let (fits, clean, typo) = per[t].0[j];
-                        // The prefilter is about the name's **start**, and it
-                        // gates the work for a token scored against the name.
-                        // The extension is at the name's end, so the prefilter
-                        // says nothing about it; an attribute is not a name at
-                        // all.
-                        if !bit(fits) && tok.axis != Axis::Extension {
-                            continue;
-                        }
-                        // The token says which part of the path it matches on
-                        // (parity row Q.1).
-                        let scored = match tok.axis {
-                            Axis::Name => token_score(&name, wide, tok.known_mask(bit(clean), bit(typo), spaced), tok),
-                            // The extension is part of the name, so the name's own
-                            // hit carries it and the scan asks the name for it.
-                            Axis::Extension => {
-                                let mask = tok.known_mask(bit(clean), bit(typo), spaced);
-                                // The name's own prefilter is a superset of the
-                                // extension's, so it never skips work that would
-                                // have succeeded.
-                                ext_of(&name).and_then(|e| token_score(e, None, mask, tok))
-                            }
-                            // A folder token is matched by a folder of the path,
-                            // and the memo carries it from the folder's name: the
-                            // name's own hit carries the bit so the memo can pick
-                            // it up, and the score is the folder's.
-                            Axis::Folder => token_score(&name, wide, tok.known_mask(bit(clean), bit(typo), spaced), tok),
-                            // An attribute is the entry's kind byte: nothing the
-                            // name can say.
-                            Axis::Attribute => None,
-                        };
-                        if let Some(s) = scored {
-                            h.bits |= 1 << t;
-                            got_name |= tok.axis == Axis::Name;
-                            let s16 = s.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-                            // A folder token's score is the folder's, and the scan
-                            // adds it: counting it here would count it twice.
-                            if tok.axis != Axis::Folder {
-                                h.score = h.score.saturating_add(s16);
-                            }
-                            if t < 4 {
-                                h.best[t] = s16.max(0);
-                            }
-                        }
-                    }
-                }
-                // A negated extension token is about the extension; every
-                // other negated token is about the name. A negated FOLDER
-                // token is about the path's folders: it poisons the memo
-                // of the directory whose name it matches, and it does not
-                // reject the entry whose own name it matches.
-                let mut neg_name = false;
-                let mut neg_dir = false;
-                for (t, p) in neg.iter().zip(&per[pos.len()..]) {
-                    if !bit(p.0[j].0) {
-                        continue;
-                    }
-                    match t.axis {
-                        Axis::Extension => neg_name |= ext_of(&name).is_some_and(|e| token_matches(e, t)),
-                        Axis::Folder => neg_dir |= token_matches(&name, t),
-                        _ => neg_name |= token_matches(&name, t),
-                    }
-                }
-                if neg_name {
-                    h.flags |= NF_NEG;
-                }
-                if neg_dir {
-                    h.flags |= NF_NEG_DIR;
-                }
-                // As a file match it must hit a token and pass name filters;
-                // as a folder on someone's path, the raw token bits matter.
-                //
-                // A query whose tokens are all on other axes -- an
-                // attribute, a folder -- asks nothing of the name, so every
-                // name is a candidate and the scan decides.
-                //
-                // And a query that asks for a name is answered by a name:
-                // the name has to carry one of the name-axis tokens, even
-                // when a folder above carries the others (see `name_hit`).
-                let ok = (pos.is_empty() || !name_asks || h.bits != 0)
-                    && (!name_pos || got_name)
-                    && h.flags & NF_NEG == 0
-                    && (q.exts.is_empty() || ext_ok_k(k, &name))
-                    && tails.as_ref().is_none_or(|t| t.iter().any(|t| ends_with_fold(&name, t)))
-                    && re.is_none_or(|re| re.is_match(&name));
-                if ok {
+        let score_one = |k: usize,
+                         i: u32,
+                         per: &[Pair],
+                         j: usize,
+                         spaced: bool,
+                         tok_fits: bool,
+                         re: Option<&crate::regex::Regex>,
+                         ok_entries: &mut usize|
+         -> Option<NameHit> {
+            let (w, bit) = (k / 64, |x: u64| x >> i & 1 != 0);
+            let flags = (if bit(dot[w]) { NF_DOT } else { 0 }) | (if bit(app[w]) { NF_APP } else { 0 });
+            let mut h = NameHit { score: 0, bits: 0, flags, best: [0; 4] };
+            if !tok_fits && (q.exts.is_empty() || ext_slots[k] != 255) && tails.is_none() && re.is_none() {
+                if !name_asks && (q.exts.is_empty() || allow[ext_slots[k] as usize / 64] >> (ext_slots[k] % 64) & 1 != 0) {
                     h.flags |= NF_OK;
                     *ok_entries += (ne_off[k + 1] - ne_off[k]) as usize;
+                    return Some(h);
                 }
-                (ok || h.bits != 0 || h.flags & (NF_NEG | NF_NEG_DIR) != 0).then_some(h)
-            };
+                return None;
+            }
+            // The name is folded: a query typed in NFC has to match a
+            // name the filesystem stored in NFD (parity row 1.12).
+            let (name, wide) = idx.uname_folded(k as u32);
+            // Whether the name answered one of the name-axis tokens.
+            //
+            // A query that asks for a name is answered by a name: the
+            // name has to carry one of the name-axis tokens, even when
+            // a folder above carries the others. The overlay says the
+            // same (see `match_path`), and the two paths have to agree
+            // on it -- a query that names a file is not a query that
+            // names a folder with that file under it.
+            let mut got_name = false;
+            if plain {
+                // Every token is on the name axis: this is the scoring it
+                // always was, and it costs the same. The axis is read per
+                // token, and a query that does not use the axes pays
+                // nothing for the privilege -- and the name table is
+                // built once per search, over every name in the index.
+                for (t, tok) in pos.iter().enumerate() {
+                    let (fits, clean, typo) = per[t].0[j];
+                    if bit(fits)
+                        && let Some(s) = token_score(&name, wide, tok.known_mask(bit(clean), bit(typo), spaced), tok)
+                    {
+                        h.bits |= 1 << t;
+                        // Every positive token is a name token here.
+                        got_name = true;
+                        let s16 = s.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+                        h.score = h.score.saturating_add(s16);
+                        if t < 4 {
+                            h.best[t] = s16.max(0);
+                        }
+                    }
+                }
+            } else {
+                for (t, tok) in pos.iter().enumerate() {
+                    let (fits, clean, typo) = per[t].0[j];
+                    if !bit(fits) {
+                        continue;
+                    }
+                    // The token says which part of the path it matches on
+                    // (parity row Q.1).
+                    let scored = match tok.axis {
+                        Axis::Name => token_score(&name, wide, tok.known_mask(bit(clean), bit(typo), spaced), tok),
+                        // The extension is part of the name, so the name's own
+                        // hit carries it and the scan asks the name for it.
+                        Axis::Extension => {
+                            let mask = tok.known_mask(bit(clean), bit(typo), spaced);
+                            // The name's own prefilter is a superset of the
+                            // extension's, so it never skips work that would
+                            // have succeeded.
+                            ext_of(&name).and_then(|e| token_score(e, None, mask, tok))
+                        }
+                        // A folder token is matched by a folder of the path,
+                        // and the memo carries it from the folder's name: the
+                        // name's own hit carries the bit so the memo can pick
+                        // it up, and the score is the folder's.
+                        Axis::Folder => token_score(&name, wide, tok.known_mask(bit(clean), bit(typo), spaced), tok),
+                        // An attribute is the entry's kind byte: nothing the
+                        // name can say.
+                        Axis::Attribute => None,
+                    };
+                    if let Some(s) = scored {
+                        h.bits |= 1 << t;
+                        got_name |= tok.axis == Axis::Name;
+                        let s16 = s.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+                        // A folder token's score is the folder's, and the scan
+                        // adds it: counting it here would count it twice.
+                        if tok.axis != Axis::Folder {
+                            h.score = h.score.saturating_add(s16);
+                        }
+                        if t < 4 {
+                            h.best[t] = s16.max(0);
+                        }
+                    }
+                }
+            }
+            // A negated extension token is about the extension; every
+            // other negated token is about the name. A negated FOLDER
+            // token is about the path's folders: it poisons the memo
+            // of the directory whose name it matches, and it does not
+            // reject the entry whose own name it matches.
+            let mut neg_name = false;
+            let mut neg_dir = false;
+            for (t, p) in neg.iter().zip(&per[pos.len()..]) {
+                if !bit(p.0[j].0) {
+                    continue;
+                }
+                match t.axis {
+                    Axis::Name => {
+                        let hit = token_matches(&name, t);
+                        neg_name |= hit;
+                        neg_dir |= hit;
+                    }
+                    Axis::Extension => neg_name |= ext_of(&name).is_some_and(|e| token_matches(e, t)),
+                    Axis::Folder => neg_dir |= token_matches(&name, t),
+                    Axis::Attribute => {}
+                }
+            }
+            if neg_name {
+                h.flags |= NF_NEG;
+            }
+            if neg_dir {
+                h.flags |= NF_NEG_DIR;
+            }
+            // As a file match it must hit a token and pass name filters;
+            // as a folder on someone's path, the raw token bits matter.
+            //
+            // A query whose tokens are all on other axes -- an
+            // attribute, a folder -- asks nothing of the name, so every
+            // name is a candidate and the scan decides.
+            //
+            // And a query that asks for a name is answered by a name:
+            // the name has to carry one of the name-axis tokens, even
+            // when a folder above carries the others (see `name_hit`).
+            let ok = (pos.is_empty() || !name_asks || h.bits != 0)
+                && (!name_pos || got_name)
+                && h.bits & ext_mask == ext_mask
+                && h.flags & NF_NEG == 0
+                && (q.exts.is_empty() || ext_ok_k(k, &name))
+                && tails.as_ref().is_none_or(|t| t.iter().any(|t| ends_with_fold(&name, t)))
+                && re.is_none_or(|re| re.is_match_bytes(&name));
+            if ok {
+                h.flags |= NF_OK;
+                *ok_entries += (ne_off[k + 1] - ne_off[k]) as usize;
+            }
+            (ok || h.bits != 0 || h.flags & (NF_NEG | NF_NEG_DIR) != 0).then_some(h)
+        };
         // One chunk of name ids: its words of the bitset and rank, and its
         // hits in id order (into a spare buffer). Words with candidates go
         // in pairs where they can (see `TokenBits::words`). `per` is the
@@ -5081,13 +5257,13 @@ impl Searcher<'_> {
             let mut ok = 0;
             let (lo, n) = (c * CHUNK_WORDS, bits.len());
             // The chunk's words with candidates, as a bitset.
-            let mut todo: Todo = std::array::from_fn(|g| 1u64.checked_shl(n.saturating_sub(g * 64) as u32).map_or(!0, |b| b - 1));
+            let mut todo: Todo = core::array::from_fn(|g| 1u64.checked_shl(n.saturating_sub(g * 64) as u32).map_or(!0, |b| b - 1));
             if let Some(f) = from {
                 let words = if f.hits[c].is_empty() { Todo::default() } else { nonzero(&f.bits[lo..lo + n]) };
-                todo = std::array::from_fn(|g| todo[g] & words[g]);
+                todo = core::array::from_fn(|g| todo[g] & words[g]);
             }
             if let Some(s) = within {
-                todo = std::array::from_fn(|g| todo[g] & s.todo[c][g]);
+                todo = core::array::from_fn(|g| todo[g] & s.todo[c][g]);
             }
             if todo == Todo::default() {
                 return (hits, ok);
@@ -5112,45 +5288,33 @@ impl Searcher<'_> {
                         // (read only for words with a hit).
                         let (wi, w) = (wi + j, w + j);
                         rank[wi] = hits.len() as u16;
-                        // The candidates are the names that could match a
-                        // name-axis token. A token on another axis does not
-                        // narrow them: the extension is at the name's end,
-                        // and an attribute is not a name.
-                        let mut any = 0;
-                        for &i in &name_idx {
-                            any |= per[i].0[j].0;
+                        let mut tok_any = 0;
+                        for &i in &pos_name_ext_idx {
+                            tok_any |= per[i].0[j].0;
                         }
-                        // With no name-axis token every name is a candidate,
-                        // unless a name filter says which can pass.
-                        if name_idx.is_empty() {
+                        for &i in &folder_idx {
+                            tok_any |= per[i].0[j].0;
+                        }
+                        for &i in &neg_check_idx {
+                            tok_any |= per[i].0[j].0;
+                        }
+                        let mut any = tok_any;
+                        // With no name-axis or extension-axis token every
+                        // name is a candidate, unless a name filter says
+                        // which can pass.
+                        if !name_asks {
                             let re = re_bits.as_ref().map_or(!0, |f| f.iter().fold(0, |a, t| a | t.word(w).0));
                             any |= !0 >> (64 - (idx.u - w * 64).min(64)) & ext_word(w) & re;
-                        } else {
-                            // The names a negated token matches are rejected
-                            // by the scan, so they have to be candidates too.
-                            for &i in &neg_name_idx {
-                                any |= per[i].0[j].0;
-                            }
-                            // And the names a folder token matches: the
-                            // folder's own name is what the memo is built
-                            // out of, so without it the folder axis has
-                            // nothing to answer it.
-                            for &i in &folder_idx {
-                                any |= per[i].0[j].0;
-                            }
-                            for &i in &neg_folder_idx {
-                                any |= per[i].0[j].0;
-                            }
-                            if by_ext && any != 0 {
-                                any &= ext_word(w);
-                            }
+                        } else if by_ext && any != 0 {
+                            any &= ext_word(w);
                         }
                         let mut cand = cand_of(w) & any;
                         while cand != 0 {
                             let i = cand.trailing_zeros();
                             cand &= cand - 1;
                             let spaced = (space[0][w] | space[1][w]) >> i & 1 != 0;
-                            if let Some(h) = score_one(w * 64 + i as usize, i, per, j, spaced, re.as_ref(), &mut ok) {
+                            let tok_fits = tok_any >> i & 1 != 0;
+                            if let Some(h) = score_one(w * 64 + i as usize, i, per, j, spaced, tok_fits, re.as_ref(), &mut ok) {
                                 hits.push(h);
                                 bits[wi] |= 1 << i;
                             }
@@ -5167,7 +5331,7 @@ impl Searcher<'_> {
         // A few thousand words to look at (a small index, a scope, a
         // narrowed table) take less time than waking threads.
         let few = from.map_or(within.map_or(idx.words, |s| if s.busy { s.names } else { s.words }), |f| f.len) <= INLINE_WORDS;
-        let mut spare = std::mem::take(&mut *HIT_POOL.lock().unwrap());
+        let mut spare = core::mem::take(&mut *HIT_POOL.lock().unwrap());
         spare.resize_with(idx.words.div_ceil(CHUNK_WORDS), Vec::new);
         let scratch = || vec![Line([(0, 0, 0); 2]); toks.len()];
         let chunks = bits.chunks_mut(CHUNK_WORDS).zip(rank.chunks_mut(CHUNK_WORDS)).zip(spare);
@@ -5175,12 +5339,10 @@ impl Searcher<'_> {
             let mut per = scratch();
             chunks.enumerate().map(|(c, ((b, r), h))| chunk(c, b, r, h, &mut per)).collect()
         } else {
-            let slots = Cells::new(chunks.map(Some));
-            par_each(slots.0.len(), scratch, |per, c| {
-                // Safety: par_each runs each chunk once.
-                let ((b, r), h) = unsafe { slots.take(c) }.unwrap();
-                chunk(c, b, r, h, per)
-            })
+            // The chunks are handed to the workers by value: each one owns
+            // its piece of the bitmaps, and the pool takes them off the list
+            // one at a time.
+            rgy_par::each_owned(chunks.collect::<Vec<_>>(), scratch, |per, c, ((b, r), h)| chunk(c, b, r, h, per))
         };
         let ok_entries = out.iter().map(|c| c.1).sum();
         let hits: Vec<Vec<NameHit>> = out.into_iter().map(|c| c.0).collect();
@@ -5192,8 +5354,8 @@ impl Searcher<'_> {
     /// `limit` is all the merge can use.
     fn search_overlay(&self, q: &Query) -> Vec<Hit> {
         let now = now_secs();
-        let pos: Vec<&Token> = q.tokens.iter().filter(|t| !t.negate).collect();
-        // A hit needs some positive token in its own name.
+        let pos: Vec<&Token> = q.tokens.iter().filter(|t| !t.negate && t.axis == Axis::Name).collect();
+        // A hit with name-axis tokens needs some positive name token in its own name.
         let flat = &self.live.flat;
         let cands: Vec<&(Vec<u8>, crate::live::OEnt)> = flat
             .masks
@@ -5213,8 +5375,7 @@ impl Searcher<'_> {
             for &&(ref path, o) in items {
                 let cut = path.iter().rposition(|&b| b == b'/').unwrap_or(0);
                 let dir = &path[..cut];
-                if let Some(score) = q.match_path_with(path, o.kind, o.size, o.mtime, |_| memo.entry(dir).or_insert_with(|| q.dir_match(dir)).clone())
-                {
+                if let Some(score) = q.match_path_with(path, o.kind, o.size, o.mtime, |_| *memo.entry(dir).or_insert_with(|| q.dir_match(dir))) {
                     let prior = o.prior as i32;
                     let score = score + prior + rank_tweaks(name_flags(&path[cut + 1..]), o.kind, o.mtime, now);
                     // The overlay has no entry in the index, so its key has
@@ -5230,7 +5391,23 @@ impl Searcher<'_> {
             }
             out
         };
-        let mut hits = if cands.len() <= OVERLAY_CHUNK { score(&cands) } else { cands.par_chunks(OVERLAY_CHUNK).flat_map_iter(score).collect() };
+        let mut hits = if cands.len() <= OVERLAY_CHUNK {
+            score(&cands)
+        } else {
+            let n = cands.len().div_ceil(OVERLAY_CHUNK);
+            par_each(
+                n,
+                || (),
+                |_, ci| {
+                    let start = ci * OVERLAY_CHUNK;
+                    let end = (start + OVERLAY_CHUNK).min(cands.len());
+                    score(&cands[start..end])
+                },
+            )
+            .into_iter()
+            .flatten()
+            .collect()
+        };
         // Best first, equal keys by path (the overlay map's order).
         hits.sort_by(|a, b| b.key.cmp(&a.key).then_with(|| a.over.cmp(&b.over)));
         hits.truncate(q.limit);
@@ -5245,11 +5422,7 @@ impl Searcher<'_> {
         let en = idx.ent_name();
         // Each dir's own name, written in parallel into a spare buffer.
         let mut out = MEMO_POOL.lock().unwrap().pop().unwrap_or_default();
-        (0..idx.d)
-            .into_par_iter()
-            .with_min_len(1 << 12)
-            .map(|k| if k > 0 { DirMemo::own(names.get(en[de[k] as usize])) } else { DirMemo::default() })
-            .collect_into_vec(&mut out);
+        rgy_par::map_collect_into(idx.d, 1 << 12, |k| if k > 0 { DirMemo::own(names.get(en[de[k] as usize])) } else { DirMemo::default() }, &mut out);
         // Fold ancestors in, parents first. A dir's descendants are one
         // contiguous id range, so the children of huge dirs go one by one,
         // then every small subtree in parallel.
@@ -5263,13 +5436,14 @@ impl Searcher<'_> {
         let mut rest: &mut [DirMemo] = &mut out;
         let mut at = 0usize;
         for (_, r) in &plan.chunks {
-            let (_, tail) = std::mem::take(&mut rest).split_at_mut(r.start as usize - at);
+            let (_, tail) = core::mem::take(&mut rest).split_at_mut(r.start as usize - at);
             let (mine, tail) = tail.split_at_mut((r.end - r.start) as usize);
             slices.push(mine);
             rest = tail;
             at = r.end as usize;
         }
-        slices.into_par_iter().zip(&plan.chunks).zip(roots).for_each(|((slice, (_, r)), (c, root))| {
+        let work = slices.into_iter().zip(&plan.chunks).zip(roots).collect::<Vec<_>>();
+        rgy_par::for_each_owned(work, |_, ((slice, (_, r)), (c, root))| {
             let a = r.start as usize;
             for k in a..r.end as usize {
                 let p = dp[k];
@@ -5282,7 +5456,7 @@ impl Searcher<'_> {
 }
 
 /// Debug switch: always take the full pass (for checking the selective one).
-pub static FULL_PASS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub static FULL_PASS: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// One query's entry scoring, shared by the two strategies.
 struct Scan<'a> {
@@ -5315,16 +5489,8 @@ impl Scan<'_> {
     /// axes does not pay for them.
     #[inline(always)]
     fn axes_ok(&self, i: usize, nh: &NameHit, memo: &DirMemo) -> bool {
-        let k = self.live.base.kind()[i];
-        for t in &self.axes.attrs {
-            if !attr_matches(t, k) {
-                return false;
-            }
-        }
-        for t in &self.axes.neg_attrs {
-            if attr_matches(t, k) {
-                return false;
-            }
+        if !self.axes.attrs_ok(self.live.base.kind()[i]) {
+            return false;
         }
         // The extension axis: the name's own hit carries it.
         if nh.bits as u32 & self.axes.ext != self.axes.ext {
@@ -5338,7 +5504,7 @@ impl Scan<'_> {
     /// `None` if it fails a filter or cannot beat `floor`.
     #[inline(always)]
     /// `re` is the caller's own copy of `path_re` (see `score_names`).
-    fn score(&self, i: usize, nh: NameHit, memo: DirMemo, floor: RankKey, pbuf: &mut Vec<u8>, re: Option<&regex::bytes::Regex>) -> Option<RankKey> {
+    fn score(&self, i: usize, nh: NameHit, memo: DirMemo, floor: RankKey, pbuf: &mut Vec<u8>, re: Option<&crate::regex::Regex>) -> Option<RankKey> {
         let idx = &self.live.base;
         let q = self.q;
         let k = idx.kind()[i];
@@ -5349,7 +5515,10 @@ impl Scan<'_> {
         if q.link && k & 3 != KIND_LINK {
             return None;
         }
-        if q.size != (0, u64::MAX) {
+        if q.size_set {
+            if k & 3 == KIND_DIR {
+                return None;
+            }
             let sz = crate::name_index::dec_size(idx.size_raw()[i]);
             if sz < q.size.0 || sz > q.size.1 {
                 return None;
@@ -5382,7 +5551,8 @@ impl Scan<'_> {
                 return None;
             }
             for t in 0..self.npos {
-                if nh.bits & (1 << t) == 0 {
+                let bit = 1u32 << t;
+                if (self.axes.folder & bit != 0) || (self.axes.name & bit != 0 && (nh.bits as u32) & bit == 0) {
                     // Matched by a folder on the path instead.
                     score += memo.best.get(t).map_or(6, |&b| b as i32 * 3 / 4);
                 }
@@ -5417,7 +5587,7 @@ impl Scan<'_> {
             let folded = fold::fold(pbuf);
             let path = &folded[..];
             if let Some(re) = re
-                && !re.is_match(path)
+                && !re.is_match_bytes(path)
             {
                 return None;
             }
@@ -5438,12 +5608,20 @@ impl Scan<'_> {
         let q = self.q;
         // Runs of entries none of which passes the size/mtime/kind filters
         // are skipped whole.
-        let filtered = q.kind.is_some() || q.size != (0, u64::MAX) || q.mtime != (0, u32::MAX);
+        let kinds = self.axes.kinds
+            & if q.link { 1 << KIND_LINK } else { ALL_KINDS }
+            & if q.size_set { !(1 << KIND_DIR) } else { ALL_KINDS }
+            & match q.kind {
+                Some(k) if q.apps => (1 << k) | (1 << KIND_LINK),
+                Some(k) => 1 << k,
+                None => ALL_KINDS,
+            };
+        let filtered = kinds != ALL_KINDS || q.size != (0, u64::MAX) || q.mtime != (0, u32::MAX);
         let zone_ok = |z: &Zone| {
-            crate::name_index::dec_size(z.max_size) >= q.size.0
+            (z.kinds as u8) & kinds != 0
+                && crate::name_index::dec_size(z.max_size) >= q.size.0
                 && z.max_mtime >= q.mtime.0
                 && z.min_mtime <= q.mtime.1
-                && q.kind.is_none_or(|k| z.kinds & (1 << k) != 0 || (q.apps && z.kinds & (1 << KIND_LINK) != 0))
         };
         top_k(hi - lo, q.limit, hi - lo, RankKey::default(), |r, top| {
             let (mut pbuf, re) = (Vec::new(), q.path_re.clone());
@@ -5538,7 +5716,7 @@ impl Scan<'_> {
 }
 
 /// The dir memo is ~13 MB; reusing it saves a page-fault storm per query.
-static MEMO_POOL: std::sync::Mutex<Vec<Vec<DirMemo>>> = std::sync::Mutex::new(Vec::new());
+static MEMO_POOL: crate::sync::Mutex<Vec<Vec<DirMemo>>> = crate::sync::Mutex::new(Vec::new());
 
 /// What the name table depends on: two queries with the same key score
 /// every name the same.
@@ -5562,7 +5740,7 @@ impl NameKey {
         NameKey {
             tokens: q.tokens.iter().map(|t| (t.text.clone(), t.mode, t.negate, t.axis)).collect(),
             exts: q.exts.clone(),
-            name_re: q.name_re.as_ref().map(|r| r.as_str().to_string()),
+            name_re: q.name_re.as_ref().map(|r| r.pattern().to_string()),
             scope,
         }
     }
@@ -5594,10 +5772,12 @@ impl NameKey {
 
 /// The last query's name table (and dir memo, built on first use).
 pub struct Scored {
-    at: std::time::Instant,
+    /// The wall-clock millisecond the table was scored at.
+    #[cfg_attr(not(feature = "std"), allow(dead_code))]
+    at: u64,
     key: NameKey,
     names: NameTable,
-    memo: std::sync::OnceLock<Vec<DirMemo>>,
+    memo: crate::sync::OnceCell<Vec<DirMemo>>,
 }
 
 impl Drop for Scored {
@@ -5614,24 +5794,38 @@ impl Drop for Scored {
 /// Lives with the index it was scored against (`Live`).
 #[derive(Default)]
 pub struct NameCache {
-    last: std::sync::Mutex<Option<std::sync::Arc<Scored>>>,
+    last: crate::sync::Mutex<Option<alloc::sync::Arc<Scored>>>,
     /// The last `in:` scope's names (see `Searcher::scope_names`).
     #[allow(clippy::type_complexity)]
-    scope: std::sync::Mutex<Option<((usize, usize), std::sync::Arc<NameSet>)>>,
+    scope: crate::sync::Mutex<Option<((usize, usize), alloc::sync::Arc<NameSet>)>>,
 }
 
 impl NameCache {
     /// Drop the cached table and spare buffers once searching has stopped:
     /// tens of MB after a broad query, worth keeping only while typing.
-    pub fn trim_if_idle(&self, idle: std::time::Duration) {
+    ///
+    /// The std build: the wall clock says whether it has stopped.
+    #[cfg(feature = "std")]
+    pub fn trim_if_idle(&self, idle: core::time::Duration) {
         let mut g = self.last.lock().unwrap();
-        if g.as_ref().is_some_and(|s| s.at.elapsed() > idle) {
+        // `>=`, not `>`: "idle for at least this long" is what a zero
+        // threshold asks for, and a millisecond clock cannot promise more
+        // precision than that.
+        if g.as_ref().is_some_and(|s| now_millis().saturating_sub(s.at) >= idle.as_millis() as u64) {
             *g = None;
             drop(g);
             *self.scope.lock().unwrap() = None;
             trim_pools();
         }
     }
+
+    /// Without a clock there is no "idle" to decide, so the cache stays.
+    ///
+    /// The `no_std` path: nothing here can tell how long ago the table was
+    /// scored, and a table that is never dropped is a bounded cost (one
+    /// table, one memo) rather than a leak.
+    #[cfg(not(feature = "std"))]
+    pub fn trim_if_idle(&self, _idle: core::time::Duration) {}
 }
 
 #[derive(Clone, Copy, Default)]
@@ -5645,10 +5839,9 @@ impl DirMemo {
     #[inline]
     fn own(hit: Option<NameHit>) -> DirMemo {
         match hit {
-            // A negated token that matches this dir's name rejects what is
-            // under it -- and a negated FOLDER token is exactly that: it
-            // rejects the folders' children, not the dir itself.
-            Some(h) if h.flags & (NF_NEG | NF_NEG_DIR) != 0 => DirMemo { bits: u32::MAX, best: [0; 4] },
+            // A negated name or folder token that matches this dir's name
+            // rejects what is under it.
+            Some(h) if h.flags & NF_NEG_DIR != 0 => DirMemo { bits: u32::MAX, best: [0; 4] },
             Some(h) => DirMemo { bits: h.bits as u32, best: h.best },
             None => DirMemo::default(),
         }
@@ -5670,7 +5863,7 @@ impl DirMemo {
 
 /// Spare hit buffers, one per name table chunk (tens of MB after a broad
 /// query), so the next broad query doesn't page-fault fresh ones in.
-static HIT_POOL: std::sync::Mutex<Vec<Vec<NameHit>>> = std::sync::Mutex::new(Vec::new());
+static HIT_POOL: crate::sync::Mutex<Vec<Vec<NameHit>>> = crate::sync::Mutex::new(Vec::new());
 
 /// Free the spare buffers searches keep for speed (after a quiet spell).
 pub fn trim_pools() {
@@ -5683,10 +5876,10 @@ pub fn trim_pools() {
 /// A spare name table bitset and rank (344 KB on this disk): allocating
 /// and freeing them each search cost page faults and madvise.
 #[allow(clippy::type_complexity)]
-static BITS_POOL: std::sync::Mutex<Vec<(Vec<u64>, Vec<u16>)>> = std::sync::Mutex::new(Vec::new());
+static BITS_POOL: crate::sync::Mutex<Vec<(Vec<u64>, Vec<u16>)>> = crate::sync::Mutex::new(Vec::new());
 
 /// Spare `NameTable::dense` views (8.9 MB on this disk).
-static DENSE_POOL: std::sync::Mutex<Vec<Vec<Short>>> = std::sync::Mutex::new(Vec::new());
+static DENSE_POOL: crate::sync::Mutex<Vec<Vec<Short>>> = crate::sync::Mutex::new(Vec::new());
 
 impl Drop for NameTable {
     fn drop(&mut self) {
@@ -5699,7 +5892,7 @@ impl Drop for NameTable {
             }
             let mut pool = BITS_POOL.lock().unwrap();
             if pool.is_empty() {
-                pool.push((std::mem::take(&mut self.bits), std::mem::take(&mut self.rank)));
+                pool.push((core::mem::take(&mut self.bits), core::mem::take(&mut self.rank)));
             }
         }
         if let Some(d) = self.dense.take() {
@@ -5710,7 +5903,7 @@ impl Drop for NameTable {
         }
         let mut pool = HIT_POOL.lock().unwrap();
         if pool.is_empty() {
-            *pool = std::mem::take(&mut self.hits);
+            *pool = core::mem::take(&mut self.hits);
             pool.iter_mut().for_each(Vec::clear);
         }
     }
@@ -5730,7 +5923,7 @@ struct NameTable {
     all: bool,
     /// For a pass over every entry: each name's `Short` (zero if absent), a
     /// direct index with a quarter of a hit's bytes.
-    dense: std::sync::OnceLock<Vec<Short>>,
+    dense: crate::sync::OnceCell<Vec<Short>>,
 }
 
 /// What an entry's score needs of its name's hit.
@@ -5743,16 +5936,16 @@ struct Short {
 
 /// `n` default `Short`s, from the allocator's zeroed memory.
 fn zeroed(n: usize) -> Vec<Short> {
-    let layout = std::alloc::Layout::array::<Short>(n).expect("dense view size");
+    let layout = alloc::alloc::Layout::array::<Short>(n).expect("dense view size");
     if layout.size() == 0 {
         return Vec::new();
     }
     // Safety: allocated with Short's layout for `n` of them; a Short is
     // plain integers, and all zero bytes is its default.
     unsafe {
-        let p = std::alloc::alloc_zeroed(layout) as *mut Short;
+        let p = alloc::alloc::alloc_zeroed(layout) as *mut Short;
         if p.is_null() {
-            std::alloc::handle_alloc_error(layout);
+            alloc::alloc::handle_alloc_error(layout);
         }
         Vec::from_raw_parts(p, n, n)
     }
@@ -5761,7 +5954,7 @@ fn zeroed(n: usize) -> Vec<Short> {
 impl NameTable {
     fn new(bits: Vec<u64>, rank: Vec<u16>, hits: Vec<Vec<NameHit>>, ok_entries: usize, all: bool) -> NameTable {
         let len = hits.iter().map(Vec::len).sum();
-        NameTable { bits, rank, hits, len, ok_entries, all, dense: std::sync::OnceLock::new() }
+        NameTable { bits, rank, hits, len, ok_entries, all, dense: crate::sync::OnceCell::new() }
     }
 
     /// The `dense` view, built on first use.
@@ -5773,7 +5966,7 @@ impl NameTable {
             let fresh = spare.is_none();
             let mut d = spare.unwrap_or_else(|| zeroed(idx.words * 64));
             let flags = [idx.bitmap(crate::name_index::BM_DOT), idx.bitmap(crate::name_index::BM_APP)];
-            d.par_chunks_mut(CHUNK_WORDS * 64).enumerate().for_each(|(c, out)| {
+            rgy_par::for_each_owned(rgy_par::split_mut(&mut d, CHUNK_WORDS * 64), |c, out| {
                 if !fresh {
                     out.fill(Short::default());
                 }
@@ -5790,7 +5983,7 @@ impl NameTable {
                 let words = self.bits[c * CHUNK_WORDS..].iter().take(CHUNK_WORDS);
                 let ids = words.enumerate().flat_map(|(wi, &b)| {
                     let mut b = b;
-                    std::iter::from_fn(move || {
+                    core::iter::from_fn(move || {
                         (b != 0).then(|| {
                             let j = wi * 64 + b.trailing_zeros() as usize;
                             b &= b - 1;
@@ -5808,6 +6001,9 @@ impl NameTable {
 
     #[inline(always)]
     fn get(&self, id: u32) -> Option<NameHit> {
+        if self.all {
+            return Some(NameHit { score: 0, bits: 0, flags: NF_OK, best: [0; 4] });
+        }
         let (w, i) = (id as usize >> 6, id & 63);
         let b = self.bits[w];
         if b >> i & 1 == 0 {
@@ -5824,7 +6020,7 @@ impl NameTable {
             let ids = words.enumerate().flat_map(move |(wi, &b)| {
                 let mut b = b;
                 let base = ((c * CHUNK_WORDS + wi) * 64) as u32;
-                std::iter::from_fn(move || {
+                core::iter::from_fn(move || {
                     (b != 0).then(|| {
                         let id = base + b.trailing_zeros();
                         b &= b - 1;

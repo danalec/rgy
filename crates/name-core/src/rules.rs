@@ -37,11 +37,15 @@
 //! searchable is not a record the search can skip.
 
 use crate::rank::Tier;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
 
 /// One rule: a name pattern, the level it gives, and who it is for.
 pub struct Rule {
     /// The name pattern.
-    re: regex::bytes::Regex,
+    re: crate::regex::Regex,
     /// The level the rule gives.
     level: Tier,
     /// The rule is for folders (the one whose name matched).
@@ -53,7 +57,7 @@ pub struct Rule {
 impl Rule {
     /// Does the rule match `name`?
     fn matches(&self, name: &[u8]) -> bool {
-        self.re.is_match(name)
+        self.re.is_match_bytes(name)
     }
 }
 
@@ -81,6 +85,9 @@ impl Rules {
     }
 
     /// The rules in a file, read from the disk.
+    ///
+    /// The `std` path: reading the disk is what this is for.
+    #[cfg(feature = "std")]
     pub fn read(path: &std::path::Path) -> Result<Rules, String> {
         let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
         Rules::parse(&text)
@@ -93,6 +100,9 @@ impl Rules {
     /// an error: the user wrote it, and rgy would otherwise ignore it
     /// without saying so. The defaults stand in for it, and the reason
     /// comes back with them.
+    ///
+    /// The `std` path: reading the disk is what this is for.
+    #[cfg(feature = "std")]
     pub fn beside(index_path: &std::path::Path) -> (Rules, Option<String>) {
         let path = index_path.with_extension("rules");
         match Rules::read(&path) {
@@ -109,6 +119,28 @@ impl Rules {
     /// `for_files` says whether the name is a file's or a folder's.
     pub fn level_of(&self, name: &[u8], for_files: bool) -> Option<Tier> {
         self.rules.iter().rev().find(|r| r.matches(name) && (if for_files { r.files } else { r.folders })).map(|r| r.level)
+    }
+
+    /// Both levels (`(for_folders, for_files)`) a name gets, in one pass.
+    pub fn levels_of(&self, name: &[u8]) -> (Option<Tier>, Option<Tier>) {
+        let mut folder = None;
+        let mut file = None;
+        for r in self.rules.iter().rev() {
+            let need_folder = folder.is_none() && r.folders;
+            let need_file = file.is_none() && r.files;
+            if (need_folder || need_file) && r.matches(name) {
+                if need_folder {
+                    folder = Some(r.level);
+                }
+                if need_file {
+                    file = Some(r.level);
+                }
+                if folder.is_some() && file.is_some() {
+                    break;
+                }
+            }
+        }
+        (folder, file)
     }
 
     /// The rules rgy ships with: the table of directory names that used to
@@ -177,13 +209,13 @@ fn parse_rule(line: &str) -> Result<Rule, String> {
         folders = true;
         files = true;
     }
-    let re = regex::bytes::Regex::new(pattern).map_err(|e| e.to_string())?;
+    let re = crate::regex::Regex::new_sensitive(pattern).map_err(|e| e.to_string())?;
     Ok(Rule { re, level, folders, files })
 }
 
 /// A rule with a pattern, before the flags are set.
 fn rule(level: Tier, pattern: &str) -> Rule {
-    Rule { re: regex::bytes::Regex::new(pattern).expect("the default rules' patterns compile"), level, folders: false, files: false }
+    Rule { re: crate::regex::Regex::new_sensitive(pattern).expect("the default rules' patterns compile"), level, folders: false, files: false }
 }
 
 impl Rule {
@@ -215,7 +247,7 @@ pub fn offset(level: Tier) -> i32 {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
 

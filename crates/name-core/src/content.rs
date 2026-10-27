@@ -26,15 +26,22 @@ use crate::live::{Live, join};
 use crate::name_index::{Blob, HDR, as_bytes, fields, header, layout, sec};
 use crate::name_query::{GrepMode, Query, fold};
 use crate::placeholder;
-use rayon::prelude::*;
+use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
 use rgy_discovery::walk::KIND_FILE;
 // Per-file confirmation runs on the rgx engine (docs/design.md §2.3
 // 4.3: literal/hybrid/fixed/VM + SIMD prefilter replace memchr/regex
-// verify). regex_syntax stays for plan()'s HIR; the regex crate remains
-// only as the fallback for patterns rgx's parser refuses (4.4 keeps it
-// for content `regex:` queries).
-use regex_syntax::hir::{Class, Hir, HirKind};
+// verify). The plan that narrows the content index is walked over the same
+// AST the confirm is compiled from, so the two cannot disagree about what
+// the pattern means; the regex crate remains only as the fallback for
+// patterns rgx's parser refuses (4.4 keeps it for content `regex:`
+// queries).
+use rgx_core::byteclass::ByteSet;
 use rgx_core::regex::ByteRegex;
+use rgx_core::syntax::Ast;
 
 /// The `regex` crate's `escape`, which this module no longer links:
 /// escape every regex metacharacter in a literal.
@@ -59,7 +66,7 @@ fn rgx_starts(re: &ByteRegex, hay: &[u8]) -> Vec<usize> {
     }
     out
 }
-use std::collections::HashMap;
+use hashbrown::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -800,8 +807,9 @@ pub fn build_segment(dir: &Path, id: u64, docs: &Docs, range: std::ops::Range<us
     let new = std::sync::Mutex::new(HashMap::<[u64; 2], u32>::new());
     let scratch = std::sync::Mutex::new(Vec::new());
     let runs: Vec<std::ops::Range<usize>> = range.clone().step_by(RUN).map(|s| s..(s + RUN).min(range.end)).collect();
-    let splits: Vec<Split> = (runs.into_par_iter())
-        .map(|run| {
+    let splits: Vec<Split> = rgy_par::map_collect_with(runs.len(), 1, |ri| {
+        let run = runs[ri].clone();
+        {
             let (mut seen, mut buf, mut short, mut long, mut tri) =
                 scratch.lock().unwrap().pop().unwrap_or_else(|| (vec![0u64; 3 << 18], Vec::new(), Vec::new(), Vec::new(), Vec::new()));
             #[rustfmt::skip]
@@ -814,7 +822,7 @@ pub fn build_segment(dir: &Path, id: u64, docs: &Docs, range: std::ops::Range<us
                 buf.clear();
                 let text = (ahead.pop_front().flatten())
                     .and_then(|f| f.take(MAX_FILE + 1).read_to_end(&mut buf).ok())
-                    .is_some_and(|n| n as u64 <= MAX_FILE && memchr::memchr(0, &buf[..n.min(8192)]).is_none());
+                    .is_some_and(|n| n as u64 <= MAX_FILE && rgx_core::memchr::memchr(0, &buf[..n.min(8192)]).is_none());
                 let holds = if !text {
                     Holds::Nothing
                 } else {
@@ -850,8 +858,8 @@ pub fn build_segment(dir: &Path, id: u64, docs: &Docs, range: std::ops::Range<us
             }
             scratch.lock().unwrap().push((seen, buf, short, long, tri));
             sp
-        })
-        .collect();
+        }
+    });
     // The new contents, numbered by their first doc (docs in path order:
     // splits cover contiguous runs, in order), with gids.
     let nnew = new.into_inner().unwrap().len();
@@ -889,8 +897,10 @@ pub fn build_segment(dir: &Path, id: u64, docs: &Docs, range: std::ops::Range<us
         splits.iter().flat_map(|sp| &sp.contents).filter(|c| !c.small).map(|c| (c.hash, gids[local[c.new as usize] as usize])).collect();
     // Postings, built in parallel over runs of keys: a run of trigrams takes
     // its bucket of every split, the definition keys every new content's.
-    let parts = key_runs()
-        .map(|keys| {
+    let runs = key_runs();
+    let parts = rgy_par::map_collect_with(runs.len(), 1, |ri| {
+        let keys = runs[ri].clone();
+        {
             let mut pairs: Vec<u64> = Vec::new();
             if keys.start < 1 << 24 {
                 for sp in &splits {
@@ -912,8 +922,8 @@ pub fn build_segment(dir: &Path, id: u64, docs: &Docs, range: std::ops::Range<us
                 part.push(nnew, (run[0] >> 32) as u32, &list);
             }
             part
-        })
-        .collect();
+        }
+    });
     let seg = write_segment(dir, id, &meta, &own, parts)?;
     // This sync's later builds find these contents.
     dedup.built.lock().unwrap().extend(shared);
@@ -950,8 +960,10 @@ pub fn merge(dir: &Path, id: u64, segs: &[&Segment]) -> Option<Segment> {
         }
     }
     // Postings, merged in parallel over runs of keys.
-    let parts = key_runs()
-        .map(|keys| {
+    let runs = key_runs();
+    let parts = rgy_par::map_collect_with(runs.len(), 1, |ri| {
+        let keys = runs[ri].clone();
+        {
             let k = |s: &Segment, x: u64| s.tri_key().partition_point(|&t| (t as u64) < x);
             let mut pos: Vec<std::ops::Range<usize>> = segs.iter().map(|s| k(s, keys.start)..k(s, keys.end)).collect();
             let (mut out, mut list, mut part) = (Postings::default(), Vec::new(), Vec::new());
@@ -970,15 +982,15 @@ pub fn merge(dir: &Path, id: u64, segs: &[&Segment]) -> Option<Segment> {
                 }
             }
             out
-        })
-        .collect();
+        }
+    });
     write_segment(dir, id, &meta, &own, parts)
 }
 
 /// The key space in runs that postings are built in, in parallel: the
 /// trigrams 64k at a time, then the definition keys (above 2^24).
-fn key_runs() -> impl IndexedParallelIterator<Item = std::ops::Range<u64>> {
-    (0..257usize).into_par_iter().map(|r| if r < 256 { (r as u64) << 16..(r as u64 + 1) << 16 } else { 1 << 24..1 << 32 })
+fn key_runs() -> Vec<std::ops::Range<u64>> {
+    (0..257usize).map(|r| if r < 256 { (r as u64) << 16..(r as u64 + 1) << 16 } else { 1 << 24..1 << 32 }).collect()
 }
 
 /// Posting lists for a run of keys, encoded: the keys (ascending), where
@@ -1518,18 +1530,26 @@ impl Content {
     /// FSEvents history is recovered for the content index by an lstat per
     /// indexed file.
     pub fn changed_dirs(&self, since: u32) -> Vec<Vec<u8>> {
-        let pool = crate::live::stat_pool();
-        let mut out: Vec<Vec<u8>> = pool.install(|| {
-            self.segs
-                .par_iter()
-                .flat_map_iter(|s| (0..s.ndocs as u32).filter(|&d| !s.is_dead(d)).map(move |d| (s, d)))
-                .filter(|&(s, d)| crate::live::lstat(s.path(d)).is_none_or(|o| o.mtime >= since || o.size != s.size()[d as usize]))
-                .map(|(s, d)| {
-                    let p = s.path(d);
-                    p[..p.iter().rposition(|&b| b == b'/').unwrap_or(0).max(1)].to_vec()
-                })
-                .collect()
-        });
+        // One sweep per segment: the segments are the pieces of work, and
+        // each one is a run of documents.
+        let mut out: Vec<Vec<u8>> = rgy_par::map_collect_with(self.segs.len(), 1, |si| {
+            let s = &self.segs[si];
+            let mut v = Vec::new();
+            for d in 0..s.ndocs as u32 {
+                if s.is_dead(d) {
+                    continue;
+                }
+                if !crate::live::lstat(s.path(d)).is_none_or(|o| o.mtime >= since || o.size != s.size()[d as usize]) {
+                    continue;
+                }
+                let p = s.path(d);
+                v.push(p[..p.iter().rposition(|&b| b == b'/').unwrap_or(0).max(1)].to_vec());
+            }
+            v
+        })
+        .into_iter()
+        .flatten()
+        .collect();
         out.sort();
         out.dedup();
         out
@@ -1957,7 +1977,7 @@ impl Content {
                     continue;
                 }
                 if at > 0 {
-                    rest[at..].par_sort_unstable();
+                    rgy_par::sort_unstable(&mut rest[at..]);
                 }
                 let (more, done) =
                     verify_from(g, end - at, filt.limit - r.files.len(), READERS, t, |i| path(&rest[at + i]), &placeholder::attributes);
@@ -2565,10 +2585,10 @@ impl Grep {
         let case_insensitive = smart_ci && mode != GrepMode::Symbol;
         let short = (1..=4096).contains(&pattern.len());
         let literal = match mode {
-            GrepMode::Symbol if short => Some(Literal::Definition(memchr::memmem::Finder::new(pattern.as_bytes()).into_owned())),
+            GrepMode::Symbol if short => Some(Literal::Definition(rgx_core::memchr::memmem::Finder::new(pattern.as_bytes()).into_owned())),
             GrepMode::Literal if short && pattern.is_ascii() => Some(match case_insensitive {
                 true => Literal::folded(pattern.as_bytes()),
-                false => Literal::Exact(memchr::memmem::Finder::new(pattern.as_bytes()).into_owned()),
+                false => Literal::Exact(rgx_core::memchr::memmem::Finder::new(pattern.as_bytes()).into_owned()),
             }),
             _ => None,
         };
@@ -2629,7 +2649,15 @@ impl Grep {
             // which reading the file weeds out).
             GrepMode::Symbol if plain_identifier(self.pattern.as_bytes()) => TQ::Tri(symbol_key(self.pattern.as_bytes())),
             GrepMode::Literal | GrepMode::Symbol => literal_plan(self.pattern.as_bytes()),
-            GrepMode::Regex => regex_syntax::Parser::new().parse(&self.pattern).map_or(TQ::All, |h| regex_plan(&h)),
+            GrepMode::Regex => {
+                // The plan comes from the same parse the confirm is compiled
+                // from. A pattern rgx refuses has no AST here, and then the
+                // plan is "everything": the fallback confirm is the other
+                // engine's, and a plan built from a different parser's view
+                // of the pattern would be a plan about a different pattern.
+                let flags = rgx_core::syntax::Flags { case_insensitive: self.case_insensitive, ..Default::default() };
+                rgx_core::syntax::parse_with(self.pattern.as_bytes(), flags).map_or(TQ::All, |p| regex_plan(&p.ast))
+            }
         }
     }
 }
@@ -2667,7 +2695,7 @@ pub struct Skipped {
 fn note_skipped(skipped: &[Skipped]) {
     let Some(first) = skipped.first() else { return };
     let n = skipped.len();
-    eprintln!("rgy: skipped {n} file{} — {} (first: {})", if n == 1 { "" } else { "s" }, first.reason, String::from_utf8_lossy(&first.path));
+    std::eprintln!("rgy: skipped {n} file{} — {} (first: {})", if n == 1 { "" } else { "s" }, first.reason, String::from_utf8_lossy(&first.path));
 }
 
 /// Threads reading candidates (the searching one and helpers): file opens on
@@ -2807,7 +2835,7 @@ fn verify_from<'a>(
     (GrepResult { files: hits.into_iter().map(|h| h.1).collect(), candidates: n, read: read.into_inner(), complete, skipped }, done)
 }
 
-thread_local! {
+std::thread_local! {
     /// One read buffer per read-pool thread: a fresh ~1 MB Vec per file
     /// costs page faults and an munmap every time. Kept only while a search
     /// runs if it grew past 256 KB.
@@ -2838,7 +2866,7 @@ fn match_file(g: &Grep, path: &[u8], attrs: &Attrs<'_>) -> Outcome {
         if file.take(MAX_FILE * 4).read_to_end(buf).ok().is_none() {
             return Outcome::NoMatch;
         }
-        if memchr::memchr(0, &buf[..buf.len().min(8192)]).is_some() {
+        if rgx_core::memchr::memchr(0, &buf[..buf.len().min(8192)]).is_some() {
             return Outcome::NoMatch;
         }
         let lines = match g.literal.as_ref().filter(|l| !l.needs_regex(buf)) {
@@ -2856,14 +2884,14 @@ fn lines_at(g: &Grep, buf: &[u8], starts: impl Iterator<Item = usize>) -> Vec<(u
     let (mut line_no, mut counted) = (1usize, 0usize);
     let mut last_line_start = usize::MAX;
     for start in starts {
-        line_no += memchr::memchr_iter(b'\n', &buf[counted..start]).count();
+        line_no += rgx_core::memchr::memchr_iter(b'\n', &buf[counted..start]).count();
         counted = start;
-        let ls = memchr::memrchr(b'\n', &buf[..start]).map_or(0, |p| p + 1);
+        let ls = rgx_core::memchr::memrchr(b'\n', &buf[..start]).map_or(0, |p| p + 1);
         if ls == last_line_start {
             continue;
         }
         last_line_start = ls;
-        let le = memchr::memchr(b'\n', &buf[start..]).map_or(buf.len(), |p| start + p);
+        let le = rgx_core::memchr::memchr(b'\n', &buf[start..]).map_or(buf.len(), |p| start + p);
         lines.push((line_no, String::from_utf8_lossy(&buf[ls..le.min(ls + 400)]).trim_end().to_string()));
         if lines.len() >= g.max_per_file {
             break;
@@ -2878,14 +2906,14 @@ fn lines_at(g: &Grep, buf: &[u8], starts: impl Iterator<Item = usize>) -> Vec<(u
 /// folds onto ASCII ones (ſ for s, the Kelvin sign for k): a file holding
 /// one of those goes to the regex.
 enum Literal {
-    Exact(memchr::memmem::Finder<'static>),
+    Exact(rgx_core::memchr::memmem::Finder<'static>),
     /// A `sym:` name: as a whole word after a declaring keyword on its line
     /// (the definition regex, with its keyword part compiled once).
-    Definition(memchr::memmem::Finder<'static>),
+    Definition(rgx_core::memchr::memmem::Finder<'static>),
     Folded {
         needle: Vec<u8>,
         pair: (usize, usize),
-        odd: Vec<memchr::memmem::Finder<'static>>,
+        odd: Vec<rgx_core::memchr::memmem::Finder<'static>>,
     },
 }
 
@@ -2903,7 +2931,7 @@ impl Literal {
         by_rarity.sort_by_key(|&i| (common(needle[i]), i));
         let (a, b) = (by_rarity[0], *by_rarity.get(1).unwrap_or(&by_rarity[0]));
         let odd = [(b's', "\u{17F}"), (b'k', "\u{212A}")].iter().filter(|(c, _)| needle.contains(c));
-        let odd = odd.map(|(_, u)| memchr::memmem::Finder::new(u.as_bytes()).into_owned()).collect();
+        let odd = odd.map(|(_, u)| rgx_core::memchr::memmem::Finder::new(u.as_bytes()).into_owned()).collect();
         Literal::Folded { needle, pair: (a.min(b), a.max(b)), odd }
     }
 
@@ -2949,7 +2977,7 @@ fn defined_at(hay: &[u8], p: usize, len: usize) -> bool {
     let re = KEYWORD.get_or_init(|| {
         ByteRegex::new_multiline(format!(r"(?-u:\b)(?:{DEFINES})(?:<[^>\n]*>)?[ \t*&]+(?:mut[ \t]+)?\z").as_bytes(), false, false).unwrap()
     });
-    let line = memchr::memrchr(b'\n', &hay[..p]).map_or(0, |i| i + 1);
+    let line = rgx_core::memchr::memrchr(b'\n', &hay[..p]).map_or(0, |i| i + 1);
     re.search(&hay[line..p], 0).is_some()
 }
 
@@ -3434,26 +3462,34 @@ fn and(a: TQ, b: TQ) -> TQ {
     }
 }
 
-fn info(h: &Hir) -> Info {
-    match h.kind() {
-        HirKind::Empty | HirKind::Look(_) => Info::exact(vec![Vec::new()]),
-        HirKind::Literal(l) => Info::exact(vec![l.0.iter().map(|&b| fold(b)).collect()]),
-        HirKind::Class(c) => class(c),
-        HirKind::Capture(c) => info(&c.sub),
-        HirKind::Repetition(r) => {
-            if r.min == 0 {
+/// What the pattern says about the text it matches, over the AST the byte
+/// engine compiles.
+///
+/// The walk is over rgx-core's AST and not over another engine's HIR, and
+/// that is the whole point: the plan must be implied by the match, and the
+/// match is decided by the engine that compiled this very AST. A plan
+/// built from a different parser's view of the pattern is a plan about a
+/// different pattern.
+fn info(a: &Ast) -> Info {
+    match a {
+        // Zero-width: it matches the empty string, which says nothing.
+        Ast::Empty | Ast::Assert(_) => Info::exact(vec![Vec::new()]),
+        Ast::Class(set) => class(set),
+        Ast::Group { node, .. } => info(node),
+        Ast::Repeat { node, min, max, .. } => {
+            if *min == 0 {
                 return Info::any();
             }
-            let i = info(&r.sub);
-            if r.min == 1 && r.max == Some(1) {
+            let i = info(node);
+            if *min == 1 && *max == Some(1) {
                 return i;
             }
             // At least one copy, which starts it; one ends it.
             Info { q: and(i.q, exact_query(i.exact)), exact: None, prefix: i.prefix, suffix: i.suffix }
         }
-        HirKind::Concat(hs) => hs.iter().map(info).fold(Info::exact(vec![Vec::new()]), concat),
-        HirKind::Alternation(hs) => {
-            let parts: Vec<Info> = hs.iter().map(info).collect();
+        Ast::Concat(nodes) => nodes.iter().map(info).fold(Info::exact(vec![Vec::new()]), concat),
+        Ast::Alt(arms) => {
+            let parts: Vec<Info> = arms.iter().map(info).collect();
             let union = |f: fn(&Info) -> &Option<Set>| {
                 let mut set = Set::new();
                 for p in &parts {
@@ -3474,28 +3510,26 @@ fn info(h: &Hir) -> Info {
     }
 }
 
-/// Up to 8 members are each an exact string; with more, their first bytes,
-/// if few (`\s`: tab to CR, space, and four UTF-8 lead bytes), start it.
-fn class(c: &Class) -> Info {
-    let mut set: Set = match c {
-        Class::Unicode(u) => {
-            u.ranges().iter().flat_map(|r| r.start()..=r.end()).take(9).map(|ch| ch.to_string().bytes().map(fold).collect()).collect()
-        }
-        Class::Bytes(b) => b.ranges().iter().flat_map(|r| r.start()..=r.end()).take(9).map(|x| vec![fold(x)]).collect(),
-    };
-    if set.len() <= 8 {
-        set.sort();
-        set.dedup();
-        return Info::exact(set);
+/// Up to 8 members are each an exact string; with more, the first byte of
+/// each, if there are few enough of them, starts it.
+///
+/// The class is a set of bytes, because the engine is a byte engine: a
+/// member is one byte, and a match on it is that byte. A class with more
+/// members than the index can name says nothing the trigrams can hold, so
+/// the plan falls back to "no constraint" -- which is slower and never
+/// wrong.
+fn class(set: &ByteSet) -> Info {
+    let members: Vec<u8> = set.iter().map(fold).collect();
+    if members.len() <= 8 {
+        let mut exact: Set = members.into_iter().map(|b| vec![b]).collect();
+        exact.sort();
+        exact.dedup();
+        return Info::exact(exact);
     }
-    let lead = |c: char| c.to_string().as_bytes()[0];
-    let mut first: Vec<u8> = match c {
-        Class::Unicode(u) => u.ranges().iter().flat_map(|r| lead(r.start())..=lead(r.end())).map(fold).collect(),
-        Class::Bytes(b) => b.ranges().iter().flat_map(|r| r.start()..=r.end()).map(fold).collect(),
-    };
+    let mut first: Set = members.into_iter().map(|b| vec![b]).collect();
     first.sort();
     first.dedup();
-    Info { prefix: (first.len() <= MAX_EXACT).then(|| first.into_iter().map(|b| vec![b]).collect()), ..Info::any() }
+    Info { prefix: (first.len() <= MAX_EXACT).then_some(first), ..Info::any() }
 }
 
 /// `a` then `b`. A match holds a's suffix right before b's prefix; that
@@ -3521,8 +3555,8 @@ fn concat(a: Info, b: Info) -> Info {
     Info { exact, prefix, suffix, q }
 }
 
-fn regex_plan(h: &Hir) -> TQ {
-    info(h).query()
+fn regex_plan(a: &Ast) -> TQ {
+    info(a).query()
 }
 
 /// Files to grep where the content index does not reach (e.g. `in:/etc`),
@@ -3786,6 +3820,7 @@ mod open_flags_tests {
 mod placeholder_tests {
     use super::{Grep, Open, open_ahead_with, open_sized, open_sized_with, placeholder, verify_from};
     use crate::name_query::GrepMode;
+    use alloc::vec::Vec;
 
     /// A file with a needle in it, and its path as the tree spells paths.
     fn temp_file(tag: &str) -> (std::path::PathBuf, Vec<u8>) {
@@ -3898,6 +3933,8 @@ mod grep_pipeline_tests {
     use crate::live::Live;
     use crate::name_index::Index;
     use crate::name_query::{GrepMode, Query};
+    use alloc::format;
+    use alloc::vec::Vec;
     use rgy_discovery::PortableSource;
     use rgy_discovery::Source;
 
@@ -4482,5 +4519,47 @@ mod grep_pipeline_tests {
         // The answer is "not here" -- not a panic.
         let _ = reloaded.search(&g, &q);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+/// The plan is what narrows the content index before a file is read, so it
+/// has to be implied by the match and nothing more.
+#[cfg(test)]
+mod plan_tests {
+    use super::{Grep, GrepMode, TQ};
+
+    /// A pattern the byte engine refuses has no AST, and so no plan: the
+    /// fallback confirm is another engine's, and a plan built from a
+    /// different parser's view of the pattern would be a plan about a
+    /// different pattern.
+    #[test]
+    fn a_pattern_the_engine_refuses_plans_everything() {
+        // A Unicode property: rgx's parser refuses it, the fallback takes
+        // it, and the plan has nothing to work from.
+        let g = Grep::new(r"\p{L}+", GrepMode::Regex).expect("the fallback compiles");
+        assert!(matches!(g.plan(), TQ::All), "the plan is everything");
+    }
+
+    /// A literal is the case the plan is best at, and it must not fall back
+    /// to "everything".
+    #[test]
+    fn a_literal_pattern_plans_its_trigrams() {
+        let g = Grep::new("invoice", GrepMode::Regex).expect("compiles");
+        assert!(!matches!(g.plan(), TQ::All), "the plan is not everything");
+    }
+
+    /// A class the index cannot name is a plan of "everything": the bytes
+    /// are there, but the trigrams are three bytes long and this is one.
+    #[test]
+    fn a_one_byte_class_plans_everything() {
+        let g = Grep::new("[0-9]", GrepMode::Regex).expect("compiles");
+        assert!(matches!(g.plan(), TQ::All), "the plan is everything");
+    }
+
+    /// The plan and the confirm must be about the same pattern: a caseless
+    /// literal still plans its trigrams, folded.
+    #[test]
+    fn a_caseless_literal_plans_its_trigrams() {
+        let g = Grep::new("Invoice", GrepMode::Regex).expect("compiles");
+        assert!(!matches!(g.plan(), TQ::All), "the plan is not everything");
     }
 }

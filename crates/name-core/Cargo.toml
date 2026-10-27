@@ -13,26 +13,34 @@ categories = ["text-processing", "filesystem"]
 readme = "../../README.md"
 
 
+[features]
+default = ["std"]
+# The filesystem, the threads, and the clock. Without it the crate is
+# `no_std`: the index and the query engine, over bytes the caller owns.
+# What goes away with it is the content grep (it reads files), the live
+# overlay, the persisted index, and the mmap of the name blob.
+std = ["rgy-par/std", "rgx-core/std", "rgy-discovery/std", "dep:regex"]
+
 [dependencies]
-rgy-discovery = { path = "../discovery", version = "0.1.0" }
+rgy-discovery = { path = "../discovery", version = "0.1.0", default-features = false }
+# The parallelism: split the work, run the pieces, join them. The width is
+# the user's (`RGY_NUM_THREADS`, or what the caller sets).
+rgy-par = { path = "../par", version = "0.1.0", default-features = false }
 # One regex engine (§4.4): the vendored zen-rs copy is gone; `re:`
 # path patterns compile through rgx-core's syntax/nfa/vm, the same engine
 # the copy was taken from (Apache-2.0).
-rgx-core = { path = "../rgx-core", version = "0.1.0" }
-# fsearch's name index v2 mmaps its name blob (name_index.rs).
-memmap2 = "0.9"
-# fsearch's parallel scan/rank (name_query.rs, live.rs).
-rayon = "1.12"
-# fsearch's Searcher prefilter inspects regex internals (re_literals,
-# path_suffixes); the zen-rs `re:` path in `index.rs` stays on rgx-core
-# (one regex engine for the query layer, §4.4).
-regex = "1.12"
-# fsearch scorer's folded find (name_query.rs find_folded/rfind_folded).
-memchr = "2.8"
-# Searcher's re_literals/path_suffixes prefilter inspects regex ASTs.
-regex-syntax = "0.8"
+rgx-core = { path = "../rgx-core", version = "0.1.0", default-features = false }
+# `std::collections::HashMap` is not in `alloc`, and the query engine's
+# hot maps want the cheap hasher the index already carries. This is the
+# no_std map: the same API, the same hasher, no `std`.
+hashbrown = { version = "0.16", default-features = false, features = ["default-hasher", "inline-more"] }
+# The content grep's fallback: the content path reads files, so it is std,
+# and so is the crate it borrows. The name path (`re:`, `path:`, the rules)
+# runs on rgx-core and needs neither -- and the content path's own plan
+# walks the same rgx-core AST the confirm is compiled from.
+regex = { version = "1.12", optional = true }
 
 # No libc (and no new platform crates): the few Darwin/unix bits in
 # content.rs declare their own `extern "C"` and ABI constants inline —
 # the same pattern `without_materializing` already used for
-# getiopolicy_np. rgx-core stays `no_std`; this crate is std (file I/O).
+# getiopolicy_np. rgx-core stays `no_std`.

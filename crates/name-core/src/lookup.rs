@@ -27,6 +27,8 @@
 //! * `folder_path` -- the full path of a folder, resolved from its chain.
 
 use crate::name_index::Index;
+use alloc::vec;
+use alloc::vec::Vec;
 use rgy_discovery::walk::{KIND_DIR, KIND_FILE, KIND_LINK};
 
 /// The volume that owns a folder.
@@ -56,7 +58,7 @@ pub struct Lookup<'a> {
     /// caller that only wants the backend does not pay it: the daemon
     /// resolves a path per request, and the resolution wants the path and
     /// the volume, not the name indexes.
-    names: std::sync::OnceLock<Names>,
+    names: crate::sync::OnceCell<Names>,
 }
 
 /// The two name indexes: the names of the files and the names of the
@@ -80,30 +82,35 @@ impl<'a> Lookup<'a> {
     ///
     /// The pass happens when the name indexes are asked for, not here.
     pub fn new(index: &'a Index) -> Lookup<'a> {
-        Lookup { index, names: std::sync::OnceLock::new() }
+        Lookup { index, names: crate::sync::OnceCell::new() }
     }
 
     /// The two name indexes, built once.
     fn names(&self) -> &Names {
         self.names.get_or_init(|| {
+            let kinds = self.index.kind();
+            let ent_name = self.index.ent_name();
+            let mut seen = vec![0u8; self.index.u];
+            for i in 0..self.index.n {
+                seen[ent_name[i] as usize] |= 1 << (kinds[i] & 3);
+            }
             let mut file_names = Vec::new();
             let mut folder_names = Vec::new();
-            for i in 0..self.index.n {
-                let kind = self.index.kind()[i] & 3;
-                match kind {
-                    KIND_DIR => folder_names.push(self.index.ent_name()[i]),
-                    KIND_FILE | KIND_LINK => file_names.push(self.index.ent_name()[i]),
-                    _ => {}
+            let file_mask = (1 << KIND_FILE) | (1 << KIND_LINK);
+            let dir_mask = 1 << KIND_DIR;
+            for (k, &m) in seen.iter().enumerate() {
+                if m & file_mask != 0 {
+                    file_names.push(k as u32);
+                }
+                if m & dir_mask != 0 {
+                    folder_names.push(k as u32);
                 }
             }
             // The names are sorted by the name's bytes -- the index's own
             // order, the one the path resolution walks -- so the lookup is
             // a binary search over the same order.
             let by_name = |a: &u32, b: &u32| self.index.uname(*a).cmp(self.index.uname(*b));
-            file_names.sort_unstable_by(by_name);
-            file_names.dedup();
-            folder_names.sort_unstable_by(by_name);
-            folder_names.dedup();
+            rgy_par::join(|| rgy_par::sort_unstable_by(&mut file_names, by_name), || rgy_par::sort_unstable_by(&mut folder_names, by_name));
             Names { files: file_names, folders: folder_names }
         })
     }
@@ -160,13 +167,10 @@ impl<'a> Lookup<'a> {
     /// entry that carries the name, files and folders alike, and the file
     /// index is not supposed to answer with a folder.
     fn entries_of(&self, names: &[u32], name: &[u8], want_dir: bool) -> Vec<u32> {
-        let at = names.partition_point(|&n| self.index.uname(n) < name);
-        names[at..]
-            .iter()
-            .take_while(|&&n| self.index.uname(n) == name)
-            .flat_map(|&n| self.index.name_ents_of(n))
-            .filter(|&e| (self.index.kind()[e as usize] & 3 == KIND_DIR) == want_dir)
-            .collect()
+        let Ok(at) = names.binary_search_by(|&n| self.index.uname(n).cmp(name)) else {
+            return Vec::new();
+        };
+        self.index.name_ents_of(names[at]).iter().copied().filter(|&e| (self.index.kind()[e as usize] & 3 == KIND_DIR) == want_dir).collect()
     }
 
     /// The number of names in each of the two name indexes.
@@ -180,6 +184,7 @@ impl<'a> Lookup<'a> {
 mod tests {
     use super::*;
     use crate::name_index::Index;
+    use alloc::vec;
     use rgy_discovery::walk::{KIND_DIR, KIND_FILE, Listing, NONE, RawEnt};
 
     /// A tree with two folders and two files: `/docs` (a folder) holding

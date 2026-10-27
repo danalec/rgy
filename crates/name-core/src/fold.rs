@@ -37,7 +37,7 @@
 //! meaning to lose.
 
 use crate::nfc::nfc;
-use std::borrow::Cow;
+use alloc::borrow::Cow;
 
 /// The fold of `bytes`: what a comparison of a stored name against a
 /// typed query sees.
@@ -53,7 +53,7 @@ pub fn fold(bytes: &[u8]) -> Cow<'_, [u8]> {
     if bytes.is_ascii() {
         return Cow::Borrowed(bytes);
     }
-    let Ok(text) = std::str::from_utf8(bytes) else {
+    let Ok(text) = core::str::from_utf8(bytes) else {
         return Cow::Borrowed(bytes);
     };
     match nfc(text) {
@@ -107,6 +107,9 @@ mod tests {
         use crate::live::Live;
         use crate::name_index::Index;
         use crate::name_query::{Query, Searcher};
+        use alloc::string::String;
+        use alloc::vec;
+        use alloc::vec::Vec;
         use rgy_discovery::walk::{KIND_FILE, NONE, RawEnt};
 
         /// An index with one file, whose name is `name`.

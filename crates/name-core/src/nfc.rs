@@ -47,7 +47,8 @@
 //! `crates/name-core/tools/gen_nfc_table.py`.
 
 use crate::nfc_table::{CCC, COMPOSE, DECOMP, QC_MAYBE, QC_NO};
-use std::borrow::Cow;
+use alloc::borrow::Cow;
+use alloc::vec::Vec;
 
 /// Hangul, the one part of Unicode normalization with no table: the
 /// syllables are composed and decomposed arithmetically (UAX #15 §16).
@@ -95,6 +96,10 @@ fn is_nfc(s: &str) -> bool {
     let mut last = 0u8;
     for c in s.chars() {
         let cp = c as u32;
+        if cp < 0x0300 {
+            last = 0;
+            continue;
+        }
         if in_ranges(QC_NO, cp) || in_ranges(QC_MAYBE, cp) {
             return false;
         }
@@ -118,13 +123,16 @@ fn is_nfc(s: &str) -> bool {
 /// characters are the marks that were composed into the character before
 /// them.
 pub(crate) fn ccc(cp: u32) -> u8 {
+    if cp < 0x0300 {
+        return 0;
+    }
     match CCC.binary_search_by(|&(lo, hi, _)| {
         if cp < lo {
-            std::cmp::Ordering::Greater
+            core::cmp::Ordering::Greater
         } else if cp > hi {
-            std::cmp::Ordering::Less
+            core::cmp::Ordering::Less
         } else {
-            std::cmp::Ordering::Equal
+            core::cmp::Ordering::Equal
         }
     }) {
         Ok(i) => CCC[i].2,
@@ -137,11 +145,11 @@ fn in_ranges(ranges: &[(u32, u32)], cp: u32) -> bool {
     ranges
         .binary_search_by(|&(lo, hi)| {
             if cp < lo {
-                std::cmp::Ordering::Greater
+                core::cmp::Ordering::Greater
             } else if cp > hi {
-                std::cmp::Ordering::Less
+                core::cmp::Ordering::Less
             } else {
-                std::cmp::Ordering::Equal
+                core::cmp::Ordering::Equal
             }
         })
         .is_ok()
@@ -255,6 +263,7 @@ fn compose_pair(a: char, b: char) -> Option<char> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::string::String;
 
     /// The UCD's own conformance suite, as vectors generated from
     /// `NormalizationTest.txt` (see `nfc_vectors`).

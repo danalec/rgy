@@ -26,6 +26,10 @@
 //! きって is "kitte" and しゃ is "sha", not "ki" + "tsu" + "te".
 
 use crate::readings_table::{KANA, KANA_READINGS, KANA_TABLE, PINYIN_READINGS, PINYIN_TABLE};
+use alloc::borrow::Cow;
+use alloc::format;
+use alloc::string::ToString;
+use alloc::vec::Vec;
 
 /// The script a shadow is in.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -92,7 +96,7 @@ impl Shadow {
     /// kana and no Han character is its own shadow, and the direct matcher
     /// already covers it.
     pub fn of(name: &[u8], script: Script) -> Option<Shadow> {
-        let s = std::str::from_utf8(name).ok()?;
+        let s = core::str::from_utf8(name).ok()?;
         // The cheap necessary condition: every kana and every Han character
         // is at U+3000 or above, and every codepoint at U+3000 or above is
         // UTF-8 encoded with a lead byte of 0xE3 or more. A name without
@@ -183,24 +187,32 @@ fn shadow_romaji(s: &str) -> Option<Shadow> {
     let mut text = Vec::with_capacity(s.len());
     let mut origin = Vec::with_capacity(s.len());
     let mut buf = [0u8; 4];
+    let mut ci = 0;
+    let mut fi = 0;
     for (i, ch) in s.chars().enumerate() {
         let src = i as u32;
-        if consumed.contains(&src) {
+        while ci < consumed.len() && consumed[ci] < src {
+            ci += 1;
+        }
+        if ci < consumed.len() && consumed[ci] == src {
             // A small ya/yu/yo that was merged into the kana before it.
             continue;
         }
-        let mine: Vec<&str> = frags.iter().filter(|(_, s)| *s == src).map(|(f, _)| f.as_str()).collect();
-        if mine.is_empty() {
-            for b in ch.encode_utf8(&mut buf).as_bytes() {
-                text.push(*b);
-                origin.push(src);
-            }
-        } else {
-            for f in mine {
-                for b in f.as_bytes() {
+        while fi < frags.len() && frags[fi].1 < src {
+            fi += 1;
+        }
+        if fi < frags.len() && frags[fi].1 == src {
+            while fi < frags.len() && frags[fi].1 == src {
+                for b in frags[fi].0.as_bytes() {
                     text.push(*b);
                     origin.push(src);
                 }
+                fi += 1;
+            }
+        } else {
+            for b in ch.encode_utf8(&mut buf).as_bytes() {
+                text.push(*b);
+                origin.push(src);
             }
         }
     }
@@ -214,10 +226,10 @@ fn shadow_romaji(s: &str) -> Option<Shadow> {
 /// A small ya/yu/yo merges with the kana before it, so its fragment is
 /// the previous character's; the small kana's own character is then
 /// consumed and contributes nothing of its own.
-fn romaji_fragments(seq: &KanaSeq) -> (Vec<(String, u32)>, Vec<u32>) {
-    let mut out: Vec<(String, u32)> = Vec::new();
+fn romaji_fragments(seq: &KanaSeq) -> (Vec<(Cow<'static, str>, u32)>, Vec<u32>) {
+    let mut out: Vec<(Cow<'static, str>, u32)> = Vec::new();
     let mut consumed: Vec<u32> = Vec::new();
-    let mut prev: Option<(String, usize, u32)> = None;
+    let mut prev: Option<(&'static str, usize, u32)> = None;
     let mut i = 0;
     while i < seq.kana.len() {
         let (c, src) = seq.kana[i];
@@ -226,30 +238,32 @@ fn romaji_fragments(seq: &KanaSeq) -> (Vec<(String, u32)>, Vec<u32>) {
             // consonant, so the doubled letter is its contribution.
             let dbl = seq.kana.get(i + 1).and_then(|&(c2, _)| kana_romaji(c2)).and_then(|r| r.chars().find(|&c| !is_vowel(c)));
             if let Some(k) = dbl {
-                out.push((k.to_string(), src));
+                out.push((Cow::Owned(k.to_string()), src));
             }
             i += 1;
             continue;
         }
         if is_youon(c) {
             let vowel = youon_vowel(c);
-            consumed.push(src);
             match prev.take() {
                 Some((p, at, psrc)) => {
-                    let merged = match p.as_str() {
+                    if psrc != src {
+                        consumed.push(src);
+                    }
+                    let merged = match p {
                         // The irregular digraphs: `sha`, not `shya`.
                         "shi" => format!("sh{vowel}"),
                         "chi" => format!("ch{vowel}"),
                         "ji" => format!("j{vowel}"),
                         _ => {
-                            let c = p.strip_suffix('i').unwrap_or(&p);
+                            let c = p.strip_suffix('i').unwrap_or(p);
                             if c.is_empty() { format!("{p}{vowel}") } else { format!("{c}y{vowel}") }
                         }
                     };
                     out.truncate(at);
-                    out.push((merged, psrc));
+                    out.push((Cow::Owned(merged), psrc));
                 }
-                None => out.push((vowel.to_string(), src)),
+                None => out.push((Cow::Owned(vowel.to_string()), src)),
             }
             i += 1;
             continue;
@@ -259,15 +273,15 @@ fn romaji_fragments(seq: &KanaSeq) -> (Vec<(String, u32)>, Vec<u32>) {
             // スーパー is "suupaa", the way a romaji IME types it.
             let last = out.last().and_then(|(f, _)| f.chars().last()).filter(|&c| is_vowel(c));
             if let Some(v) = last {
-                out.push((v.to_string(), src));
+                out.push((Cow::Owned(v.to_string()), src));
             }
             i += 1;
             continue;
         }
-        let r = kana_romaji(c).unwrap_or("").to_string();
+        let r = kana_romaji(c).unwrap_or("");
         if !r.is_empty() {
-            prev = Some((r.clone(), out.len(), src));
-            out.push((r, src));
+            prev = Some((r, out.len(), src));
+            out.push((Cow::Borrowed(r), src));
         }
         i += 1;
     }
@@ -378,6 +392,7 @@ fn youon_vowel(ch: char) -> char {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::string::String;
 
     fn romaji(name: &str) -> String {
         let sh = Shadow::of(name.as_bytes(), Script::Romaji).expect("a romaji shadow");
@@ -404,6 +419,7 @@ mod tests {
         // fuzzy matcher skips it. `nihongo` is a subsequence of
         // `nichihongo`, which is what the matcher needs.
         assert_eq!(romaji("日本語"), "nichihongo");
+        assert_eq!(romaji("東京"), "toukyou");
         assert_eq!(kana("日本語", Script::Hiragana), "にちほんご");
         assert_eq!(kana("日本語", Script::Katakana), "ニチホンゴ");
         assert!(is_subsequence("nihongo", &romaji("日本語")));

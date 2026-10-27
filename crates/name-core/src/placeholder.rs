@@ -160,6 +160,7 @@ pub fn is_placeholder_path(path: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::format;
 
     /// The two bits Windows sets on a placeholder, and one bit it sets on
     /// every ordinary file, so the test can tell "the attribute" from "any

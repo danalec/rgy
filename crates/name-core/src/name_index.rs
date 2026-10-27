@@ -17,12 +17,18 @@
 //! (see `name_bits`) before any name is read.
 
 use crate::fold;
-use memmap2::{Mmap, MmapMut};
-use rayon::prelude::*;
+use alloc::borrow::Cow;
+use alloc::boxed::Box;
+use alloc::vec;
+use alloc::vec::Vec;
+use hashbrown::HashMap;
 use rgy_discovery::walk::{KIND_DIR, Listing, NONE};
-use std::borrow::Cow;
-use std::collections::HashMap;
+
+#[cfg(feature = "std")]
+use rgx_core::memmap2::{Mmap, MmapMut};
+#[cfg(feature = "std")]
 use std::io::Write;
+#[cfg(feature = "std")]
 use std::path::Path;
 
 /// Index storage: a file mapping or an owned buffer.
@@ -44,14 +50,18 @@ use std::path::Path;
 ///   way around, and never a threshold constant nothing calls (rgx's
 ///   `AUTO_MMAP_THRESHOLD` trap).
 pub enum Blob {
+    /// The file, mapped. The `std` path: a mapping is cheaper than a read
+    /// for the random access this index does.
+    #[cfg(feature = "std")]
     Mapped(Mmap),
     Owned(Box<[u8]>),
 }
 
-impl std::ops::Deref for Blob {
+impl core::ops::Deref for Blob {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
         match self {
+            #[cfg(feature = "std")]
             Blob::Mapped(m) => m,
             Blob::Owned(v) => v,
         }
@@ -60,6 +70,7 @@ impl std::ops::Deref for Blob {
 
 impl Blob {
     /// Map the file; if mapping fails, read it into memory instead.
+    #[cfg(feature = "std")]
     pub fn from_file(f: &std::fs::File) -> std::io::Result<Blob> {
         match unsafe { Mmap::map(f) } {
             Ok(m) => Ok(Blob::Mapped(m)),
@@ -79,23 +90,27 @@ impl Blob {
 /// Vec where it does not (Windows under commit pressure must not panic a
 /// 5M-name build).
 pub enum BlobMut {
+    /// The anonymous map. The `std` path.
+    #[cfg(feature = "std")]
     Mapped(MmapMut),
     Owned(Vec<u8>),
 }
 
-impl std::ops::Deref for BlobMut {
+impl core::ops::Deref for BlobMut {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
         match self {
+            #[cfg(feature = "std")]
             BlobMut::Mapped(m) => m,
             BlobMut::Owned(v) => v,
         }
     }
 }
 
-impl std::ops::DerefMut for BlobMut {
+impl core::ops::DerefMut for BlobMut {
     fn deref_mut(&mut self) -> &mut [u8] {
         match self {
+            #[cfg(feature = "std")]
             BlobMut::Mapped(m) => m,
             BlobMut::Owned(v) => v,
         }
@@ -103,6 +118,7 @@ impl std::ops::DerefMut for BlobMut {
 }
 
 impl BlobMut {
+    #[cfg(feature = "std")]
     pub fn anon(len: usize) -> BlobMut {
         match MmapMut::map_anon(len) {
             Ok(m) => BlobMut::Mapped(m),
@@ -110,8 +126,15 @@ impl BlobMut {
         }
     }
 
+    /// The same buffer, read-only.
+    #[cfg(not(feature = "std"))]
+    pub fn anon(len: usize) -> BlobMut {
+        BlobMut::Owned(vec![0u8; len])
+    }
+
     pub fn freeze(self) -> Blob {
         match self {
+            #[cfg(feature = "std")]
             BlobMut::Mapped(m) => Blob::Mapped(m.make_read_only().expect("freeze map")),
             BlobMut::Owned(v) => Blob::Owned(v.into_boxed_slice()),
         }
@@ -192,10 +215,10 @@ pub struct Index {
     /// then are what needs relisting.
     pub synced_at: u32,
     off: [usize; NSEC],
-    plan: std::sync::OnceLock<MemoPlan>,
-    counts: std::sync::OnceLock<[[u32; CLASSES]; 2]>,
-    top_prior: std::sync::OnceLock<i8>,
-    by_key: std::sync::OnceLock<ByKey>,
+    plan: crate::sync::OnceCell<MemoPlan>,
+    counts: crate::sync::OnceCell<[[u32; CLASSES]; 2]>,
+    top_prior: crate::sync::OnceCell<i8>,
+    by_key: crate::sync::OnceCell<ByKey>,
 }
 
 /// Per distinct name, what bounds its score for one fuzzy token without
@@ -236,7 +259,7 @@ pub struct MemoPlan {
     pub upper: Vec<u32>,
     /// (dir, its descendants' id range): the range's parents are the dir or
     /// inside the range, so each runs on its own once `upper` is done.
-    pub chunks: Vec<(u32, std::ops::Range<u32>)>,
+    pub chunks: Vec<(u32, core::ops::Range<u32>)>,
 }
 
 /// A typed view of one section of `self.map`, `self.$len` long. Shared with
@@ -244,12 +267,13 @@ pub struct MemoPlan {
 macro_rules! sec {
     ($name:ident, $s:expr, $t:ty, $len:ident) => {
         pub fn $name(&self) -> &[$t] {
-            unsafe { std::slice::from_raw_parts(self.map.as_ptr().add(self.off[$s as usize]) as *const $t, self.$len) }
+            unsafe { core::slice::from_raw_parts(self.map.as_ptr().add(self.off[$s as usize]) as *const $t, self.$len) }
         }
     };
 }
 // Re-exported so the content index can name the same section macro (see
 // `content.rs`), which reads the same blob internals.
+#[cfg(feature = "std")]
 pub(crate) use sec;
 
 impl Index {
@@ -322,8 +346,8 @@ impl Index {
         self.counts.get_or_init(|| {
             let count = |b: &[u64]| b.iter().map(|x| x.count_ones()).sum();
             [
-                std::array::from_fn(|c| self.bitmap(BM_FIRST + c).iter().zip(self.bitmap(BM_SECOND + c)).map(|(a, b)| (a | b).count_ones()).sum()),
-                std::array::from_fn(|c| count(self.bitmap(BM_DOUBLE + c))),
+                core::array::from_fn(|c| self.bitmap(BM_FIRST + c).iter().zip(self.bitmap(BM_SECOND + c)).map(|(a, b)| (a | b).count_ones()).sum()),
+                core::array::from_fn(|c| count(self.bitmap(BM_DOUBLE + c))),
             ]
         })
     }
@@ -426,14 +450,14 @@ impl Index {
         self.dir_entry().binary_search(&entry).ok().map(|d| d as u32)
     }
 
-    pub fn children(&self, d: u32) -> std::ops::Range<usize> {
+    pub fn children(&self, d: u32) -> core::ops::Range<usize> {
         let s = self.dir_start()[d as usize] as usize;
         s..s + self.dir_len()[d as usize] as usize
     }
 
     /// Dir ids of `k`'s strict descendants: one contiguous range, since dir
     /// ids follow entry order and a subtree's entries are contiguous.
-    pub fn descendants(&self, k: u32) -> std::ops::Range<u32> {
+    pub fn descendants(&self, k: u32) -> core::ops::Range<u32> {
         let de = self.dir_entry();
         let (s, e) = (self.dir_start()[k as usize], self.dir_end()[k as usize]);
         de.partition_point(|&x| x < s) as u32..de.partition_point(|&x| x < e) as u32
@@ -550,7 +574,7 @@ impl Index {
     /// what its folder is worth, and the search reads that per candidate
     /// instead of walking the rules again.
     pub fn build_with_rules(mut ls: Vec<Listing>, event_id: u64, synced_at: u32, home: &[u8], rules: &crate::rules::Rules) -> Index {
-        ls.par_iter_mut().for_each(|l| {
+        rgy_par::for_each_mut(&mut ls, |_, l| {
             let names = &l.names;
             l.ents.sort_unstable_by(|a, b| {
                 names[a.name_off as usize..][..a.name_len as usize].cmp(&names[b.name_off as usize..][..b.name_len as usize])
@@ -618,7 +642,7 @@ impl Index {
         for (k, b) in blocks.iter().enumerate() {
             dir_of[b.0 as usize] = k as u32;
         }
-        parent[..n].par_iter_mut().for_each(|p| *p = dir_of[*p as usize]);
+        rgy_par::for_each_mut(&mut parent[..n], |_, p| *p = dir_of[*p as usize]);
         parent[0] = 0;
         drop(dir_of);
 
@@ -639,11 +663,12 @@ impl Index {
         }
         let u = ids.len();
         drop(ids);
+        drop((names, name_off, name_len));
         let words = u.div_ceil(64);
         // Each 64-name block's word of every bitmap, then transposed so each
         // bitmap is contiguous.
         let mut by_block = vec![0u64; words * NBITMAPS];
-        by_block.par_chunks_mut(NBITMAPS).enumerate().for_each(|(w, out)| {
+        rgy_par::for_each_owned(rgy_par::split_mut(&mut by_block, NBITMAPS), |w, out| {
             for k in w * 64..(w * 64 + 64).min(u) {
                 // The bitmaps describe the folded name: they are what a
                 // query's classes are tested against, and a query is
@@ -655,7 +680,7 @@ impl Index {
             }
         });
         let mut ubits = vec![0u64; words * NBITMAPS];
-        ubits.par_chunks_mut(words).enumerate().for_each(|(b, out)| {
+        rgy_par::for_each_owned(rgy_par::split_mut(&mut ubits, words), |b, out| {
             for (w, o) in out.iter_mut().enumerate() {
                 *o = by_block[w * NBITMAPS + b];
             }
@@ -697,6 +722,8 @@ impl Index {
         // and the files under it the closest that is for files.
         let mut folder_level = vec![crate::rank::Tier::Normal; d];
         let mut file_level = vec![crate::rank::Tier::Normal; d];
+        let uname_levels: Vec<(Option<crate::rank::Tier>, Option<crate::rank::Tier>)> =
+            rgy_par::map_collect(u, |k| rules.levels_of(&unames[uoff[k] as usize..uoff[k + 1] as usize]));
         // The level each entry is in, and the offset it is worth in the
         // score. The level is the tier the ranking compares; the offset is
         // what the score says about two entries in the same tier.
@@ -712,7 +739,8 @@ impl Index {
         for k in 1..d {
             let e = dir_entry[k] as usize;
             let p = parent[e] as usize;
-            let nm = &names[name_off[e] as usize..][..name_len[e] as usize];
+            let uid = ent_name[e] as usize;
+            let nm = &unames[uoff[uid] as usize..uoff[uid + 1] as usize];
             depth[k] = depth[p].saturating_add(1);
             hm[k] = match hm[p] {
                 u8::MAX => u8::MAX,
@@ -721,8 +749,9 @@ impl Index {
                 _ => u8::MAX,
             };
             let entered_home = hm[k] as usize == comps.len() && (hm[p] as usize) < comps.len();
-            folder_level[k] = rules.level_of(nm, false).unwrap_or(folder_level[p]);
-            file_level[k] = rules.level_of(nm, true).unwrap_or(file_level[p]);
+            let (own_folder, own_file) = uname_levels[uid];
+            folder_level[k] = own_folder.unwrap_or(folder_level[p]);
+            file_level[k] = own_file.unwrap_or(file_level[p]);
             home_bonus[k] = if entered_home { 15 } else { home_bonus[p] };
             // The dir itself, and the files under it.
             level[e] = folder_level[k];
@@ -735,11 +764,11 @@ impl Index {
                 continue;
             }
             let p = parent[i] as usize;
-            let lvl = rules.level_of(&names[name_off[i] as usize..][..name_len[i] as usize], true).unwrap_or(file_level[p]);
+            let lvl = uname_levels[ent_name[i] as usize].1.unwrap_or(file_level[p]);
             level[i] = lvl;
             prior[i] = (crate::rules::offset(lvl) + home_bonus[p] as i32).clamp(-100, 60) as i8;
         }
-        drop((names, name_off, name_len));
+        drop(uname_levels);
 
         // The location prior each entry inherits from its directory, folded
         // into the record. The search reads this per entry, and reading it
@@ -749,7 +778,7 @@ impl Index {
         // (its `record_store.rs` is the largest module in its engine), and
         // the reason is the same: a ranking property that is read per
         // candidate belongs to the candidate.
-        let rank_adj: Vec<i8> = prior.clone();
+        let rank_adj = prior;
 
         // The priority tier each entry is in, in the kind byte's free bits
         // (5 to 7).
@@ -768,6 +797,7 @@ impl Index {
         for i in 0..n {
             kind[i] |= (level[i].bits() as u8) << 5;
         }
+        drop(level);
 
         // Write the blob, freeing each array once its last reader is done:
         // the build's peak is here, the blob beside the arrays it copies.
@@ -796,12 +826,12 @@ impl Index {
         // directory (an entry the overlay added takes the prior of the
         // directory it is in), and the entries and the directories are
         // numbered apart. The per-entry prior is in `Sec::RankAdj`.
-        put(Sec::DirPrior, as_bytes(&dir_entry.iter().map(|&e| prior[e as usize]).collect::<Vec<_>>()));
+        put(Sec::DirPrior, as_bytes(&dir_entry.iter().map(|&e| rank_adj[e as usize]).collect::<Vec<_>>()));
         put(Sec::DirParent, as_bytes(&dir_entry.iter().map(|&e| parent[e as usize]).collect::<Vec<_>>()));
         drop(dir_entry);
         // Each name's entries best location prior first (then ascending): a
         // search visiting them can stop at the first that cannot make it.
-        ne.par_sort_unstable_by_key(|&e| (ent_name[e as usize], std::cmp::Reverse(rank_adj[e as usize]), e));
+        rgy_par::sort_unstable_by_key(&mut ne, |&e| (ent_name[e as usize], core::cmp::Reverse(rank_adj[e as usize]), e));
         put(Sec::NameEntsOff, as_bytes(&ne_off));
         put(Sec::NameEnts, as_bytes(&ne));
         drop((ne_off, ne));
@@ -810,8 +840,7 @@ impl Index {
             name_prior[k as usize] = name_prior[k as usize].max(rank_adj[i]);
         }
         put(Sec::NamePrior, as_bytes(&name_prior));
-        let info: Vec<NameInfo> =
-            (0..u).into_par_iter().map(|k| NameInfo::of(&unames[uoff[k] as usize..uoff[k + 1] as usize], name_prior[k])).collect();
+        let info: Vec<NameInfo> = rgy_par::map_collect(u, |k| NameInfo::of(&unames[uoff[k] as usize..uoff[k + 1] as usize], name_prior[k]));
         put(Sec::NameInfo, as_bytes(&info));
         let (table, slots) = ext_slots(&unames, &uoff);
         put(Sec::NameExt, &slots);
@@ -841,31 +870,74 @@ impl Index {
             synced_at: synced_at as u32,
             off,
             map,
-            plan: std::sync::OnceLock::new(),
-            counts: std::sync::OnceLock::new(),
-            top_prior: std::sync::OnceLock::new(),
-            by_key: std::sync::OnceLock::new(),
+            plan: crate::sync::OnceCell::new(),
+            counts: crate::sync::OnceCell::new(),
+            top_prior: crate::sync::OnceCell::new(),
+            by_key: crate::sync::OnceCell::new(),
         })
     }
 
+    /// The index in bytes: the header and the payload, exactly as [`save`]
+    /// writes them.
+    ///
+    /// Portable: this is the *format*, without the filesystem. A caller
+    /// that has the bytes — over a pipe, in a message, in an image built
+    /// elsewhere — can build the index with [`Index::from_bytes`], and the
+    /// bytes are the same ones the daemon writes to disk.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.map.len());
+        out.extend_from_slice(&header(
+            MAGIC,
+            &[self.n as u64, self.d as u64, self.u as u64, self.names_len as u64, self.event_id, self.synced_at as u64],
+        ));
+        out.extend_from_slice(&self.map[HDR..]);
+        out
+    }
+
+    /// The index from the bytes [`Index::to_bytes`] writes.
+    ///
+    /// The bytes are copied: the index owns its map, and a mapped file is
+    /// the cheaper way to own one (see [`Blob`]). `None` when the bytes are
+    /// not an index — a wrong magic, or a truncated payload.
+    pub fn from_bytes(bytes: &[u8]) -> Option<Index> {
+        Index::from_blob(Blob::Owned(bytes.to_vec().into_boxed_slice()))
+    }
+
+    /// The event id an index is current as of, from the header alone.
+    ///
+    /// The header is 56 bytes of the file's first 4 KiB, so this answers
+    /// "is the saved index current?" without reading the payload.
+    pub fn header_event_id(bytes: &[u8]) -> Option<u64> {
+        fields::<6>(bytes, MAGIC).map(|f| f[4])
+    }
+
     /// Write atomically (tmp + rename), stamping the current event id.
+    ///
+    /// The std path: writing the disk is what this is for.
+    #[cfg(feature = "std")]
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         let tmp = path.with_extension("tmp");
         let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(&header(MAGIC, &[self.n as u64, self.d as u64, self.u as u64, self.names_len as u64, self.event_id, self.synced_at as u64]))?;
-        f.write_all(&self.map[HDR..])?;
+        f.write_all(&self.to_bytes())?;
         f.sync_data()?;
         std::fs::rename(tmp, path)
     }
 
     /// The event id a saved index is current as of, from its header alone.
+    ///
+    /// The std path: reading the disk is what this is for.
+    #[cfg(feature = "std")]
     pub fn saved_event_id(path: &Path) -> Option<u64> {
         use std::io::Read;
         let mut h = [0u8; 56];
         std::fs::File::open(path).ok()?.read_exact(&mut h).ok()?;
-        fields::<6>(&h, MAGIC).map(|f| f[4])
+        Index::header_event_id(&h)
     }
 
+    /// The index in a file, mapped.
+    ///
+    /// The std path: reading the disk is what this is for.
+    #[cfg(feature = "std")]
     pub fn load(path: &Path) -> Option<Index> {
         let f = std::fs::File::open(path).ok()?;
         // mmap first (random-access bitmaps page in on demand), owned
@@ -886,10 +958,10 @@ impl Index {
             let start = self.off[s as usize];
             let end = self.off.get(s as usize + 1).copied().unwrap_or(self.map.len());
             for i in (start..end).step_by(16 * 1024) {
-                sum = sum.wrapping_add(unsafe { std::ptr::read_volatile(self.map.as_ptr().add(i)) });
+                sum = sum.wrapping_add(unsafe { core::ptr::read_volatile(self.map.as_ptr().add(i)) });
             }
         }
-        std::hint::black_box(sum);
+        core::hint::black_box(sum);
         // Built here rather than by the first search that needs them (~5
         // ms each), which after a compaction would be the next keystroke.
         self.class_counts();
@@ -983,8 +1055,8 @@ pub enum ForestFault {
     DeadAncestor { entry: u32, folder: u32 },
 }
 
-impl std::fmt::Display for ForestFault {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for ForestFault {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             ForestFault::BrokenChain { folder, parent } => write!(f, "broken parent chain: {folder} names the folder {parent}, which is not there"),
             ForestFault::WrongKind { folder, parent } => write!(f, "wrong record kind: the parent {parent} of {folder} is not a folder"),
@@ -1009,7 +1081,7 @@ pub(crate) fn header(magic: &[u8; 8], fields: &[u64]) -> Vec<u8> {
 
 /// The header's fields, if `b` starts with `magic`.
 pub(crate) fn fields<const N: usize>(b: &[u8], magic: &[u8; 8]) -> Option<[u64; N]> {
-    (b.len() >= 8 + N * 8 && &b[..8] == magic).then(|| std::array::from_fn(|k| u64::from_le_bytes(b[8 + k * 8..16 + k * 8].try_into().unwrap())))
+    (b.len() >= 8 + N * 8 && &b[..8] == magic).then(|| core::array::from_fn(|k| u64::from_le_bytes(b[8 + k * 8..16 + k * 8].try_into().unwrap())))
 }
 
 /// Section offsets for these lengths, and the file size.
@@ -1024,7 +1096,7 @@ pub(crate) fn layout<const N: usize>(lens: &[usize; N]) -> ([usize; N], usize) {
 }
 
 pub(crate) fn as_bytes<T: Copy>(v: &[T]) -> &[u8] {
-    unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, std::mem::size_of_val(v)) }
+    unsafe { core::slice::from_raw_parts(v.as_ptr() as *const u8, core::mem::size_of_val(v)) }
 }
 
 /// A name's extension (the bytes after its last dot) as `[len, bytes..]`,
@@ -1051,21 +1123,22 @@ fn ext_key(name: &[u8]) -> Option<[u8; 16]> {
 pub(crate) fn ext_slots(names: &[u8], off: &[u32]) -> (Vec<[u8; 16]>, Vec<u8>) {
     let name = |k: usize| &names[off[k] as usize..off[k + 1] as usize];
     let ext = |k: usize| ext_key(&fold::fold(name(k)));
-    let count = (0..off.len() - 1)
-        .into_par_iter()
-        .with_min_len(1 << 16)
-        .fold(HashMap::<[u8; 16], u32, Fx>::default, |mut m, k| {
+    // The counts, one map per piece of the names, merged at the end: the
+    // merge is a walk over the maps, and the pieces are the workers.
+    let parts = rgy_par::map_chunks(off.len() - 1, 1 << 16, |r| {
+        r.fold(HashMap::<[u8; 16], u32, Fx>::default(), |mut m, k| {
             if let Some(e) = ext(k) {
                 *m.entry(e).or_default() += 1;
             }
             m
         })
-        .reduce(HashMap::default, |mut a, b| {
-            for (e, n) in b {
-                *a.entry(e).or_default() += n;
-            }
-            a
-        });
+    });
+    let mut count = HashMap::<[u8; 16], u32, Fx>::default();
+    for part in parts {
+        for (e, n) in part {
+            *count.entry(e).or_default() += n;
+        }
+    }
     let mut common: Vec<([u8; 16], u32)> = count.into_iter().collect();
     common.sort_by(|(a, m), (b, n)| n.cmp(m).then_with(|| a[1..=a[0] as usize].cmp(&b[1..=b[0] as usize])));
     let mut table = vec![[0u8; 16]; 256];
@@ -1074,16 +1147,13 @@ pub(crate) fn ext_slots(names: &[u8], off: &[u32]) -> (Vec<[u8; 16]>, Vec<u8>) {
         table[i + 1] = e;
         slot.insert(e, i as u8 + 1);
     }
-    let slots = (0..off.len() - 1)
-        .into_par_iter()
-        .map(|k| {
-            let n = name(k);
-            match ext(k) {
-                Some(e) => slot.get(&e).copied().unwrap_or(255),
-                None => n.contains(&b'.') as u8 * 255,
-            }
-        })
-        .collect();
+    let slots = rgy_par::map_collect(off.len() - 1, |k| {
+        let n = name(k);
+        match ext(k) {
+            Some(e) => slot.get(&e).copied().unwrap_or(255),
+            None => n.contains(&b'.') as u8 * 255,
+        }
+    });
     (table, slots)
 }
 
@@ -1110,7 +1180,7 @@ impl NameInfo {
 
 fn section_lens(n: usize, d: usize, u: usize, names_len: usize) -> [usize; NSEC] {
     let (n4, d4, u4) = (n * 4, d * 4, (u + 1) * 4);
-    let z = n.div_ceil(ZONE) * std::mem::size_of::<Zone>();
+    let z = n.div_ceil(ZONE) * core::mem::size_of::<Zone>();
     [u.div_ceil(64) * NBITMAPS * 8, u4, names_len, n4, n, n, n4, n4, n4, d4, d4, d4, d4, d, d4, u4, n4, u, u * 4, u, 256 * 16, z]
 }
 
@@ -1158,13 +1228,13 @@ pub fn dec_size(v: u32) -> u64 {
 #[derive(Clone, Copy, Default)]
 pub struct Fx;
 pub struct FxH(u64);
-impl std::hash::BuildHasher for Fx {
+impl core::hash::BuildHasher for Fx {
     type Hasher = FxH;
     fn build_hasher(&self) -> FxH {
         FxH(0)
     }
 }
-impl std::hash::Hasher for FxH {
+impl core::hash::Hasher for FxH {
     fn write(&mut self, bytes: &[u8]) {
         for c in bytes.chunks(8) {
             let mut w = [0u8; 8];
@@ -1285,9 +1355,10 @@ pub fn char_bit(b: u8) -> u64 {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod blob_tests {
     use super::*;
+    use alloc::format;
 
     #[test]
     fn blob_from_file_reads_the_bytes() {
@@ -1327,7 +1398,7 @@ mod blob_tests {
         use rgy_discovery::walk::{KIND_FILE, Listing, NONE, RawEnt};
         let mut names = b"hi.txt".to_vec();
         let ents = vec![RawEnt { name_off: 0, name_len: 6, kind: KIND_FILE, size: 3, mtime: 7, child: NONE }];
-        let ls = vec![Listing { id: 0, names: std::mem::take(&mut names), ents }];
+        let ls = vec![Listing { id: 0, names: core::mem::take(&mut names), ents }];
         let idx = Index::build(ls, 42, 1, b"/");
         let dir = std::env::temp_dir().join(format!("rgy_idx_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
@@ -1338,6 +1409,45 @@ mod blob_tests {
         assert_eq!(loaded.u, idx.u);
         assert_eq!(Index::saved_event_id(&p), Some(42));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The format is portable: the bytes an index writes are the bytes an
+    /// index reads, with no filesystem in between.
+    ///
+    /// This is what makes the index shippable — an index built on one
+    /// machine can be handed to another as bytes, and the daemon that
+    /// reads it does not need to have built it.
+    #[test]
+    fn the_index_format_round_trips_through_bytes() {
+        use rgy_discovery::walk::{KIND_FILE, Listing, NONE, RawEnt};
+        let mut names = b"hi.txt".to_vec();
+        let ents = vec![RawEnt { name_off: 0, name_len: 6, kind: KIND_FILE, size: 3, mtime: 7, child: NONE }];
+        let ls = vec![Listing { id: 0, names: core::mem::take(&mut names), ents }];
+        let idx = Index::build(ls, 42, 1, b"/");
+        let bytes = idx.to_bytes();
+        let loaded = Index::from_bytes(&bytes).expect("the bytes are an index");
+        assert_eq!(loaded.n, idx.n);
+        assert_eq!(loaded.u, idx.u);
+        assert_eq!(loaded.d, idx.d);
+        assert_eq!(Index::header_event_id(&bytes), Some(42));
+        // The bytes are the file's bytes: the same header, the same
+        // payload, so a file and a message carry the same index.
+        let dir = std::env::temp_dir().join(format!("rgy_idxbytes_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let p = dir.join("i.fsi");
+        std::fs::write(&p, &bytes).unwrap();
+        assert_eq!(Index::saved_event_id(&p), Some(42));
+        let from_file = Index::load(&p).expect("load after write");
+        assert_eq!(from_file.u, idx.u);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Bytes that are not an index are refused, not half-read.
+    #[test]
+    fn bytes_that_are_not_an_index_are_refused() {
+        assert!(Index::from_bytes(b"not an index at all").is_none());
+        assert!(Index::from_bytes(&[]).is_none());
+        assert_eq!(Index::header_event_id(b"nope"), None);
     }
 
     /// The parent chain of a well-formed index is a forest, and the check
@@ -1436,9 +1546,11 @@ mod blob_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod path_tests {
     use super::*;
+    use alloc::format;
+    use alloc::string::{String, ToString};
 
     /// A path nested deeper than the fixed 256-entry chain used to come back
     /// missing its outermost components. Nothing said it had been cut, so the
@@ -1504,7 +1616,7 @@ mod path_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod prior_tests {
     use super::*;
     use rgy_discovery::walk::{KIND_DIR, KIND_FILE, Listing, NONE, RawEnt};

@@ -11,7 +11,51 @@
 //! from fsearch and keep fsearch's MIT terms; their headers say so, and the
 //! text is in `LICENSE-MIT-FSEARCH`. The other modules were written here,
 //! on the same design, and are Apache-2.0.
+//!
+//! # `no_std`
+//!
+//! The crate is `no_std` with the `std` feature off: the index, the query
+//! engine, the ranking, the fold, and the transliterations all run over
+//! bytes the caller owns, with `alloc` and nothing else. The `std` feature
+//! adds what needs a filesystem: the content grep (it reads files), the live
+//! overlay, the persisted index, the mmap of the name blob, the clock, and
+//! the threads.
+//!
+//! The engine is the reason this is worth doing: the query path is the
+//! part that has to be fast, and a name engine that cannot be linked into
+//! an embedded search box is a name engine with one customer.
+//!
+//! The decision behind this, and behind the parallelism that came with it,
+//! is `docs/design.md` §2.5.
 
+#![no_std]
+
+/// The allocator, named: the crate is `no_std`, and the pieces it carries
+/// are the ones that have to say so.
+extern crate alloc;
+/// The filesystem, the threads, and the clock -- only with the `std`
+/// feature, and only for the modules that need them.
+#[cfg(all(feature = "std", not(test)))]
+extern crate std;
+/// The test macros: `vec!`, `format!`, `println!`.
+///
+/// The crate is `no_std`, so the core prelude has none of them, and the
+/// tests were written against the std ones. This is the `std` declaration
+/// that brings them in; the one above stands down while the tests run,
+/// because a crate cannot be declared twice.
+///
+/// The types the tests want -- `Vec`, `String` -- are not macros, so they
+/// are not here: they are imported from `alloc` where they are used, the
+/// same as everywhere else in the crate. A test module that needs one
+/// says so, instead of a crate-wide glob that every other module would
+/// then have to silence.
+#[cfg(test)]
+#[macro_use]
+extern crate std;
+
+/// The wall clock, without `std`: what time it is, in milliseconds and in
+/// seconds. The session's idle trim and the persisted index's age ask it.
+pub mod clock;
 pub mod fuzzy;
 /// fsearch's live overlay (dead bits + overrides).
 pub mod live;
@@ -25,6 +69,8 @@ pub mod rank;
 pub mod regex;
 /// The user's priority rules: what a name is worth, and who it is for.
 pub mod rules;
+/// The synchronisation the query engine needs, without std.
+mod sync;
 
 /// The comparison fold: ASCII case-fold + NFC (parity row 1.12). The
 /// display and the I/O keep the bytes the filesystem gave; this is what a
@@ -49,15 +95,18 @@ mod readings_table;
 /// Kept inside name-core beside `live` for the same reason: it reads the
 /// name index's blob internals (`HDR`/`sec!`) and shares `Query`; a
 /// `content-core` crate splits out with the Phase 4 glue to rgx's engine.
+#[cfg(feature = "std")]
 pub mod content;
 
 /// Persisting a built name index so a repeat query pays an mmap instead of
 /// a full tree walk, plus the root check that makes loading one safe.
+#[cfg(feature = "std")]
 pub mod persist;
 
 /// Cloud placeholders: the files whose bytes are not on this disk, and the
 /// attribute that says so. The content path asks before it opens, so a
 /// search never downloads a file the user did not ask for.
+#[cfg(feature = "std")]
 pub mod placeholder;
 
 /// The incremental search session: what a keystroke re-uses (parity row

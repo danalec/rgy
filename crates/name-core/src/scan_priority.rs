@@ -24,6 +24,8 @@
 //! way `content.rs` declares the Darwin bits: name-core carries no libc
 //! dependency, on purpose.
 
+use alloc::vec::Vec;
+
 /// Make the calling thread a scan worker.
 ///
 /// The platform seam: on Linux this is affinity plus nice; where the
@@ -55,14 +57,16 @@ pub fn select_cpus(allowed: &[u32], fast: &[u32]) -> Vec<u32> {
     all
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "std"))]
 mod linux {
     //! Linux's approximation of the interactive priority the other platforms
     //! have natively.
 
+    use crate::sync::OnceCell;
+    use alloc::format;
+    use alloc::vec::Vec;
     use std::cell::Cell;
     use std::path::Path;
-    use std::sync::OnceLock;
 
     /// `PRIO_PROCESS` with `who == 0`: the calling thread. Linux's nice
     /// value is per-thread, so this is the worker's own value and not the
@@ -95,9 +99,9 @@ mod linux {
     /// Once per process because the set is the machine's, and reading it
     /// costs a file read per CPU; once per thread because the affinity is
     /// per thread.
-    static SCAN_CPUS: OnceLock<Vec<u32>> = OnceLock::new();
+    static SCAN_CPUS: OnceCell<Vec<u32>> = OnceCell::new();
 
-    thread_local! {
+    std::thread_local! {
         /// Whether this thread has been set up already.
         ///
         /// The setup is a handful of syscalls: once per thread is free,
@@ -231,6 +235,7 @@ mod linux {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use alloc::vec;
         use std::fs;
         use std::path::PathBuf;
 
@@ -340,6 +345,7 @@ mod linux {
 #[cfg(test)]
 mod tests {
     use super::select_cpus;
+    use alloc::vec;
 
     /// The fast cores win when the process may use them.
     #[test]

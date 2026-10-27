@@ -19,7 +19,7 @@ use std::fs::File;
 use std::io::Write;
 use std::time::Instant;
 
-use memmap2::Mmap;
+use rgx_core::memmap2::Mmap;
 
 const ROUNDS: usize = 15;
 

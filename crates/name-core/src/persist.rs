@@ -16,9 +16,11 @@
 //! that passes its own limit overrides it.
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use crate::name_index::Index;
+use alloc::format;
+use alloc::string::{String, ToString};
 
 /// How old a saved index may be before it is rebuilt instead of reused.
 ///
@@ -67,7 +69,9 @@ pub fn age_text(age: u64) -> String {
 }
 
 fn now_unix() -> u64 {
-    unix(SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default())
+    // The crate's own clock (crate::clock): the same wall clock in every
+    // build, declared rather than borrowed from std::time.
+    crate::clock::unix_millis() / 1000
 }
 
 /// Canonicalise so `.`, `..`, trailing separators and (on Windows) verbatim
@@ -291,6 +295,9 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 mod tests {
     use super::*;
     use crate::name_index::Index;
+    use alloc::format;
+    use alloc::string::ToString;
+    use alloc::vec::Vec;
     use rgy_discovery::PortableSource;
     use rgy_discovery::Source;
 

@@ -1,4 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
+//
+// Without std the overlay's write half has no filesystem to write from,
+// so it is unreachable there: the code is here, the callers are not.
+#![cfg_attr(not(feature = "std"), allow(dead_code))]
 
 //! The overlay: what the disk holds now, over the snapshot the base holds.
 //!
@@ -29,9 +33,16 @@
 //! from the base, once from the overlay — and a file that went away keeps
 //! answering from the base's snapshot.
 
-use crate::name_index::{Index, enc_size, name_mask};
-use rgy_discovery::walk::{self, FLAG_MOUNT, KIND_DIR, KIND_FILE, KIND_LINK, KIND_OTHER, Listing, NONE, RawEnt};
-use std::collections::{BTreeMap, HashMap};
+use crate::name_index::enc_size;
+use crate::name_index::{Index, name_mask};
+use alloc::collections::BTreeMap;
+use alloc::vec;
+use alloc::vec::Vec;
+use rgy_discovery::walk;
+use rgy_discovery::walk::{FLAG_MOUNT, KIND_DIR, Listing, NONE, RawEnt};
+// `String` is the watch feed's error type.
+use alloc::string::String;
+use hashbrown::HashMap;
 
 /// One entry of the overlay.
 #[derive(Clone, Copy)]
@@ -437,7 +448,7 @@ impl Live {
         if f.blocked {
             return Applied::Done;
         }
-        let p = std::mem::take(&mut f.path);
+        let p = core::mem::take(&mut f.path);
         if f.recursive {
             if p == b"/" {
                 return Applied::Rebuild;
@@ -615,26 +626,24 @@ impl Live {
     /// that changed is [`Live::apply_dir`]'s job. This is how a lost fsevents
     /// history is recovered without crawling the whole disk.
     pub fn changed_dirs(&self, since: u32) -> Vec<Vec<u8>> {
-        use rayon::prelude::*;
         let idx = &self.base;
         let de = idx.dir_entry();
         let check = |p: &[u8]| !walk::blocked(p) && lstat(p).is_some_and(|o| o.mtime >= since);
-        let pool = stat_pool();
-        let mut out: Vec<Vec<u8>> = pool.install(|| {
-            (1..idx.d)
-                .into_par_iter()
-                .with_min_len(1024)
-                .filter(|&k| !self.is_dead(de[k]))
-                .map_init(Vec::new, |buf, k| {
-                    idx.path(de[k] as usize, buf);
-                    // The base holds root-relative paths; the disk wants
-                    // openable ones.
-                    let on_disk = self.openable(buf);
-                    check(&on_disk).then_some(on_disk)
-                })
-                .flatten()
-                .collect()
-        });
+        let mut out: Vec<Vec<u8>> = rgy_par::map_collect_with(idx.d.saturating_sub(1), 1024, |ki| {
+            let k = ki + 1;
+            if self.is_dead(de[k]) {
+                return None;
+            }
+            let mut buf = Vec::new();
+            idx.path(de[k] as usize, &mut buf);
+            // The base holds root-relative paths; the disk wants
+            // openable ones.
+            let on_disk = self.openable(&buf);
+            check(&on_disk).then_some(on_disk)
+        })
+        .into_iter()
+        .flatten()
+        .collect();
         out.extend(self.over.iter().filter(|(p, o)| o.kind & 3 == KIND_DIR && o.kind & FLAG_MOUNT == 0 && check(p)).map(|(p, _)| p.clone()));
         let root = self.openable(b"/");
         if lstat(&root).is_some_and(|o| o.mtime >= since) {
@@ -707,11 +716,6 @@ impl Live {
     }
 }
 
-/// The threads for bulk lstat: path lookups scale further than opens do.
-pub fn stat_pool() -> rayon::ThreadPool {
-    rayon::ThreadPoolBuilder::new().num_threads(12).start_handler(|_| crate::no_materialize()).build().unwrap()
-}
-
 /// Visit every entry of a scan with its full path.
 pub fn for_each_path(ls: &[Listing], root: &[u8], mut f: impl FnMut(Vec<u8>, &RawEnt)) {
     let mut by_id: HashMap<u32, &Listing> = HashMap::with_capacity(ls.len());
@@ -747,14 +751,12 @@ pub(crate) fn normalize(path: &[u8]) -> Vec<u8> {
 }
 
 /// Join a folder and a name.
+///
+/// The seam owns the joining: the platform backends join the same way, so
+/// a path that came from a feed and a path that came from a walk name the
+/// same folder.
 pub fn join(dir: &[u8], name: &[u8]) -> Vec<u8> {
-    let mut p = Vec::with_capacity(dir.len() + 1 + name.len());
-    p.extend_from_slice(dir);
-    if dir != b"/" {
-        p.push(b'/');
-    }
-    p.extend_from_slice(name);
-    p
+    rgy_discovery::path::join(dir, name)
 }
 
 /// The key range holding everything strictly under a path.
@@ -766,28 +768,25 @@ fn subtree_bounds(path: &[u8]) -> (Vec<u8>, Vec<u8>) {
 }
 
 /// Stat a path without following links, and report what it holds now.
+///
+/// The seam's stat: a link is a link and not the thing it points at, and
+/// the disk is the only place the answer comes from. The overlay needs it
+/// to tell a file that changed from a file that is gone, and that answer
+/// is worth having wherever there is a disk to ask.
 pub fn lstat(path: &[u8]) -> Option<OEnt> {
-    let s = std::path::Path::new(std::str::from_utf8(path).ok()?).symlink_metadata().ok()?;
-    let kind = if s.file_type().is_symlink() {
-        KIND_LINK
-    } else if s.is_dir() {
-        KIND_DIR
-    } else if s.is_file() {
-        KIND_FILE
-    } else {
-        KIND_OTHER
-    };
-    let mtime =
-        s.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs().min(u32::MAX as u64) as u32).unwrap_or(0);
-    Some(OEnt::new(path, kind, s.len(), mtime))
+    let s = rgy_discovery::dir::stat(path)?;
+    Some(OEnt::new(path, s.kind, s.size, s.mtime))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
     use crate::name_index::Index;
     use crate::name_query::{Hit, Query, Searcher};
+    use alloc::format;
+    use alloc::vec;
     use rgy_discovery::{PortableSource, Source};
+    extern crate std;
 
     /// A tree in a temporary directory, with one file in it.
     fn tree(tag: &str) -> (std::path::PathBuf, Vec<u8>) {

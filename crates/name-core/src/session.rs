@@ -50,6 +50,8 @@
 //! exactly is not used at all.
 
 use crate::name_query::{Hit, NameKey, Query, Searcher, SortBy};
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 
 /// How much more a re-rank's visit costs than a step of the linear scan.
 ///
@@ -66,15 +68,16 @@ const RERANK_VISIT_RATIO: u64 = 60;
 pub struct Session {
     /// The session's identity. The client picks it, or the daemon does.
     id: u64,
-    last: std::sync::Mutex<Option<Last>>,
+    last: crate::sync::Mutex<Option<Last>>,
     /// Whether the last search was answered from the session.
-    reranked: std::sync::atomic::AtomicBool,
+    reranked: core::sync::atomic::AtomicBool,
 }
 
 /// The state a session keeps between two keystrokes.
 struct Last {
-    /// When the session was filled.
-    at: std::time::Instant,
+    /// When the session was filled, in wall-clock milliseconds.
+    #[cfg_attr(not(feature = "std"), allow(dead_code))]
+    at: u64,
     /// The revision of the index the result set was found against.
     revision: u64,
     /// The query's key: what a later query is compared against.
@@ -100,7 +103,7 @@ struct Last {
 impl Session {
     /// A session with the given identity and nothing in it.
     pub fn new(id: u64) -> Session {
-        Session { id, last: std::sync::Mutex::new(None), reranked: std::sync::atomic::AtomicBool::new(false) }
+        Session { id, last: crate::sync::Mutex::new(None), reranked: core::sync::atomic::AtomicBool::new(false) }
     }
 
     /// The session's identity.
@@ -142,7 +145,7 @@ impl Session {
     /// This is how a caller -- and a test -- tells a re-rank from a fresh
     /// search. The answers are the same either way; the work is not.
     pub fn last_reranked(&self) -> bool {
-        self.reranked.load(std::sync::atomic::Ordering::Relaxed)
+        self.reranked.load(core::sync::atomic::Ordering::Relaxed)
     }
 
     /// Search the query, re-using the session when it can.
@@ -157,11 +160,12 @@ impl Session {
         let revision = searcher.live.revision;
         match self.rerank(searcher, q, revision) {
             Some(hits) => {
-                self.reranked.store(true, std::sync::atomic::Ordering::Relaxed);
+                self.reranked.store(true, core::sync::atomic::Ordering::Relaxed);
+                self.fill(searcher, q, revision, &hits, true);
                 hits
             }
             None => {
-                self.reranked.store(false, std::sync::atomic::Ordering::Relaxed);
+                self.reranked.store(false, core::sync::atomic::Ordering::Relaxed);
                 let (base, over) = searcher.search_split(q);
                 let complete = base.len() + over.len() < q.limit;
                 let mut hits = base;
@@ -186,30 +190,33 @@ impl Session {
     /// the session is empty. The answer is then a fresh search, and the
     /// caller cannot tell the difference -- which is the point.
     fn rerank(&self, searcher: &Searcher<'_>, q: &Query, revision: u64) -> Option<Vec<Hit>> {
-        let last = self.last.lock().unwrap();
-        let last = last.as_ref()?;
-        if last.revision != revision || !last.complete {
-            return None;
-        }
-        // The query has to narrow the previous one, and it has to be the
-        // same shape of query: a filter that changed the answer cannot be
-        // re-ranked from the entries the old filter chose.
-        if !SessionKey::of(q).narrows(&last.key) {
-            return None;
-        }
-        // The re-rank visits the entries one by one, and a visit costs about
-        // sixty times what a step of the linear scan costs (the scan reads
-        // the names in order; the re-rank goes to each entry's name). So
-        // the re-rank only pays when the previous set is much smaller than
-        // what a fresh scan would walk -- the same rule the engine's own
-        // `selective` plan follows. Without it the session would be a
-        // pessimisation on a wide query, and a session that makes the
-        // search slower is not an optimisation.
-        let (lo, hi) = searcher.scope_range(q).unwrap_or((1, searcher.live.base.n));
-        if (last.entries.len() as u64).saturating_mul(RERANK_VISIT_RATIO) > (hi - lo) as u64 {
-            return None;
-        }
-        Some(searcher.rerank_entries(q, &last.entries))
+        let entries = {
+            let last = self.last.lock().unwrap();
+            let last = last.as_ref()?;
+            if last.revision != revision || !last.complete {
+                return None;
+            }
+            // The query has to narrow the previous one, and it has to be the
+            // same shape of query: a filter that changed the answer cannot be
+            // re-ranked from the entries the old filter chose.
+            if !SessionKey::of(q).narrows(&last.key) {
+                return None;
+            }
+            // The re-rank visits the entries one by one, and a visit costs about
+            // sixty times what a step of the linear scan costs (the scan reads
+            // the names in order; the re-rank goes to each entry's name). So
+            // the re-rank only pays when the previous set is much smaller than
+            // what a fresh scan would walk -- the same rule the engine's own
+            // `selective` plan follows. Without it the session would be a
+            // pessimisation on a wide query, and a session that makes the
+            // search slower is not an optimisation.
+            let (lo, hi) = searcher.scope_range(q).unwrap_or((1, searcher.live.base.n));
+            if (last.entries.len() as u64).saturating_mul(RERANK_VISIT_RATIO) > (hi - lo) as u64 {
+                return None;
+            }
+            last.entries.clone()
+        };
+        Some(searcher.rerank_entries(q, &entries))
     }
 
     /// Fill the session with what the search matched.
@@ -226,7 +233,7 @@ impl Session {
             entries.push((h.idx, name));
         }
         *self.last.lock().unwrap() = Some(Last {
-            at: std::time::Instant::now(),
+            at: crate::name_query::now_millis(),
             revision,
             key: SessionKey::of(q),
             facets: Facets::of(q),
@@ -245,21 +252,40 @@ impl Session {
 
     /// Drop the session once searching has stopped: the result set is worth
     /// keeping only while the user is typing.
-    pub fn trim_if_idle(&self, idle: std::time::Duration) {
+    ///
+    /// The `std` build: the wall clock says whether it has stopped.
+    #[cfg(feature = "std")]
+    pub fn trim_if_idle(&self, idle: core::time::Duration) {
         let mut g = self.last.lock().unwrap();
-        if g.as_ref().is_some_and(|s| s.at.elapsed() > idle) {
+        // `>=`, not `>`: "idle for at least this long" is what a zero
+        // threshold asks for, and a millisecond clock cannot promise more
+        // precision than that.
+        if g.as_ref().is_some_and(|s| crate::name_query::now_millis().saturating_sub(s.at) >= idle.as_millis() as u64) {
             *g = None;
         }
     }
+
+    /// Without a clock there is no "idle" to decide, so the session stays.
+    #[cfg(not(feature = "std"))]
+    pub fn trim_if_idle(&self, _idle: core::time::Duration) {}
 
     /// Whether the session has been idle for `idle`.
     ///
     /// The daemon asks this of every session it keeps and drops the ones
     /// that have not been used. A session with no result set is idle: it
     /// holds nothing, and the next query reads the index anyway.
-    pub fn idle_for(&self, idle: std::time::Duration) -> bool {
+    ///
+    /// The `std` build: the wall clock says whether it has stopped.
+    #[cfg(feature = "std")]
+    pub fn idle_for(&self, idle: core::time::Duration) -> bool {
         let g = self.last.lock().unwrap();
-        g.as_ref().is_none_or(|s| s.at.elapsed() > idle)
+        g.as_ref().is_none_or(|s| crate::name_query::now_millis().saturating_sub(s.at) >= idle.as_millis() as u64)
+    }
+
+    /// Without a clock there is no "idle" to decide, so no session is idle.
+    #[cfg(not(feature = "std"))]
+    pub fn idle_for(&self, _idle: core::time::Duration) -> bool {
+        false
     }
 
     /// The facet selection: the part of the query that is not the text the
@@ -302,10 +328,10 @@ impl Session {
             && last.revision == searcher.live.revision
             && let Some(hits) = &last.answer
         {
-            self.reranked.store(true, std::sync::atomic::Ordering::Relaxed);
+            self.reranked.store(true, core::sync::atomic::Ordering::Relaxed);
             return hits.clone();
         }
-        self.reranked.store(false, std::sync::atomic::Ordering::Relaxed);
+        self.reranked.store(false, core::sync::atomic::Ordering::Relaxed);
         self.search(searcher, q)
     }
 }
@@ -342,8 +368,8 @@ impl Facets {
             size: q.size,
             size_set: q.size_set,
             mtime: q.mtime,
-            name_re: q.name_re.as_ref().map(|r| r.as_str().to_string()),
-            path_re: q.path_re.as_ref().map(|r| r.as_str().to_string()),
+            name_re: q.name_re.as_ref().map(|r| r.pattern().to_string()),
+            path_re: q.path_re.as_ref().map(|r| r.pattern().to_string()),
             globs: q.globs.clone(),
         }
     }
@@ -419,7 +445,7 @@ impl SessionKey {
                 size_set: q.size_set,
                 mtime: q.mtime,
                 globs: q.globs.clone(),
-                path_re: q.path_re.as_ref().map(|r| r.as_str().to_string()),
+                path_re: q.path_re.as_ref().map(|r| r.pattern().to_string()),
                 scope: q.scope.clone(),
                 sort: q.sort,
                 limit: q.limit,
@@ -439,6 +465,8 @@ mod tests {
     use super::*;
     use crate::live::Live;
     use crate::name_index::Index;
+    use alloc::format;
+    use alloc::vec;
     use rgy_discovery::walk::{KIND_FILE, KIND_LINK, Listing, NONE, RawEnt};
 
     /// An index of `n` files whose names are `entry_000000.txt` and so on,

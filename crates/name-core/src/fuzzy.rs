@@ -15,6 +15,9 @@
 //! kind-ranked UI matcher. Deleting it is a deliberate call, not a cleanup —
 //! check with `grep -rn 'fuzzy::' --include=*.rs` before assuming it is dead.
 
+use alloc::string::String;
+use alloc::vec::Vec;
+
 /// How tightly the needle matched the name. Lower ranks better.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MatchKind {
@@ -172,6 +175,8 @@ pub fn score(name: &str, needles: &[String]) -> Option<Match> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::string::ToString;
+    use alloc::vec;
 
     fn needle(s: &str) -> Vec<String> {
         vec![s.to_string()]
