@@ -8,6 +8,8 @@
 //! unit is written out as a file the user can read and edit — see
 //! [`crate::render::systemd_unit`].
 
+use alloc::format;
+use alloc::string::{String, ToString};
 use std::path::{Path, PathBuf};
 
 use crate::render::systemd_unit;

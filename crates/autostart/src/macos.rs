@@ -11,6 +11,9 @@
 //! the launchd path came from `fsearch`, and nothing in this tree carried
 //! it. This module is that path, written here.
 
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 use std::path::{Path, PathBuf};
 
 use crate::render::launchd_plist;

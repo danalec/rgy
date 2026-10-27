@@ -9,6 +9,8 @@
 //! line *is* the artifact — it is printed for the user to read, and it is
 //! the same line the tool hands to `schtasks`.
 
+use alloc::format;
+use alloc::string::String;
 use std::path::Path;
 
 use crate::display_path;
@@ -186,6 +188,8 @@ fn xml_escape(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::string::ToString;
+    use alloc::vec::Vec;
     use std::path::PathBuf;
 
     fn args(items: &[&str]) -> Vec<String> {

@@ -15,6 +15,10 @@ fn tool() -> Command {
     Command::new(env!("CARGO_BIN_EXE_rgy-autostart"))
 }
 
+/// The autostart is implemented for Windows, Linux and macOS; on every
+/// other system the tool refuses, and what it says then is a different
+/// thing to test.
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 #[test]
 fn a_daemon_that_is_not_there_is_refused() {
     let missing = std::env::temp_dir().join("rgy-autostart-does-not-exist");
@@ -36,6 +40,7 @@ fn a_daemon_that_is_not_there_is_refused() {
     );
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 #[test]
 fn install_without_a_path_says_what_is_missing() {
     let output = tool().arg("install").output().expect("the tool runs");
@@ -47,6 +52,7 @@ fn install_without_a_path_says_what_is_missing() {
     );
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 #[test]
 fn status_reports_without_registering_anything() {
     let output = tool().arg("status").output().expect("the tool runs");
@@ -54,6 +60,25 @@ fn status_reports_without_registering_anything() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("platform:"), "{stdout}");
     assert!(stdout.contains("mechanism:"), "{stdout}");
+}
+
+/// On a platform with no autostart mechanism, the tool says so and
+/// fails.
+///
+/// It does not pretend to have registered anything: a tool that answers
+/// "installed" on a system where it registered nothing is worse than no
+/// tool at all. This is the FreeBSD case, and it is a case of its own —
+/// the tool refuses, in words, and the refusal is the answer.
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+#[test]
+fn a_platform_without_autostart_says_so() {
+    let output = tool().arg("status").output().expect("the tool runs");
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not implemented on this operating system"),
+        "the reason has to name the platform: {stderr}"
+    );
 }
 
 #[test]

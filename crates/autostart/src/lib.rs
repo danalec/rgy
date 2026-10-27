@@ -1,14 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Autostart: the daemon is there before the user needs it.
+//! Arming the daemon at login, without asking.
 //!
-//! A search that only finds the files created *after* the daemon started is
-//! half a search. The machine was off, the file was created while it was
-//! off, and the first thing the user does after login is look for exactly
-//! that file. So the daemon has to come up with the session.
-//!
-//! Each platform has its own way of saying "run this at login", and each
-//! one is text the user can read:
+//! One command, three platforms, no elevation and no dialog:
 //!
 //!   * Linux — a systemd **user** unit under `~/.config/systemd/user/`.
 //!   * macOS — a launchd agent under `~/Library/LaunchAgents/`.
@@ -31,16 +25,45 @@
 //! which mechanism, what the text says — is a pure function that can be
 //! tested from any operating system, and so that the parts that touch the
 //! machine are thin enough to read in one go.
+//!
+//! # `no_std`
+//!
+//! The crate is `no_std`: the decision — which platform, which mechanism,
+//! which arguments — is portable, and it is in [`plan`]. The parts that
+//! touch the machine (the files written, the commands run, the paths
+//! resolved) are behind the `std` feature, because a machine is a machine.
 
-pub mod linux;
-pub mod macos;
+#![no_std]
+
+extern crate alloc;
+#[cfg(feature = "std")]
+extern crate std;
+
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
+/// Which platform, which mechanism — decided before anything is touched.
 pub mod plan;
+
+/// The text of the artifacts: the systemd unit, the launchd plist, the
+/// commands the Windows tools take.
+#[cfg(feature = "std")]
 pub mod render;
+
+/// The systemd user unit (Linux).
+#[cfg(feature = "std")]
+pub mod linux;
+
+/// The launchd agent (macOS).
+#[cfg(feature = "std")]
+pub mod macos;
+
+/// The Task Scheduler task, or the registry value (Windows).
+#[cfg(feature = "std")]
 pub mod windows;
 
 pub use plan::{Mechanism, Platform, choose_mechanism, default_name, detect_platform};
-
-use std::path::{Path, PathBuf};
 
 /// The mechanism's name, with the fallback's caveat.
 ///
@@ -70,12 +93,13 @@ pub const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
 /// can fail for reasons that have nothing to do with the first — no user
 /// bus on a headless box, no permission to write the task. The tool then
 /// says so, instead of claiming a success that did not happen.
+#[cfg(feature = "std")]
 #[derive(Debug, Clone)]
 pub struct Report {
     /// The mechanism that is in place.
     pub mechanism: Mechanism,
     /// The file that was written, when the mechanism has one.
-    pub artifact: Option<PathBuf>,
+    pub artifact: Option<std::path::PathBuf>,
     /// The program command line that was registered.
     pub command: String,
     /// Whether the platform's own tool was told to arm it.
@@ -85,6 +109,7 @@ pub struct Report {
 }
 
 /// What an uninstall did, in words.
+#[cfg(feature = "std")]
 #[derive(Debug, Clone)]
 pub struct Removal {
     /// The mechanism that was looked for.
@@ -99,15 +124,16 @@ pub struct Removal {
 ///
 /// `HOME` on the unix side and `USERPROFILE` on the Windows side: the
 /// platform's own variable, so a user who overrides it gets the override.
-pub fn home_dir() -> PathBuf {
+#[cfg(feature = "std")]
+pub fn home_dir() -> std::path::PathBuf {
     #[cfg(windows)]
     let key = "USERPROFILE";
     #[cfg(not(windows))]
     let key = "HOME";
 
     std::env::var_os(key)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
 }
 
 /// The path as the user should read it.
@@ -117,7 +143,8 @@ pub fn home_dir() -> PathBuf {
 /// task created with that prefix holds a command that cannot be started.
 /// So the prefix comes off before the path is written into anything the
 /// platform will run.
-pub fn display_path(path: &Path) -> String {
+#[cfg(feature = "std")]
+pub fn display_path(path: &std::path::Path) -> String {
     let text = path.display().to_string();
     #[cfg(windows)]
     {
@@ -137,7 +164,8 @@ pub fn display_path(path: &Path) -> String {
 /// A tool that registers a path that does not exist is worse than no tool:
 /// the entry is there, the daemon is not, and the user finds out at the
 /// next login, in a way that looks like a broken product.
-pub fn resolve_binary(path: &Path) -> Result<PathBuf, String> {
+#[cfg(feature = "std")]
+pub fn resolve_binary(path: &std::path::Path) -> Result<std::path::PathBuf, String> {
     if !path.exists() {
         return Err(format!("there is no file at {}", path.display()));
     }
@@ -155,19 +183,25 @@ pub fn resolve_binary(path: &Path) -> Result<PathBuf, String> {
 /// it is deliberately not a shell: nothing here is quoted, escaped, or
 /// interpreted.
 pub fn split_args(text: &str) -> Vec<String> {
-    text.split_whitespace().map(str::to_string).collect()
+    text.split_whitespace()
+        .map(alloc::string::ToString::to_string)
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::string::ToString;
+    use alloc::vec;
 
+    #[cfg(feature = "std")]
     #[test]
     fn a_binary_that_is_not_there_is_refused() {
-        let err = resolve_binary(Path::new("/definitely/not/here/searchd")).unwrap_err();
+        let err = resolve_binary(std::path::Path::new("/definitely/not/here/searchd")).unwrap_err();
         assert!(err.contains("there is no file at"), "{err}");
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn a_directory_is_not_a_binary() {
         let dir = std::env::temp_dir();

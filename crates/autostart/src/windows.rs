@@ -16,6 +16,8 @@
 //! the command line — and the tool prints it, so the user can read what
 //! was registered and run it again by hand.
 
+use alloc::format;
+use alloc::string::{String, ToString};
 use std::path::Path;
 
 use crate::render::windows_task_command;

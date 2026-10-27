@@ -13,9 +13,21 @@ categories = ["os::windows-apis", "os::unix-apis"]
 readme = "../../README.md"
 
 
+[features]
+default = ["std"]
+# The machine: the files written, the commands run, the paths resolved.
+# Without it the crate is `core` plus `alloc`, and what is left is the
+# decision -- which platform, which mechanism, which arguments.
+std = []
+
 [[bin]]
 name = "rgy-autostart"
 path = "src/main.rs"
+# The binary is the product: it arms the daemon on the user's machine, so
+# it needs the `std` half of the library. Without the feature there is no
+# binary to build -- and the `no_std` build of the library is what the
+# bare-metal gate checks.
+required-features = ["std"]
 
 # No dependencies on purpose. The platform calls are `schtasks` and `reg`
 # on Windows, `systemctl` and the filesystem on Linux, and a plist file on
