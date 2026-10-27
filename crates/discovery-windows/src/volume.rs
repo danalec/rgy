@@ -3,7 +3,12 @@
 //! Win32 volume access: raw NTFS file records and USN journal reads.
 
 use crate::ntfs::{self, FileRecordInput, ReadUsnJournalData};
-use std::ffi::c_void;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
+use core::ffi::c_void;
+use hashbrown::HashSet;
 use windows::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
@@ -15,6 +20,12 @@ use windows::Win32::System::Ioctl::{
     FSCTL_READ_USN_JOURNAL,
 };
 use windows::core::PCWSTR;
+
+/// The tests, and only the tests, need `std`: a temp file to read at an
+/// offset, and the process id to name it after. The crate body is `core`
+/// plus `alloc`.
+#[cfg(test)]
+extern crate std;
 
 /// `GENERIC_READ`. The NTFS driver rejects volume reads opened with anything
 /// weaker; Zen uses the same value (0x80000000) for its volume handles.
@@ -41,8 +52,8 @@ pub enum VolumeError {
     JournalUnavailable { code: u32 },
 }
 
-impl std::fmt::Display for VolumeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for VolumeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             VolumeError::Open { path, code } => {
                 write!(f, "failed to open volume {path} (win32 error {code})")
@@ -57,7 +68,7 @@ impl std::fmt::Display for VolumeError {
     }
 }
 
-impl std::error::Error for VolumeError {}
+impl core::error::Error for VolumeError {}
 
 /// An open NTFS volume handle.
 pub struct Volume {
@@ -97,7 +108,7 @@ impl Volume {
 
         // Volume devices are opened with flags=0: passing FILE_FLAG_BACKUP_SEMANTICS
         // makes \\.\X: resolve as a directory handle rather than the volume.
-        let wide: Vec<u16> = device.encode_utf16().chain(std::iter::once(0)).collect();
+        let wide: Vec<u16> = device.encode_utf16().chain(core::iter::once(0)).collect();
 
         let handle = unsafe {
             CreateFileW(
@@ -350,7 +361,7 @@ impl Volume {
     /// cannot complete inline would report ERROR_IO_PENDING; volume reads at
     /// these offsets do not, and that case is handled as a hard error below.
     pub fn read_at(&self, byte_offset: u64, buf: &mut [u8]) -> VolumeResult<usize> {
-        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+        let mut overlapped: OVERLAPPED = unsafe { core::mem::zeroed() };
         overlapped.Anonymous.Anonymous.Offset = (byte_offset & 0xFFFF_FFFF) as u32;
         overlapped.Anonymous.Anonymous.OffsetHigh = (byte_offset >> 32) as u32;
 
@@ -403,7 +414,7 @@ impl Volume {
             let Some(list) = ntfs::attr_list_value(&rec) else {
                 return Ok(runs);
             };
-            let mut seen = std::collections::HashSet::new();
+            let mut seen = HashSet::new();
             for entry in ntfs::parse_attr_list(list) {
                 // $DATA run-list fragments only. A nonzero VCN marks run data,
                 // and `start_vcn == 0` is the fragment already in record 0.
@@ -447,7 +458,7 @@ impl Volume {
     /// closes nothing.
     pub(crate) fn dummy_for_tests() -> Self {
         Volume {
-            handle: HANDLE(std::ptr::null_mut()),
+            handle: HANDLE(core::ptr::null_mut()),
             root: "C:\\".to_string(),
             path: String::new(),
             serial: 0,
@@ -471,7 +482,10 @@ fn volume_serial(root: &str) -> Option<u32> {
         drive.to_string()
     };
     let root_path = format!("{}\\", drive);
-    let wide: Vec<u16> = root_path.encode_utf16().chain(std::iter::once(0)).collect();
+    let wide: Vec<u16> = root_path
+        .encode_utf16()
+        .chain(core::iter::once(0))
+        .collect();
 
     let mut serial: u32 = 0;
     let ok = unsafe {
@@ -505,7 +519,7 @@ pub fn list_fixed_ntfs_roots() -> Vec<String> {
     let mut out = Vec::new();
     for letter in b'A'..=b'Z' {
         let root = format!("{}:\\", letter as char);
-        let wide: Vec<u16> = root.encode_utf16().chain(std::iter::once(0)).collect();
+        let wide: Vec<u16> = root.encode_utf16().chain(core::iter::once(0)).collect();
 
         let drive_type = unsafe { GetDriveTypeW(PCWSTR(wide.as_ptr())) };
         if drive_type != DRIVE_FIXED {
@@ -632,7 +646,7 @@ mod tests {
         let wide: Vec<u16> = path
             .to_string_lossy()
             .encode_utf16()
-            .chain(std::iter::once(0))
+            .chain(core::iter::once(0))
             .collect();
         // Opened exactly like Volume::open: no FILE_FLAG_OVERLAPPED.
         let handle = unsafe {
@@ -649,7 +663,7 @@ mod tests {
         .expect("open temp file");
 
         let read_at_offset = |offset: u32| -> Vec<u8> {
-            let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+            let mut overlapped: OVERLAPPED = unsafe { core::mem::zeroed() };
             overlapped.Anonymous.Anonymous.Offset = offset;
             let mut buf = [0u8; 4];
             let mut read = 0u32;

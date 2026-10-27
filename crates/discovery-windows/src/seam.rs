@@ -7,6 +7,9 @@
 //! [`ChangeBatch`]es. Together they are the Windows half of
 //! `docs/design.md` §2.2.
 
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
 use rgy_discovery::walk::Listing;
 use rgy_discovery::{ChangeBatch, Source, Watch};
 

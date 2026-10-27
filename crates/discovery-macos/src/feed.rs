@@ -21,8 +21,20 @@
 //! The adapter owns the stream. Dropping the stream stops the feed, and a
 //! stopped feed is a daemon that stopped noticing changes — which looks
 //! exactly like a disk that stopped changing.
+//!
+//! The channel is the tree's own (`rgy_par::mpsc`), so the feed is the same
+//! with and without `std`: with it the reader that finds the queue empty
+//! parks, without it the reader spins.
 
-use std::sync::mpsc::Receiver;
+use alloc::boxed::Box;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+// The `vec!` macro, for the path buffers below. They are macOS's, so the
+// import is macOS's too.
+#[cfg(target_os = "macos")]
+use alloc::vec;
+
+use rgy_par::mpsc::Receiver;
 
 use rgy_discovery::{ChangeBatch, FILE_ATTRIBUTE_DIRECTORY, UsnRecord, Watch};
 
@@ -73,7 +85,7 @@ impl FseventsWatch {
     /// coalesce events into one batch.
     #[cfg(target_os = "macos")]
     pub fn open(root: &[u8], since: u64, latency: f64) -> Self {
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = rgy_par::mpsc::channel();
         let stream = crate::fsevents::watch(since, latency, tx, 0);
         Self::new(rx, Box::new(stream), root)
     }
@@ -223,20 +235,76 @@ fn record_for(ev: &Event, grain: Grain) -> UsnRecord {
 /// that reaches the tree through a symlink is resolved too: the kernel
 /// reports the resolved path, and an unresolved root would never match the
 /// events under it.
+///
+/// The two calls behind it are `getcwd(3)` and the path resolution: the
+/// ones `std::path::absolute` and `std::fs::canonicalize` are made of, and
+/// the crate has no `std` to make them with. The resolution is the seam's
+/// (`rgy_discovery::file::canonicalize`); the working directory is here.
+#[cfg(target_os = "macos")]
 fn absolute_root(root: &[u8]) -> Vec<u8> {
-    let text = String::from_utf8_lossy(root);
-    let path = std::path::Path::new(text.as_ref());
-    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
-    let resolved = std::fs::canonicalize(&absolute).unwrap_or(absolute);
-    resolved.as_os_str().as_encoded_bytes().to_vec()
+    // The absolute path: a relative one is resolved against the working
+    // directory.
+    let absolute = if root.starts_with(b"/") {
+        root.to_vec()
+    } else {
+        match working_directory() {
+            Some(cwd) => rgy_discovery::path::join(&cwd, root),
+            None => root.to_vec(),
+        }
+    };
+    // The resolved path: the symlinks followed. A path that does not
+    // resolve is kept as it is — the absolute path is still the tree.
+    match rgy_discovery::file::canonicalize(&absolute) {
+        Some(p) => p,
+        None => absolute,
+    }
+}
+
+/// The indexed root as an absolute path.
+///
+/// Off macOS there is no FSEvents stream, and no absolute path for the
+/// events to be under: the root is taken as it comes.
+#[cfg(not(target_os = "macos"))]
+fn absolute_root(root: &[u8]) -> Vec<u8> {
+    root.to_vec()
+}
+
+/// The buffer the two path calls use.
+///
+/// PATH_MAX is 1024 on macOS, and the Darwin extension of `realpath`
+/// answers paths longer than that, so the buffer is wider than either.
+#[cfg(target_os = "macos")]
+const PATH_BUF: usize = 64 * 1024;
+
+// The call the root resolution is made of. `getcwd(3)` is the working
+// directory; the path with its symlinks followed is the seam's
+// (`rgy_discovery::file::canonicalize`), because that is where the
+// resolution of a path lives. The crate declares `getcwd` itself because
+// it has no `std::env` to reach for.
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn getcwd(buf: *mut core::ffi::c_char, size: usize) -> *mut core::ffi::c_char;
+}
+
+/// The working directory, as bytes.
+#[cfg(target_os = "macos")]
+fn working_directory() -> Option<Vec<u8>> {
+    let mut buf = vec![0u8; PATH_BUF];
+    let p = unsafe { getcwd(buf.as_mut_ptr().cast(), buf.len()) };
+    if p.is_null() {
+        return None;
+    }
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    buf.truncate(end);
+    Some(buf)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicBool, Ordering};
     use rgy_discovery::Source;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
 
     /// A stand-in for the FSEvents stream: its drop is observable, which is
     /// the property the test is about.
@@ -342,7 +410,7 @@ mod tests {
     /// The callback pushes, the daemon pulls: one batch in, one batch out.
     #[test]
     fn a_batch_becomes_one_change_batch() {
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = rgy_par::mpsc::channel();
         let (_alive, stream) = fake();
         let mut watch = FseventsWatch::with_prefix(rx, stream, b"/w");
         tx.send(vec![event("/w/docs", 0)]).unwrap();
@@ -359,7 +427,7 @@ mod tests {
     /// that is missing events is not a batch of changes.
     #[test]
     fn a_feed_that_lost_history_asks_for_a_rebuild() {
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = rgy_par::mpsc::channel();
         let (_alive, stream) = fake();
         let mut watch = FseventsWatch::with_prefix(rx, stream, b"/w");
         tx.send(vec![event("/w/docs", KERNEL_DROPPED)]).unwrap();
@@ -378,7 +446,7 @@ mod tests {
     /// The feed's position is where it stands in the change history.
     #[test]
     fn the_position_is_the_newest_event_id_delivered() {
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = rgy_par::mpsc::channel();
         let (_alive, stream) = fake();
         let mut watch = FseventsWatch::with_prefix(rx, stream, b"/w");
         assert_eq!(watch.position(), Some(0));
@@ -407,7 +475,7 @@ mod tests {
     /// changing.
     #[test]
     fn the_stream_is_kept_alive_for_as_long_as_the_adapter() {
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = rgy_par::mpsc::channel();
         let (alive, stream) = fake();
         let mut watch = FseventsWatch::with_prefix(rx, stream, b"/w");
         // The feed works while the adapter holds the stream.

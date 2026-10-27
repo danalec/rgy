@@ -5,11 +5,15 @@
 //! and anything else is translated into `UsnRecord`-shaped
 //! [`rgy_discovery::UsnRecord`]s the name layer already knows (create/delete/
 //! rename reason bits) — one change vocabulary across backends.
+//!
+//! The crate is `no_std`: the kernel is asked through `libc`, and the paths
+//! the watch holds are bytes, the shape the tree speaks everywhere else.
 
-use std::ffi::CString;
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::path::PathBuf;
+use alloc::collections::BTreeMap;
+use alloc::string::String;
+use alloc::vec::Vec;
 
+use rgy_discovery::path;
 use rgy_discovery::{ChangeBatch, UsnRecord, Watch};
 
 /// fsearch/Zen path-reason equivalents, folded into the shared
@@ -22,50 +26,98 @@ const REASON_RENAME_NEW: u32 = rgy_discovery::USN_REASON_RENAME_NEW_NAME;
 pub struct InotifyWatch {
     fd: i32,
     /// watch descriptor -> directory path.
-    watches: std::collections::HashMap<i32, PathBuf>,
+    watches: BTreeMap<i32, Vec<u8>>,
     /// Pending rename_old record awaiting its rename_new partner.
     pending_old: Option<UsnRecord>,
+}
+
+/// The names in `dir`, with `.` and `..` left out.
+///
+/// A directory read skips the two directory entries, and so does this: a
+/// tree walk that followed `.` would never end. A directory that cannot
+/// be read answers `None`, the way a failed read did.
+fn dir_names(dir: &[u8]) -> Option<Vec<Vec<u8>>> {
+    let c = path::cstring(dir)?;
+    let dp = unsafe { libc::opendir(path::as_c_ptr(&c)) };
+    if dp.is_null() {
+        return None;
+    }
+    let mut names: Vec<Vec<u8>> = Vec::new();
+    loop {
+        let ent = unsafe { libc::readdir(dp) };
+        if ent.is_null() {
+            break;
+        }
+        let name = unsafe { core::ffi::CStr::from_ptr((*ent).d_name.as_ptr()) }.to_bytes();
+        if name == b"." || name == b".." {
+            continue;
+        }
+        names.push(name.to_vec());
+    }
+    unsafe {
+        libc::closedir(dp);
+    }
+    Some(names)
+}
+
+/// The mode of `full`, without following a symlink.
+///
+/// This is the `symlink_metadata` the std walk asked for, asked through
+/// `lstat`: a symlink to a directory is a symlink, not a directory, and the
+/// watch must not descend through it.
+fn lstat_mode(full: &[u8]) -> Option<libc::mode_t> {
+    let c = path::cstring(full)?;
+    let mut st: libc::stat = unsafe { core::mem::zeroed() };
+    if unsafe { libc::lstat(path::as_c_ptr(&c), &mut st) } != 0 {
+        return None;
+    }
+    Some(st.st_mode)
+}
+
+/// Whether `full` is a directory (and not a symlink to one).
+fn is_dir(full: &[u8]) -> bool {
+    matches!(lstat_mode(full), Some(m) if m & libc::S_IFMT == libc::S_IFDIR)
 }
 
 impl InotifyWatch {
     /// Start watching `root` recursively. Directory watches are added on
     /// the fly for created subdirectories; a create event for a dir is
     /// enough to extend coverage.
-    pub fn new(root: &PathBuf) -> Result<InotifyWatch, String> {
+    pub fn new(root: &[u8]) -> Result<InotifyWatch, String> {
         let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
         if fd < 0 {
             return Err("inotify_init failed".into());
         }
         let mut w = InotifyWatch {
             fd,
-            watches: std::collections::HashMap::new(),
+            watches: BTreeMap::new(),
             pending_old: None,
         };
         w.add_tree(root)
-            .map_err(|e| format!("inotify_add_watch failed: {e}"))?;
+            .map_err(|e| alloc::format!("inotify_add_watch failed: {e}"))?;
         Ok(w)
     }
 
-    fn add_tree(&mut self, dir: &PathBuf) -> Result<(), i32> {
+    fn add_tree(&mut self, dir: &[u8]) -> Result<(), i32> {
         self.add_one(dir)?;
-        let Ok(rd) = std::fs::read_dir(dir) else {
+        let Some(names) = dir_names(dir) else {
             return Ok(());
         };
-        for e in rd.flatten() {
-            let p = e.path();
-            if p.symlink_metadata().map(|m| m.is_dir()).unwrap_or(false) {
+        for name in names {
+            let p = path::join(dir, &name);
+            if is_dir(&p) {
                 self.add_tree(&p)?;
             }
         }
         Ok(())
     }
 
-    fn add_one(&mut self, dir: &PathBuf) -> Result<(), i32> {
-        let c = CString::new(dir.as_os_str().as_bytes()).map_err(|_| -1)?;
+    fn add_one(&mut self, dir: &[u8]) -> Result<(), i32> {
+        let c = path::cstring(dir).ok_or(-1)?;
         let wd = unsafe {
             libc::inotify_add_watch(
                 self.fd,
-                c.as_ptr(),
+                path::as_c_ptr(&c),
                 libc::IN_CREATE
                     | libc::IN_DELETE
                     | libc::IN_MOVED_FROM
@@ -76,16 +128,16 @@ impl InotifyWatch {
         if wd < 0 {
             return Err(wd);
         }
-        self.watches.insert(wd, dir.clone());
+        self.watches.insert(wd, dir.to_vec());
         Ok(())
     }
 
     fn record(&self, wd: i32, name: &[u8], reason: u32) -> UsnRecord {
         let dir = self.watches.get(&wd).cloned().unwrap_or_default();
-        let path = if name.is_empty() {
+        let full = if name.is_empty() {
             dir
         } else {
-            dir.join(std::ffi::OsString::from_vec(name.to_vec()))
+            path::join(&dir, name)
         };
         UsnRecord {
             // The index keys by name rows, not FRNs, in the live overlay;
@@ -95,23 +147,25 @@ impl InotifyWatch {
             usn: 0,
             reason,
             file_attributes: 0,
-            name: path.to_string_lossy().into_owned(),
+            name: String::from_utf8_lossy(&full).into_owned(),
         }
     }
 }
 
 impl Watch for InotifyWatch {
     fn next_batch(&mut self) -> Result<ChangeBatch, String> {
-        let mut buf = vec![0u8; 64 * 1024];
+        let mut buf = alloc::vec![0u8; 64 * 1024];
         let mut events: Vec<UsnRecord> = Vec::new();
         loop {
             let n = unsafe { libc::read(self.fd, buf.as_mut_ptr().cast(), buf.len()) };
             if n < 0 {
-                let err = std::io::Error::last_os_error();
-                if err.kind() == std::io::ErrorKind::WouldBlock {
+                // The read is non-blocking, so "nothing yet" is `EAGAIN`
+                // and everything else is a real failure.
+                let errno = unsafe { *libc::__errno_location() };
+                if errno == libc::EAGAIN || errno == libc::EWOULDBLOCK {
                     break;
                 }
-                return Err(format!("inotify read: {err}"));
+                return Err(alloc::format!("inotify read: errno {errno}"));
             }
             if n == 0 {
                 break;
@@ -139,12 +193,8 @@ impl Watch for InotifyWatch {
                 }
                 if mask & libc::IN_CREATE != 0 {
                     if mask & libc::IN_ISDIR != 0 {
-                        let dir = self
-                            .watches
-                            .get(&wd)
-                            .cloned()
-                            .unwrap_or_default()
-                            .join(std::ffi::OsString::from_vec(name.clone()));
+                        let dir =
+                            path::join(&self.watches.get(&wd).cloned().unwrap_or_default(), &name);
                         // A directory we cannot watch is a directory we will
                         // never hear about: its whole subtree goes unobserved
                         // and the live index silently misses it. The batch
@@ -164,7 +214,7 @@ impl Watch for InotifyWatch {
                         // a clone, an unpack) has folders under it that were
                         // made before the watch on it existed, and a watch
                         // on the folder alone would miss all of them.
-                        let gone = dir.symlink_metadata().is_err();
+                        let gone = lstat_mode(&dir).is_none();
                         if !gone && self.add_tree(&dir).is_err() {
                             return Ok(ChangeBatch::Rescan);
                         }
@@ -183,13 +233,9 @@ impl Watch for InotifyWatch {
                         // with it, and the subtree has to be watched: the
                         // watches are on the paths, so a tree that was moved
                         // from elsewhere has none.
-                        let dir = self
-                            .watches
-                            .get(&wd)
-                            .cloned()
-                            .unwrap_or_default()
-                            .join(std::ffi::OsString::from_vec(name.clone()));
-                        let gone = dir.symlink_metadata().is_err();
+                        let dir =
+                            path::join(&self.watches.get(&wd).cloned().unwrap_or_default(), &name);
+                        let gone = lstat_mode(&dir).is_none();
                         if !gone && self.add_tree(&dir).is_err() {
                             return Ok(ChangeBatch::Rescan);
                         }
@@ -217,11 +263,13 @@ impl Drop for InotifyWatch {
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
+
     use super::*;
 
     /// A temporary directory of the test's own.
-    fn temp(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
+    fn temp(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(alloc::format!(
             "rgy-inotify-{tag}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
@@ -248,7 +296,7 @@ mod tests {
     fn watched(w: &InotifyWatch) -> Vec<String> {
         w.watches
             .values()
-            .map(|p| p.to_string_lossy().into_owned())
+            .map(|p| String::from_utf8_lossy(p).into_owned())
             .collect()
     }
 
@@ -261,7 +309,7 @@ mod tests {
     #[test]
     fn a_directory_created_with_content_is_watched_all_the_way_down() {
         let root = temp("created");
-        let mut w = InotifyWatch::new(&root).expect("the watch opens");
+        let mut w = InotifyWatch::new(root.to_string_lossy().as_bytes()).expect("the watch opens");
         std::fs::create_dir_all(root.join("a/b/c")).unwrap();
         let events = wait_for(&mut w);
         assert!(!events.is_empty(), "the create arrives");
@@ -283,7 +331,7 @@ mod tests {
         let root = temp("moved-into");
         let outside = temp("moved-from");
         std::fs::create_dir_all(outside.join("x/y")).unwrap();
-        let mut w = InotifyWatch::new(&root).expect("the watch opens");
+        let mut w = InotifyWatch::new(root.to_string_lossy().as_bytes()).expect("the watch opens");
         std::fs::rename(outside.join("x"), root.join("x")).unwrap();
         let events = wait_for(&mut w);
         assert!(!events.is_empty(), "the move arrives");

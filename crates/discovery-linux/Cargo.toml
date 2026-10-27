@@ -14,8 +14,9 @@ readme = "../../README.md"
 
 
 [dependencies]
-rgy-discovery = { path = "../discovery", version = "0.1.0" }
+# The backend is `no_std`: the seam comes in without its `std` feature, so
+# nothing here can drag the standard library in through the door.
+rgy-discovery = { path = "../discovery", version = "0.1.0", default-features = false }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
-rayon = "1.12"

@@ -5,7 +5,7 @@
 //! The workspace takes no dependency on `ctrlc`/`signal-hook`: the same
 //! pattern `name-core`'s Darwin/unix bits use in `content.rs` — declare the
 //! two `extern` declarations the platform needs, and nothing else. That keeps
-//! the portable backend's dependency list at `rayon` alone.
+//! the portable backend's dependency list at `rgy-par` alone.
 //!
 //! What Ctrl-C means here is narrow on purpose. A scan that is cut short is a
 //! tree missing whole subtrees, so it must never look like a smaller tree:
@@ -13,7 +13,9 @@
 //! that lands outside a scan keeps its usual meaning — the default handler,
 //! since nothing is installed until [`cancel_on_interrupt`] is called.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use alloc::format;
+use alloc::string::String;
+use core::sync::atomic::AtomicBool;
 
 use crate::walk::{Cancel, Progress};
 
@@ -47,11 +49,13 @@ fn install() {
     // Async-signal-safe: one relaxed store on a static, no lock, no lazy
     // init, nothing to re-enter.
     extern "C" fn on_sigint(_sig: i32) {
-        TRIPPED.store(true, Ordering::Relaxed);
+        TRIPPED.store(true, core::sync::atomic::Ordering::Relaxed);
     }
 
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| unsafe {
+    // The cell is `rgy-par`'s: the installation happens once per process,
+    // and there is no `std` here to keep a `Once` in.
+    static ONCE: rgy_par::sync::OnceCell<()> = rgy_par::sync::OnceCell::new();
+    ONCE.get_or_init(|| unsafe {
         // Through a pointer: casting a function straight to an integer is a
         // lint (`function_casts_as_integer`) on its way to being an error.
         signal(SIGINT, on_sigint as *const () as usize);
@@ -75,15 +79,15 @@ fn install() {
     unsafe extern "system" fn on_console(u32_event: u32) -> i32 {
         match u32_event {
             CTRL_C_EVENT | CTRL_BREAK_EVENT => {
-                TRIPPED.store(true, Ordering::Relaxed);
+                TRIPPED.store(true, core::sync::atomic::Ordering::Relaxed);
                 1
             }
             _ => 0,
         }
     }
 
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| unsafe {
+    static ONCE: rgy_par::sync::OnceCell<()> = rgy_par::sync::OnceCell::new();
+    ONCE.get_or_init(|| unsafe {
         SetConsoleCtrlHandler(Some(on_console), 1);
     });
 }
@@ -96,8 +100,10 @@ pub fn line(p: Progress) -> String {
     format!("{} dirs, {} entries", p.dirs, p.entries)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
+    extern crate std;
+
     use super::*;
 
     /// Two tokens are equal only when a trip on one is a trip on the other —

@@ -6,11 +6,19 @@
 //! and the [`Listing`] block the name index lays out in DFS order. The
 //! platform walks themselves stay in their crates (macOS `getattrlistbulk`,
 //! Windows MFT, Linux `getdents64`).
+//!
+//! The portable walk reads the filesystem through [`crate::dir`], which
+//! asks the operating system directly: the paths here are bytes, the
+//! separator is `/`, and the walk needs no `std` to do its work. What the
+//! `std` feature still buys is the threads the fan-out runs on -- without
+//! it the same fan-out runs the same work in order on the calling thread.
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
+
+use crate::dir;
+use crate::path;
 
 /// Sentinel for "no child listing" (an entry with no directory table).
 pub const NONE: u32 = u32::MAX;
@@ -49,8 +57,13 @@ pub struct Listing {
 
 /// Folders a scan must not open (macOS Full-Disk-Access gated folders set
 /// this; the portable walk honours it the same way).
-pub static SKIP: std::sync::OnceLock<Vec<Vec<u8>>> = std::sync::OnceLock::new();
+///
+/// The cell is `rgy-par`'s, so it exists in a `no_std` build too: the
+/// platform backends read it from their own walks, and a backend that
+/// could not ask would have to keep its own copy.
+pub static SKIP: rgy_par::sync::OnceCell<Vec<Vec<u8>>> = rgy_par::sync::OnceCell::new();
 
+/// Whether `path` is inside a folder a scan must not open.
 pub fn blocked(path: &[u8]) -> bool {
     SKIP.get().is_some_and(|v| {
         v.iter()
@@ -58,63 +71,28 @@ pub fn blocked(path: &[u8]) -> bool {
     })
 }
 
-fn kind_of(md: &std::fs::Metadata) -> u8 {
-    let ft = md.file_type();
-    if ft.is_symlink() {
-        KIND_LINK
-    } else if ft.is_dir() {
-        KIND_DIR
-    } else if ft.is_file() {
-        KIND_FILE
-    } else {
-        KIND_OTHER
-    }
-}
-
-fn hidden_flag(md: &std::fs::Metadata) -> u8 {
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        if md.file_attributes() & 0x2 != 0 {
-            return FLAG_HIDDEN;
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = md;
-    }
-    0
-}
-
-fn list_dir(path: &std::path::Path) -> Option<Listing> {
-    let rd = std::fs::read_dir(path).ok()?;
-    let mut names = Vec::new();
-    let mut ents = Vec::new();
-    for e in rd.flatten() {
-        let name = e.file_name();
-        let raw = name.to_string_lossy().as_bytes().to_vec();
-        // `DirEntry::metadata`, not `e.path().symlink_metadata()`. They mean
-        // the same thing -- std documents that this "will not traverse
-        // symlinks if this entry points at a symlink" -- but the former does
-        // not rebuild the path and, where the platform's directory read
-        // already carries the attributes (Windows `FindNextFile`, Linux
-        // `getdents`+`d_type`), it uses them instead of a stat per entry.
-        // That stat was one syscall per file on the hot path of every scan.
-        let md = e.metadata().ok();
-        let Some(md) = md else { continue };
+/// The entries of one folder, as the block stream carries them.
+///
+/// The reading is [`crate::dir`]'s, and its contract is the walk's: the
+/// names are the platform's own bytes, `.` and `..` are not in the list,
+/// an entry whose metadata cannot be read is left out, a link is a link
+/// and not the thing it points at, and the order is the platform's.
+///
+/// The kind is the kind in the low two bits and the flags above them,
+/// which is what [`RawEnt`] says.
+fn list_dir(dir_path: &[u8]) -> Option<Listing> {
+    let list = dir::list_dir(dir_path)?;
+    let mut names = Vec::with_capacity(list.names.len() * 16);
+    let mut ents = Vec::with_capacity(list.stats.len());
+    for (name, stat) in list.names.iter().zip(list.stats.iter()) {
         let name_off = names.len() as u32;
-        names.extend_from_slice(&raw);
+        names.extend_from_slice(name);
         ents.push(RawEnt {
             name_off,
-            name_len: raw.len() as u16,
-            kind: kind_of(&md) | hidden_flag(&md),
-            size: md.len(),
-            mtime: md
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs().min(u32::MAX as u64) as u32)
-                .unwrap_or(0),
+            name_len: name.len().min(u16::MAX as usize) as u16,
+            kind: stat.kind | stat.flags,
+            size: stat.size,
+            mtime: stat.mtime,
             child: NONE,
         });
     }
@@ -126,7 +104,7 @@ fn list_dir(path: &std::path::Path) -> Option<Listing> {
 ///
 /// The walk polls the token once per directory, and once per level in the
 /// parallel path, so how long a cancel takes to land is bounded by one
-/// `read_dir` — long enough to be free, short enough to feel immediate.
+/// directory read — long enough to be free, short enough to feel immediate.
 ///
 /// Two tokens are equal when they share a flag, which is what makes "the
 /// handler tripped the token the walk is holding" a testable statement
@@ -178,8 +156,8 @@ impl Cancel {
     }
 }
 
-impl std::fmt::Debug for Cancel {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for Cancel {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Cancel")
             .field("cancelled", &self.is_cancelled())
             .finish()
@@ -190,7 +168,9 @@ impl PartialEq for Cancel {
     fn eq(&self, other: &Self) -> bool {
         match (&self.0, &other.0) {
             (Flag::Own(a), Flag::Own(b)) => Arc::ptr_eq(a, b),
-            (Flag::Global(a), Flag::Global(b)) => std::ptr::eq(*a, *b),
+            (Flag::Global(a), Flag::Global(b)) => core::ptr::eq(*a, *b),
+            // Only the two kinds can meet, and a token of one kind never
+            // equals one of the other.
             _ => false,
         }
     }
@@ -205,13 +185,13 @@ impl PartialEq for Cancel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cancelled;
 
-impl std::fmt::Display for Cancelled {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for Cancelled {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("scan cancelled")
     }
 }
 
-impl std::error::Error for Cancelled {}
+impl core::error::Error for Cancelled {}
 
 /// How far a scan has got. Handed to the progress callback once per
 /// directory (per level, in the parallel path), which is often enough that
@@ -224,16 +204,21 @@ pub struct Progress {
     pub entries: u64,
 }
 
+/// The walk's stack entry: the folder's bytes, and the parent slot
+/// (listing index, entry index) whose `child` takes this listing's id.
+type Frame = (Vec<u8>, Option<(usize, usize)>);
+
 /// Portable whole-tree scan: one [`Listing`] per directory, DFS pre-order,
 /// listing 0 = `root`. This is the `rgy_discovery::Source` block stream — the
 /// macOS getattrlistbulk fast path lives in `discovery-macos` and returns
 /// the same blocks.
 ///
-/// `threads` > 1 fans the directory reads out across a rayon pool; the
-/// resulting block stream is identical to [`scan_sequential`] either way
+/// `threads` > 1 fans the directory reads out across a pool of that width;
+/// the resulting block stream is identical to [`scan_sequential`] either way
 /// (a differential test pins that). `threads` of 0 or 1 runs inline.
 ///
-/// Within one listing, entry order is whatever `read_dir` returned, so it
+/// Within one listing, entry order is whatever the platform's directory
+/// read returned, so it
 /// is not stable across machines — that is fine, because `Index::build`
 /// sorts every listing's entries by name before laying out the index (and
 /// `Index::lookup` binary-searches that sorted order). What the index does
@@ -255,18 +240,13 @@ pub fn scan_with(
     // `Sync` because the parallel path hands it to the pool.
     on_progress: &(dyn Fn(Progress) + Sync),
 ) -> Result<Vec<Listing>, Cancelled> {
-    if threads > 1
-        && let Ok(pool) = rayon::ThreadPoolBuilder::new()
-            .num_threads(threads)
-            .thread_name(|i| format!("rgy-walk-{i}"))
-            .build()
-    {
-        return pool.install(|| walk_parallel(root, cancel, on_progress));
+    if threads > 1 {
+        return walk_parallel(root, threads, cancel, on_progress);
     }
     scan_sequential_with(root, cancel, on_progress)
 }
 
-/// The reference walk: strictly sequential, one `read_dir` at a time.
+/// The reference walk: strictly sequential, one folder at a time.
 ///
 /// Kept public and unoptimised on purpose — it is the correctness oracle
 /// that [`walk_parallel`] is tested against.
@@ -281,21 +261,21 @@ pub fn scan_sequential_with(
     cancel: &Cancel,
     on_progress: &(dyn Fn(Progress) + Sync),
 ) -> Result<Vec<Listing>, Cancelled> {
-    let root_path = std::path::PathBuf::from(String::from_utf8_lossy(root).into_owned());
     let mut out: Vec<Listing> = Vec::new();
     let mut next_id = 1u32;
     let mut seen = 0u64;
     // (path, parent_slot in out where the child id goes) — filled after the
-    // child listing is built.
-    let mut stack: Vec<(std::path::PathBuf, Option<(usize, usize)>)> = vec![(root_path, None)];
-    while let Some((path, fix)) = stack.pop() {
+    // child listing is built. The path is bytes: the tree's separator is
+    // `/`, and the bytes are the bytes the filesystem gave.
+    let mut stack: Vec<Frame> = alloc::vec![(root.to_vec(), None)];
+    while let Some((dir, fix)) = stack.pop() {
         if cancel.is_cancelled() {
             return Err(Cancelled);
         }
-        if blocked(path.to_string_lossy().as_bytes()) {
+        if blocked(&dir) {
             continue;
         }
-        let Some(mut listing) = list_dir(&path) else {
+        let Some(mut listing) = list_dir(&dir) else {
             continue;
         };
         let id = if fix.is_none() { 0 } else { next_id };
@@ -312,9 +292,7 @@ pub fn scan_sequential_with(
             if ent.kind & 3 == KIND_DIR {
                 let name = &listing.names
                     [ent.name_off as usize..(ent.name_off as usize + ent.name_len as usize)];
-                let mut p = path.clone();
-                p.push(String::from_utf8_lossy(name).into_owned());
-                kids.push((p, ei));
+                kids.push((path::join(&dir, name), ei));
             }
         }
         let li = out.len();
@@ -331,19 +309,23 @@ pub fn scan_sequential_with(
     Ok(out)
 }
 
-/// The same walk with the `read_dir` calls fanned out across the pool.
+/// The same walk with the directory reads fanned out across the pool.
 ///
 /// Listing a directory is I/O-bound and the next frontier depends on the
 /// current one's result, so this expands breadth-first (one parallel batch
 /// per directory depth) and only then renumbers into DFS pre-order. The
 /// output is byte-identical to [`scan_sequential`].
+///
+/// The pool is `rgy-par`'s, at the width the caller asked for: the walk
+/// has its own width, and it is not the query's. Without the `std` feature
+/// there are no threads to run it on, and the same fan-out runs the same
+/// work in order on the calling thread.
 fn walk_parallel(
     root: &[u8],
+    threads: usize,
     cancel: &Cancel,
     on_progress: &(dyn Fn(Progress) + Sync),
 ) -> Result<Vec<Listing>, Cancelled> {
-    use rayon::prelude::*;
-
     /// A discovered directory before DFS numbering.
     struct Node {
         listing: Listing,
@@ -353,32 +335,33 @@ fn walk_parallel(
         children: Vec<usize>,
     }
 
-    let root_path = std::path::PathBuf::from(String::from_utf8_lossy(root).into_owned());
     let mut nodes: Vec<Node> = Vec::new();
     let mut seen = 0u64;
     // (path, parent node, entry index in the parent's listing)
-    let mut pending: Vec<(std::path::PathBuf, Option<(usize, usize)>)> = vec![(root_path, None)];
+    let mut pending: Vec<Frame> = alloc::vec![(root.to_vec(), None)];
 
     while !pending.is_empty() {
         // Once per level rather than per directory: the level below is a
-        // batch of `read_dir` calls already in flight, and stopping between
-        // them buys nothing a whole `read_dir` does not already cost.
+        // batch of directory reads already in flight, and stopping between
+        // them buys nothing a whole read does not already cost.
         if cancel.is_cancelled() {
             return Err(Cancelled);
         }
-        let listings: Vec<Option<Listing>> = pending
-            .par_iter()
-            .map(|(path, _)| {
-                if blocked(path.to_string_lossy().as_bytes()) {
-                    None
-                } else {
-                    list_dir(path)
-                }
-            })
-            .collect();
+        // The workers take the indices off a shared counter, one at a time:
+        // a directory with a hundred thousand entries does not hold the
+        // others up the way a fixed split would.
+        let listings: Vec<Option<Listing>> = rgy_par::each_index_at(
+            threads,
+            pending.len(),
+            || (),
+            |_, i| {
+                let (dir, _) = &pending[i];
+                if blocked(dir) { None } else { list_dir(dir) }
+            },
+        );
 
         let mut next = Vec::new();
-        for ((path, parent), mut listing) in pending.iter().zip(listings) {
+        for ((dir, parent), mut listing) in pending.iter().zip(listings) {
             // A blocked or unreadable directory yields no block at all, so the
             // parent's `child` link stays NONE — same as the sequential walk.
             let Some(listing) = listing.take() else {
@@ -394,9 +377,7 @@ fn walk_parallel(
                 if ent.kind & 3 == KIND_DIR {
                     let name = &listing.names
                         [ent.name_off as usize..(ent.name_off as usize + ent.name_len as usize)];
-                    let mut p = path.clone();
-                    p.push(String::from_utf8_lossy(name).into_owned());
-                    next.push((p, Some((node, ei))));
+                    next.push((path::join(dir, name), Some((node, ei))));
                 }
             }
             seen += listing.ents.len() as u64;
@@ -419,9 +400,9 @@ fn walk_parallel(
 
     // DFS pre-order over the discovered tree. Iterative: a deep tree must
     // not turn into deep Rust recursion.
-    let mut order: Vec<usize> = vec![0];
+    let mut order: Vec<usize> = alloc::vec![0];
     order.reserve(nodes.len());
-    let mut cursor: Vec<(usize, usize)> = vec![(0, 0)];
+    let mut cursor: Vec<(usize, usize)> = alloc::vec![(0, 0)];
     while let Some(&(node, seen)) = cursor.last() {
         if seen < nodes[node].children.len() {
             let kid = nodes[node].children[seen];
@@ -444,7 +425,7 @@ fn walk_parallel(
 
     let mut out: Vec<Listing> = Vec::with_capacity(order.len());
     for &node in &order {
-        out.push(std::mem::replace(
+        out.push(core::mem::replace(
             &mut nodes[node].listing,
             Listing {
                 id: 0,
@@ -459,13 +440,16 @@ fn walk_parallel(
 /// List a single directory (no recursion). Subdirectories come back with
 /// `child == NONE`. Used by the live updater.
 pub fn list_one(path: &[u8]) -> Option<Listing> {
-    let p = String::from_utf8_lossy(path).into_owned();
-    list_dir(std::path::Path::new(&p))
+    list_dir(path)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
+    extern crate std;
+
     use super::*;
+    use alloc::format;
+    use alloc::string::{String, ToString};
     use std::collections::BTreeMap;
 
     /// A tree with the shapes that break naive parallel walks: nesting,
@@ -500,11 +484,12 @@ mod tests {
     type Rows = BTreeMap<String, Vec<(String, u8, u64, u32, Option<String>)>>;
 
     /// Reshape a block stream into `directory path -> rows`, so the
-    /// comparison does not depend on the order `read_dir` happened to
+    /// comparison does not depend on the order the platform's directory
+    /// read happened to
     /// return entries in (which is not stable, and `Index::build` sorts it
     /// away anyway).
     fn normalize(ls: &[Listing]) -> Rows {
-        let mut paths: Vec<Option<String>> = vec![None; ls.len()];
+        let mut paths: Vec<Option<String>> = alloc::vec![None; ls.len()];
         if ls.is_empty() {
             return BTreeMap::new();
         }

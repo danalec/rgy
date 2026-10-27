@@ -12,6 +12,19 @@
 //! not in `discovery-windows::ntfs` (that module re-exports them for the
 //! old paths).
 
+#![no_std]
+
+extern crate alloc;
+// The crate body is `core` plus `alloc`: the walk reads the filesystem
+// through `crate::dir`, which asks the operating system directly, and
+// nothing here needs a standard library. `std` is here for the tests,
+// which build their fixtures with it.
+#[cfg(feature = "std")]
+extern crate std;
+
+use alloc::string::String;
+use alloc::vec::Vec;
+
 /// A USN journal change record (`USN_RECORD_V2` tail fields at the SDK
 /// offsets: `FileAttributes`@52, `FileNameLength`@56, `FileNameOffset`@58).
 ///
@@ -100,12 +113,32 @@ pub trait Watch {
     }
 }
 
+/// The directory reader: the filesystem, asked directly.
+///
+/// The portable walk reads through this, and it needs no `std` to do it:
+/// the names and the metadata come from the operating system, and the
+/// paths are bytes.
+pub mod dir;
+/// Files: the bytes of a file, and the path a file really has.
+///
+/// The platform calls are declared here, by hand: the crate has no `std`
+/// to make them with, and the tree speaks bytes everywhere else.
+pub mod file;
+/// Ctrl-C as a cooperative stop: the handler is a platform signal, and a
+/// signal is an OS thing whatever the Rust around it is.
 pub mod interrupt;
+/// Paths as bytes: the joining and the C strings the platform backends
+/// need. `no_std` has no `std::path`, and the tree speaks one shape.
+pub mod path;
 pub mod walk;
 
-/// The portable [`Source`]: a std-based DFS walk (see [`walk::scan`]).
+/// The portable [`Source`]: a DFS walk that reads the filesystem through
+/// [`crate::dir`] (see [`walk::scan`]).
 /// Correct on every platform; the macOS getattrlistbulk fast path and the
 /// Windows MFT walk return the same blocks from their own crates.
+///
+/// The walk needs no `std`; what the `std` feature buys is the threads
+/// the directory reads are fanned out over.
 pub struct PortableSource {
     pub root: Vec<u8>,
     /// Directory-read fan-out handed to [`walk::scan`]. 0 or 1 walks inline;

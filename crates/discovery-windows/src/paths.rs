@@ -10,10 +10,18 @@
 //! The volume is live: a file can be deleted between the journal's record
 //! and the read that would place it, and then there is no path to give.
 
-use std::collections::HashMap;
+use alloc::string::String;
+use alloc::vec::Vec;
+use hashbrown::HashMap;
 
 use crate::ntfs;
 use crate::volume::Volume;
+
+/// The tests, and only the tests, need `std`: a temp file to ask the volume
+/// about, and the process id to name it after. The crate body is `core`
+/// plus `alloc`.
+#[cfg(test)]
+extern crate std;
 
 /// How many levels the walk goes up before it gives up.
 ///
@@ -136,6 +144,8 @@ fn path_of_record(
 mod tests {
     use super::*;
     use crate::ntfs::testutil::build_record;
+    use alloc::format;
+    use alloc::string::ToString;
 
     /// The records of a small tree: `\Users` (7), `\Users\me` (42) and
     /// `\Users\me\docs` (99), each naming its parent.
@@ -239,7 +249,7 @@ mod tests {
             }
         };
 
-        let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+        let wide: Vec<u16> = text.encode_utf16().chain(core::iter::once(0)).collect();
         let handle = unsafe {
             CreateFileW(
                 PCWSTR(wide.as_ptr()),
@@ -258,7 +268,7 @@ mod tests {
                 handle,
                 FileIdInfo,
                 &mut info as *mut FILE_ID_INFO as *mut _,
-                std::mem::size_of::<FILE_ID_INFO>() as u32,
+                core::mem::size_of::<FILE_ID_INFO>() as u32,
             )
         };
         let _ = unsafe { CloseHandle(handle) };

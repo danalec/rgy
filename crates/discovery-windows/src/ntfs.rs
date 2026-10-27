@@ -6,6 +6,9 @@
 //! are not exposed by the `windows` crate, so the layouts below are parsed by hand
 //! against the documented on-disk formats.
 
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
 // Kept as a complete reference set for the attribute types and namespaces NTFS
 // defines, even where this indexer only needs one of them today.
 pub const ATTR_STANDARD_INFORMATION: u32 = 0x10;
@@ -951,6 +954,9 @@ pub fn extract_data_runs(record: &[u8]) -> Result<Vec<MftRun>, String> {
 /// stops understanding the real layout fails here.
 #[cfg(test)]
 pub(crate) mod testutil {
+    use alloc::vec;
+    use alloc::vec::Vec;
+
     pub(crate) fn build_record(base_frn: u64, parent_frn: u64, ns: u8, name: &str) -> Vec<u8> {
         let name_bytes = name.encode_utf16().count() * 2;
         let value_len = 66 + name_bytes;
@@ -981,6 +987,7 @@ pub(crate) mod testutil {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     /// A run header's length and offset are nibbles, so a corrupt record can
     /// claim up to 15 bytes for either. The value only holds eight, and the

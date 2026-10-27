@@ -13,10 +13,23 @@ categories = ["filesystem"]
 readme = "../../README.md"
 
 
+[features]
+default = ["std"]
+# The threads the parallel walk fans out over. Without it the same walk
+# runs with one worker, on the calling thread: the shape of the walk does
+# not change, only how many workers share it.
+std = ["rgy-par/std"]
+
 [dependencies]
-rgy-discovery = { path = "../discovery", version = "0.1.0" }
+rgy-discovery = { path = "../discovery", version = "0.1.0", default-features = false }
+rgy-par = { path = "../par", version = "0.1.0", default-features = false }
+
+[dev-dependencies]
+# The tests build a name index and apply the feed's records to it: the
+# live overlay is the thing under test.
 rgy-name-core = { path = "../name-core", version = "0.1.0" }
+# The portable walk, which the tests use to index a fixture tree.
+rgy-discovery = { path = "../discovery", version = "0.1.0", features = ["std"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
-rayon = "1.12"

@@ -14,7 +14,15 @@ readme = "../../README.md"
 
 
 [dependencies]
-rgy-discovery = { path = "../discovery", version = "0.1.0" }
+# The backend is `no_std`: the seam comes in without its `std` feature, so
+# nothing here can drag the standard library in through the door.
+rgy-discovery = { path = "../discovery", version = "0.1.0", default-features = false }
+
+[dev-dependencies]
+# The oracle the reader is compared against is the portable walk, which is
+# `std`. The test needs it; the backend does not, and a normal build of
+# this crate does not see this edge.
+rgy-discovery = { path = "../discovery", version = "0.1.0", features = ["std"] }
 
 [target.'cfg(target_os = "freebsd")'.dependencies]
 libc = "0.2"

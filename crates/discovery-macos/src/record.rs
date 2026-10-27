@@ -11,6 +11,8 @@
 //! them, so they are tested on every platform rather than only on a Mac
 //! (the walk itself is `cfg(target_os = "macos")` -- see `walk.rs`).
 
+use alloc::vec::Vec;
+
 /// The 32-bit word at `at`, if the buffer holds it.
 pub fn word32(b: &[u8], at: usize) -> Option<u32> {
     let w = b.get(at..at + 4)?;

@@ -6,12 +6,22 @@
 //! `cfg(target_os = "freebsd")`; on other hosts this crate compiles empty
 //! and the portable walk stays the Source.
 //!
+//! The crate is `no_std`: it asks the kernel through `libc` and keeps its
+//! paths as bytes, the shape the rest of the tree speaks.
+//!
 //! Verified against the sequential oracle on a real FreeBSD kernel by
 //! `freebsd_reader_matches_sequential_oracle` below — the phase-4 suite
 //! (P2.3); `cargo check --target x86_64-unknown-freebsd` is the cross-host
 //! floor.
 
+// The `no_std` comes first on purpose: a crate-level `cfg` that is false
+// empties the crate, and an emptied crate has no `no_std` to declare — so
+// the flag has to be set before the gate, or this crate would want the
+// standard library on a target that has none.
+#![no_std]
 #![cfg(target_os = "freebsd")]
+
+extern crate alloc;
 
 mod walk;
 
@@ -19,7 +29,11 @@ pub use walk::{FreeBsdSource, scan};
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
+
     use super::scan;
+    use alloc::string::String;
+    use alloc::vec::Vec;
     use std::collections::BTreeMap;
 
     use rgy_discovery::walk::{KIND_DIR, KIND_FILE, Listing, NONE, scan_sequential};
@@ -27,7 +41,8 @@ mod tests {
     type Rows = BTreeMap<String, Vec<(String, u8, u64, u32, Option<String>)>>;
 
     fn fixture(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("rgy-fbsd-{tag}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(alloc::format!("rgy-fbsd-{tag}-{}", std::process::id()));
         let _ = std::fs::create_dir_all(dir.join("a/aa"));
         let _ = std::fs::create_dir_all(dir.join("b"));
         std::fs::write(dir.join("top.txt"), b"t").unwrap();
@@ -46,7 +61,7 @@ mod tests {
     /// order `getdirentries` happened to return entries in (the same
     /// normalization `parallel_walk_matches_sequential_oracle` uses).
     fn normalize(ls: &[Listing]) -> Rows {
-        let mut paths: Vec<Option<String>> = vec![None; ls.len()];
+        let mut paths: Vec<Option<String>> = alloc::vec![None; ls.len()];
         if ls.is_empty() {
             return BTreeMap::new();
         }
@@ -60,7 +75,7 @@ mod tests {
                 if ent.child == NONE || child >= ls.len() {
                     continue;
                 }
-                paths[child] = Some(format!("{base}/{}", name_of(&ls[id], ent)));
+                paths[child] = Some(alloc::format!("{base}/{}", name_of(&ls[id], ent)));
             }
         }
         ls.iter()
@@ -104,7 +119,7 @@ mod tests {
             4,
             "fixture must exercise the root plus three subdirectories"
         );
-        let got = normalize(&scan(&dir));
+        let got = normalize(&scan(dir.to_string_lossy().as_bytes()));
         assert_eq!(
             want, got,
             "the getdirentries reader diverged from the oracle"
@@ -117,7 +132,7 @@ mod tests {
     #[test]
     fn an_absent_root_yields_no_blocks() {
         let root = std::env::temp_dir().join("rgy-fbsd-absent-zzz");
-        assert!(scan(&root).is_empty());
+        assert!(scan(root.to_string_lossy().as_bytes()).is_empty());
     }
 
     /// Kinds survive the d_type path: a symlink and a directory must not
@@ -127,7 +142,7 @@ mod tests {
         use std::os::unix::fs::symlink;
         let dir = fixture("kinds");
         symlink("top.txt", dir.join("alink")).unwrap();
-        let ls = scan(&dir);
+        let ls = scan(dir.to_string_lossy().as_bytes());
         let top = ls
             .iter()
             .find(|l| l.id == 0)

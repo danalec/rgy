@@ -13,8 +13,19 @@ categories = ["filesystem"]
 readme = "../../README.md"
 
 
+# The crate is `no_std` in every configuration, so it declares no features of
+# its own: there is nothing to turn off and nothing to turn on. What needs a
+# filesystem (the portable walk, the Ctrl-C handler) stays in the seam and in
+# the product, not here.
+
 [dependencies]
-rgy-discovery = { path = "../discovery", version = "0.1.0" }
+# The seam, without its `std` feature. The backend only speaks the block
+# types and the change vocabulary, and neither needs a filesystem -- so the
+# seam must not drag `std` in through the back door.
+rgy-discovery = { path = "../discovery", version = "0.1.0", default-features = false }
+# `std::collections` is not in `alloc`, and the backend's maps want the same
+# cheap hasher the name index already carries.
+hashbrown = { version = "0.16", default-features = false, features = ["default-hasher", "inline-more"] }
 
 # Gated to Windows, like the crate body in `src/lib.rs`. The `windows` family
 # does not cross-compile -- `windows-future` pulls internals `windows-core`
@@ -22,8 +33,12 @@ rgy-discovery = { path = "../discovery", version = "0.1.0" }
 # for the target even when the crate that wants it is empty there. So the
 # gate has to be here too, or `cargo check --workspace` still dies in
 # `windows-future` on every other platform.
+#
+# `default-features = false` drops the `std` feature of the `windows` family:
+# the crate is `no_std`, and the Win32 bindings do not need a standard
+# library to call `DeviceIoControl`.
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62.2", features = [
+windows = { version = "0.62.2", default-features = false, features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Storage_FileSystem",

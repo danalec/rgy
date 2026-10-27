@@ -2,6 +2,9 @@
 
 //! MFT walk and USN tailing: the two ways this indexer learns about files.
 
+use alloc::vec;
+use alloc::vec::Vec;
+
 use crate::ntfs;
 use crate::ntfs::ROOT_FRN;
 use crate::volume::{Volume, VolumeError};
@@ -61,8 +64,8 @@ fn name_is_indexable(e: &ntfs::FileNameEntry) -> bool {
 /// same child listing — directories are not hard-linked on NTFS, so this is
 /// only a hard-link-style edge case in the data.
 pub fn listings_from_rows(rows: &[NameRow], root_frn: u64) -> Vec<rgy_discovery::walk::Listing> {
+    use hashbrown::HashMap;
     use rgy_discovery::walk::{KIND_DIR, KIND_FILE, KIND_LINK, Listing, NONE, RawEnt};
-    use std::collections::HashMap;
 
     let mut by_parent: HashMap<u64, Vec<usize>> = HashMap::new();
     for (i, r) in rows.iter().enumerate() {
@@ -141,6 +144,12 @@ pub struct IndexStats {
 
 pub struct Indexer<'a> {
     volume: &'a Volume,
+    /// Whether the scan may use the fast extent-streaming path.
+    ///
+    /// The choice used to be an environment variable the backend read for
+    /// itself. A `no_std` crate cannot read the environment, and a backend
+    /// should not: the product reads it and passes the decision down.
+    streamed: bool,
 }
 
 impl<'a> Indexer<'a> {
@@ -150,8 +159,29 @@ impl<'a> Indexer<'a> {
     /// volume its own name index (`zen-rs`'s `index-all` builds one per
     /// volume), so two volumes never share an FRN space and no key has to
     /// disambiguate them.
+    ///
+    /// The scan uses the fast extent-streaming path ([`Self::scan_via_runs`])
+    /// and falls back to the record-by-record path when the volume refuses
+    /// it. [`Self::with_records`] chooses the path explicitly.
     pub fn new(volume: &'a Volume) -> Self {
-        Indexer { volume }
+        Indexer {
+            volume,
+            streamed: true,
+        }
+    }
+
+    /// The indexer for one volume, with the scan path chosen explicitly.
+    ///
+    /// `streamed` picks the fast extent-streaming path
+    /// ([`Self::scan_via_runs`]); `false` forces the record-by-record
+    /// `FSCTL_GET_NTFS_FILE_RECORD` path ([`Self::scan_via_records`]) and
+    /// skips the streaming attempt altogether.
+    ///
+    /// This is where the product's `ERS_USE_RECORDS` decision lands: the
+    /// daemon and the CLI read the variable and pass the answer down,
+    /// because the backend itself is `no_std` and cannot.
+    pub fn with_records(volume: &'a Volume, streamed: bool) -> Self {
+        Indexer { volume, streamed }
     }
 
     /// The volume this indexer reads.
@@ -165,8 +195,9 @@ impl<'a> Indexer<'a> {
     ///
     /// Attempts fast extent streaming by reading MFT cluster runs directly
     /// and falls back to sequential record-by-record
-    /// `FSCTL_GET_NTFS_FILE_RECORD` calls (`ERS_USE_RECORDS=1` forces the
-    /// fallback). Both paths and the name rules are documented on
+    /// `FSCTL_GET_NTFS_FILE_RECORD` calls. Which of the two is taken is the
+    /// indexer's own choice (see [`Self::new`] and [`Self::with_records`]).
+    /// Both paths and the name rules are documented on
     /// [`Self::scan_via_runs`] and [`Self::ingest_record`].
     pub fn scan_rows(
         &self,
@@ -176,7 +207,7 @@ impl<'a> Indexer<'a> {
         let mut rows = Vec::new();
         let limit = self.volume.record_count.clamp(1, MAX_RECORDS);
 
-        let streamed = std::env::var_os("ERS_USE_RECORDS").is_none()
+        let streamed = self.streamed
             && match self.volume.read_mft_data_runs() {
                 Ok(runs) => self
                     .scan_via_runs(&runs, limit, &mut stats, progress, &mut rows)
@@ -515,7 +546,7 @@ impl<'a> Indexer<'a> {
         };
 
         let mut out = Vec::new();
-        let mut seen_targets = std::collections::HashSet::new();
+        let mut seen_targets = hashbrown::HashSet::new();
         for entry in ntfs::parse_attr_list(list) {
             // Only $FILE_NAME rows that point somewhere else; a nonzero VCN
             // marks a data run, never a name.

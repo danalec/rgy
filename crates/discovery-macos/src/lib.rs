@@ -19,6 +19,34 @@
 //! event means, and which events belong to the indexed tree — are plain
 //! functions over [`event::Event`], so they are tested on every platform
 //! rather than only on a Mac.
+//!
+//! # `no_std`
+//!
+//! The crate is `no_std` + `alloc`: the walk, the feed and the record
+//! reader run on bytes the caller owns, and nothing in the crate names
+//! `std`. The three things a `std` crate would have reached for are the
+//! tree's own: the paths (`rgy_discovery::path`), the channel
+//! (`rgy_par::mpsc`) and the locks (`rgy_par::sync`).
+//!
+//! The `std` feature is what the parallel walk's fan-out needs: with it
+//! the workers are threads (`rgy-par`), without it there is one worker, on
+//! the thread that called. Nothing else changes between the two builds.
+//!
+//! The one thing the FSEvents callback needs that `std` does not have is
+//! a way to be called from a thread the Rust runtime does not own: the
+//! callback's state is `Send + Sync` and holds no thread of its own.
+
+#![no_std]
+
+extern crate alloc;
+/// The test macros (`vec!`, `format!`) and the `std` the tests use.
+///
+/// The crate is `no_std`, so the core prelude has none of them. This is
+/// the `std` declaration that brings them in, and it stands down outside
+/// the tests: a crate cannot be declared twice.
+#[cfg(test)]
+#[macro_use]
+extern crate std;
 
 #[cfg(target_os = "macos")]
 mod fsevents;

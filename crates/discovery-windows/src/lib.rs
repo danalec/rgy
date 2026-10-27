@@ -26,7 +26,13 @@
 // An empty crate off-Windows is what keeps `cargo check --workspace` honest
 // on the platforms the rest of the stack supports. `ntfs.rs` is pure byte
 // parsing and needs none of this, but it is only reachable through here.
+#![no_std]
 #![cfg(windows)]
+
+// The crate is `no_std` + `alloc`: the Win32 calls, the byte parsing and the
+// maps are all that is here, and none of them needs a standard library. The
+// allocator is the one thing `no_std` still has to be handed.
+extern crate alloc;
 
 pub mod indexer;
 pub mod ntfs;

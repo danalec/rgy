@@ -11,6 +11,14 @@
 //! The whole backend is `cfg(target_os = "linux")` — on other hosts this
 //! crate compiles empty and the portable `rgy_discovery::PortableSource` is
 //! the Source.
+//!
+//! The crate is `no_std`: it asks the kernel through `libc` and keeps its
+//! paths as bytes, the shape the rest of the tree speaks. Nothing here
+//! needs the standard library, and nothing here brings it in.
+
+#![no_std]
+
+extern crate alloc;
 
 #[cfg(target_os = "linux")]
 mod walk;

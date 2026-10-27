@@ -8,6 +8,8 @@
 //! testable where FSEvents does not run, so they live beside the type
 //! rather than behind the FFI.
 
+use alloc::vec::Vec;
+
 /// The framework dropped events: the batch is not the whole truth.
 pub const KERNEL_DROPPED: u32 = 0x0000_0004;
 /// The client fell behind: the batch is not the whole truth.

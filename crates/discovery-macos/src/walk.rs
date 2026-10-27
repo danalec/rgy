@@ -4,20 +4,39 @@
 //!
 //! One syscall returns hundreds of entries with name, type, size, mtime and
 //! flags already attached, so there is no per-file stat. Directories fan out
-//! over a rayon pool; mount points are not crossed, firmlinks are (that is
+//! over the workers; mount points are not crossed, firmlinks are (that is
 //! how /Users etc. on the data volume appear under / exactly once).
+//!
+//! # The shape
+//!
+//! The walk is a shared stack of directories still to list. A worker takes
+//! one off the stack, lists it, and puts its subdirectories on the stack;
+//! the walk ends when the stack drains. The listing id comes from one
+//! shared counter, and the listings are collected in one place: the index
+//! follows the `child` links, not the order the listings arrive in.
+//!
+//! The `std` feature is what the fan-out needs: with it the workers are
+//! threads (`rgy-par`), without it there is one worker, on the thread that
+//! called. The walk itself is the same either way.
+//!
+//! Children are opened with `openat()` relative to the parent's fd, so
+//! paths are never rebuilt and PATH_MAX never bites. Measured on this Mac:
+//! open() + close() is ~19us per directory (two Endpoint Security clients
+//! tax every open), getattrlistbulk ~14us; past ~8 threads the kernel side
+//! stops scaling. 18% of directories are empty: those the parent's listing
+//! already says so (rechecked with one lookup) are never opened.
 
-use rayon::Scope;
-use rgy_name_core::no_materialize;
-use std::cell::RefCell;
-use std::ffi::CString;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use alloc::sync::Arc;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+
+use rgy_par::sync::{Mutex, OnceCell};
 
 /// Folders never to open: set when the daemon runs without Full Disk
 /// Access, where opening a consent-gated folder (Downloads, Desktop, ...)
 /// pops a privacy prompt and blocks the call until someone answers it.
-pub static SKIP: std::sync::OnceLock<Vec<Vec<u8>>> = std::sync::OnceLock::new();
+pub static SKIP: OnceCell<Vec<Vec<u8>>> = OnceCell::new();
 
 /// Folders a scan was refused (EPERM): without Full Disk Access macOS also
 /// silently denies some, like ~/Library/Mail. Recorded only while paths are
@@ -49,52 +68,119 @@ pub use rgy_discovery::walk::{
 /// never get it; grafts (MobileAsset images) do, so `finish_dir` checks.
 const MAYBE_EMPTY: u8 = 1 << 7;
 
+/// The buffer `getattrlistbulk` writes into: 256 KiB, one per worker.
+///
+/// `thread_local!` has no `no_std` equivalent, so the buffer is part of
+/// the state the worker factory hands out.
+const BUF_SIZE: usize = 256 * 1024;
+
+/// What the workers share: the directories still to list, the id counter,
+/// and the listings they produce.
 struct Ctx {
+    /// The directories still to list.
+    stack: Mutex<Vec<Work>>,
+    /// How many work items are outstanding: on the stack, or being listed.
+    ///
+    /// The walk is over when the stack is empty and this is zero. A worker
+    /// that finds the stack empty while another one is still listing a
+    /// directory waits for it: that worker is about to put more on the
+    /// stack, and leaving early would leave those directories unlisted.
+    pending: AtomicUsize,
+    /// The next listing id.
     next_id: AtomicU32,
-    out: Vec<Mutex<Vec<Listing>>>,
+    /// The listings, as they come.
+    out: Mutex<Vec<Listing>>,
 }
 
-thread_local! {
-    static BUF: RefCell<Vec<u8>> = RefCell::new(vec![0u8; 256 * 1024]);
+/// A directory still to list.
+struct Work {
+    /// The id its listing will carry.
+    id: u32,
+    /// The directory it is opened against: the child is opened with
+    /// `openat()` relative to the parent's fd, so no path is ever rebuilt
+    /// and PATH_MAX never bites. `None` for the root, which is opened by
+    /// path.
+    parent: Option<Arc<Fd>>,
+    /// The name, NUL-terminated: what `openat()` takes.
+    name: Vec<u8>,
+    /// The path, when paths are tracked (SKIP is set).
+    path: Option<Vec<u8>>,
+}
+
+/// A directory fd, closed when the last holder lets it go.
+struct Fd(i32);
+
+impl Drop for Fd {
+    fn drop(&mut self) {
+        unsafe { libc::close(self.0) };
+    }
+}
+
+/// What a worker owns: the buffer `getattrlistbulk` writes into.
+struct Worker {
+    buf: Vec<u8>,
 }
 
 /// Scan `root` recursively. Listing id 0 is `root` itself.
 pub fn scan(root: &[u8], threads: usize) -> Vec<Listing> {
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(threads)
-        .start_handler(|_| no_materialize())
-        .build()
-        .unwrap();
-    let ctx = Ctx {
-        next_id: AtomicU32::new(1),
-        out: (0..threads + 1).map(|_| Mutex::new(Vec::new())).collect(),
-    };
     raise_fd_limit();
-    let fd = if blocked(root) {
-        -1
-    } else {
-        CString::new(root).map_or(-1, |c| unsafe { libc::open(c.as_ptr(), OPEN_DIR) })
-    };
-    // Paths are only tracked when there is something to skip.
-    let path = SKIP
-        .get()
-        .is_some_and(|v| !v.is_empty())
-        .then(|| root.to_vec());
-    pool.scope(|s| finish_dir(s, fd, path, 0, &ctx));
-    let parts: Vec<Vec<Listing>> = ctx
-        .out
-        .into_iter()
-        .map(|m| m.into_inner().unwrap())
-        .collect();
-    let mut out = Vec::with_capacity(parts.iter().map(Vec::len).sum());
-    for p in parts {
-        out.extend(p);
-    }
-    out
+    let workers = threads.max(1);
+    let ctx = Arc::new(Ctx {
+        stack: Mutex::new(Vec::new()),
+        pending: AtomicUsize::new(0),
+        next_id: AtomicU32::new(1),
+        out: Mutex::new(Vec::new()),
+    });
+    // The root: the one work item that is not opened relative to a parent.
+    ctx.stack.lock().unwrap().push(Work {
+        id: 0,
+        parent: None,
+        name: rgy_discovery::path::cstring(root).unwrap_or_default(),
+        path: tracked_path(root),
+    });
+    ctx.pending.store(1, Ordering::Release);
+    // The workers: one buffer each, and the shared stack between them.
+    // The closure runs until the stack drains, so the walk ends when the
+    // last directory has been listed.
+    rgy_par::each_index_at(
+        workers,
+        workers,
+        || Worker {
+            buf: vec![0u8; BUF_SIZE],
+        },
+        |worker, _| {
+            loop {
+                let work = {
+                    let mut stack = ctx.stack.lock().unwrap();
+                    match stack.pop() {
+                        Some(w) => Some(w),
+                        None => {
+                            if ctx.pending.load(Ordering::Acquire) == 0 {
+                                // The stack is empty and nothing is
+                                // outstanding: the walk is over.
+                                break;
+                            }
+                            None
+                        }
+                    }
+                };
+                let Some(work) = work else {
+                    // Another worker is listing a directory, and it is
+                    // about to put more on the stack. Nothing to do but
+                    // wait for it.
+                    core::hint::spin_loop();
+                    continue;
+                };
+                list_dir(work, &ctx, &mut worker.buf);
+            }
+        },
+    );
+    let mut out = ctx.out.lock().unwrap();
+    core::mem::take(&mut *out)
 }
 
 fn raise_fd_limit() {
-    let mut r: libc::rlimit = unsafe { std::mem::zeroed() };
+    let mut r: libc::rlimit = unsafe { core::mem::zeroed() };
     unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut r) };
     r.rlim_cur = r.rlim_max.min(65536);
     unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &r) };
@@ -122,32 +208,68 @@ pub fn list_one(path: &[u8]) -> Option<Listing> {
 
 const OPEN_DIR: i32 = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
 
-/// Directory fd shared by the tasks that still need to openat() a child.
-struct Fd(i32);
-impl Drop for Fd {
-    fn drop(&mut self) {
-        unsafe { libc::close(self.0) };
-    }
+/// The path of the root, when paths are tracked: they are only tracked
+/// when there is something to skip.
+fn tracked_path(root: &[u8]) -> Option<Vec<u8>> {
+    SKIP.get()
+        .is_some_and(|v| !v.is_empty())
+        .then(|| root.to_vec())
 }
 
-// Children are opened with openat() relative to the parent's fd, so paths
-// never get rebuilt and PATH_MAX never bites. Measured on this Mac: open() +
-// close() is ~19us per directory (two Endpoint Security clients tax every
-// open), getattrlistbulk ~14us; past ~8 threads the kernel side stops scaling.
-// 18% of directories are empty: those the parent's listing already says
-// so (rechecked with one lookup) are never opened.
-fn finish_dir<'s>(s: &Scope<'s>, fd: i32, path: Option<Vec<u8>>, id: u32, ctx: &'s Ctx) {
+/// List one directory, and put its subdirectories on the stack.
+///
+/// The directory is opened here: `openat()` against the parent's fd, or
+/// `open()` for the root. A directory that cannot be opened still gets a
+/// listing — an empty one, under the id it was given — because the index
+/// follows the `child` links and a missing link is a broken tree.
+fn list_dir(work: Work, ctx: &Ctx, buf: &mut [u8]) {
+    list_dir_inner(work, ctx, buf);
+    // The directory is listed: its children are on the stack now, so the
+    // count of the outstanding work can drop. This is the last thing the
+    // worker does with the item, and it happens on every path -- the one
+    // where the directory could not be opened included. An item that was
+    // never counted down would keep the other workers waiting for a
+    // directory that is not coming.
+    ctx.pending.fetch_sub(1, Ordering::Release);
+}
+
+/// The work of one directory: open it, list it, and queue its children.
+fn list_dir_inner(work: Work, ctx: &Ctx, buf: &mut [u8]) {
+    let fd = match &work.parent {
+        Some(parent) => unsafe {
+            libc::openat(
+                parent.0,
+                rgy_discovery::path::as_c_ptr(&work.name),
+                OPEN_DIR,
+            )
+        },
+        None => unsafe { libc::open(rgy_discovery::path::as_c_ptr(&work.name), OPEN_DIR) },
+    };
+    if fd < 0 {
+        // (With paths tracked, opening is how refusals get recorded.)
+        if work.parent.is_some()
+            && unsafe { *libc::__error() } == libc::EPERM
+            && let Some(p) = &work.path
+        {
+            DENIED.lock().unwrap().push(p.clone());
+        }
+        push(
+            Listing {
+                id: work.id,
+                names: Vec::new(),
+                ents: Vec::new(),
+            },
+            ctx,
+        );
+        return;
+    }
+    let me = Arc::new(Fd(fd));
     let mut l = Listing {
-        id,
+        id: work.id,
         names: Vec::new(),
         ents: Vec::new(),
     };
-    if fd < 0 {
-        push(l, ctx);
-        return;
-    }
-    list_fd(fd, &mut l);
-    let me = std::sync::Arc::new(Fd(fd));
+    list_fd(fd, &mut l, buf);
     let mut kids = Vec::new();
     let mut empty = Vec::new();
     for e in l.ents.iter_mut() {
@@ -155,17 +277,19 @@ fn finish_dir<'s>(s: &Scope<'s>, fd: i32, path: Option<Vec<u8>>, id: u32, ctx: &
         e.kind &= !MAYBE_EMPTY;
         if e.kind & 3 == KIND_DIR && e.kind & FLAG_MOUNT == 0 {
             let name = &l.names[e.name_off as usize..e.name_off as usize + e.name_len as usize];
-            let child_path = path.as_ref().map(|p| rgy_name_core::live::join(p, name));
+            let child_path = work
+                .path
+                .as_ref()
+                .map(|p| rgy_discovery::path::join(p, name));
             if child_path.as_deref().is_some_and(blocked) {
                 continue;
             }
             e.child = ctx.next_id.fetch_add(1, Ordering::Relaxed);
-            let name = CString::new(name).unwrap_or_default();
-            // (With paths tracked, opening is how refusals get recorded.)
-            if maybe_empty && child_path.is_none() && entry_count(fd, &name) == Some(0) {
+            let cname = rgy_discovery::path::cstring(name).unwrap_or_default();
+            if maybe_empty && child_path.is_none() && entry_count(fd, &cname) == Some(0) {
                 empty.push(e.child);
             } else {
-                kids.push((name, e.child, child_path));
+                kids.push((cname, e.child, child_path));
             }
         }
     }
@@ -180,32 +304,32 @@ fn finish_dir<'s>(s: &Scope<'s>, fd: i32, path: Option<Vec<u8>>, id: u32, ctx: &
             ctx,
         );
     }
-    for (name, cid, child_path) in kids {
-        let parent = me.clone();
-        s.spawn(move |s| {
-            let fd = unsafe { libc::openat(parent.0, name.as_ptr(), OPEN_DIR) };
-            drop(parent);
-            if fd < 0
-                && std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-                && let Some(p) = &child_path
-            {
-                DENIED.lock().unwrap().push(p.clone());
-            }
-            finish_dir(s, fd, child_path, cid, ctx);
+    // The children go on the stack, each holding the parent's fd: it is
+    // opened relative to it, so no path is ever rebuilt. The count of the
+    // outstanding work goes up with them, under the same lock, so a worker
+    // that finds the stack empty sees both.
+    let mut stack = ctx.stack.lock().unwrap();
+    for (name, id, path) in kids {
+        stack.push(Work {
+            id,
+            parent: Some(me.clone()),
+            name,
+            path,
         });
+        ctx.pending.fetch_add(1, Ordering::Relaxed);
     }
 }
 
 /// Entries in the directory `name` (in `dir`) resolves to.
-fn entry_count(dir: i32, name: &CString) -> Option<u32> {
-    let mut al: libc::attrlist = unsafe { std::mem::zeroed() };
+fn entry_count(dir: i32, name: &[u8]) -> Option<u32> {
+    let mut al: libc::attrlist = unsafe { core::mem::zeroed() };
     al.bitmapcount = libc::ATTR_BIT_MAP_COUNT;
     al.dirattr = libc::ATTR_DIR_ENTRYCOUNT;
     let mut b = [0u32; 2];
     let r = unsafe {
         libc::getattrlistat(
             dir,
-            name.as_ptr(),
+            rgy_discovery::path::as_c_ptr(name),
             (&raw mut al).cast(),
             b.as_mut_ptr().cast(),
             8,
@@ -217,8 +341,7 @@ fn entry_count(dir: i32, name: &CString) -> Option<u32> {
 
 fn push(l: Listing, ctx: &Ctx) {
     LISTED.fetch_add(l.ents.len(), Ordering::Relaxed);
-    let slot = rayon::current_thread_index().unwrap_or(ctx.out.len() - 1);
-    ctx.out[slot].lock().unwrap().push(l);
+    ctx.out.lock().unwrap().push(l);
 }
 
 /// The 32-bit word at `at`, if the buffer holds it.
@@ -238,20 +361,21 @@ fn rd64_at(b: &[u8], at: usize) -> Option<u64> {
 
 /// Returns false if the directory could not be opened.
 fn list_into(path: &[u8], l: &mut Listing) -> bool {
-    let Ok(cpath) = CString::new(path) else {
+    let Some(cpath) = rgy_discovery::path::cstring(path) else {
         return false;
     };
-    let fd = unsafe { libc::open(cpath.as_ptr(), OPEN_DIR) };
+    let fd = unsafe { libc::open(rgy_discovery::path::as_c_ptr(&cpath), OPEN_DIR) };
     if fd < 0 {
         return false;
     }
-    list_fd(fd, l);
+    let mut buf = vec![0u8; BUF_SIZE];
+    list_fd(fd, l, &mut buf);
     unsafe { libc::close(fd) };
     true
 }
 
-fn list_fd(fd: i32, l: &mut Listing) {
-    let mut al: libc::attrlist = unsafe { std::mem::zeroed() };
+fn list_fd(fd: i32, l: &mut Listing, buf: &mut [u8]) {
+    let mut al: libc::attrlist = unsafe { core::mem::zeroed() };
     al.bitmapcount = libc::ATTR_BIT_MAP_COUNT;
     al.commonattr = libc::ATTR_CMN_RETURNED_ATTRS
         | libc::ATTR_CMN_NAME
@@ -261,43 +385,41 @@ fn list_fd(fd: i32, l: &mut Listing) {
         | libc::ATTR_CMN_FLAGS;
     al.dirattr = libc::ATTR_DIR_ENTRYCOUNT | libc::ATTR_DIR_MOUNTSTATUS;
     al.fileattr = libc::ATTR_FILE_DATALENGTH;
-    BUF.with_borrow_mut(|buf| {
-        loop {
-            let n = unsafe {
-                libc::getattrlistbulk(
-                    fd,
-                    &mut al as *mut _ as *mut libc::c_void,
-                    buf.as_mut_ptr() as *mut libc::c_void,
-                    buf.len(),
-                    0,
-                )
-            };
-            if n <= 0 {
-                break;
-            }
-            // Size the listing exactly: 8M entries' worth of growth slack
-            // would be ~150 MB at the scan's peak.
-            // The records the kernel wrote, as byte ranges: a record that
-            // does not fit in the buffer ends the listing, and the walk
-            // reads the ones it can trust.
-            let recs = crate::record::records(buf, n as usize);
-            let mut bytes = 0usize;
-            for &(start, end) in &recs {
-                let (b, common) = (&buf[start..end], rd32_at(buf, start + 4).unwrap_or(0));
-                if common & libc::ATTR_CMN_NAME != 0 {
-                    let f = if common & ATTR_CMN_ERROR != 0 { 28 } else { 24 };
-                    if let Some(nlen) = rd32_at(b, f + 4) {
-                        bytes += (nlen as usize).saturating_sub(1);
-                    }
+    loop {
+        let n = unsafe {
+            libc::getattrlistbulk(
+                fd,
+                &mut al as *mut _ as *mut libc::c_void,
+                buf.as_mut_ptr() as *mut libc::c_void,
+                buf.len(),
+                0,
+            )
+        };
+        if n <= 0 {
+            break;
+        }
+        // Size the listing exactly: 8M entries' worth of growth slack
+        // would be ~150 MB at the scan's peak.
+        // The records the kernel wrote, as byte ranges: a record that
+        // does not fit in the buffer ends the listing, and the walk
+        // reads the ones it can trust.
+        let recs = crate::record::records(buf, n as usize);
+        let mut bytes = 0usize;
+        for &(start, end) in &recs {
+            let (b, common) = (&buf[start..end], rd32_at(buf, start + 4).unwrap_or(0));
+            if common & libc::ATTR_CMN_NAME != 0 {
+                let f = if common & ATTR_CMN_ERROR != 0 { 28 } else { 24 };
+                if let Some(nlen) = rd32_at(b, f + 4) {
+                    bytes += (nlen as usize).saturating_sub(1);
                 }
             }
-            l.ents.reserve_exact(recs.len());
-            l.names.reserve_exact(bytes);
-            for &(start, end) in &recs {
-                parse_entry(&buf[start..end], l);
-            }
         }
-    });
+        l.ents.reserve_exact(recs.len());
+        l.names.reserve_exact(bytes);
+        for &(start, end) in &recs {
+            parse_entry(&buf[start..end], l);
+        }
+    }
 }
 
 fn parse_entry(b: &[u8], l: &mut Listing) {

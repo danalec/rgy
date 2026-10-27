@@ -17,12 +17,36 @@
 //! do on each OS ([`catch_up_for`]). The Windows, macOS, Linux and FreeBSD
 //! paths cannot disagree about "replayed" vs "relisted", because there is
 //! only one function that answers it.
+//!
+//! # `no_std`
+//!
+//! The crate is `no_std`: the pick is a `cfg` and a decision, and both
+//! are portable. The portable walk is `no_std` too — it asks the operating
+//! system directly — so the fallback exists in every build, on every
+//! target. What the `std` feature buys is the environment (the
+//! `ERS_USE_RECORDS` switch on Windows) and the threads the parallel walk
+//! fans out over.
 
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
-use std::path::PathBuf;
+#![no_std]
 
+extern crate alloc;
+#[cfg(feature = "std")]
+extern crate std;
+
+#[cfg(windows)]
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::vec::Vec;
+
+/// The trait the backends implement, where there is one.
+#[cfg(any(
+    windows,
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "freebsd"
+))]
+use rgy_discovery::Source;
 use rgy_discovery::walk::{Cancel, Cancelled, Listing, Progress};
-use rgy_discovery::{PortableSource, Source};
 use rgy_proto::CatchUp;
 
 /// The platform whose change feed decides how a restart catches up.
@@ -116,6 +140,10 @@ enum Kind {
     /// Linux, macOS and FreeBSD always have their own backend, so the
     /// variant does not exist there: their fallback to the portable walk is
     /// a run-time decision (`enumerate_cancellable`), not a pick.
+    ///
+    /// The walk itself needs no `std` — it asks the operating system
+    /// directly (`rgy_discovery::dir`) — so this variant exists in every
+    /// build, on every target.
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd")))]
     Portable,
     #[cfg(target_os = "linux")]
@@ -146,6 +174,15 @@ impl Source for MacSource {
 /// The [`Source`] for `root`: the native walk on its own platform, the
 /// portable walk elsewhere. `threads` is the portable walk's directory-read
 /// fan-out; backends with their own parallelism ignore it.
+#[cfg_attr(
+    not(any(
+        windows,
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "freebsd"
+    )),
+    allow(dead_code)
+)]
 pub struct AnySource {
     root: Vec<u8>,
     threads: usize,
@@ -162,37 +199,27 @@ pub fn source_for(root: Vec<u8>, threads: usize) -> AnySource {
     }
 }
 
-/// The root as a path, for the backends that take one. Linux and FreeBSD
-/// only: those two walks want a `PathBuf`, and a Unix path is a byte string
-/// rather than a UTF-8 string, so the bytes are carried through unchanged.
-/// The Windows and macOS backends take the root as it is.
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
-fn path_of(root: &[u8]) -> PathBuf {
-    use std::os::unix::ffi::OsStringExt;
-    PathBuf::from(std::ffi::OsString::from_vec(root.to_vec()))
-}
-
 fn pick(root: &[u8], threads: usize) -> Kind {
     #[cfg(target_os = "linux")]
     {
         let _ = threads;
-        return Kind::Linux(rgy_discovery_linux::LinuxSource {
-            root: path_of(root),
-        });
+        Kind::Linux(rgy_discovery_linux::LinuxSource {
+            root: root.to_vec(),
+        })
     }
     #[cfg(target_os = "freebsd")]
     {
         let _ = threads;
-        return Kind::FreeBsd(rgy_discovery_freebsd::FreeBsdSource {
-            root: path_of(root),
-        });
+        Kind::FreeBsd(rgy_discovery_freebsd::FreeBsdSource {
+            root: root.to_vec(),
+        })
     }
     #[cfg(target_os = "macos")]
     {
-        return Kind::Macos(MacSource {
+        Kind::Macos(MacSource {
             root: root.to_vec(),
             threads,
-        });
+        })
     }
     #[cfg(windows)]
     {
@@ -221,21 +248,75 @@ fn pick(root: &[u8], threads: usize) -> Kind {
 /// privileges, a non-NTFS root — keeps the portable walk.
 #[cfg(windows)]
 fn try_mft(root: &[u8]) -> Option<rgy_discovery_windows::MftSource<'static>> {
-    let path = std::str::from_utf8(root).ok()?;
-    let p = std::path::Path::new(path);
-    if p.parent().is_some() {
+    let path = core::str::from_utf8(root).ok()?;
+    if !is_volume_root(path) {
         return None;
     }
-    let vol_root = p.to_str()?;
     // The volume lives for the process; leak it so the MftSource owns a
     // 'static borrow (the same trade `searchd`'s `open_watch` makes).
     let volume: &'static rgy_discovery_windows::volume::Volume = Box::leak(Box::new(
-        rgy_discovery_windows::volume::Volume::open(vol_root).ok()?,
+        rgy_discovery_windows::volume::Volume::open(path).ok()?,
     ));
-    let indexer = rgy_discovery_windows::indexer::Indexer::new(volume);
+    let indexer = mft_indexer(volume);
     Some(rgy_discovery_windows::MftSource::new(indexer))
 }
 
+/// The indexer the MFT walk reads through.
+///
+/// The escape hatch that forces the record path instead of the streamed
+/// one is `ERS_USE_RECORDS`, and it is read *here* rather than inside the
+/// backend: a library that reads the environment is a library that cannot
+/// be tested, and the backend has no business knowing how it was built.
+/// With the `std` feature off there is no environment to read, and the
+/// streamed path is the one that is used.
+#[cfg(windows)]
+fn mft_indexer(
+    volume: &'static rgy_discovery_windows::volume::Volume,
+) -> rgy_discovery_windows::indexer::Indexer<'static> {
+    #[cfg(feature = "std")]
+    let streamed = std::env::var_os("ERS_USE_RECORDS").is_none();
+    #[cfg(not(feature = "std"))]
+    let streamed = true;
+    rgy_discovery_windows::indexer::Indexer::with_records(volume, streamed)
+}
+
+/// Whether the path names a volume root.
+///
+/// The MFT walk enumerates a volume from its root, so it answers only for
+/// a root. A drive and its separator is one ("C:\", "C:"), a UNC share's
+/// root is one ("\\server\share"), and the POSIX root is one ("/").
+///
+/// The rule is about the *name*: a path that names a root but whose
+/// volume cannot be opened is caught by the open that follows, and a path
+/// that does not name a root is caught here. Both end in the portable
+/// walk.
+#[cfg(windows)]
+fn is_volume_root(path: &str) -> bool {
+    let p = path.trim_end_matches(['\\', '/']);
+    // The drive and nothing else.
+    if p.len() == 2 && p.as_bytes()[1] == b':' {
+        return true;
+    }
+    // A UNC share: a server and a share, and no path under them.
+    if let Some(unc) = p.strip_prefix("\\\\") {
+        let mut parts = unc.split(['\\', '/']);
+        return parts.next().is_some_and(|s| !s.is_empty())
+            && parts.next().is_some_and(|s| !s.is_empty())
+            && parts.next().is_none();
+    }
+    // The POSIX root.
+    p.is_empty()
+}
+
+#[cfg_attr(
+    not(any(
+        windows,
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "freebsd"
+    )),
+    allow(dead_code)
+)]
 impl AnySource {
     /// Which backend answers this source. The differential test asserts it
     /// before comparing, so a silent fallback cannot make a broken backend
@@ -278,6 +359,19 @@ impl AnySource {
     /// walk checks it per directory. A native backend that refuses falls
     /// back to the portable walk rather than taking the daemon down — the
     /// same contract `searchd`'s `open_watch` holds.
+    // On a bare-metal build there is no native backend, so the token and
+    // the progress callback have nobody to hand: the parameters are still
+    // part of the signature (the callers are the same everywhere), they
+    // are just not read there.
+    #[cfg_attr(
+        not(any(
+            windows,
+            target_os = "linux",
+            target_os = "macos",
+            target_os = "freebsd"
+        )),
+        allow(unused_variables)
+    )]
     pub fn enumerate_cancellable(
         &self,
         cancel: &Cancel,
@@ -285,7 +379,20 @@ impl AnySource {
     ) -> Result<Vec<Listing>, Cancelled> {
         match &self.kind {
             #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd")))]
-            Kind::Portable => self.portable().enumerate_cancellable(cancel, on_progress),
+            Kind::Portable => {
+                let p = rgy_discovery::PortableSource::new(self.root.clone(), self.threads);
+                p.enumerate_cancellable(cancel, on_progress)
+            }
+            // The native backends, where this build has one. The arm is
+            // gone where there is none — a bare-metal build, where the
+            // `Kind` enum has a single variant and a catch-all would be
+            // an unreachable pattern.
+            #[cfg(any(
+                windows,
+                target_os = "linux",
+                target_os = "macos",
+                target_os = "freebsd"
+            ))]
             _ => {
                 if cancel.is_cancelled() {
                     return Err(Cancelled);
@@ -298,20 +405,34 @@ impl AnySource {
                             Ok(ls)
                         }
                     }
-                    Err(_) => self.portable().enumerate_cancellable(cancel, on_progress),
+                    Err(_) => self.fallback(cancel, on_progress),
                 }
             }
         }
     }
 
-    fn portable(&self) -> PortableSource {
-        PortableSource::new(self.root.clone(), self.threads)
+    /// The portable walk's answer, for a native backend that refused.
+    ///
+    /// The walk asks the operating system directly and needs no `std` to
+    /// do it, so there is always something to fall back to.
+    fn fallback(
+        &self,
+        cancel: &Cancel,
+        on_progress: &(dyn Fn(Progress) + Sync),
+    ) -> Result<Vec<Listing>, Cancelled> {
+        let p = rgy_discovery::PortableSource::new(self.root.clone(), self.threads);
+        p.enumerate_cancellable(cancel, on_progress)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(test)]
+    extern crate std;
+
+    use alloc::format;
+    use alloc::vec;
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 
@@ -469,5 +590,20 @@ mod tests {
         assert_eq!(current_platform(), Platform::Other);
         // And the shortcut agrees with the rule, not with a second copy of it.
         assert_eq!(catch_up(), catch_up_for(current_platform()));
+    }
+
+    /// A volume root is a root, and a path under one is not: the MFT walk
+    /// enumerates the whole volume, so it may only answer for a root.
+    #[cfg(windows)]
+    #[test]
+    fn only_a_volume_root_names_a_volume() {
+        assert!(super::is_volume_root("C:\\"));
+        assert!(super::is_volume_root("C:"));
+        assert!(super::is_volume_root("c:\\"));
+        assert!(super::is_volume_root("\\\\server\\share"));
+        assert!(super::is_volume_root("/"));
+        assert!(!super::is_volume_root("C:\\Users"));
+        assert!(!super::is_volume_root("\\\\server\\share\\dir"));
+        assert!(!super::is_volume_root("relative"));
     }
 }
