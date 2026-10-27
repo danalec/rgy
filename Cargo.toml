@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/par",
     "crates/discovery",
     "crates/name-core",
     "crates/discovery-windows",
