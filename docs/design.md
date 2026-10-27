@@ -158,7 +158,67 @@ content worker that builds the trigrams, not a regex pass at query time.
   search itself) wraps the daemon, and the QoS/priority pools come
   through the platform seam.
 
-### 2.5 UX surfaces
+### 2.5 The tree without `std`, and the parallelism written by hand
+
+- **The whole library tree is `no_std`.** Every crate this repository owns
+  — the name engine, the seam, the protocol, the selector, the engine and
+  the four platform backends — declares `#![no_std]` and is `alloc` and
+  nothing else. What genuinely needs a filesystem — the content grep, the
+  persisted index, the mmap, the threads, the keep-warm spinner, the
+  console, the pack store — is behind the `std` feature, and the `no_std`
+  build does not have it. The CI builds that configuration for
+  `x86_64-unknown-none`: a bare-metal target with no operating system at
+  all, so nothing in the chain can quietly reach for a file, a thread or a
+  clock, because there is nothing there to reach for.
+- **The platform calls are written by hand, and they are written once.**
+  The seam is where a platform call lives: `rgy_discovery::dir` (list a
+  folder, stat a path), `rgy_discovery::file` (read a file, write one,
+  resolve a path) and `rgy_discovery::path` (the bytes, the joining, and
+  the Windows spelling). The portable walk, the live overlay's `lstat`, the
+  scope filter's path resolution and the macOS backend's root all go
+  through them, so there is one implementation of each and no `std` behind
+  it. A call that needs the operating system is a call the tree declares:
+  `clock_gettime(2)` in `rgy_name_core::clock`, `GetSystemTimeAsFileTime`
+  on Windows, `realpath(3)` and `open(2)` in the seam.
+- **A path is bytes.** `std::path` does not exist in `no_std`, and the
+  tree does not miss it: the seam's root is a `Vec<u8>`, the platform
+  backends take the same shape, and `rgy_discovery::path` owns the joining
+  and the C strings. The separator is `/` everywhere, and the bytes are the
+  bytes the filesystem gave — a Unix path is not UTF-8, and the tree does
+  not pretend otherwise.
+- **The smaller Cortex-M targets would do the same job**, except that
+  rgx-core keeps a 64-bit atomic in its instruction cache and those
+  cores do not have one. That is a limit of the upstream tree, not of
+  this one, and the upstream tree is not edited by hand.
+- **The parallelism is written here, not borrowed.** rayon needs `std`,
+  and its thread pool is the one thing a `no_std` build cannot have.
+  `crates/par` (`rgy-par`) is the replacement: `no_std`, no dependencies,
+  and only the primitives the tree actually uses — map and collect, the
+  per-worker split of a slice, the k-way merge sort, and the two
+  synchronisation primitives a `no_std` tree needs (a lock and a cell
+  that spin, because there is nothing to park on). Under `std` the chunks
+  run on threads and the lock is the OS one; without it they run in order,
+  in the same order, so the two configurations agree on the answer.
+- **The width belongs to the user.** `--threads` on `searchctl` and
+  `searchd`, `RGY_NUM_THREADS` in the environment, and the default is
+  four for the scan and the machine's cores for the query. The flag wins
+  over the environment, and the environment over the default. Four for
+  the scan is not timidity: walking a tree is disk work, and eight
+  workers on one disk queue behind each other instead of reading any
+  faster. The query is arithmetic, so it does want every core.
+- **The macOS backend walked the tree with rayon and does not any more.**
+  Its walk is a recursive descent that opens every child relative to its
+  parent's descriptor, so the number of open descriptors follows the
+  *depth* of the tree rather than its width. That shape is now a shared
+  stack of work over `rgy-par`'s workers: the same `openat` trick, the
+  same bound on the descriptors, and the same `no_std` answer — parallel
+  with the `std` feature, one worker without it.
+- **One crate in the tree is `std`, and it is not ours.**
+  `crates/rgx-adapters-docs` is the upstream's, transported verbatim, and
+  it spawns external programs (`soffice`, `tesseract`) — which is `std` by
+  definition, and its own manifest says so.
+
+### 2.6 UX surfaces
 
 - `searchctl` (names): fsearch's one-shot ergonomics + zen-rs's filters
   + rg-compatible exit codes where they do not conflict; `--json` from

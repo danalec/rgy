@@ -37,6 +37,7 @@ use std::process::Command;
 /// The product: Apache-2.0, and only Apache-2.0.
 const PRODUCT: &[&str] = &[
     "crates/name-core/",
+    "crates/par/",
     "crates/discovery/",
     "crates/discovery-windows/",
     "crates/discovery-linux/",

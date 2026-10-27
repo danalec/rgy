@@ -18,6 +18,7 @@ verification on machines this host does not have.
 | Live overlay | `crates/name-core` (`live`) | ✅ portable `lstat`; the base's root-relative paths and the overlay's openable ones are crossed, so a re-listed folder answers each file once. The daemon merges the overlay through `search_alternatives` and the CLI through `merge_hits`, so **every** live change is answered — the keyed-by-index merge it replaced dropped one change per file and made the CLI index the base with the overlay's `u32::MAX` sentinel (a panic); both paths are pinned by `every_live_change_is_answered` |
 | Index persistence (sidecar-pinned root) | `crates/name-core` (`persist`) | ✅ |
 | Path fold (ASCII case + Unicode NFC, UAX #15) | `crates/name-core` (`fold`, `nfc`) | ✅ tables generated from the UCD; 20,171 UCD conformance cases pass |
+| The tree without `std` | `crates/*` (every crate this repository owns) | ✅ the index, the query parser, the ranking, the fold, the transliterations, the protocol, the selector, the engine and the four platform backends are `alloc` and nothing else — the lot builds for `x86_64-unknown-none` (bare metal, no OS at all), and the CI checks it on every push. The `std` feature adds what needs a filesystem: the content grep, the live overlay, the persisted index, the mmap, the clock, the threads, the portable walk, the console and the pack store |
 
 ### Discovery
 
@@ -47,8 +48,8 @@ verification on machines this host does not have.
 | Content index (trigram + bloom) | `crates/name-core` (`content`) | ✅ transported from fsearch |
 | Cloud placeholders (never hydrated) | `crates/name-core` (`placeholder`) | ✅ the recall bits on Windows, `SF_DATALESS` in `st_flags` on macOS — asked at the open, so the bytes are never fetched |
 | Confirm via rgx engine + `grep:`/`regex:`/`sym:` | `crates/name-core` (`content`), `crates/rgx-core` | ✅ |
-| rgx engine, TV packs, adapters | `crates/rgx-*` | ✅ upstream's crates, verbatim (re-synced 2026-10-24, at upstream `a72b898`) |
-| One regex engine (vendored copy deleted) | `crates/name-core` (`regex`) → `rgx-core` | ✅ (`rgx-core` stays `no_std`) |
+| rgx engine, TV packs, adapters | `crates/rgx-*` | ✅ upstream's crates, verbatim (re-synced 2026-10-25, at upstream `11ce39a`) |
+| One regex engine (vendored copy deleted) | `crates/name-core` (`regex`) → `rgx-core` | ✅ (`rgx-core` stays `no_std`) — the name path (`re:`, `path:`, the rules) and the content path's query plan both run on rgx-core's AST; the `regex` crate is left only as the content grep's fallback for the patterns rgx's byte parser refuses (Unicode properties, say), which is the same gap upstream's rgx still has |
 | Pack compaction | `crates/rgx-core` (`tv_runtime`) | ✅ opt-in, `--compact` |
 
 > **`grep:`/`regex:`/`sym:` search file bytes today, not containers.** The
@@ -75,6 +76,8 @@ verification on machines this host does not have.
 | PGO (trained on the name bench) | `pgo.sh` (unix), `pgo.ps1` (Windows) | ✅ validated end to end on Windows |
 | Bench harness + baselines | `crates/engine/examples`, `crates/name-core/examples`, `benchmark/` | ✅ |
 | The perf gate itself | `scripts/bench-names.py`, `benchmark/baseline-names.csv` | ✅ a fixed worker width, seven runs, the best of them, and the spread beside the number |
+| The parallel primitives (rayon gone) | `crates/par` (`rgy-par`) | ✅ `no_std` and dependency-free: `map_collect`, `for_each`, the k-way merge sort and the split that writes a chunk per worker. The width is the user's: `--threads` wins, then `RGY_NUM_THREADS`, then four for the scan and the machine's cores for the query |
+| The whole tree is `no_std` | `crates/*`, `crates/discovery-*` | ✅ every crate this repository owns declares `#![no_std]`; the `no-std` job builds the lot for `x86_64-unknown-none`, and each platform backend is proved on its own OS by the suite job |
 | The CI (the gates, on three OSes) | `.github/workflows/ci.yml`, `.gitea/workflows/drift.yml` | ✅ written and pinned to the named images (Windows Server 2022, macOS 15 on arm64, Ubuntu 24.04); ⬜ **never run** — see below |
 
 ### Perf gate
@@ -422,6 +425,59 @@ the three platforms behaving alike.
   trigram means something different over extracted text than over raw
   bytes, and the pack path already covers the recurrent container
   queries.
+- **The `std` corners that are left, and why.** The library tree is `alloc`
+  and nothing else; what still leans on the standard library is behind a
+  feature, and there are two kinds of it:
+  - **Ours, and it is a capability rather than a leftover.** The threads
+    (the parallel walk and the query), the mmap of the name blob, the
+    content grep's file reads, the persisted index's cache folder and the
+    environment it asks for. Each one needs an operating system to be
+    interesting, and each one has a working shape without it: the walk
+    runs on one worker, the index is read into memory instead of mapped,
+    the grep does not run at all.
+  - **Upstream's, and it travels with the crate.** The content grep keeps
+    the `regex` crate as the fallback for the patterns rgx's byte parser
+    refuses (Unicode properties, say). The name path and the content
+    path's query plan both run on rgx-core; the fallback is the same gap
+    upstream's own rgx still has. And `crates/rgx-adapters-docs` is the
+    upstream's crate, transported verbatim, and it spawns external
+    programs (`soffice`, `tesseract`) — `std` by definition, and its own
+    manifest says so. It is the one crate the bare-metal gate does not
+    name.
+- **The whole tree is `no_std`, and the CI says so.** Every crate this
+  repository owns — the name engine, the seam, the protocol, the selector,
+  the orchestration engine, the login-item tool and the four platform
+  backends — declares `#![no_std]`, and the `no-std` job builds the lot for
+  `x86_64-unknown-none`: a bare-metal target with no operating system at
+  all, so nothing in the chain can quietly reach for a file, a thread or a
+  clock. The platform backends' own bodies are proved by the suite job,
+  which builds each one for its own OS — where the `#![no_std]` at the root
+  is the proof, because a `std::` path in the body does not compile.
+- **The second round: the platform calls, written by hand.** The first round
+  made the tree compile without `std`. The second asked what such a build is
+  *missing*, and the answer was the operating system. The seam owns that
+  now: `rgy_discovery::dir` (list a folder, stat a path),
+  `rgy_discovery::file` (read a file, write one, resolve a path) and
+  `rgy_discovery::path` (the bytes, the joining, the Windows spelling). The
+  portable walk was rewritten over those calls, and it came out of `std`
+  with them: `rgy_discovery::walk::scan` answers in a bare-metal build, so
+  the selector's `Kind::None` — the "no walk on this target" answer — is
+  gone. The name layer got the same treatment: its own clock
+  (`clock_gettime(2)`, `GetSystemTimeAsFileTime` on Windows), the index
+  format separated from the I/O (`to_bytes`/`from_bytes`), the live
+  overlay's `lstat` and the scope filter's path resolution. What is still
+  behind `std` is the list above, and every entry in it is a capability
+  rather than a gap.
+  - **What the migration changed in public API.** The roots of the sources
+    are bytes now (`Vec<u8>`), because `std::path` does not exist in
+    `no_std` and the tree did not need it: `rgy_discovery::path` owns the
+    joining and the C strings, and the separator is `/` everywhere. The
+    Linux inotify watch takes `&[u8]` where it took a `&Path`.
+  - **The `ERS_USE_RECORDS` escape hatch moved.** The Windows backend no
+    longer reads the environment — a library that reads the environment is
+    a library that cannot be tested. The daemon and the CLI read it and
+    hand the decision to `Indexer::with_records`, and the default is the
+    same behaviour the variable used to select.
 - **Publishing to a registry.** The rgx repository is published
   (`https://github.com/danalec/rgx`, answering 200 since 2026-10-23, and
   the blob links in this file resolve), and the rgx crates are on
@@ -444,6 +500,11 @@ the three platforms behaving alike.
   names (`searchctl`, `searchd`, `rgy-autostart`); only the package names
   moved.
 
+  `rgy-par` is the fifteenth, and it is **not published yet**: it was
+  written for the `no_std` migration, so it has no release of its own to
+  speak of. It publishes with the next release of the crates that depend
+  on it.
+
   The *distribution* keeps a different name: `rgy-search`, because `rgy`
   is taken on crates.io (a GameBoy emulator library); on winget and
   homebrew the name is free, and one name across the registries is worth
@@ -463,6 +524,25 @@ the three platforms behaving alike.
   operating system it describes. The code is transported and compiles
   there — checked for both `aarch64-apple-darwin` and `x86_64-apple-darwin`
   — but nobody has watched it work.
+- **The FreeBSD column has run, and it found two things that are not
+  ours.** The whole workspace suite now runs on a real FreeBSD 15.1
+  kernel: a `vmactions/freebsd-vm`-shaped VM, brought up with `anyvm` on
+  the Unraid host with KVM, with `pkg install rust git` and the same two
+  commands the CI job runs — 64 test targets, none failing. The autostart's
+  CLI tests were running on platforms where the autostart does not exist;
+  they are now filtered by platform, and the refusal is itself under
+  test. Two failures are upstream's, in the vendored `rgx-core`, and both
+  are about the host rather than about FreeBSD. The JSON scanner's test
+  asserts the AVX2 path on any `x86_64`; the image boots with QEMU's
+  baseline CPU when the rich one will not start it, and that baseline has
+  no AVX2 — so the assertion cannot hold there, and the test should ask
+  the machine instead of the architecture. And the fuzz harness's watchdog
+  is ten seconds of wall clock, which a round crosses when `cargo test`
+  runs the targets in parallel — and the worker thread the watchdog
+  abandons keeps spinning, so the test binary never exits: on the Linux
+  box that took the whole VM down. The same test passes three times out of
+  three on an idle FreeBSD guest, so the input that does it is not the
+  same one every time. Both belong in rgx, not here.
 - **The CI has never run.** The workflow is written and pinned to the
   images this project is verified against: Windows Server 2022, macOS 15 on
   arm64 (the only place the NEON scorer and the macOS discovery backend

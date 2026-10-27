@@ -325,6 +325,7 @@ the tree but not yet wired into the search path.
 | `--reindex` | rebuild the index even if a usable one exists |
 | `--max-age <dur>` | rebuild an index older than this (`30m`, `2h`, `7d`) |
 | `--explain` | print the query plan on stderr — what rgy did with your query |
+| `--threads <n>` | how many workers to use, for the scan and for the query |
 
 The index is what makes the name half of the query fast. rgy keeps it
 between runs and rebuilds it when it is older than `--max-age`.
@@ -334,6 +335,35 @@ folder inside it: `%LOCALAPPDATA%\rgy` on Windows,
 `$XDG_CACHE_HOME/rgy` (or `~/.cache/rgy`) on Linux, and
 `~/Library/Caches/rgy` on macOS. Set `RGY_INDEX_DIR` to keep the index
 somewhere else.
+
+### How many workers
+
+rgy uses **four** workers to walk the tree, and as many as the machine
+has cores to answer the query. Both numbers are yours to change.
+
+```sh
+searchctl --root ~ --threads 8 "invoice"
+```
+
+The flag wins over everything. Without it, the environment decides:
+
+```sh
+RGY_NUM_THREADS=8 searchctl --root ~ "invoice"
+```
+
+`RGY_NUM_THREADS` is the setting for both widths, and it applies to
+every run of the program — put it in the same place you put the other
+environment settings and you never think about it again. Without the
+flag and without the environment, the scan uses four workers and the
+query uses every core.
+
+Four is the default for the scan on purpose: walking a tree is disk
+work, and eight workers on one disk mostly queue behind each other
+instead of reading any faster. The query is arithmetic, so it does want
+every core.
+
+The daemon takes the same flag — `searchd --root ~ --threads 8` — and
+the same environment variable.
 
 ## 7. The daemon
 

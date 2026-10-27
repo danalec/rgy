@@ -7,3 +7,6 @@
 # package, and its .pyc is a build output like /target.
 __pycache__/
 *.py[cod]
+# The tool cache: the run files the desktop tools leave beside the tree.
+# They are outputs, not sources, and nothing in the repository reads them.
+.cache/

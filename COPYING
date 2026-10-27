@@ -20,6 +20,7 @@ fsearch under MIT and keep its terms (see NOTICE and LICENSE-MIT-FSEARCH).
 appears or if one of them stops being MIT.
 
     crates/name-core/                  the name index, the query engine, the fuzzy ranker
+    crates/par/                        the parallelism: split the work, run the pieces
     crates/discovery/                  the discovery seam
     crates/discovery-windows/          MFT + USN discovery
     crates/discovery-linux/            getdents64 walk
