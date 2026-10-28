@@ -76,7 +76,7 @@ verification on machines this host does not have.
 | PGO (trained on the name bench) | `pgo.sh` (unix), `pgo.ps1` (Windows) | ✅ validated end to end on Windows |
 | Bench harness + baselines | `crates/engine/examples`, `crates/name-core/examples`, `benchmark/` | ✅ |
 | The perf gate itself | `scripts/bench-names.py`, `benchmark/baseline-names.csv` | ✅ a fixed worker width, seven runs, the best of them, and the spread beside the number |
-| The parallel primitives (rayon gone) | `crates/par` (`rgy-par`) | ✅ `no_std` and dependency-free: `map_collect`, `for_each`, the k-way merge sort and the split that writes a chunk per worker. The width is the user's: `--threads` wins, then `RGY_NUM_THREADS`, then four for the scan and the machine's cores for the query |
+| The parallel primitives (rayon gone) | `crates/par` (`rgy-par`) | ✅ `no_std` and dependency-free: `map_collect`, `for_each`, the k-way merge sort and the split that writes a chunk per worker. Under `std` the chunks run on a pool the crate keeps between the calls, so a search does not create a thread per call. The width is the user's: `--threads` wins, then `RGY_NUM_THREADS`, then four for the scan and the machine's cores for the query |
 | The whole tree is `no_std` | `crates/*`, `crates/discovery-*` | ✅ every crate this repository owns declares `#![no_std]`; the `no-std` job builds the lot for `x86_64-unknown-none`, and each platform backend is proved on its own OS by the suite job |
 | The CI (the gates, on three OSes) | `.github/workflows/ci.yml`, `.gitea/workflows/drift.yml` | ✅ written and pinned to the named images (Windows Server 2022, macOS 15 on arm64, Ubuntu 24.04); ⬜ **never run** — see below. The `release` job is a matrix of eleven platforms, one archive each |
 
@@ -103,19 +103,50 @@ Two things follow from it, and both are in the script:
   identical code disagreeing by 28%). A gate that fires on noise is worse
   than no gate.
 
-**The gate is red, and the regression is not where it looked.**
-Measured on 2026-10-27, right after the `rgx-v0.1.1` sync: every
-gated row of the 200k corpus is between 26% and 94% slower than the
-baseline. The A/B rules out the two obvious suspects. The sync is not
-the cause — the tree from before it measures the same (193 µs
-against 184 µs on `^src`, inside the row's own spread). The
-machine is not the cause either: the tree from before the `no_std`
-rewrite reproduces the baseline on this host, on the same day
-(101 µs against the recorded 110 µs). The rewrite is what costs
-1.8x on the scan and the rank, and it was committed without the gate
-being measured — only `bench-names.py render --check` ran, and
-that checks the table against the CSV, not the code against the
-baseline.
+**The gate is green, and the regression was two things.**
+The `no_std` rewrite of the name engine was committed with the perf
+gate's *render* check green and its *measurement* never run — only
+`bench-names.py render --check` ran, and that checks the table against
+the CSV, not the code against the baseline. When the gate was finally
+run (2026-10-27, right after the `rgx-v0.1.1` sync) every gated row of
+the 200k corpus was between 26% and 94% slower. The A/B ruled out the
+two obvious suspects: the sync is not the cause — the tree from before
+it measures the same (193 µs against 184 µs on `^src`, inside the
+row's own spread) — and the machine is not the cause either: the tree
+from before the rewrite reproduces the baseline on this host, on the
+same day (101 µs against the recorded 110 µs).
+
+What it was, measured the same day in the same conditions, was two
+things the rewrite had changed:
+
+- **The rules ran the engine on every name.** The rewrite replaced the
+  `regex` crate — a lazy DFA with a literal prefilter — with rgx-core's
+  byte VM, which restarts at every byte of the name. The rules are asked
+  about every name in the index, and ten patterns over two hundred
+  thousand names is two million VM runs to say "no". The fix is the
+  shape: a rule's pattern is walked once, when it is compiled, for the
+  literals a match has to begin or end with, and a name that cannot
+  match is rejected with a few byte comparisons. Every one of the default
+  rules has a shape — seven name a whole folder, one says "starts with
+  a dot", two say "ends with an extension" — and the index build went
+  from 170 ms to 47 ms at four workers, against the 61 ms of the tree
+  from before the rewrite.
+- **Every parallel call created its threads.** `rgy-par` had replaced
+  rayon's persistent pool with `std::thread::scope`, which creates a
+  thread per call: three threads for every parallel call of a search,
+  and a search makes several. The fix is the pool `rgy-par` keeps now —
+  the workers live between the calls, and a search that runs a hundred
+  times does not create a hundred threads. The tell was that at one
+  worker the new tree matched the old one to within 3%: the work per
+  entry was never the problem, only what it cost to get the workers
+  there.
+
+The gate now passes on every gated row of the 200k corpus, and the tree
+is 7% to 14% faster than the baseline there. The 5M rows are measured
+and reported rather than gated, and they are not a measurement one can
+decide anything on: the same code came out 4% faster than the baseline
+in a quiet run and 44% slower in a noisy one, which is the 5–52% spread
+the baseline itself records, and the reason those rows do not rule.
 
 The tuned builds do not move it either: `-C target-cpu=znver4`
 measures 187 µs against 184 µs for the portable one. The
@@ -464,18 +495,19 @@ the three platforms behaving alike.
     programs (`soffice`, `tesseract`) — `std` by definition, and its own
     manifest says so. It is the one crate the bare-metal gate does not
     name.
-- **The name path is 1.8x slower than it was, and the gate that would
-  have said so never ran.** The `no_std` rewrite of the name engine
-  — the seam, the clock, the index format — was committed on
-  2026-10-26 with the perf gate's *render* check green and its
-  *measurement* never run. Measured on 2026-10-27, the gated rows of
-  the 200k corpus are between 26% and 94% slower than the baseline,
-  and the A/B puts the cost on the rewrite: the tree from before it
-  reproduces the baseline on the same host on the same day. This is
-  the one row of the scoreboard that is red, and it is red on a tree
-  that works and passes every other gate. The hunt is in what the
-  rewrite changed in `crates/name-core` and `crates/engine`; the two
-  commits to read first are `ffc0a62` and `c44d10c`.
+- **The perf gate is the gate that was not run.** The `no_std` rewrite of
+  the name engine — the seam, the clock, the index format — was committed
+  on 2026-10-26 with the perf gate's *render* check green and its
+  *measurement* never run: the render check compares the table with the
+  CSV and says nothing about the code. Measured on 2026-10-27, the
+  gated rows were between 26% and 94% slower than the baseline, and
+  the A/B put the cost on the rewrite — the tree from before it reproduced
+  the baseline on the same host on the same day. The gate passes now;
+  the two causes were the rules running the regex engine on every name
+  and the pool creating a thread per parallel call. What is left of
+  that episode is the habit: `bench-names.py render --check` is not the
+  gate, `bench-names.py check` is, and the second one is the one that
+  has to run.
 - **The whole tree is `no_std`, and the CI says so.** Every crate this
   repository owns — the name engine, the seam, the protocol, the selector,
   the orchestration engine, the login-item tool and the four platform

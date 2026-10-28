@@ -56,7 +56,15 @@ pub struct Rule {
 
 impl Rule {
     /// Does the rule match `name`?
+    ///
+    /// The shape first: it is a few byte comparisons, and it is what
+    /// keeps the engine from running on every name in the index. The
+    /// engine is a Pike VM that restarts at every byte of the name, and
+    /// the rules are asked about every name there is.
     fn matches(&self, name: &[u8]) -> bool {
+        if !self.re.shape().maybe(name) {
+            return false;
+        }
         self.re.is_match_bytes(name)
     }
 }
@@ -288,6 +296,92 @@ mod tests {
         assert!(Rules::parse("low [unclosed").is_err(), "an uncompilable pattern");
         assert!(Rules::parse("low ^x$ q").is_err(), "an unknown flag");
         assert!(Rules::parse("low").is_err(), "no pattern");
+    }
+
+    /// The shape never rejects a name the engine accepts.
+    ///
+    /// The shape is a necessary condition, not a sufficient one: it may
+    /// admit a name the engine rejects, but it must never reject a name
+    /// the engine accepts. That is the whole of its contract, and this
+    /// is where it is checked -- over the default rules and over the
+    /// names that exercise them.
+    #[test]
+    fn the_shape_never_rejects_a_match() {
+        let rules = Rules::defaults();
+        let names = [
+            "node_modules",
+            "__pycache__",
+            "site-packages",
+            "Pods",
+            "venv",
+            "bower_components",
+            "target",
+            "build",
+            "dist",
+            "out",
+            "vendor",
+            "deps",
+            "tmp",
+            "temp",
+            "Caches",
+            "cache",
+            "caches",
+            "Logs",
+            "DerivedData",
+            "CoreSimulator",
+            "folders",
+            "Containers",
+            "Group Containers",
+            "Application Support",
+            "Library",
+            "System",
+            "opt",
+            "Applications",
+            ".git",
+            ".hidden",
+            "foo.app",
+            "Foo.APP",
+            "x.framework",
+            "x.bundle",
+            "x.dSYM",
+            "x.sdk",
+            "src",
+            "main.rs",
+            "notes.txt",
+            "",
+            "node_modules2",
+            "xnode_modules",
+            "app",
+            "myapp",
+        ];
+        for rule in &rules.rules {
+            for name in names {
+                if rule.re.is_match_bytes(name.as_bytes()) {
+                    assert!(rule.re.shape().maybe(name.as_bytes()), "the shape of {:?} rejected {name:?}, which the rule matches", rule.re.pattern());
+                }
+            }
+        }
+    }
+
+    /// The shape of the default rules is what makes them cheap.
+    ///
+    /// Seven of them name a whole folder, one says "starts with a dot",
+    /// and two say "ends with". A name that is none of those is rejected
+    /// without the engine running at all.
+    #[test]
+    fn the_default_rules_have_a_shape() {
+        let rules = Rules::defaults();
+        let shapes: Vec<(&str, bool, bool, bool)> = rules
+            .rules
+            .iter()
+            .map(|r| {
+                let shape = r.re.shape();
+                (r.re.pattern(), shape.whole.is_some(), shape.start.is_some(), shape.end.is_some())
+            })
+            .collect();
+        for (pattern, whole, start, end) in &shapes {
+            assert!(*whole || *start || *end, "the rule {pattern:?} has no shape: the engine would run on every name");
+        }
     }
 
     #[test]

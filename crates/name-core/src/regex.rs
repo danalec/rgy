@@ -34,6 +34,8 @@ pub struct Regex {
     pattern: String,
     /// `None` is [`Regex::never`]: matches nothing, not even empty input.
     prog: Option<nfa::Program>,
+    /// What a text that matches has to look like.
+    shape: Shape,
 }
 
 impl Regex {
@@ -55,15 +57,26 @@ impl Regex {
     fn compile(pattern: &str, case_insensitive: bool) -> Result<Self, String> {
         let flags = syntax::Flags { case_insensitive, ..syntax::Flags::default() };
         let parsed = syntax::parse_with(pattern.as_bytes(), flags).map_err(|e| e.to_string())?;
+        let shape = shape_of(&parsed.ast);
         let prog = nfa::compile(&parsed.ast, parsed.groups);
-        Ok(Regex { pattern: pattern.to_string(), prog: Some(prog) })
+        Ok(Regex { pattern: pattern.to_string(), prog: Some(prog), shape })
     }
 
     /// A pattern that never matches. Used to fail closed when a user's
     /// pattern does not compile: a positive `re:` filter then rejects
     /// everything rather than silently admitting everything.
     pub fn never() -> Self {
-        Regex { pattern: String::new(), prog: None }
+        Regex { pattern: String::new(), prog: None, shape: Shape::default() }
+    }
+
+    /// What a text that matches this pattern has to look like.
+    ///
+    /// The conditions are necessary, not sufficient: the engine still
+    /// decides. They are here so that a caller asking about many texts --
+    /// the rules, which are asked about every name in the index -- can
+    /// say "no" without running the engine.
+    pub fn shape(&self) -> &Shape {
+        &self.shape
     }
 
     /// The pattern as typed.
@@ -101,7 +114,7 @@ impl Eq for Regex {}
 
 impl Clone for Regex {
     fn clone(&self) -> Self {
-        Regex { pattern: self.pattern.clone(), prog: self.prog.clone() }
+        Regex { pattern: self.pattern.clone(), prog: self.prog.clone(), shape: self.shape.clone() }
     }
 }
 
@@ -109,6 +122,235 @@ impl fmt::Debug for Regex {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Regex({:?})", self.pattern)
     }
+}
+
+/// What a pattern says about the text it has to match.
+///
+/// The conditions are *necessary*: a text the pattern matches always
+/// satisfies them, and the engine still has the last word. They come
+/// from the pattern's AST -- the pattern is parsed once, and the tree is
+/// walked -- so they cost nothing to compute and little to test.
+///
+/// They are what keeps a rule that matches nothing from costing a run of
+/// the engine on every name. The engine is a Pike VM that restarts at
+/// every byte of the text, and a rule set of ten patterns over two
+/// hundred thousand names is two million VM runs to say "no".
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Shape {
+    /// The text is one of these, whole.
+    pub whole: Option<Vec<Vec<u8>>>,
+    /// The text starts with one of these.
+    pub start: Option<Vec<Vec<u8>>>,
+    /// The text ends with one of these.
+    pub end: Option<Vec<Vec<u8>>>,
+}
+
+impl Shape {
+    /// Could a text that looks like this match the pattern?
+    ///
+    /// The comparison folds the ASCII case on both sides: the literals
+    /// are the pattern's own bytes, folded, and the text is folded the
+    /// same way. Folding is a per-byte map, so a pattern that matches
+    /// the text matches the folded text too -- and the pattern's own
+    /// case insensitivity is already in the tree -- so this never
+    /// rejects a match.
+    pub fn maybe(&self, text: &[u8]) -> bool {
+        if let Some(lits) = &self.whole {
+            return lits.iter().any(|l| eq_folded(text, l));
+        }
+        if let Some(lits) = &self.start
+            && !lits.iter().any(|l| starts_folded(text, l))
+        {
+            return false;
+        }
+        if let Some(lits) = &self.end
+            && !lits.iter().any(|l| ends_folded(text, l))
+        {
+            return false;
+        }
+        true
+    }
+}
+
+/// The shape of a pattern, from its tree.
+///
+/// The anchors are the text's own edges: `^` is the start of the text
+/// and `$` is its end, and the engine checks them against the absolute
+/// position in the text (`pos == 0`, `pos == len`). So a pattern that
+/// starts with `^` can only match a text that starts with what follows
+/// it, and one that ends with `$` only a text that ends with what comes
+/// before it -- which is what the shape says.
+fn shape_of(ast: &syntax::Ast) -> Shape {
+    let syntax::Ast::Concat(nodes) = ast else {
+        // A group is the shape of what it holds; anything else -- an
+        // alternation at the top, a repetition -- has no shape this can
+        // name.
+        return match ast {
+            syntax::Ast::Group { node, .. } => shape_of(node),
+            _ => Shape::default(),
+        };
+    };
+    // The anchors, and what is between them. The empty nodes are the
+    // inline flags (`(?i)`), and they are nothing.
+    let mut from = 0;
+    while from < nodes.len() && matches!(nodes[from], syntax::Ast::Empty) {
+        from += 1;
+    }
+    let mut to = nodes.len();
+    while to > from && matches!(nodes[to - 1], syntax::Ast::Empty) {
+        to -= 1;
+    }
+    let start = matches!(nodes.get(from), Some(syntax::Ast::Assert(a)) if matches!(a, syntax::Assert::StartText));
+    let end = matches!(nodes.get(to.wrapping_sub(1)), Some(syntax::Ast::Assert(a)) if matches!(a, syntax::Assert::EndText));
+    let body = &nodes[from + usize::from(start)..to - usize::from(end)];
+    // The whole text: both anchors, and a body that is a fixed set of
+    // literals.
+    if start
+        && end
+        && let Some(lits) = body_literals(body)
+    {
+        return Shape { whole: Some(lits), start: None, end: None };
+    }
+    Shape {
+        whole: None,
+        // The start: the literals the body begins with.
+        start: if start { prefix_of(body) } else { None },
+        // The end: the literals the body ends with.
+        end: if end { suffix_of(body) } else { None },
+    }
+}
+
+/// The literals the body is, when the body is a fixed set of them.
+///
+/// Every node has to allow a fixed set of bytes: a run of them is the
+/// product of what they allow, and an alternation is the union.
+fn body_literals(body: &[syntax::Ast]) -> Option<Vec<Vec<u8>>> {
+    let mut out: Vec<Vec<u8>> = vec![Vec::new()];
+    for node in body {
+        let step = alternatives(node)?;
+        out = join(&out, &step, false);
+        if out.len() > MAX_LITERALS {
+            return None;
+        }
+    }
+    finish(out)
+}
+
+/// The literals the body begins with, when it begins with a fixed set.
+///
+/// The walk stops at the first node that allows too much to name: what
+/// is before it is the prefix, and what is after it is not.
+fn prefix_of(body: &[syntax::Ast]) -> Option<Vec<Vec<u8>>> {
+    let mut out: Vec<Vec<u8>> = vec![Vec::new()];
+    for node in body {
+        if matches!(node, syntax::Ast::Empty) {
+            continue;
+        }
+        let Some(step) = alternatives(node) else { break };
+        out = join(&out, &step, false);
+        if out.len() > MAX_LITERALS {
+            return None;
+        }
+        if can_be_empty(node) {
+            break;
+        }
+    }
+    finish(out)
+}
+
+/// The literals the body ends with, when it ends with a fixed set.
+///
+/// The prefix walk, backwards: what is after the first node that allows
+/// too much is the suffix, and what is before it is not.
+fn suffix_of(body: &[syntax::Ast]) -> Option<Vec<Vec<u8>>> {
+    let mut out: Vec<Vec<u8>> = vec![Vec::new()];
+    for node in body.iter().rev() {
+        if matches!(node, syntax::Ast::Empty) {
+            continue;
+        }
+        let Some(step) = alternatives(node) else { break };
+        out = join(&out, &step, true);
+        if out.len() > MAX_LITERALS {
+            return None;
+        }
+        if can_be_empty(node) {
+            break;
+        }
+    }
+    finish(out)
+}
+
+/// The literals a node allows, when it allows a fixed set of them.
+///
+/// A class is its members; a run of nodes is the product of what they
+/// allow; an alternation is the union of its arms. Anything else -- a
+/// repetition, a zero-width condition -- allows too much to name.
+fn alternatives(node: &syntax::Ast) -> Option<Vec<Vec<u8>>> {
+    match node {
+        syntax::Ast::Class(set) => {
+            let folded = fold_set(set);
+            if folded.is_empty() {
+                return None;
+            }
+            Some(folded.into_iter().map(|b| vec![b]).collect())
+        }
+        syntax::Ast::Concat(nodes) => {
+            let mut out: Vec<Vec<u8>> = vec![Vec::new()];
+            for node in nodes {
+                let step = alternatives(node)?;
+                out = join(&out, &step, false);
+                if out.len() > MAX_LITERALS {
+                    return None;
+                }
+            }
+            Some(out)
+        }
+        syntax::Ast::Alt(arms) => {
+            let mut out = Vec::new();
+            for arm in arms {
+                out.extend(alternatives(arm)?);
+            }
+            // The arms of a caseless character are its case variants, and
+            // folded they are the same bytes: `S` and `s` are one
+            // literal, and only the ones ASCII does not fold -- the long
+            // s, the Kelvin sign -- are their own.
+            let out = fold_and_dedup(out);
+            if out.len() > MAX_LITERALS {
+                return None;
+            }
+            Some(out)
+        }
+        syntax::Ast::Group { node, .. } => alternatives(node),
+        _ => None,
+    }
+}
+
+/// The literals, folded and without repeats.
+///
+/// The fold is the ASCII one, and it is the same fold the comparison
+/// does: a literal that folds to another is the same literal, and
+/// keeping both would only make the set longer.
+fn fold_and_dedup(lits: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+    let mut out: Vec<Vec<u8>> = lits.into_iter().map(|l| l.into_iter().map(|b| b.to_ascii_lowercase()).collect()).collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// The text and the literal, equal the way the engine compares them:
+/// the ASCII case does not count.
+fn eq_folded(text: &[u8], lit: &[u8]) -> bool {
+    text.len() == lit.len() && text.iter().zip(lit).all(|(a, b)| a.to_ascii_lowercase() == *b)
+}
+
+/// The text starts with the literal.
+fn starts_folded(text: &[u8], lit: &[u8]) -> bool {
+    text.len() >= lit.len() && eq_folded(&text[..lit.len()], lit)
+}
+
+/// The text ends with the literal.
+fn ends_folded(text: &[u8], lit: &[u8]) -> bool {
+    text.len() >= lit.len() && eq_folded(&text[text.len() - lit.len()..], lit)
 }
 
 /// How many members a class may have and still be a set of literals.
@@ -409,6 +651,75 @@ fn fold_set(set: &rgx_core::byteclass::ByteSet) -> Vec<u8> {
 mod tests {
     use super::*;
     use alloc::vec;
+
+    /// The shape never rejects a match.
+    ///
+    /// The shape is a necessary condition, not a sufficient one: it may
+    /// admit a text the engine rejects, but it must never reject a text
+    /// the engine accepts. That is the whole of its contract, and this
+    /// is where it is checked -- over the pattern shapes a user can
+    /// write, and not only over the ones the defaults use.
+    #[test]
+    fn the_shape_never_rejects_a_match() {
+        let patterns = [
+            "^(a|b)$",
+            "^\\.",
+            "(?i)\\.app$",
+            "^foo.*bar$",
+            "(?i)foo",
+            "foo$",
+            "a|b",
+            "[a-z]+",
+            ".*",
+            "^$",
+            "node_modules",
+            "(?i)(framework|bundle)$",
+            "^\\w+",
+            "x{2,3}",
+            "(?s)a.b",
+            "^(a|b)c$",
+            "(?i)^\\w+$",
+        ];
+        let texts = [
+            "",
+            "a",
+            "b",
+            "ab",
+            "c",
+            "ac",
+            "bc",
+            "foo",
+            "FOO",
+            "foo.bar",
+            "xfoobar",
+            "foobar",
+            ".git",
+            ".hidden",
+            "foo.app",
+            "FOO.APP",
+            "node_modules",
+            "x.app",
+            "framework",
+            "FRAMEWORK",
+            "x.framework",
+            "xx",
+            "xxx",
+            "abcd",
+            "a.b",
+            "a\nb",
+            "src",
+            "notes.txt",
+            "barfoo",
+        ];
+        for pattern in patterns {
+            let re = Regex::new_sensitive(pattern).expect("the pattern compiles");
+            for text in texts {
+                if re.is_match_bytes(text.as_bytes()) {
+                    assert!(re.shape().maybe(text.as_bytes()), "the shape of {pattern:?} rejected {text:?}, which it matches");
+                }
+            }
+        }
+    }
 
     #[test]
     fn a_literal_is_its_own_prefix() {

@@ -134,6 +134,16 @@ content worker that builds the trigrams, not a regex pass at query time.
   dependency on `rgx-core` — the same lineage it was copied from. The
   byte-regex crate stays only where the Unicode mode is needed for
   `regex:` content queries; the path `re:` uses rgx-core.
+- **The rules ask the shape before they ask the engine.** rgx-core's byte
+  VM restarts at every byte of the text, and the priority rules are asked
+  about every name in the index: ten patterns over two hundred thousand
+  names is two million VM runs to say "no". A pattern's AST is therefore
+  walked once, when it is compiled, for the literals a match has to begin
+  or end with, and a name that cannot match is rejected with a few byte
+  comparisons before the engine runs at all. The shape is a *necessary*
+  condition and never a sufficient one — the engine still decides — and
+  the comparison folds the ASCII case on both sides, which is a per-byte
+  map, so it never rejects a match.
 - **One protocol:** the JSON-lines op model (`{"q", "limit"}`,
   `{"op":"grep"|"status"|"…"}`) is `rgy-proto`, spoken over a named pipe
   (Windows), a UDS (Unix) and stdio. rgx's `--serve` (an argv-array per
