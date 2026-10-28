@@ -183,6 +183,15 @@ struct State {
     /// open the window the user just closed. The flag tells the two
     /// apart: the window says goodbye, or the user says it.
     hiding: bool,
+    /// The user went somewhere else and the window has to get out of the
+    /// way.
+    ///
+    /// The answer is given by the message pump and not by the window
+    /// procedure: the message can arrive while the host is inside a
+    /// platform call -- opening a file changes the activation -- and
+    /// answering it from there would ask the host for the state it is
+    /// already using.
+    focus_lost: bool,
     /// The icons, one per kind, resolved the first time they are needed.
     icons: Icons,
     /// The window's fonts, made once and deleted with the window.
@@ -227,6 +236,7 @@ impl Window {
             painted: (0, 0),
             backdrop: false,
             hiding: false,
+            focus_lost: false,
             icons: Icons::new(),
             fonts: Fonts::new(),
         }));
@@ -367,8 +377,10 @@ impl Window {
     /// search box.
     pub fn show(&mut self) {
         // A window that is up is not hiding: the goodbye it says when it
-        // goes away belongs to this showing, not to the next one.
+        // goes away belongs to this showing, not to the next one. And a
+        // window that is up is not leaving either.
         self.state_mut().hiding = false;
+        self.state_mut().focus_lost = false;
         unsafe {
             self.place();
             ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
@@ -383,6 +395,9 @@ impl Window {
     pub fn hide(&mut self) {
         // The window is the one that is going away, and it says so.
         self.state_mut().hiding = true;
+        // And it is not the user who left: the window is going, so the
+        // answer to "the user left" is stale.
+        self.state_mut().focus_lost = false;
         unsafe {
             ShowWindow(self.hwnd, SW_HIDE);
         }
@@ -696,24 +711,46 @@ impl Window {
                     break;
                 }
                 let control = self.dispatch(&msg, &mut on_event);
-                match control {
-                    Control::None => {}
-                    Control::Show(view, width, height) => {
-                        self.state_mut().view = view;
-                        self.resize(width, height);
-                        self.show();
+                if !self.apply(control) {
+                    break;
+                }
+                // The user went somewhere else: the window gets out of the
+                // way, and the answer is given here, where the host is not
+                // inside anything.
+                if self.state_mut().focus_lost {
+                    self.state_mut().focus_lost = false;
+                    let control = on_event(Event::Toggle);
+                    if !self.apply(control) {
+                        break;
                     }
-                    Control::Hide => self.hide(),
-                    Control::Paint(view, width, height) => {
-                        self.state_mut().view = view;
-                        self.resize(width, height);
-                        self.repaint();
-                    }
-                    Control::Quit => break,
                 }
             }
         }
         Ok(())
+    }
+
+    /// Do what the control says. False when the window is done.
+    fn apply(&mut self, control: Control) -> bool {
+        match control {
+            Control::None => true,
+            Control::Show(view, width, height) => {
+                self.state_mut().view = view;
+                self.resize(width, height);
+                self.show();
+                true
+            }
+            Control::Hide => {
+                self.hide();
+                true
+            }
+            Control::Paint(view, width, height) => {
+                self.state_mut().view = view;
+                self.resize(width, height);
+                self.repaint();
+                true
+            }
+            Control::Quit => false,
+        }
     }
 
     /// Turn one message into one control.
@@ -750,7 +787,10 @@ impl Window {
                 if self.state_mut().hiding {
                     self.state_mut().hiding = false;
                 } else {
-                    return on_event(Event::Toggle);
+                    // The answer waits for the pump: the message can come
+                    // from inside a platform call, and the host cannot be
+                    // asked twice for the same state.
+                    self.state_mut().focus_lost = true;
                 }
             }
             if msg.message == WM_SIZE {
