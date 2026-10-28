@@ -13,10 +13,12 @@
 //! launcher where typing `copy` searched for files called "copy" would be
 //! a launcher that ran the wrong thing half the time.
 //!
-//! A `>` is also a prefix the engine does not know, and the engine fails
-//! closed on one: so the launcher takes the `>`-lines before the engine
-//! ever sees them. A command the launcher does not know is said out loud
-//! rather than being sent on to fail somewhere else.
+//! A `>` is also a prefix the engine does not know: the engine splits a
+//! word on `:` and on nothing else, so a `>`-line would be searched as the
+//! literal text of the line — ">folder" — and would answer nothing. The
+//! launcher takes the `>`-lines before the engine ever sees them, and a
+//! command the launcher does not know is said out loud rather than being
+//! sent on to fail somewhere else.
 
 use crate::actions::Action;
 
@@ -81,7 +83,7 @@ pub fn command_for(text: &str) -> Option<&'static Command> {
 ///
 /// A `>` with nothing after it is the prefix being typed, and it is
 /// still a command line: the launcher must not send it to the engine,
-/// which would fail it closed.
+/// which would search for the literal ">" and answer nothing.
 pub fn is_command(text: &str) -> bool {
     text.trim_start().starts_with(COMMAND_PREFIX)
 }
@@ -156,8 +158,9 @@ mod tests {
 
     #[test]
     fn a_prefix_alone_is_a_command_line() {
-        // The engine does not know `>` and fails closed on it, so the
-        // launcher has to take it before the engine sees it.
+        // The engine does not know `>`, and it would search for the
+        // literal text of the line, so the launcher has to take it before
+        // the engine sees it.
         assert!(is_command(">"));
         assert!(is_command(">open"));
         assert!(!is_command("open"));

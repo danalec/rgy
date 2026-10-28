@@ -413,8 +413,8 @@ impl App {
     /// Whether the query is a command line.
     ///
     /// A command line is not a search, and the launcher takes it before
-    /// the engine sees it: the engine does not know `>` and fails closed
-    /// on one.
+    /// the engine sees it: the engine does not know `>`, and it would
+    /// search for the literal text of the line and answer nothing.
     pub fn is_command(&self) -> bool {
         commands::is_command(self.query.text())
     }
