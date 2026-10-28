@@ -57,8 +57,7 @@
 # ONE DELIBERATE DIFFERENCE FROM THE WINDOWS TWIN: the archive format.
 # Linux and macOS get a .tar.gz; Windows gets a .zip, because winget
 # installs a zip and nothing else. The file list inside is the same on every
-# platform, the log lines are the same, and the exit code is the same --
-# see AGENTS.md on the twins.
+# platform, the log lines are the same, and the exit code is the same.
 #
 # The version comes from the binary crates' manifests, and all four have to
 # agree: a release whose binaries disagree about their version is a release

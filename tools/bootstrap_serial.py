@@ -5,8 +5,7 @@ Boots the official FreeBSD qcow2 image with WHPX acceleration, drives the
 serial console - exposed as a TCP socket precisely so the console outlives
 this script - to install an ssh key and start sshd, and leaves the VM
 running. Everything after this happens over SSH; the phase-4 suite recipe
-is in AGENTS.md (`cargo build --workspace` first, then
-`cargo test --workspace`).
+is: `cargo build --workspace` first, then `cargo test --workspace`.
 
 Usage: python tools/bootstrap_serial.py <qemu-image> <authorized-key-file> [ssh-port]
 """

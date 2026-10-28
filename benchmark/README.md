@@ -1,102 +1,34 @@
-# rgx: Benchmark Suite
+# rgy: the measurements
 
-One harness, generated corpora, one table. The table lives in
-[`status.md`](status.md) and is not repeated here, because a number that
-exists in two files is a number that will exist in two versions.
+What was measured, on which host, and what the number does not claim. Every
+table here carries the machine it was taken on and the date it was taken
+on; a number without those two is a rumour.
 
-| Path | What it is |
-| :--- | :--- |
-| [`status.md`](status.md) | The measured tables, the gate results, and what the numbers do not claim. **Windows 7950X3D.** |
-| [`status-linux-ryzen7-255.md`](https://github.com/danalec/rgx/blob/main/benchmark/status-linux-ryzen7-255.md) | The same gated dashboard on a **second host** (Linux, Ryzen 7 255). Where the two hosts agree and where they do not. |
-| [`tv-transcript.md`](tv-transcript.md) | A/B/C of ripgrep vs rgx (filesystem) vs rgx-tv (pack store) over a 20,028-file tree — runs on **both hosts**. |
-| [`findings.md`](findings.md) | Measurements and defects that shaped the code: walk cost, `--sort path`, `--files` path-as-regex, the prefilter pair, line-walk bookkeeping. |
-| [`optimal-techniques.md`](optimal-techniques.md) | The engineering behind the pack store's streaming. Its −44.3% is **not reproduced** — a second host measures ≈12% in the same direction. |
-| [`diffrig/`](https://github.com/danalec/rgx/tree/main/benchmark/diffrig) | Byte-for-byte differential harness against `rg`: `cmp.sh` for one case, `fuzz.py` for a pattern × flag matrix, `conpty.py` for Windows console output. |
+| file | what it is |
+|---|---|
+| [baseline-names.md](baseline-names.md) | the name-search baseline and the perf gate: the table, the host, the spread beside every number, and the A/B write-ups |
+| [baseline-names.csv](baseline-names.csv) | the source of truth for the table above — the Markdown is generated from it, and the gate compares against it |
+| [mmap-vs-read.md](mmap-vs-read.md) | mmap against `read()` for a sequential scan, and the cold and hot verdicts |
+| [rgy-name-transcript.md](rgy-name-transcript.md) | the name-tier protocol transcript, written by `scripts/rgy-name-protocol.*` |
 
-**Two hosts are on file, not one.** The Windows 7950X3D dashboard is
-[`status.md`](status.md) and remains the quoted source of the paper's
-engine-alone figures. The Linux Ryzen 7 255 dashboard is
-[`status-linux-ryzen7-255.md`](https://github.com/danalec/rgx/blob/main/benchmark/status-linux-ryzen7-255.md) and is the check
-on whether those figures travel. They do not: the sign of the engine-alone
-edge flips on six of nine pattern shapes. Pack-store ratios travel in
-direction (the store is faster than both direct paths, exact count parity)
-but not in headline magnitude. **Never quote a millisecond without its host,
-and never quote a ratio without both.**
+## The gate
 
----
+A PR that regresses any gated row by more than 20% fails:
 
-## Running it
-
-```bash
-# 1. build the corpora (once; --verify checks an existing one)
-python scripts/make-corpus.py --tiny
-
-# 2. build the binaries and print both tables, gated
-bash scripts/bench-status.sh
+```sh
+python scripts/bench-names.py check --baseline benchmark/baseline-names.csv --runs 7
 ```
 
-Nothing is written into the repository: the transcript goes to the system
-temp directory and the path is printed, so a run can be pasted into
-`status.md` or filed without dirtying the tree.
+Exit codes: 0 pass, 1 regression, 2 undecidable (the noise floor is wider
+than the threshold), 3 not comparable (a different worker width, a row that
+is not measured at all, or a host the baseline has no rows for).
 
-The corpora are generated rather than found, because the directory the
-previous tables used — `~/.cargo/registry/src` — grows on every `cargo fetch`
-and is a different size on every machine. One seed, one generator, the same
-bytes everywhere.
+The measurement is several independent runs at a fixed worker width, the
+statistic is the best of them, and the spread across the runs is recorded
+next to the number — because a gate that fires on noise is worse than no
+gate. The table is generated from the CSV, and `bench-names.py render --check`
+fails when the two have drifted:
 
-### Asking it something else
-
-```bash
-# one extra row, through the same count gate as the nine
-cargo run --release -p rgx-core --example status_table -- --pattern 'impl Trait'
-
-# a different corpus
-cargo run --release -p rgx-core --example status_table -- --tree ~/.rgx-bench/tiny
-
-# a build of rgx before the change, timed in the same process and the same rounds
-cargo run --release -p rgx-core --example status_table -- --rgx-base ./rgx-before.exe
+```sh
+python scripts/bench-names.py render --csv benchmark/baseline-names.csv --check
 ```
-
-An ad-hoc pattern goes through the gate like any other. On a corpus that does
-not contain it the row is refused with `GATE FAIL, timing withheld`.
-
-### Walk attribution
-
-```bash
-rustc -O --edition 2021 -o walk_patterns scripts/walk_patterns.rs
-./walk_patterns
-```
-
-Splits a walk into traversal, ignore matching, and everything above it, by
-varying one input at a time. Writes nothing into the repository.
-
-### Pack-store A/B
-
-Build a store, then measure the three engines on the same corpus:
-
-```powershell
-cargo build --release -p rgx-core --bin rgx-tv --features tv-runtime
-.\target\release\rgx-tv.exe build <tree> --store <dir>
-# then a paired count-gated A/B/C over the same corpus (see tv-transcript.md)
-```
-
-### Differential parity
-
-```bash
-cd benchmark/diffrig
-bash cmp.sh "fn main" ../../src/main.rs     # one query, byte for byte
-python fuzz.py                               # pattern × flag matrix
-```
-
-The three scripts resolve their own binaries: `RGX` is derived from the
-script's location and `rg` takes an `RG` environment override, then `PATH`.
-
----
-
-## Elsewhere
-
-- **Paper:** the preprint, hosted on Zenodo as
-  [10.5281/zenodo.23453407](https://doi.org/10.5281/zenodo.23453407).
-  Its sources (`paper/tesla-valve.tex`) live in the upstream rgx checkout, not
-  in this repository; re-render them with `cd paper && pdflatex tesla-valve.tex` ×3.
-- **Guide and usage:** [`../README.md`](../README.md)

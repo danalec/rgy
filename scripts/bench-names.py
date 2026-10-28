@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Measure the name-search bench, and gate a change against the baseline.
 
-The perf gate in AGENTS.md §5 is a number: a >20% regression on any row of
+The perf gate is a number: a >20% regression on any row of
 `benchmark/baseline-names.md` fails the PR. This script is how that number
 is produced and compared, because a single run of the bench is not a number
 this machine can be trusted with.
@@ -64,10 +64,9 @@ match.
 Exit codes: 0 pass, 1 regression, 2 undecidable (the noise floor is wider
 than the threshold), 3 the measurement itself failed.
 
-The table in `benchmark/baseline-names.md` is generated from the CSV, the way
-`docs/parity.md` is generated from `docs/parity.toml` (AGENTS.md §4): the CSV
-is the source of truth, the Markdown is what a reader reads, and `--check`
-fails when the two have drifted.
+The table in `benchmark/baseline-names.md` is generated from the CSV: the
+CSV is the source of truth, the Markdown is what a reader reads, and
+`--check` fails when the two have drifted.
 """
 import argparse
 import csv
@@ -85,7 +84,7 @@ BASELINE_CSV = ROOT / "benchmark" / "baseline-names.csv"
 BASELINE_MD = ROOT / "benchmark" / "baseline-names.md"
 
 
-# The threshold the gate uses, and the one AGENTS.md §5 states.
+# The threshold the gate uses, and the one the write-up states.
 THRESHOLD_PCT = 20.0
 
 # The worker width the measurement is taken at. Four is narrow enough that

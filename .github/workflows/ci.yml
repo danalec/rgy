@@ -36,27 +36,18 @@ env:
 
 jobs:
   parity:
-    name: the parity matrix is current and claims no gap
+    name: the parity document claims no gap it cannot act on
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      # The matrix is a promise, not a picture: a G cell is work required,
-      # and a matrix that is not what its source renders is a matrix that
-      # reads better than it is. Both fail here.
-      - run: python3 scripts/parity-matrix.py --check
-
-  listary-parity:
-    name: the listary plan has work and a phase on every gap
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      # The Listary matrix is the implementation plan, and a plan is only
-      # a plan while it can be acted on. The gate fails when the table is
-      # not what its source renders, and when a gap has no work attached
-      # or a parity claim names no place in the code.
+      # One document, two tables: what each operating system gets, and
+      # what Listary does that rgy does not. It is written by hand, and
+      # the gate is what keeps it honest -- a G cell that is not on the
+      # known-gaps list, a gap with no work attached, a parity claim that
+      # names no place in the code, a phase with no rows.
       #
       # It does NOT fail because a gap is open. A gap is the work.
-      - run: python3 scripts/listary-parity.py --check
+      - run: python3 scripts/parity.py --check
 
   bench-table:
     name: the bench table is what the baseline renders

@@ -4,9 +4,10 @@ The decisions this workspace is built on, and the rules that keep it
 honest. The code cites this file; when a comment says "§2.2", this is
 what it means.
 
-What is *not* here: the plan that produced these decisions (it landed
-end to end — see [STATUS.md](STATUS.md)), and the work that is still
-open (that is the last section of [STATUS.md](STATUS.md)).
+What is *not* here: the plan that produced these decisions — it landed
+end to end — and the work that is still open, which is the
+[Listary capabilities](parity.md) and the gaps in the
+[per-OS matrix](parity.md).
 
 ## 1. The performance targets
 
@@ -21,7 +22,7 @@ containers for content.
 | Typing a whole filename (all keystrokes) | **≤ 8 ms total** | fsearch 3.0 ms |
 | Content query via index (trigram/pack), median | **≤ 5 ms** | fsearch 2.3 ms |
 | Content query via index, p90 worst tree | **≤ 25 ms** | fsearch Chromium p90 2.3 ms |
-| Raw content scan (rgx engine, big file) | **≥ rg parity** (rgx already +32…111% on engine rows) | rgx `benchmark/status.md` |
+| Raw content scan (rgx engine, big file) | **≥ rg parity** (rgx already +32…111% on engine rows) | rgx `benchmark/upstream-rgx/status.md` |
 | Walker (`--files`-style enumeration) | **≥ rg parity** (rgx already +37.5%) | rgx |
 | Mixed query (name filter + content), median | **≤ 10 ms** via indexes | new |
 | Daemon warm query (name or content) | **≤ 8 ms** | fsearch CLI 3.3 ms |
@@ -348,8 +349,7 @@ Recorded so it is not re-investigated:
 
 - **Build before you test.** The e2e harness resolves the binaries by
   path, so `cargo test --workspace` on a clean tree races the rest of the
-  workspace and spawns nothing. `cargo build --workspace` first. See
-  [AGENTS.md](../AGENTS.md).
+  workspace and spawns nothing. `cargo build --workspace` first.
 - **Both parents' oracles.** rgx: the differential oracle against the
   `regex` crate, the CLI differential against ripgrep, the adapter
   fixtures, the pack round-trips, the corpus sha256 discipline. fsearch:

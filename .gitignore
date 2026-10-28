@@ -1,12 +1,44 @@
-/target
-/build
-# The release artifacts: the archives the release flow builds, and the
-# digests beside them. They are outputs, not sources.
+# Build outputs.
+/target/
 /.dist
-# Python's bytecode cache. The parity generator is a script, not a
-# package, and its .pyc is a build output like /target.
+/.cache/
+
+# Generated corpora, downloaded tool bundles, reference checkouts, pack stores.
+/tests/golden/
+/tests/.rgx-*/
+/benchmark/target/
+/benchmark/ripgrep-15/
+/benchmark/.rgx-*/
+/benchmark/tv/
+/benchmark/diffrig/.rg*.err
+/benchmark/diffrig/in.txt
+/benchmark/diffrig/t1.txt
+/benchmark/diffrig/t2.txt
+**/.rgx-tv/
+
+# Logs and editor leftovers.
+*.log
+*.bak
+*.ugi
+.zcode/
+
+# Python bytecode.
 __pycache__/
+*.pyc
 *.py[cod]
-# The tool cache: the run files the desktop tools leave beside the tree.
-# They are outputs, not sources, and nothing in the repository reads them.
-.cache/
+
+# Agent scratch: the decisions these record belong in the code they describe.
+/.remember/
+/.egm/
+/docs/designs/
+EGM.md
+/.worktrees/
+
+# The working notes of this repository: the owner's and the agent's own file,
+# on the machine, out of the tree and out of every upload.
+/AGENTS.md
+
+# Prototypal release scripts: a PGO build is two cargo runs and a profile
+# merge. The capability the matrix records is the build, not the file.
+pgo.sh
+pgo.ps1

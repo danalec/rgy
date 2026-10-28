@@ -259,8 +259,7 @@ Notes:
   normalized. `bench-names.py check` compares against the rows of the host it
   runs on, and refuses (exit 3) a baseline that has no rows for it; `--host`
   names the host when a machine has more than one name.
-- The table is generated from `benchmark/baseline-names.csv`, the way
-  `docs/parity.md` is generated from `docs/parity.toml` (AGENTS.md §4). The
+- The table is generated from `benchmark/baseline-names.csv`. The
   CSV is the source of truth; `bench-names.py render --check` fails when the
   two have drifted.
 

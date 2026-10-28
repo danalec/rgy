@@ -1,11 +1,13 @@
 # Insights carried over from rgx
 
-rgx (`../rgx`) has already paid for the lessons below — measured on its own
+rgx ([github.com/danalec/rgx](https://github.com/danalec/rgx)) has
+already paid for the lessons below — measured on its own
 corpora, documented in its `AGENTS.md` / `ROADMAP.md` / `src/mmap.rs`. rgy
 inherits them so the same bill is not paid twice. (Its `rar-codec` rewrite
 settled: this workspace's copies of the `rgx-*` crates are upstream's own,
-transported verbatim, and `benchmark/winrar-oracle.md` records what the
-WinRAR oracle verified.)
+transported verbatim, and [rgx's own WinRAR oracle
+write-up](https://github.com/danalec/rgx/blob/main/benchmark/winrar-oracle.md)
+records what it verified.)
 
 ## Memory mapping
 
@@ -102,7 +104,8 @@ that cannot state its own median cannot be tuned.
 
 ## Walk traps
 
-Three from `benchmark/findings.md`, all priced on the `crates/` row.
+Three from [rgx's findings](https://github.com/danalec/rgx/blob/main/benchmark/findings.md),
+all priced on the `crates/` row.
 
 **Ignore cost is the rule-set COMPILE, not the match.** The walk is 85.7%
 of a 12.43 ms run; `--no-ignore` takes it to 3.54 ms, so 7.01 ms is
@@ -217,8 +220,10 @@ hand-write a commit to make the gate green.
 
 ## Extraction cache pricing
 
-`benchmark/archive-extract-cache.md` (7950X3D, `RGXFIXTURE` over `crates/`,
-min-of-N; 4.3 ms spawn floor measured and reported separately):
+[rgx's archive-extract cache
+write-up](https://github.com/danalec/rgx/blob/main/benchmark/archive-extract-cache.md)
+(7950X3D, `RGXFIXTURE` over `crates/`, min-of-N; 4.3 ms spawn floor
+measured and reported separately):
 
 | cell | ms | note |
 |---|---:|---|
@@ -247,21 +252,10 @@ min-of-N; 4.3 ms spawn floor measured and reported separately):
 - mimalloc for the general heap on Windows (MSVCRT `HeapAlloc` serialises
   parallel walks); both bins set `#[global_allocator]`.
 - Release profile follows rgx's (`lto = "fat"`, `codegen-units = 1`,
-  `strip`); `pgo.sh` is fsearch's pattern trained on the name bench.
+  `strip`); the PGO build is fsearch's pattern trained on the name bench.
 
-## Still open, named honestly
+## Still open
 
-- ~~PGO validated end-to-end on Windows~~ — **done**: `pgo.ps1` drives the
-  same two-pass shape as `pgo.sh` (instrumented `name_bench` trainer →
-  `llvm-profdata` merge → profile-use release build); validated on
-  Windows. Both scripts `cd` to their own directory first.
-- ~~A Linux measurement of the mmap-vs-read ordering~~ — **done**:
-  `benchmark/mmap-vs-read.md`, bench at
-  `crates/name-core/examples/mmap_vs_read`. Linux reverses the Windows
-  ordering (mmap 0.72× the read() cost cold, 0.63× hot-inclusive), and
-  the resident-scan rows show the scan itself costs the same either way —
-  the delta is the read() copy vs page faults. Windows first-touch cold
-  stays unmeasured (needs a kernel driver to drop the standby list).
 - `rgy-discovery-macos` is imports-only transport, unverified (no macOS
   target on the machine that built this workspace). It is the first row
-  of the macOS limits in [STATUS.md](STATUS.md).
+  of the macOS limits in the [parity matrix](parity.md).

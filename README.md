@@ -18,14 +18,7 @@ searchctl --root ~ "invoice grep:tesla"   # and what is inside it
 |---|---|---|
 | [MANUAL.md](MANUAL.md) | how to use it: the query language, the flags, the daemon, the pack store | everyone |
 | [FORMATS.md](FORMATS.md) | what it reads inside a file, format by format | everyone |
-| [docs/STATUS.md](docs/STATUS.md) | the scoreboard: what is built, what is measured, what is unverified — and what is left | maintainers |
-| [docs/parity.md](docs/parity.md) | the 53-feature per-OS matrix, with the gaps marked | maintainers |
-| [docs/listary-parity.md](docs/listary-parity.md) | what Listary does that rgy does not, and the work that closes it — the implementation plan | maintainers |
-| [docs/design.md](docs/design.md) | the decisions this workspace is built on, and the rules that keep it honest | maintainers |
-| [docs/insights-from-rgx.md](docs/insights-from-rgx.md) | what the rgx side taught about storage and access shapes | maintainers |
-| [docs/on-disk-formats.md](docs/on-disk-formats.md) | the on-disk formats: the index blob, the packs, the content segments | maintainers |
-| [docs/rgy-name-core.md](docs/rgy-name-core.md) | the name index and the query engine | maintainers |
-| [AGENTS.md](AGENTS.md) | the rules of this repository, for agents and for people | everyone |
+| [docs/README.md](docs/README.md) | the map of the rest: the scoreboard, the parity matrices, the design, the on-disk formats | maintainers |
 | [benchmark/](benchmark/) | the measured tables and the write-ups behind them | everyone |
 
 ## rgy or rgx?
@@ -111,21 +104,19 @@ The merge is landed end to end: name search,
 content search, one daemon/CLI, and the polish layer. What is left is
 verification on machines this host does not have — macOS above all.
 
-**[docs/STATUS.md](docs/STATUS.md)** has the tables: name search, discovery,
-content, the binaries, and the perf gate that fails a PR on a >20%
-regression against any [`benchmark/baseline-names.md`](benchmark/baseline-names.md)
-row.
+**[docs/parity.md](docs/parity.md)** has both matrices: the per-OS one — 53
+features, none of them carrying a gap (a `G` cell — work required) — and what
+Listary does that rgy does not. A gap that is not on the known-gaps list fails
+CI, so a new one cannot appear quietly. The degraded cells (`D`) are the limits
+that are documented rather than closed.
 
-**[docs/parity.md](docs/parity.md)** has the per-OS matrix: 53 features, and
-none of them carries a gap (a `G` cell — work required). A gap that is not
-on the known-gaps list fails CI, so a new one cannot appear quietly.
-**[docs/STATUS.md](docs/STATUS.md)** says what is still open, and what each
-remaining limit costs.
+The perf gate fails a PR on a >20% regression against any
+[`benchmark/baseline-names.md`](benchmark/baseline-names.md) row.
 
 The crates are on crates.io, all fourteen at 0.1.0: `rgy-name-core`,
-`rgy-discovery`, `rgy-engine`, `rgy-proto` and the rest. The list, and
-why they carry the `rgy-` prefix, are in
-[docs/STATUS.md](docs/STATUS.md).
+`rgy-discovery`, `rgy-engine`, `rgy-proto` and the rest. They carry the
+`rgy-` prefix because `name-core`, `discovery`, `engine`, `proto`, `par`
+and `zen-rs` are taken on crates.io.
 
 ## Related projects
 
