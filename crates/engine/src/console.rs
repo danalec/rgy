@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Console output encoding: the Windows code page (parity row 4.7).
+//! Console output encoding: the Windows code page.
 //!
 //! rgy writes UTF-8 bytes. On Linux and macOS the terminal *is* UTF-8, so
 //! the bytes are the text. On Windows the console's output code page

@@ -2,7 +2,7 @@
 
 //! The incremental session's cost: a re-ranked keystroke against a fresh one.
 //!
-//! The question this answers is the one the parity matrix asks (row S.10):
+//! The question this answers is the one the session asks:
 //! does the session save the work of a keystroke, and by how much?
 //!
 //! The measurement is the same shape as the name bench: a fixed synthetic

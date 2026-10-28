@@ -27,7 +27,7 @@ extern crate std;
 /// is not (see [`keep_warm`]).
 pub mod warm;
 
-/// Console output encoding: the Windows code page (parity row 4.7).
+/// Console output encoding: the Windows code page.
 ///
 /// One place for the three binaries to put the console into UTF-8, and
 /// for the streams to fall back to `WriteConsoleW` when the console

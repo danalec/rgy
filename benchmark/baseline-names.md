@@ -263,7 +263,7 @@ Notes:
   CSV is the source of truth; `bench-names.py render --check` fails when the
   two have drifted.
 
-**Gate:** a PR that regresses any row by more than 20% fails (plan §2).
+**Gate:** a PR that regresses any row by more than 20% fails.
 
     python scripts/bench-names.py check --baseline benchmark/baseline-names.csv --runs 7
 

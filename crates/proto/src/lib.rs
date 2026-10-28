@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! JSON-lines protocol types shared by `searchd`, stdio, and `searchctl`
-//! (`docs/design.md` §2.4).
+//!.
 //!
 //! One request per line in, one response per line out — identical over
 //! named pipe (Windows), UDS (Unix), and stdio. Hand-rolled encode/decode:
@@ -32,7 +32,7 @@ use alloc::vec::Vec;
 pub enum Request {
     /// Name search: `{"op":"search","q":…,"limit":…}`.
     ///
-    /// The `session` is the incremental-search id (parity row S.10): the
+    /// The `session` is the incremental-search id: the
     /// daemon keeps a session per id, and a query that narrows the
     /// previous one is answered by re-ranking the previous result set
     /// instead of walking the index again. It is optional and additive:
@@ -47,7 +47,7 @@ pub enum Request {
     Grep { q: String, limit: usize },
     /// Resolve a path through the lookup surface: `{"op":"resolve","path":…}`.
     ///
-    /// The five indexes of the lookup (parity row I.1) answer it: the
+    /// The five indexes of the lookup answer it: the
     /// `file_path` and `folder_path` indexes give the path of an entry, the
     /// `file_name` and `folder_name` indexes the entries that carry a name,
     /// and the `folder_backend` index the volume that owns a folder.
@@ -58,8 +58,8 @@ pub enum Request {
 
 /// How the index caught up after the last restart.
 ///
-/// Two values, and the difference is the point (`docs/design.md` §3, rule 5
-/// — "live-feed honesty"). The field carries what the daemon *did*, not what
+/// Two values, and the difference is the point (the live-feed honesty
+/// rule). The field carries what the daemon *did*, not what
 /// the platform could have done:
 ///
 /// * `replayed` — the daemon resumed the OS's journal at the watermark the
@@ -101,7 +101,7 @@ pub enum Response {
     ///
     /// `catch_up` is additive: a reader that does not know the field keeps
     /// working, and the field is what tells a replayed catch-up from a
-    /// relisted one (`docs/design.md` §3, rule 5).
+    /// relisted one.
     Status {
         docs: usize,
         event_id: u64,
@@ -731,7 +731,7 @@ mod tests {
             .to_json(),
             r#"{"op":"status","docs":3,"event_id":9,"catch_up":"relisted"}"#
         );
-        // The other value, spelled the way `docs/design.md` §3 spells it.
+        // The other value, spelled the way the rules spells it.
         assert_eq!(
             Response::Status {
                 docs: 3,
@@ -769,7 +769,7 @@ mod tests {
     }
 
     /// The catch-up value is a string with exactly two spellings, and they
-    /// are the ones `docs/design.md` §3 uses: a journal-backed platform
+    /// are the ones the rules uses: a journal-backed platform
     /// "replayed", a journal-less one "relisted".
     #[test]
     fn the_catch_up_spellings_are_the_two_the_design_doc_uses() {

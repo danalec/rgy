@@ -11,7 +11,7 @@
 //! pattern (ASCII case-insensitive, because paths are compared that way),
 //! ask "does this match anywhere in the path", and fail closed with
 //! [`Regex::never`] when a pattern does not compile. The vendored copy that
-//! used to sit here is deleted (§4.4): this calls into rgx-core directly.
+//! used to sit here is deleted: this calls into rgx-core directly.
 //!
 //! The same wrapper answers the prefilter's question: which literal must
 //! every match start with, and which must every match end with. Those

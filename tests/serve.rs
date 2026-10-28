@@ -148,7 +148,7 @@ fn malformed_request_errors_and_does_not_hang() {
 
 /// The status answer must say *how* the index caught up after the last
 /// restart, and the answer is what this process did — not what the platform
-/// could have done (`docs/design.md` §3, rule 5). A daemon that walked the
+/// could have done. A daemon that walked the
 /// tree says "relisted"; a daemon that resumed the change journal at the
 /// saved watermark says "replayed".
 ///
@@ -513,7 +513,7 @@ fn a_second_daemon_start_reuses_the_saved_index() {
 
 // --- console encoding --------------------------------------------------------
 
-/// The protocol stream keeps its raw UTF-8 bytes (parity row 4.7).
+/// The protocol stream keeps its raw UTF-8 bytes.
 ///
 /// The daemon's stdout is a machine channel: the client reads the bytes
 /// and decodes them itself. The console's code page is for rendering on a

@@ -15,7 +15,7 @@ readme = "../../README.md"
 
 [dependencies]
 rgy-name-core = { path = "../../crates/name-core", version = "0.1.0" }
-# The console's UTF-8 code page (parity row 4.7).
+# The console's UTF-8 code page.
 rgy-engine = { path = "../../crates/engine", version = "0.1.0" }
 crossterm = "0.28.1"
 

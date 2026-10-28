@@ -785,7 +785,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Action {
 /// the screen is restored, so the result can be piped onward.
 pub fn run(live: Live, root: String, indexed: usize) -> Result<(), String> {
     // The console decides how the UTF-8 bytes are decoded, so it is put
-    // into UTF-8 before the first frame is painted (parity row 4.7): a
+    // into UTF-8 before the first frame is painted: a
     // name with an accent has to reach the screen as itself.
     rgy_engine::console::init();
 

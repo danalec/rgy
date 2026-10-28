@@ -7,7 +7,7 @@
 //! the daemon back when it dies. The plist is written out as text the user
 //! can read and edit — see [`crate::render::launchd_plist`].
 //!
-//! The parity matrix claimed the macOS side was already native. It was not:
+//! The macOS side was claimed to be native before it was: it was not.
 //! the launchd path came from `fsearch`, and nothing in this tree carried
 //! it. This module is that path, written here.
 

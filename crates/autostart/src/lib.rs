@@ -11,7 +11,7 @@
 //!     when the task tool is not there, the weaker `HKCU\...\Run` value is
 //!     written and the tool says so in as many words.
 //!
-//! Two rules hold on every platform (parity row 4.13):
+//! Two rules hold on every platform:
 //!
 //!   1. **Nothing is elevated and nothing asks.** The entry goes into the
 //!      *user's* own session — a user unit, a LaunchAgent, a task at

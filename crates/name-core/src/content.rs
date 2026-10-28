@@ -32,9 +32,9 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 use rgy_discovery::walk::KIND_FILE;
-// Per-file confirmation runs on the rgx engine (docs/design.md §2.3
-// 4.3: literal/hybrid/fixed/VM + SIMD prefilter replace memchr/regex
-// verify). The plan that narrows the content index is walked over the same
+// Per-file confirmation runs on the rgx engine: literal/hybrid/fixed/VM +
+// SIMD prefilter replace memchr/regex verify. The plan that narrows the
+// content index is walked over the same
 // AST the confirm is compiled from, so the two cannot disagree about what
 // the pattern means; the regex crate remains only as the fallback for
 // patterns rgx's parser refuses (4.4 keeps it for content `regex:`
@@ -3773,7 +3773,7 @@ fn open_sized_with(path: &[u8], attrs: &Attrs<'_>) -> Open {
     Open::File(f, m.len())
 }
 
-/// P0.1 acceptance (`docs/design.md` §3): a FIFO under the scan root
+/// The acceptance rule: a FIFO under the scan root
 /// must not hang `open()`. `O_NONBLOCK` turns the hang into `ENXIO` when no
 /// writer exists, so `open_sized` answers `Unreadable` — promptly. A regression
 /// to the zero-flags arm turns this test into a hang instead of a failure.
@@ -3813,7 +3813,7 @@ mod open_flags_tests {
 }
 
 /// A cloud placeholder is never opened, and a file that is really on the
-/// disk is read exactly as before (parity row 1.7).
+/// disk is read exactly as before.
 ///
 /// The recall attributes cannot be set on a real file -- only a cloud
 /// filter driver sets them, and a program may not -- so the file on disk

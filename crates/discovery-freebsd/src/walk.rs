@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! `getdirentries` bulk walk (docs/design.md §2.2): one syscall
+//! `getdirentries` bulk walk: one syscall
 //! returns a whole directory block with name and type already attached
 //! (`d_type` in the dirent), so there is no per-entry directory open — the
 //! FreeBSD shape of the Linux `getdents64` walk, and closer to it than to

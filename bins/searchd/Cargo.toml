@@ -19,7 +19,7 @@ path = "src/main.rs"
 
 [dependencies]
 rgy-discovery = { path = "../../crates/discovery", version = "0.1.0" }
-# The platform walk selector (docs/design.md §2.2).
+# The platform walk selector.
 rgy-discovery-dispatch = { path = "../../crates/discovery-dispatch", version = "0.1.0" }
 rgy-engine = { path = "../../crates/engine", version = "0.1.0" }
 rgy-name-core = { path = "../../crates/name-core", version = "0.1.0" }

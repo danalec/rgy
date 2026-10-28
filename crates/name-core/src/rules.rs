@@ -2,7 +2,7 @@
 
 //! The user's priority rules.
 //!
-//! Listary's priority is a rule system the user writes: a rule carries a
+//! The reference's priority is a rule system the user writes: a rule carries a
 //! priority, a regex and two flags, and it is attached to a path (§4.6 of
 //! the reverse engineering report). rgy's was a table of directory names
 //! in the source, which cannot be changed by the user and does not survive

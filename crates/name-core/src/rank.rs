@@ -15,7 +15,7 @@
 //!
 //! So the priority became a **level** rather than a term, and the level
 //! lives in the high bits of the key, where nothing else can outrank it.
-//! That is Listary's shape: its ranking is a packed 64-bit composite
+//! That is the reference's shape: its ranking is a packed 64-bit composite
 //! (§5.8.1 of the reverse engineering report), with the priority ladder
 //! (Ignored < Low < Normal < Internal < High < HighFile, §4.6) applied on
 //! three axes -- path, attribute and name -- each with its own tier.
@@ -40,7 +40,7 @@
 
 /// The priority ladder.
 ///
-/// Listary's `DiskSearchPriority` is a ladder of six levels (§4.6), and the
+/// The reference's `DiskSearchPriority` is a ladder of six levels (§4.6), and the
 /// levels are what a rule sets: a path the user cares about is `High`, a
 /// build directory is `Low`, and `Ignored` is the one that takes a record out
 /// of the live set entirely.
@@ -124,7 +124,7 @@ pub const fn tier_of_kind(kind: u8) -> Tier {
 
 /// The fractional bits of the fixed-point score.
 ///
-/// Listary's score is fixed-point with 13 fractional bits, and the search
+/// The reference's score is fixed-point with 13 fractional bits, and the search
 /// quantises it before comparing (§5.8.1). rgy's matchers score in whole
 /// points today, so the fraction is zero -- but the score is a fixed-point
 /// value all the same, so an axis that carries a fractional weight has
@@ -165,7 +165,7 @@ impl Score {
 
     /// The score in whole points, rounded **up**.
     ///
-    /// This is the quantisation Listary's search does: the ceiling of the
+    /// This is the quantisation the reference's search does: the ceiling of the
     /// fixed-point value, so a score that is a fraction of a point above
     /// another still lands in the bucket above it. Two scores that differ by
     /// less than a point are one bucket, and the key carries the bucket.
@@ -179,7 +179,7 @@ impl Score {
 ///
 /// The score the ranking produces -- the fzf score plus the folder bonuses
 /// plus the prior -- is well inside it, and the field is narrower than
-/// Listary's 24 so that the entry's index keeps its 32 bits: a mask on the
+/// the reference's 24 so that the entry's index keeps its 32 bits: a mask on the
 /// hot path is an instruction the whole scan pays for every candidate.
 const SCORE_BIAS: i32 = 1 << 22;
 

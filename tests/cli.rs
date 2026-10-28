@@ -561,7 +561,7 @@ fn an_index_built_for_another_tree_is_refused() {
 
 // --- console encoding --------------------------------------------------------
 
-/// A redirected stdout keeps the raw UTF-8 bytes (parity row 4.7).
+/// A redirected stdout keeps the raw UTF-8 bytes.
 ///
 /// The console's code page decides how the bytes are *rendered* on a
 /// terminal, and that is where the fix belongs. A pipe is not a terminal:

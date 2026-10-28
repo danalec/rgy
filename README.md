@@ -14,12 +14,11 @@ searchctl --root ~ "invoice grep:tesla"   # and what is inside it
 
 ## The docs
 
-| file | what it is | for whom |
-|---|---|---|
-| [MANUAL.md](MANUAL.md) | how to use it: the query language, the flags, the daemon, the pack store | everyone |
-| [FORMATS.md](FORMATS.md) | what it reads inside a file, format by format | everyone |
-| [docs/README.md](docs/README.md) | the map of the rest: the scoreboard, the parity matrices, the design, the on-disk formats | maintainers |
-| [benchmark/](benchmark/) | the measured tables and the write-ups behind them | everyone |
+| file | what it is |
+|---|---|
+| [MANUAL.md](MANUAL.md) | how to use it: the query language, the flags, the daemon, the pack store |
+| [FORMATS.md](FORMATS.md) | what it reads inside a file, format by format |
+| [benchmark/](benchmark/) | the measured tables and the write-ups behind them |
 
 ## rgy or rgx?
 
@@ -53,10 +52,9 @@ the whole filesystem in one plain query language — words, plus
 `ext:`/`type:`/`size:`/`dir:`/`re:`, `|` to alternate — with one daemon
 underneath and nothing to configure.
 
-> **Where the numbers live.** rgy's are targets until the plan's per-OS
-> verification lands — name lookup **≤ 0.5 ms** median at 5M entries
-> ([`docs/design.md`](docs/design.md) §1) — with
-> measurements so far in [`benchmark/`](benchmark/). rgx's are measured and
+> **Where the numbers live.** rgy's are targets until the per-OS
+> verification lands — name lookup **≤ 0.5 ms** median at 5M entries —
+> with measurements so far in [`benchmark/`](benchmark/). rgx's are measured and
 > dated in its
 > [`benchmark/`](https://github.com/danalec/rgx/tree/main/benchmark); quote
 > them with their run date and host.
@@ -103,12 +101,6 @@ daemon, and the pack store.
 The merge is landed end to end: name search,
 content search, one daemon/CLI, and the polish layer. What is left is
 verification on machines this host does not have — macOS above all.
-
-**[docs/parity.md](docs/parity.md)** has both matrices: the per-OS one — 53
-features, none of them carrying a gap (a `G` cell — work required) — and what
-Listary does that rgy does not. A gap that is not on the known-gaps list fails
-CI, so a new one cannot appear quietly. The degraded cells (`D`) are the limits
-that are documented rather than closed.
 
 The perf gate fails a PR on a >20% regression against any
 [`benchmark/baseline-names.md`](benchmark/baseline-names.md) row.

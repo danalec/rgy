@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! FreeBSD discovery backend (`docs/design.md` §4):
+//! FreeBSD discovery backend:
 //! the `getdirentries` bulk walk as a [`rgy_discovery::Source`], selected by
 //! `discovery-dispatch` on this target. The whole backend is
 //! `cfg(target_os = "freebsd")`; on other hosts this crate compiles empty
@@ -104,7 +104,7 @@ mod tests {
             .collect()
     }
 
-    /// P1.2 acceptance (`docs/design.md` §2.2): the FreeBSD reader
+    /// The acceptance rule: the FreeBSD reader
     /// matches `scan_sequential` — same names, kinds, sizes, mtimes and
     /// child links — so the backend is a speed decision, never a semantics
     /// one. Runs on the phase-4 kernel (P2.3).

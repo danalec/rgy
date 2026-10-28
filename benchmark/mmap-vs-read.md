@@ -2,7 +2,7 @@
 
 Measured by `crates/name-core/examples/mmap_vs_read` (deterministic 256 MiB
 corpus, checksums proven equal before timing, 1 warmup, min-of-N=15).
-Closes the Linux question from `docs/insights-from-rgx.md`: rgx measured
+Closes the Linux question from rgx's own numbers: rgx measured
 mmap 1.51× SLOWER than `read()` for scans on Windows and kept its mmap
 path alive to check whether Linux's cheap soft faults reverse the ordering.
 They do — and the resident-scan rows show where the difference lives.

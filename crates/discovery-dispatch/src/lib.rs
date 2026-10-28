@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The `Source` selector (`docs/design.md` §4).
+//! The `Source` selector.
 //!
 //! One walk per platform, chosen by `cfg`, with the portable walk as the
 //! answer everywhere else and as the fallback whenever a native backend
@@ -100,7 +100,7 @@ pub fn current_platform() -> Platform {
 
 /// How the index catches up after a restart, per platform.
 ///
-/// This is the whole of `docs/design.md` §3, rule 5 ("live-feed honesty"),
+/// This is the whole of the live-feed honesty rule,
 /// in one place:
 ///
 /// * **Windows** (the USN journal) and **macOS** (the FSEvents event id)
@@ -189,7 +189,7 @@ pub struct AnySource {
     kind: Kind,
 }
 
-/// Build the platform [`Source`] for `root` (docs/design.md §2.2).
+/// Build the platform [`Source`] for `root`.
 pub fn source_for(root: Vec<u8>, threads: usize) -> AnySource {
     let kind = pick(&root, threads);
     AnySource {
@@ -515,7 +515,7 @@ mod tests {
             .collect()
     }
 
-    /// P2.1 acceptance: the selected backend matches the sequential oracle
+    /// The acceptance rule: the selected backend matches the sequential oracle
     /// — names, kinds, sizes, mtimes and child links — and the premise is
     /// checked first, so this cannot pass by silently falling back to the
     /// portable walk.
@@ -547,7 +547,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The catch-up rule as `docs/design.md` §3 states it: a platform whose
+    /// The catch-up rule: a platform whose
     /// OS keeps a journal replays it, a platform whose OS keeps none
     /// relists the tree. Asserted for every platform, so the rule is the
     /// same on every host -- not only the one the test runs on.

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The platform discovery seam (`docs/design.md` §2.2).
+//! The platform discovery seam.
 //!
 //! `Source` enumerates the filesystem as DFS directory blocks; `Watch`
 //! delivers change batches, or [`ChangeBatch::Rescan`] when the feed loses

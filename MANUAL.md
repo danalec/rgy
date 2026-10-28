@@ -511,7 +511,5 @@ being written. rgy skips it and lists it rather than failing the run.
 |---|---|
 | [README.md](README.md) | the map: what rgy is, how it compares to rgx |
 | [FORMATS.md](FORMATS.md) | what it reads inside a file, format by format |
-| [docs/design.md](docs/design.md) | the decisions this workspace is built on |
-| [docs/insights-from-rgx.md](docs/insights-from-rgx.md) | what the rgx side taught about storage and access shapes |
 | [benchmark/](benchmark/) | the measured numbers |
 | [rgx](https://github.com/danalec/rgx) | the content-search specialist this workspace is built on |

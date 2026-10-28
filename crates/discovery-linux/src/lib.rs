@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Linux discovery backend (`docs/design.md` §2.2): a `getdents64`
+//! Linux discovery backend: a `getdents64`
 //! bulk walk producing the same DFS [`Listing`]s as every other `Source`,
 //! and a recursive inotify [`Watch`] whose overflow becomes `Rescan`.
 //!

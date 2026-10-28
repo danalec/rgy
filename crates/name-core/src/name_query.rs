@@ -10,7 +10,7 @@
 //! repository's own work, written on the same design; the module carries
 //! everything `Query::match_path` needs.
 //!
-//! Merged query syntax (docs/design.md §2.1): fsearch's token modes
+//! Merged query syntax: fsearch's token modes
 //! on top of zen-rs's filter vocabulary.
 
 use crate::fold;
@@ -52,15 +52,15 @@ pub struct Token {
     ///
     /// A token names a part of the path: the name, the extension, a folder
     /// of it, or an attribute. The name is the default -- what a bare word
-    /// means -- and the others are named (parity row Q.1).
+    /// means -- and the others are named.
     pub axis: Axis,
 }
 
 /// The part of a path a token matches on.
 ///
-/// Listary's engine matches against four independent parts of a path --
+/// The engine matches against four independent parts of a path --
 /// folder, attribute, name, extension -- and the legacy contract holds a
-/// list of per-folder-part matcher groups (parity row Q.1). A token says
+/// list of per-folder-part matcher groups. A token says
 /// which part it means; the name is the default, because that is what a
 /// bare word means.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -157,7 +157,7 @@ fn all_mask(pos_len: usize, axes: &Axes<'_>) -> u32 {
 impl Axis {
     /// The axis a token names, from the prefix it carries.
     ///
-    /// The prefixes are the ones Listary's own contract carries:
+    /// The prefixes are the ones the reference's own contract carries:
     /// `FolderPartMatchers` is a list per folder part, and the query
     /// grammar's facet prefix is `:`. So the axis is named before the
     /// colon: `name:`, `ext:`, `folder:` and `attr:`.
@@ -243,7 +243,7 @@ pub enum GrepMode {
 
 /// The order the results come in.
 ///
-/// Listary's `SortBy` is a choice (NoSort, Score, FileName, LastWriteTime),
+/// The reference's `SortBy` is a choice (NoSort, Score, FileName, LastWriteTime),
 /// and rgy's is one too: `sort:` in the query.
 ///
 /// The choice orders the hits the cap kept; it does not pick them. The cap
@@ -309,7 +309,7 @@ impl Query {
     /// `ext: type: kind: in: size: mtime: re: path: limit: grep: regex: sym:`.
     ///
     /// A word may also name the **axis** it matches on, before the colon:
-    /// `name:`, `ext:`, `folder:` and `attr:` (parity row Q.1). A bare word
+    /// `name:`, `ext:`, `folder:` and `attr:`. A bare word
     /// is the name axis, which is what it has always meant.
     pub fn parse(s: &str, home: &str) -> Result<Query, String> {
         let mut q = Query { size: (0, u64::MAX), mtime: (0, u32::MAX), limit: 50, ..Default::default() };
@@ -321,7 +321,7 @@ impl Query {
                 continue;
             }
             // An axis prefix names the part of the path the word matches
-            // (parity row Q.1): `name:`, `ext:`, `folder:` and `attr:`.
+            //: `name:`, `ext:`, `folder:` and `attr:`.
             //
             // The prefix is only an axis when the word carries one of the
             // matcher's own markers, or when the prefix is not also a
@@ -443,7 +443,7 @@ impl Query {
         // vocabulary is layered on top).
         if t.contains('*') || t.contains('?') {
             // The pattern is folded and lowercased: it is matched against
-            // the folded path (docs/design.md 6.6, rule 2).
+            // the folded path.
             let pattern = fold::fold(t.as_bytes());
             self.globs.push((negate, pattern.iter().map(|&b| b.to_ascii_lowercase()).collect()));
             return;
@@ -495,7 +495,7 @@ impl Query {
         match k {
             "ext" => self.exts.extend(v.split(',').map(|e| {
                 // The extension is folded and lowercased: it is compared
-                // against the folded name (docs/design.md 6.6, rule 2).
+                // against the folded name.
                 fold::fold(e.trim_start_matches('.').as_bytes()).iter().map(|&b| b.to_ascii_lowercase()).collect()
             })),
             "type" => {
@@ -563,7 +563,7 @@ impl Query {
                 // mtime:<7d means "modified within the last 7 days".
                 let now = now_secs();
                 // The named windows: a vocabulary, not a mechanism. The
-                // numbers are the ones Listary's parser carries (the
+                // numbers are the ones The reference's parser carries (the
                 // 86400-second day).
                 self.mtime = match v {
                     "today" | "last_24_hours" => (now.saturating_sub(86_400), now),
@@ -662,8 +662,7 @@ impl Query {
                 return None;
             }
         }
-        // Every comparison runs on the fold of the path (docs/design.md
-        // 6.6, rule 2): a name typed in NFC has to match one the
+        // Every comparison runs on the fold of the path (the fold rule, rule 2): a name typed in NFC has to match one the
         // filesystem stored in NFD. The path the caller holds is the one
         // that is displayed and opened; this is the view for comparison.
         let folded = fold::fold(path);
@@ -961,7 +960,7 @@ fn parse_age(s: &str) -> Option<u64> {
 ///
 /// The dates are UTC: a date has no timezone, and the index stores a unix
 /// second, so a date is a day in the same clock the index counts in. The
-/// day is 86 400 seconds -- the constant Listary's parser carries.
+/// day is 86 400 seconds -- the constant The reference's parser carries.
 const DAY: u64 = 86_400;
 
 /// The unix second a calendar date starts at, in UTC.
@@ -1012,7 +1011,7 @@ enum DateOp {
     Before,
     /// `>`: after the value.
     After,
-    /// `c`: the created date (Listary's token).
+    /// `c`: the created date (the reference's token).
     Created,
 }
 
@@ -1028,7 +1027,7 @@ enum DateOp {
 /// * an **age** -- `7d`, `2mo`. An age is counted back from now, so
 ///   `mtime:7d` is the last seven days;
 /// * an **operator** on either -- `<` before, `>` after, and the two
-///   Listary recovered verbatim: `c` (created) and `<` (before).
+///   the reference recovered verbatim: `c` (created) and `<` (before).
 ///
 /// The comparison is the same in both: the operator bounds the **value**.
 /// `<` is "less than the value" and `>` is "more than it". For an age that
@@ -1649,7 +1648,7 @@ fn keyword_span(name: &[u8], q: &[u8]) -> Option<(usize, usize)> {
 /// A name that matched through a typo, or through its shadow (the pinyin or
 /// the kana reading), has no positions: the span would be in another text.
 pub fn matched_chars(name: &[u8], tokens: &[Token]) -> Vec<u32> {
-    // The comparison runs on the fold of the name (docs/design.md 6.6,
+    // The comparison runs on the fold of the name (the fold rule,
     // rule 2), and so does the highlight: the token is folded, so a name
     // the filesystem stored in NFD has to be folded here as well. Without
     // it the comparison misses a name that does match, and the row shows
@@ -2092,8 +2091,8 @@ mod tests {
 
     /// The four axes: the name, the extension, a folder and an attribute.
     ///
-    /// Listary's engine matches against four independent parts of a path
-    /// (parity row Q.1). A word says which part it means: `name:`,
+    /// The engine matches against four independent parts of a path
+    ///. A word says which part it means: `name:`,
     /// `ext:`, `folder:` and `attr:`. A bare word is the name axis, which
     /// is what it has always meant.
     #[test]
@@ -2681,7 +2680,7 @@ mod tests {
     /// The date facet: a calendar date, an age, and the operator suffix
     /// that tells them apart.
     ///
-    /// The two operator tokens are the ones Listary's binary carries
+    /// The two operator tokens are the ones The reference's binary carries
     /// verbatim: `c` (created) and `<` (before). rgy's index keeps the
     /// modification time, so `c` answers with it -- the honest answer for
     /// the data rgy has -- and `<` is the "before" bound.
@@ -2694,7 +2693,7 @@ mod tests {
         let r = q("mtime:2024-01-01..2024-01-31");
         assert_eq!(r.mtime.0, 1_704_067_200);
         assert_eq!(r.mtime.1, 1_704_067_200 + 30 * 86_400 - 1, "the range ends at the last second of the second day");
-        // The operator Listary recovered: before.
+        // The operator the reference recovered: before.
         let before = q("mtime:<2024-01-01");
         assert_eq!(before.mtime, (0, 1_704_067_199), "before a date excludes the date itself");
         // And the other side, which the same vocabulary makes possible.
@@ -3573,7 +3572,7 @@ impl<'a> TokenBits<'a> {
 fn name_hit(idx: &Index, q: &Query, pos: &[&Token], neg: &[&Token], re: Option<&crate::regex::Regex>, k: u32) -> Option<NameHit> {
     // The name is folded for the comparison: the index keeps the bytes the
     // filesystem gave, and a query typed in NFC has to match one stored in
-    // NFD (parity row 1.12).
+    // NFD.
     let (name, wide) = idx.uname_folded(k);
     let m = crate::name_index::mask_of(&name);
     let mut h = NameHit { score: 0, bits: 0, flags: name_flags(&name), best: [0; 4] };
@@ -4523,7 +4522,7 @@ impl Searcher<'_> {
         let score = |k: u32, (_, clean, typo): (u64, u64, u64), re: Option<&crate::regex::Regex>| -> Option<Cand> {
             let (w, i) = (k as usize / 64, k % 64);
             // The name is folded: a query typed in NFC has to match a name
-            // the filesystem stored in NFD (parity row 1.12).
+            // the filesystem stored in NFD.
             let (name, wide) = idx.uname_folded(k);
             let spaced = (space[0][w] | space[1][w]) >> i & 1 != 0;
             let s = token_score(&name, wide, t.known_mask(clean >> i & 1 != 0, typo >> i & 1 != 0, spaced), t)?;
@@ -5194,7 +5193,7 @@ impl Searcher<'_> {
                 return None;
             }
             // The name is folded: a query typed in NFC has to match a
-            // name the filesystem stored in NFD (parity row 1.12).
+            // name the filesystem stored in NFD.
             let (name, wide) = idx.uname_folded(k as u32);
             // Whether the name answered one of the name-axis tokens.
             //
@@ -5233,7 +5232,7 @@ impl Searcher<'_> {
                         continue;
                     }
                     // The token says which part of the path it matches on
-                    // (parity row Q.1).
+                    //.
                     let scored = match tok.axis {
                         Axis::Name => token_score(&name, wide, tok.known_mask(bit(clean), bit(typo), spaced), tok),
                         // The extension is part of the name, so the name's own
@@ -5536,7 +5535,7 @@ struct Scan<'a> {
     names: &'a NameTable,
     npos: usize,
     need_dirs: bool,
-    /// The axes the tokens match on (parity row Q.1).
+    /// The axes the tokens match on.
     axes: Axes<'a>,
     /// The bits the name table's bitmap and the memo can carry.
     ///
@@ -5653,8 +5652,7 @@ impl Scan<'_> {
             // skip the globs entirely, so `*walk.rs` returned every name).
             idx.path(i, pbuf);
             // The path is folded for the comparison: the path that is
-            // displayed and opened is the original one (docs/design.md
-            // 6.6, rule 2).
+            // displayed and opened is the original one (the fold rule, rule 2).
             let folded = fold::fold(pbuf);
             let path = &folded[..];
             if let Some(re) = re

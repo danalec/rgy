@@ -26,7 +26,7 @@
 //! an embedded search box is a name engine with one customer.
 //!
 //! The decision behind this, and behind the parallelism that came with it,
-//! is `docs/design.md` §2.5.
+//! is the pool and the width
 
 #![no_std]
 
@@ -72,7 +72,7 @@ pub mod rules;
 /// The synchronisation the query engine needs, without std.
 mod sync;
 
-/// The comparison fold: ASCII case-fold + NFC (parity row 1.12). The
+/// The comparison fold: ASCII case-fold + NFC. The
 /// display and the I/O keep the bytes the filesystem gave; this is what a
 /// comparison sees.
 pub mod fold;

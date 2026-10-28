@@ -2,9 +2,9 @@
 
 //! The incremental search session: what a keystroke re-uses.
 //!
-//! Listary's engine keeps a session per search and re-uses the previous
+//! The engine keeps a session per search and re-uses the previous
 //! result set when the query is edited, instead of walking the index again
-//! (parity row S.10). The win is the latency of a keystroke, and it is the
+//!. The win is the latency of a keystroke, and it is the
 //! largest single win in the matrix.
 //!
 //! rgy's engine already re-uses one thing across a keystroke: the table of
@@ -16,7 +16,7 @@
 //! This module is that session. It holds:
 //!
 //! * an **id**, so a client can keep its own session and the daemon can
-//!   tell two of them apart (Listary's incremental-search id);
+//!   tell two of them apart (the reference's incremental-search id);
 //! * the **revision** of the index the result set was found against, so a
 //!   session whose index has moved is dropped rather than answered from;
 //! * the **previous result set**, so the next keystroke re-ranks it
@@ -291,10 +291,10 @@ impl Session {
     /// The facet selection: the part of the query that is not the text the
     /// user is typing.
     ///
-    /// Listary's product crate keeps the facet selection in a state
+    /// The reference's product crate keeps the facet selection in a state
     /// machine, and an unchanged selection does not trigger a re-search:
     /// "file search window facet selection unchanged; skipping re-search to
-    /// keep the engine replay path" (parity row Q.4). The facet state lives
+    /// keep the engine replay path". The facet state lives
     /// in the product, not in the engine -- and rgy's product is the TUI
     /// and the daemon, which is where this is.
     ///
@@ -309,7 +309,7 @@ impl Session {
     /// Search the query, replaying the previous answer when the query has
     /// not changed at all.
     ///
-    /// This is the facet replay path (parity row Q.4). The selection is
+    /// This is the facet replay path. The selection is
     /// compared with the one the session holds, and so is the text: a
     /// query that is the same query is answered from the previous answer,
     /// with no search at all.
@@ -610,7 +610,7 @@ mod tests {
 
     /// An unchanged query replays the previous answer.
     ///
-    /// This is the facet replay path (parity row Q.4): Listary's product
+    /// This is the facet replay path: the reference's product
     /// crate skips the re-search when the selection has not changed, and
     /// the engine's replay path is what it replays.
     #[test]

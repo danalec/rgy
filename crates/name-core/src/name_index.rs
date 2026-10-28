@@ -33,7 +33,7 @@ use std::path::Path;
 
 /// Index storage: a file mapping or an owned buffer.
 ///
-/// Lessons from rgx (see `docs/insights-from-rgx.md`):
+/// Lessons from rgx:
 /// - `Mmap::map` can FAIL (Windows sharing/commit limits, empty files,
 ///   network paths) — a load that only maps turns that into "no index".
 ///   `Blob::from_file` falls back to reading the bytes.
@@ -411,7 +411,7 @@ impl Index {
     /// 64-byte window the wide scorer reads.
     ///
     /// The fold is what makes a name typed in NFC match one the filesystem
-    /// stored in NFD (parity row 1.12). The index keeps the bytes the
+    /// stored in NFD. The index keeps the bytes the
     /// filesystem gave: the name that is displayed and the path that is
     /// opened are the original ones, and the fold is a view for comparison
     /// only.
@@ -436,7 +436,7 @@ impl Index {
     ///
     /// The name table is the index's own: a name is stored once and the
     /// entries that carry it point at it. This is what the `file_name` and
-    /// `folder_name` lookups of the lookup surface (parity row I.1) read.
+    /// `folder_name` lookups of the lookup surface read.
     pub fn name_ents_of(&self, id: u32) -> Vec<u32> {
         let (s, e) = (self.name_ents_off()[id as usize] as usize, self.name_ents_off()[id as usize + 1] as usize);
         self.name_ents()[s..e].to_vec()
@@ -774,7 +774,7 @@ impl Index {
         // into the record. The search reads this per entry, and reading it
         // from the directory table means a dependent load -- the entry's
         // parent, then that parent's prior -- in the hottest loop there
-        // is. Listary's record store keeps the same thing in the record
+        // is. The reference's record store keeps the same thing in the record
         // (its `record_store.rs` is the largest module in its engine), and
         // the reason is the same: a ranking property that is read per
         // candidate belongs to the candidate.
@@ -974,7 +974,7 @@ impl Index {
     /// not a forest is an index that would answer with paths that do not
     /// exist.
     ///
-    /// The four faults are the ones Listary's path index names (`REVERSE_
+    /// The four faults are the ones The reference's path index names (`REVERSE_
     /// ENGINEERING_REPORT.md` §4.5): a broken chain, a dead ancestor, a
     /// wrong record kind and a cycle. rgy's chain is the directory table
     /// (`DirParent`), one pointer per folder, and the entry table
@@ -1039,7 +1039,7 @@ fn check_forest(dp: &[u32], de: &[u32], kind: &[u8], parent: &[u32], n: usize, d
 
 /// What is wrong with an index's parent chain.
 ///
-/// The four faults are Listary's (`core_db/path_index.rs`): a broken chain,
+/// The four faults are the reference's (`core_db/path_index.rs`): a broken chain,
 /// a dead ancestor, a wrong record kind and a cycle. rgy's chain is the
 /// directory table, so the dead-ancestor fault is the live set's to raise
 /// (see [`crate::live::Live::validate_forest`]).
@@ -1119,7 +1119,7 @@ fn ext_key(name: &[u8]) -> Option<[u8; 16]> {
 /// most 15 bytes) and each name's slot in it (see `Index::name_ext`).
 ///
 /// The extension is the one of the *folded* name: the table prefilters a
-/// comparison, and a comparison sees the folded name (parity row 1.12).
+/// comparison, and a comparison sees the folded name.
 pub(crate) fn ext_slots(names: &[u8], off: &[u32]) -> (Vec<[u8; 16]>, Vec<u8>) {
     let name = |k: usize| &names[off[k] as usize..off[k + 1] as usize];
     let ext = |k: usize| ext_key(&fold::fold(name(k)));
@@ -1161,7 +1161,7 @@ impl NameInfo {
     /// The info of a name whose folders' best location prior is `prior`.
     ///
     /// The name is folded first: the length, the stem and the head are
-    /// what a comparison sees (parity row 1.12), and a query typed in NFC
+    /// what a comparison sees, and a query typed in NFC
     /// has to line up with a name the filesystem stored in NFD.
     pub fn of(name: &[u8], prior: i8) -> NameInfo {
         let folded = fold::fold(name);
@@ -1264,7 +1264,7 @@ pub fn char_mask(s: &[u8]) -> u64 {
 /// rejects every other name without reading it.
 ///
 /// The name is folded first: the mask says which classes a *comparison*
-/// sees, and a comparison sees the folded name (parity row 1.12).
+/// sees, and a comparison sees the folded name.
 pub fn name_mask(s: &[u8]) -> u64 {
     mask_of(&fold::fold(s))
 }
@@ -1372,7 +1372,7 @@ mod blob_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// P1.1 acceptance (`docs/design.md` §2.2): a non-empty file must
+    /// The acceptance rule: a non-empty file must
     /// arrive as `Blob::Mapped`, so a regression to the owned fallback is
     /// visible here instead of silently costing the whole blob in RSS. On
     /// FreeBSD this exercises `memmap2/platform/freebsd.rs`; on Linux and
@@ -1453,7 +1453,7 @@ mod blob_tests {
     /// The parent chain of a well-formed index is a forest, and the check
     /// says so.
     ///
-    /// The check is the one the parity matrix asks for (row I.2): a forest
+    /// The check is the one the index needs: a forest
     /// that is not a forest is an index that answers with paths that do not
     /// exist, and a corrupt index must be detected rather than read.
     #[test]

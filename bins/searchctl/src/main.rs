@@ -87,7 +87,7 @@ fn parse_age(s: &str) -> Option<std::time::Duration> {
 
 fn main() {
     // The console decides how the UTF-8 bytes below are decoded, so it is
-    // put into UTF-8 before anything is printed (parity row 4.7). A
+    // put into UTF-8 before anything is printed. A
     // redirected stdout keeps its raw bytes: a machine consumer wants
     // UTF-8, not a console's idea of it.
     rgy_engine::console::init();
@@ -250,7 +250,7 @@ fn obtain_index(opts: &Opts) -> Result<Index, String> {
         }
     }
 
-    // The platform walk where one exists (docs/design.md §2.2),
+    // The platform walk where one exists,
     // the portable walk where none does or where the native one refuses —
     // no privileges needed either way, the selector falls back on its own.
     let (scan_threads, query_threads) = widths(opts.threads);

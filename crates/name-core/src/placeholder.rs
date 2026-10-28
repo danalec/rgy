@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Cloud placeholders: files whose bytes are not on this disk (parity row 1.7).
+//! Cloud placeholders: files whose bytes are not on this disk.
 //!
 //! OneDrive, Dropbox and the other cloud drives leave a file behind as a
 //! placeholder: the directory entry is there, with the size and the times the
@@ -40,7 +40,7 @@
 //! not carried in the index. It is a property of the file *now* -- the user
 //! may have pinned the file since the index was built, and the index may
 //! have been built on another machine -- while the index format is a
-//! cross-language contract (`docs/on-disk-formats.md`) that has no reason to
+//! cross-language contract (the index format) that has no reason to
 //! grow a field for a question only the open path asks.
 
 /// `FILE_ATTRIBUTE_RECALL_ON_OPEN`: the file must be fetched from the cloud

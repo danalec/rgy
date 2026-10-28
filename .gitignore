@@ -63,6 +63,7 @@ __pycache__/
 /.remember/
 /.egm/
 /docs/designs/
+/build/
 EGM.md
 /.worktrees/
 

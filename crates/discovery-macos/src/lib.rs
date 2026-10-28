@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! macOS discovery backend (`docs/design.md` §2.2): fsearch's
+//! macOS discovery backend: fsearch's
 //! `getattrlistbulk` walk and FSEvents watch, transported verbatim.
 //!
 //! The whole backend is `cfg(target_os = "macos")`; on other hosts this

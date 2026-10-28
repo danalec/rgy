@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! TV pack store as the daemon's corpus store (`docs/design.md` §2.3
-//! §4.3/§10): the pack searcher answers `grep:` when the query names a
+//! TV pack store as the daemon's corpus store: the pack searcher answers
+//! `grep:` when the query names a
 //! store built with `--tv-pre-extract` / `rgx-tv` — corpus bytes packed
 //! once, mmap'd, incremental. The direct engine (name-core `content`)
 //! stays available beside it.

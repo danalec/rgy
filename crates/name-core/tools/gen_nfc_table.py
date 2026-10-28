@@ -3,9 +3,9 @@
 
 """Generate the Unicode tables the name index's comparison fold needs.
 
-The fold is "ASCII case-fold + NFC" (docs/design.md 6.6, rule 2): a name
+The fold is "ASCII case-fold + NFC": a name
 typed in NFC has to match a name the filesystem stored in NFD, which is what
-macOS does (parity row 1.12).  NFC needs the Unicode Character Database --
+macOS does.  NFC needs the Unicode Character Database --
 there is no way to derive canonical decomposition, canonical combining class
 or canonical composition from the Latin-1 range or from anything else this
 repository already carries.

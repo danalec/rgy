@@ -2,14 +2,14 @@
 
 //! The lookup surface: five indexes over one record store.
 //!
-//! Listary's core DB carries five indexes (parity row I.1): `file_name`,
+//! The core DB carries five indexes: `file_name`,
 //! `folder_name`, `folder_backend`, `file_path` and `folder_path`. They are
 //! five ways into the same records, not five copies of them.
 //!
 //! rgy's index is one flat structure: interned names, DFS ranges for the
 //! tree, and a name mask. It answers a name query and it resolves a path,
 //! but the lookup surface does not separate files from folders -- and the
-//! one index Listary has that rgy does not is `folder_backend`, the map
+//! one index the reference has that rgy does not is `folder_backend`, the map
 //! from a folder's name to the volume that owns it.
 //!
 //! This module is that surface. It is a view over the index, not a second

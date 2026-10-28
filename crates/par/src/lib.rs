@@ -29,7 +29,7 @@
 //! draws a cheap index does not hold the others up. That is [`each_index`]
 //! and [`each_owned`].
 //!
-//! The decision this crate exists to make is `docs/design.md` §2.5.
+//! The decision this crate exists to make is the pool and the width
 
 #![no_std]
 

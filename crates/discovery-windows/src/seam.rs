@@ -5,7 +5,7 @@
 //! `MftSource` enumerates the volume as DFS directory blocks via the MFT
 //! walk (the trap suite in `indexer`); `UsnWatch` tails the USN journal as
 //! [`ChangeBatch`]es. Together they are the Windows half of
-//! `docs/design.md` §2.2.
+//! the discovery seam
 
 use alloc::format;
 use alloc::string::String;

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! searchd — the merged search daemon (`docs/design.md` §2.5).
+//! searchd — the merged search daemon.
 //!
 //! Indexes `--root` once at startup and answers JSON-lines requests. Three
 //! fronts, two framings:
@@ -117,7 +117,7 @@ struct Ctx {
     /// Set when a content search has been asked for: what tells the
     /// content thread there is something to build an index for.
     wants_content: std::sync::atomic::AtomicBool,
-    /// The incremental search sessions, one per client (parity row S.10).
+    /// The incremental search sessions, one per client.
     ///
     /// A session holds the last result set and re-ranks it when the query
     /// narrows, instead of walking the index again. The id is the client's
@@ -135,8 +135,8 @@ struct Ctx {
 }
 
 impl Ctx {
-    /// How the index caught up after the last restart
-    /// (`docs/design.md` §3, rule 5 — "live-feed honesty").
+    /// How the index caught up after the last restart (the live-feed
+    /// honesty rule).
     ///
     /// What this process did: the change journal was resumed at the saved
     /// watermark and the backlog applied (`Replayed`), or it was not
@@ -157,10 +157,10 @@ impl Ctx {
 
     /// Search the alternatives through the client's session.
     ///
-    /// The session is the incremental-search id (parity row S.10): the
+    /// The session is the incremental-search id: the
     /// daemon keeps one per id, and a query that narrows the previous one
     /// is answered by re-ranking the previous result set instead of
-    /// walking the index again. The facet replay path (parity row Q.4) is
+    /// walking the index again. The facet replay path is
     /// the same session: a facet selection that has not changed replays
     /// the previous answer instead of searching again.
     ///
@@ -250,7 +250,7 @@ fn parse_age(s: &str) -> Option<Duration> {
 
 fn main() {
     // The console decides how the UTF-8 bytes are decoded, so it is put
-    // into UTF-8 before anything is printed (parity row 4.7). The input
+    // into UTF-8 before anything is printed. The input
     // side too: in stdio mode the requests are typed by a person, and the
     // console encodes the keystrokes with the input code page. A
     // redirected stdout keeps its raw bytes -- a machine consumer wants
@@ -660,7 +660,7 @@ fn open_index(
         }
     }
 
-    // The platform walk where one exists (docs/design.md §2.2),
+    // The platform walk where one exists,
     // the portable walk where none does or where the native one refuses.
     let source = rgy_discovery_dispatch::source_for(root.as_bytes().to_vec(), threads);
     // The first thing a daemon does is walk a tree it was pointed at, and
@@ -786,7 +786,7 @@ fn handle(req: Request, ctx: &Ctx) -> Vec<Response> {
                 // them -- and the daemon's answer is what the CLI reads.
                 //
                 // With a session the answer is the same one, computed from
-                // the session's previous result set (parity row S.10): a
+                // the session's previous result set: a
                 // query that narrows the previous one is re-ranked instead
                 // of walked again.
                 let hits = match session {
@@ -841,7 +841,7 @@ fn handle(req: Request, ctx: &Ctx) -> Vec<Response> {
     responses
 }
 
-/// Resolve a path through the lookup surface (parity row I.1).
+/// Resolve a path through the lookup surface.
 ///
 /// The five indexes answer it: the `file_path` and `folder_path` indexes
 /// give the path of the entry, and the `folder_backend` index the volume
@@ -1736,7 +1736,7 @@ mod tests {
         assert_eq!(ctx.catch_up(), CatchUp::Relisted);
     }
 
-    /// The lookup surface answers a path (parity row I.1).
+    /// The lookup surface answers a path.
     #[test]
     fn a_path_resolves_through_the_lookup_surface() {
         let dir = std::env::temp_dir().join(format!(

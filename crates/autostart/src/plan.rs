@@ -21,7 +21,7 @@ pub enum Platform {
 }
 
 impl Platform {
-    /// The name the parity matrix uses.
+    /// The name the code uses.
     pub fn name(self) -> &'static str {
         match self {
             Platform::Windows => "windows",

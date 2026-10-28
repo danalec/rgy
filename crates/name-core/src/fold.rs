@@ -4,7 +4,7 @@
 //!
 //! ## The rule
 //!
-//! `docs/design.md` §6.6, rule 2: *every comparison runs on a fold of the
+//! The fold rule: *every comparison runs on a fold of the
 //! path (ASCII case-fold + NFC); display and I/O keep the original
 //! bytes/UTF-16.* This module is the NFC half of that fold, and the
 //! ASCII half already exists where the bytes are compared

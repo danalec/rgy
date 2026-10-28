@@ -2,7 +2,7 @@
 
 //! The pool: the workers that live between the calls.
 //!
-//! The tree's parallelism is written here, not borrowed (§2.5), and this
+//! The tree's parallelism is written here, not borrowed, and this
 //! is where the pool lives: the threads that carry the tree's parallel
 //! work are created once and kept, so a search that runs a hundred times
 //! does not create a hundred threads.

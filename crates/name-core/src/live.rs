@@ -23,7 +23,7 @@
 //! The two halves are split on purpose. [`Live::fetch`] reads the disk and
 //! needs only `&self`, so a daemon can re-list a folder under a read lock
 //! while searches keep answering; [`Live::apply`] writes the difference and
-//! needs `&mut self`. See `docs/name-core.md` for the contract.
+//! needs `&mut self`.
 //!
 //! The two path spaces matter here: the base holds root-relative paths and
 //! the overlay holds openable ones. The Live knows the tree the base was

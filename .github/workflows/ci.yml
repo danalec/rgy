@@ -1,11 +1,11 @@
-# The gates (docs/design.md §6).
+# The gates.
 #
 # Two layers for FreeBSD: the floor is a cross-check that needs no VM (catches
 # cfg and dependency breakage for the FreeBSD target on every push), and the
-# bar is the full suite on a real FreeBSD kernel. Decision 5 in §5 names the
-# vehicles for the bar - vmactions/freebsd-vm, a Gitea runner, or a local one
-# - and this workflow covers the first two wherever a Docker-capable runner
-# exists. The recorded local-VM run (15.1-RELEASE, 2026-10-14) is filed in §4;
+# bar is the full suite on a real FreeBSD kernel. The vehicles for the bar are
+# vmactions/freebsd-vm, a Gitea runner, or a local one, and this workflow covers
+# the first two wherever a Docker-capable runner exists. The recorded local-VM
+# run (15.1-RELEASE, 2026-10-14) is filed with the tree's working notes;
 # this keeps it from being a one-off.
 #
 # The e2e harness resolves bins by path, so every job builds first
@@ -35,28 +35,14 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  parity:
-    name: the parity document claims no gap it cannot act on
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      # One document, two tables: what each operating system gets, and
-      # what Listary does that rgy does not. It is written by hand, and
-      # the gate is what keeps it honest -- a G cell that is not on the
-      # known-gaps list, a gap with no work attached, a parity claim that
-      # names no place in the code, a phase with no rows.
-      #
-      # It does NOT fail because a gap is open. A gap is the work.
-      - run: python3 scripts/parity.py --check
-
   bench-table:
     name: the bench table is what the baseline renders
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      # The same shape as the parity matrix: the table in the write-up is
-      # generated from the CSV, and a table that is not what its source
-      # renders is a table that reads better than it is.
+      # The table in the write-up is generated from the CSV, and a table
+      # that is not what its source renders is a table that reads better
+      # than it is.
       #
       # What this does NOT do is run the perf gate itself. The gate compares
       # a measurement against a baseline recorded on a named host, and a
