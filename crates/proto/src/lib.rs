@@ -180,7 +180,13 @@ pub enum Response {
 pub struct Hit {
     pub path: String,
     pub score: i32,
-    /// The byte offsets of the matched characters in the name, in order.
+    /// The character offsets of the matched characters in the name, in
+    /// order.
+    ///
+    /// The first character of the name is 0, and the offsets count the
+    /// name as it is written: the engine folds the name to score it, and
+    /// the positions it sends are the positions in the name the user
+    /// sees.
     pub span: Vec<u32>,
     /// Whether the hit is a folder.
     ///

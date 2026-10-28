@@ -17,7 +17,7 @@ pub struct Row {
     pub path: String,
     /// The engine's score.
     pub score: i32,
-    /// The byte offsets of the matched characters in the name.
+    /// The character offsets of the matched characters in the name.
     pub span: Vec<u32>,
     /// The line under the name, when the row is not a plain name.
     ///
@@ -104,9 +104,12 @@ impl Row {
 
     /// The name's characters that the query matched.
     ///
-    /// The span is in the name's own bytes, so the caller has to fold the
-    /// name before it can index with it — the same fold the engine used
-    /// when it scored the match.
+    /// The span counts the characters of the name from the first one —
+    /// the first character is 0 — and it counts the name as it is
+    /// written: the engine folded the name to score it, and the
+    /// positions it sends are the positions in the name the user sees.
+    /// A caller that folded the name again would be looking at a
+    /// different text.
     pub fn matched(&self) -> &[u32] {
         &self.span
     }

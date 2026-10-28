@@ -182,9 +182,10 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
 
 /// Whether the key is one of the Controls.
 ///
-/// The hook tells the two apart and never says the generic Control: the
-/// key that was pressed is the one on the keyboard, and the keyboard has
-/// two of them.
+/// The hook hears the generic Control as well as the left and the right
+/// one: a keyboard that does not say which side was pressed says the
+/// generic one, and a press the hook does not hear breaks the gesture
+/// that opens the window.
 fn is_control(vk_code: u32) -> bool {
     vk_code == VK_CONTROL || vk_code == VK_LCONTROL || vk_code == VK_RCONTROL
 }
@@ -227,7 +228,7 @@ mod tests {
     }
 
     #[test]
-    fn the_hook_hears_both_of_the_control_keys() {
+    fn the_hook_hears_every_control_key() {
         assert!(is_control(VK_CONTROL));
         assert!(is_control(VK_LCONTROL));
         assert!(is_control(VK_RCONTROL));

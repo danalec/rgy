@@ -172,9 +172,10 @@ pub const VK_ESCAPE: u32 = 0x1B;
 pub const VK_DELETE: u32 = 0x2E;
 /// The left and the right Control keys.
 ///
-/// The hook tells the two apart, and never says the generic Control: the
-/// key that was pressed is the one on the keyboard, and the keyboard has
-/// two of them.
+/// The hook hears the generic Control as well as the left and the right
+/// one: a keyboard that does not say which side was pressed says the
+/// generic one, and a press the hook does not hear breaks the gesture
+/// that opens the window.
 pub const VK_LCONTROL: u32 = 0xA2;
 pub const VK_RCONTROL: u32 = 0xA3;
 

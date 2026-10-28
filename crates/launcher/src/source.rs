@@ -25,8 +25,8 @@ pub struct Answer {
     /// The paths, in the engine's order. The ranking is the product and
     /// nothing here re-sorts it.
     pub paths: Vec<String>,
-    /// For each path, the byte offsets of the matched characters in its
-    /// **name**. Empty when the answer could not say which characters
+    /// For each path, the character offsets of the matched characters in
+    /// its **name**. Empty when the answer could not say which characters
     /// matched — a query with more than one alternative does not say which
     /// alternative a hit came from, and a span that guessed would be a lie
     /// in the place the user looks first.
