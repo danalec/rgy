@@ -145,6 +145,15 @@ noise is otherwise wider than the threshold, and a gate that fires on noise
 is worse than no gate. A row whose spread is wider than the threshold is
 undecidable, and the script says so instead of guessing.
 
+The width is a machine too, and not the same thing twice. The gate
+measures at four workers, because that is the width this host's noise lets
+a comparison decide; the tree runs at the width the machine gives it, and
+that width is the machine's **cores**, not its processors — a core with two
+threads is one core, and the scan is a memory-bound pass that measured 47%
+slower with the second thread of every core put to work. A caller that
+wants a width of its own (`RGY_NUM_THREADS`, `rgy_par::set_workers`) still
+gets it.
+
 The gate is also a machine. A baseline recorded on one host cannot rule on
 another — the code generator is the OS's, and the measurement is a
 memory-bound one, so the CPU's memory system is in it too — so every row

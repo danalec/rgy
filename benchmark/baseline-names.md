@@ -184,6 +184,64 @@ second one. So a 5M number is read the way the
 gate reads every number, and a change is judged by the A/B against the same
 code on the same day, on the platform the change is for.
 
+### The width the tree asks for by itself
+
+The tables above are taken at a fixed width of four workers, because that
+is the width this host's noise lets a comparison decide. The tree does not
+run at four: it runs at the width the machine gives it, and there the
+story is different — and worth writing down, because the number that came
+out of it was wrong for a while.
+
+**A core is a core.** This host has sixteen cores and two threads each.
+The scan is a memory-bound pass over arrays, and the second thread of a
+core shares the first one's load units, its cache and its place in the
+memory system. The same scan, the same corpus, the best of seven runs, in
+microseconds:
+
+| workers | 1 | 2 | 4 | 8 | 16 | 32 |
+|---|---|---|---|---|---|---|
+| 200,000 names | 374 | 190 | 98 | 54 | 55 | 81 |
+
+| workers | 1 | 4 | 8 | 16 | 32 |
+|---|---|---|---|---|---|
+| 5,000,000 names | 9704 | 3290 | 1324 | 708 | 691 |
+
+Sixteen workers is the machine's best at both corpora. Thirty-two is 47%
+worse at 200k and 2% better at 5M. The gate's four workers are not the
+tree's width, and the tree's width is not the machine's processor count.
+
+**The tree that came before the pool measured 61 µs at thirty-two workers,
+and the reason was a race.** Its worker chain handed out the work from a
+shared counter, and a helper that found the counter empty went home
+without working: of the thirty-two workers it asked for, fifteen to
+seventeen did the job. That was counted, not inferred — the counter sat in
+the closure and the tree printed it. The pool's workers all engage:
+thirty-two of thirty-two. The old tree's number was the number of sixteen
+workers with thirty-two asked for; the new tree's number is the number of
+thirty-two workers. The new tree is the honest one, and honest was 32%
+slower at 200k.
+
+So the width the tree asks for by itself is the machine's **cores**:
+`available_parallelism()` divided by the number of processors a core
+carries, which the platform says — `GetLogicalProcessorInformationEx` on
+Windows, the sibling list in sysfs on Linux, `hw.physicalcpu` on macOS. A
+caller that wants a width of its own still gets it: `RGY_NUM_THREADS` and
+`rgy_par::set_workers` are the user's, and the gate's four workers are the
+gate's. The width does not cost the index build anything either: the 5M
+build measured 1964 ms with sixteen workers against 2003 with thirty-two.
+
+With that, the two trees as they ship — each at its own width, the same
+machine, the same day, interleaved, the best of seven:
+
+| corpus | rows | new/old |
+|---|---|---|
+| 200,000 | all eight | 0.70 – 0.93 |
+| 5,000,000 | all eight | 0.87 – 1.05 |
+
+The 5M rows that come out above one are inside the noise this host has at
+that corpus (its spread is 4–13% there); the rows that come out below one
+are outside it.
+
 Notes:
 - `hits` is the true match count at an unbounded limit; the timed work is
   the scan+rank at `limit: 50`. The `plan` column is what `--explain`

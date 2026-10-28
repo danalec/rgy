@@ -148,6 +148,19 @@ decide anything on: the same code came out 4% faster than the baseline
 in a quiet run and 44% slower in a noisy one, which is the 5–52% spread
 the baseline itself records, and the reason those rows do not rule.
 
+The tree's own width is the machine's cores, not its processors. A core
+with two threads is one core, and the scan is a memory-bound pass over
+arrays: on a sixteen-core host with two threads each, the same scan took
+55 µs with sixteen workers and 81 µs with thirty-two, and the tree that
+came before the pool measured 61 — because its worker chain lost half of
+them to a race and ran sixteen threads while asking for thirty-two. The
+width is now `available_parallelism()` divided by the number of processors
+a core carries, which the platform says; `RGY_NUM_THREADS` and
+`rgy_par::set_workers` are still the user's. As the two trees ship, each
+at its own width, the new one is 7–30% faster at 200k and 0.87–1.05 at
+5M (the 5M rows above one are inside the noise that corpus has on a
+Windows host).
+
 The baseline is a machine as well as a number. The same Rust is not the same
 machine code on Linux and on Windows, and the measurement is a memory-bound
 one, so every row of `benchmark/baseline-names.csv` now carries the host it

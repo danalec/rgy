@@ -12,10 +12,12 @@
 //!
 //! **The width is the user's.** [`workers`] says how many workers the
 //! parallel paths use. It is, in order: what [`set_workers`] said, what the
-//! environment says (`RGY_NUM_THREADS`), or the platform's own count of
-//! processors -- which is what the pool this replaces did. A caller that
-//! wants a width of its own says so with [`set_workers`], and a caller that
-//! wants one width for one call says so with the `_at` variants.
+//! environment says (`RGY_NUM_THREADS`), or the machine's own count of
+//! cores -- which is what the pool this replaces did, less the second
+//! thread of every core, which is not a core (the `cores` module has the
+//! measurement's story). A caller that wants a width of its own says so
+//! with [`set_workers`], and a caller that wants one width for one call
+//! says so with the `_at` variants.
 //!
 //! The split is not a work-stealing pool: it is a chunk per worker, each
 //! chunk folded or sorted on its own, and the pieces joined afterwards.
@@ -44,6 +46,10 @@ pub mod sync;
 /// The channel the tree needs, without `std`: a queue between a callback
 /// that pushes and a reader that pulls.
 pub mod mpsc;
+
+/// The machine's cores: how many logical processors share one.
+#[cfg(feature = "std")]
+mod cores;
 
 /// The pool: the workers that live between the calls.
 ///
@@ -118,15 +124,25 @@ pub fn configured() -> Option<usize> {
     }
 }
 
-/// The platform's own count of processors.
+/// The machine's cores.
+///
+/// The platform's own count of processors, divided by the number of
+/// processors a core carries: a core with two threads is one core, and the
+/// tree's parallel work is a memory-bound pass that measured 47% slower
+/// with the second thread of every core put to work (the `cores` module
+/// has the measurement's story).
 ///
 /// Without `std` there are no threads, so the width is one.
 pub fn default_workers() -> usize {
     #[cfg(feature = "std")]
     {
-        std::thread::available_parallelism()
+        let logical = std::thread::available_parallelism()
             .map(|n| n.get())
-            .unwrap_or(1)
+            .unwrap_or(1);
+        let width = cores::smt_width()
+            .map(|threads| logical / threads.max(1))
+            .unwrap_or(logical);
+        width.clamp(1, logical)
     }
     #[cfg(not(feature = "std"))]
     {
