@@ -232,8 +232,8 @@ the file, `Control+K` for the actions.
 
 The daemon's order is the relevance order and it rules; on top of it the
 launcher remembers what **you** opened, and a result you used recently comes
-up a few places — never more than three, so a better match is never
-overtaken by an old habit.
+up a few places — never more than three. It is a nudge and not a takeover:
+what it passes goes down one place to make room.
 
 The window is a Windows thing for now — the double-`Control` hotkey is a
 low-level keyboard hook, and the hook this repository has is the Windows

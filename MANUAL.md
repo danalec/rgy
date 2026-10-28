@@ -617,6 +617,10 @@ Some things are not searches. A line that starts with `>` is a command:
 | `Control+W` | deletes the word |
 | `Control+U` | empties the field |
 
+The window gets out of the way when you click somewhere else. A launcher
+floating over the editor you just clicked into is a launcher you have to
+close by hand.
+
 ### Where it runs
 
 The window needs a desktop. A machine without one gets the terminal
