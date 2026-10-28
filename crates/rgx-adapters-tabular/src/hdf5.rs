@@ -1429,8 +1429,22 @@ impl<'a> File<'a> {
     /// ones that were never written: those hold the fill value, which the
     /// file does not write out.
     fn chunks_implicit(&self, addr: u64, grid: &ChunkGrid) -> Result<Vec<Chunk>, String> {
+        // An implicit list holds every chunk back to back, unfiltered, so
+        // a file of this length holds at most this many of them: a count
+        // past the ceiling is a layout the file cannot back, and walking
+        // it anyway is a loop a crafted max-shape can push past 2^60. The
+        // ceiling is the loop's bound, because every chunk in `out` is a
+        // `Vec` of its own.
+        if grid.bytes == 0 {
+            return Err(
+                "the chunk layout declares chunks of zero bytes, and this reader \
+                 does not read it"
+                    .to_string(),
+            );
+        }
+        let count = grid.count().min(self.data.len() as u64 / grid.bytes + 1);
         let mut out = Vec::new();
-        for index in 0..grid.count() {
+        for index in 0..count {
             let at = addr.saturating_add(index.saturating_mul(grid.bytes));
             out.push(Chunk {
                 addr: at,
@@ -1474,7 +1488,17 @@ impl<'a> File<'a> {
             ));
         }
         // The number of elements in a page of the array, and whether the
-        // array is paged at all.
+        // array is paged at all. The shift is a count the file supplies:
+        // 64 or more is not a page size but an arithmetic trap, and the
+        // element spans below are checked because `nelmts * elmt_size + 4`
+        // used to wrap and hand the element loop a slice too short for its
+        // first element.
+        if head[7] >= 64 {
+            return Err(format!(
+                "the fixed array at 0x{addr:x} puts 2^{} elements in a page",
+                head[7]
+            ));
+        }
         let page_nelmts = 1u64 << head[7];
         let nelmts = le_uint(&head[8..8 + self.sl], 0, self.sl)?;
         let dblk_addr = le_uint(&head[8 + self.sl..], 0, self.so)?;
@@ -1505,6 +1529,31 @@ impl<'a> File<'a> {
             ));
         }
         // The elements of the array, and the index of each one of them.
+        // The byte span of `count` elements plus the checksum is checked
+        // arithmetic: a count the file invented used to wrap the product
+        // and buy a short slice for a long element loop.
+        let span = |count: u64| -> Result<usize, String> {
+            count
+                .checked_mul(elmt_size as u64)
+                .and_then(|span| span.checked_add(4))
+                .and_then(|span| usize::try_from(span).ok())
+                .ok_or_else(|| {
+                    format!(
+                        "the fixed array at 0x{addr:x} declares {count} elements of \
+                         {elmt_size} bytes, a span this platform cannot address"
+                    )
+                })
+        };
+        let page_stride = page_nelmts
+            .checked_mul(elmt_size as u64)
+            .and_then(|stride| stride.checked_add(4))
+            .ok_or_else(|| {
+                format!(
+                    "the fixed array at 0x{addr:x} puts {} elements of \
+                     {elmt_size} bytes in a page",
+                    page_nelmts
+                )
+            })?;
         let mut raw: Vec<(u64, Vec<u8>)> = Vec::new();
         if npages > 0 {
             for page in 0..npages {
@@ -1514,16 +1563,20 @@ impl<'a> File<'a> {
                 }
                 let first = page * page_nelmts;
                 let count = (nelmts - first).min(page_nelmts);
-                let page_addr =
-                    dblk_addr + prefix as u64 + page * (page_nelmts * elmt_size as u64 + 4);
-                let data = self.bytes(page_addr, count as usize * elmt_size + 4)?;
+                let page_addr = dblk_addr
+                    .checked_add(prefix as u64)
+                    .and_then(|at| at.checked_add(page.checked_mul(page_stride)?))
+                    .ok_or_else(|| {
+                        format!("the fixed array at 0x{addr:x} page {page} runs past the end of the address space")
+                    })?;
+                let data = self.bytes(page_addr, span(count)?)?;
                 for i in 0..count {
                     let at = i as usize * elmt_size;
                     raw.push((first + i, data[at..at + elmt_size].to_vec()));
                 }
             }
         } else {
-            let data = self.bytes(dblk_addr + prefix as u64, nelmts as usize * elmt_size + 4)?;
+            let data = self.bytes(dblk_addr + prefix as u64, span(nelmts)?)?;
             for i in 0..nelmts {
                 let at = i as usize * elmt_size;
                 raw.push((i, data[at..at + elmt_size].to_vec()));
@@ -2029,6 +2082,10 @@ impl<'a> File<'a> {
     /// the tree, in the order the tree holds them.
     fn btree_records(&self, header: &BtreeHeader) -> Result<Vec<Vec<u8>>, String> {
         let mut records = Vec::new();
+        // A node costs six bytes of the file at the least, so this many
+        // nodes is more than any tree the file can hold — and a walk that
+        // asks for one more has come around to a node it already read.
+        let mut nodes = self.data.len() / 6 + 1;
         self.btree_walk(
             header.root_addr,
             header.root_nrec,
@@ -2037,6 +2094,7 @@ impl<'a> File<'a> {
             header.max_nrec_size,
             &header.cum_max_nrec_size,
             &mut records,
+            &mut nodes,
         )?;
         Ok(records)
     }
@@ -2062,6 +2120,12 @@ impl<'a> File<'a> {
     }
 
     /// The records of the B-tree node at `addr`, and of the nodes below.
+    ///
+    /// The level is not a bound on the walk: it saturates at zero, so a
+    /// child that points back at a node already read would walk forever.
+    /// The node budget is — every node costs its six-byte signature, so a
+    /// budget of the file's own length over six ends any cycle the file
+    /// was built to carry.
     #[allow(clippy::too_many_arguments)]
     fn btree_walk(
         &self,
@@ -2072,7 +2136,15 @@ impl<'a> File<'a> {
         max_nrec_size: usize,
         cum_max_nrec_size: &[usize],
         records: &mut Vec<Vec<u8>>,
+        nodes: &mut usize,
     ) -> Result<(), String> {
+        if *nodes == 0 {
+            return Err(format!(
+                "the v2 B-tree node at 0x{addr:x} was reached again: the walk \
+                 has visited more nodes than the file holds"
+            ));
+        }
+        *nodes -= 1;
         let head = self.bytes(addr, 6)?;
         if &head[0..4] == BTLF {
             let mut p = addr + 6;
@@ -2123,6 +2195,7 @@ impl<'a> File<'a> {
                 max_nrec_size,
                 cum_max_nrec_size,
                 records,
+                nodes,
             )?;
         }
         Ok(())

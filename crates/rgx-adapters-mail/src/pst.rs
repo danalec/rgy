@@ -268,6 +268,11 @@ impl Heap {
             return None;
         }
         let block = self.blocks.get(block_index)?;
+        // A one-byte block is a legal `block_ref` answer; the u16 read
+        // of ibHnpm below needs two of them before any later check runs.
+        if block.len() < 2 {
+            return None;
+        }
         // Every HN block flavor leads with ibHnpm at offset 0.
         let pm_off = u16le(block, 0) as usize;
         if pm_off + 4 > block.len() {
@@ -390,7 +395,10 @@ impl<'a> Pst<'a> {
 
     fn page(&self, ib: u64) -> PstResult<(u8, &'a [u8], usize, u8)> {
         let ib = ib as usize;
-        if ib + PAGE_SIZE > self.data.len() {
+        // The subtraction form is the whole point: `ib + PAGE_SIZE`
+        // wraps past usize::MAX on a crafted child IB and the addition
+        // guard lets it through to a slice that cannot exist.
+        if ib >= self.data.len() || self.data.len() - ib < PAGE_SIZE {
             return Err(PstErr::Corrupt("page out of range"));
         }
         let page = &self.data[ib..ib + PAGE_SIZE];
@@ -398,10 +406,10 @@ impl<'a> Pst<'a> {
         let body = &page[..PAGE_SIZE - tsize];
         // BTPAGE ([MS-PST] 2.2.2.7.7.1) puts rgentries first and the four
         // header bytes at ITS END: cEnt, cEntMax, cbEnt, cLevel. Reading them
-        // off the front is not an off-by-one but a different structure, and the
-        // first eight bytes of the body are the first btkey -- so `cb_ent` came
-        // from a key's high bytes and read 0 on every real page, which is the
-        // "zero page entry size" the adapter reported.
+        // off the front is not an off-by-one but a different structure, and
+        // the first eight bytes of the body are the first btkey -- so `cb_ent`
+        // came from a key's high bytes and read 0 on every real page, which is
+        // the "zero page entry size" the adapter reported.
         let rg = if self.unicode {
             RGENTRIES_UNICODE
         } else {
@@ -415,6 +423,27 @@ impl<'a> Pst<'a> {
         let level = body[rg + 3];
         if cb_ent == 0 {
             return Err(PstErr::Corrupt("zero page entry size"));
+        }
+        // An entry must be wide enough for the fields the readers read at
+        // fixed offsets inside it: a btkey plus, on a leaf, a whole BREF
+        // (and the node's second BID), or on an internal page the child
+        // IB alone. A `cb_ent` under that passes the product check below
+        // and panics the last entry's field read.
+        let key_size = if self.unicode { 8 } else { 4 };
+        let min_ent = key_size
+            + if level == 0 {
+                if self.unicode {
+                    16
+                } else {
+                    8
+                }
+            } else if self.unicode {
+                8
+            } else {
+                4
+            };
+        if cb_ent < min_ent {
+            return Err(PstErr::Corrupt("page entry size below its own fields"));
         }
         let ptype = page[PAGE_SIZE - tsize];
         let entries = &body[..rg];
@@ -513,7 +542,9 @@ impl<'a> Pst<'a> {
         let (ib, cb) = self.block_ref(bid)?;
         let span = (cb + self.block_trailer()).div_ceil(64) * 64;
         let ib = ib as usize;
-        if ib + span > self.data.len() {
+        // As in `page`: the subtraction form cannot wrap where the
+        // addition form does on a crafted IB.
+        if ib >= self.data.len() || self.data.len() - ib < span {
             return Err(PstErr::Corrupt("block out of range"));
         }
         Ok(&self.data[ib..ib + cb])
@@ -557,6 +588,18 @@ impl<'a> Pst<'a> {
     }
 
     fn data_tree(&self, bid: u64, depth: u32) -> PstResult<Vec<Vec<u8>>> {
+        self.data_tree_seen(bid, depth, &mut Vec::new())
+    }
+
+    /// The same walk, carrying the blocks already visited so a crafted
+    /// block list cannot multiply the tree by listing one child many
+    /// times.
+    fn data_tree_seen(
+        &self,
+        bid: u64,
+        depth: u32,
+        children_seen: &mut Vec<u64>,
+    ) -> PstResult<Vec<Vec<u8>>> {
         if bid == 0 {
             return Ok(Vec::new());
         }
@@ -580,7 +623,16 @@ impl<'a> Pst<'a> {
                 } else {
                     u32le(&block, 8 + i * step) as u64
                 };
-                out.extend(self.data_tree(child, depth + 1)?);
+                // A block listing the same child twice -- or a child
+                // pointing back at an ancestor -- multiplies the walk by
+                // the entry count per level, and `count` is the file's
+                // own. One visit per distinct block is the shape the
+                // format means, and the file's own length bounds it.
+                if children_seen.contains(&child) {
+                    continue;
+                }
+                children_seen.push(child);
+                out.extend(self.data_tree_seen(child, depth + 1, children_seen)?);
             }
             Ok(out)
         } else {
@@ -589,6 +641,17 @@ impl<'a> Pst<'a> {
     }
 
     fn subnodes(&self, bid: u64, depth: u32) -> PstResult<Vec<(u32, u64, u64)>> {
+        self.subnodes_seen(bid, depth, &mut Vec::new())
+    }
+
+    /// As `data_tree_seen`: one visit per distinct block, so a crafted
+    /// intermediate list cannot fan the walk out exponentially.
+    fn subnodes_seen(
+        &self,
+        bid: u64,
+        depth: u32,
+        children_seen: &mut Vec<u64>,
+    ) -> PstResult<Vec<(u32, u64, u64)>> {
         if bid == 0 {
             return Ok(Vec::new());
         }
@@ -639,7 +702,11 @@ impl<'a> Pst<'a> {
                 } else {
                     u32le(&block, o + 4) as u64
                 };
-                out.extend(self.subnodes(child, depth + 1)?);
+                if children_seen.contains(&child) {
+                    continue;
+                }
+                children_seen.push(child);
+                out.extend(self.subnodes_seen(child, depth + 1, children_seen)?);
             }
             Ok(out)
         }
@@ -776,6 +843,12 @@ impl<'a> Pst<'a> {
             }
         };
         let mut level = header[3];
+        // The level is one byte of the file, and no real property store
+        // stands more than a handful of levels deep: past this the walk
+        // is a crafted fan-out, not a hierarchy.
+        if level > 16 {
+            return Err(PstErr::Corrupt("BTH deeper than any property store"));
+        }
         let mut pages = vec![u32le(header, 4)];
         while level > 0 {
             let mut next = Vec::new();
@@ -783,7 +856,13 @@ impl<'a> Pst<'a> {
                 let page = heap.item(hid).ok_or(PstErr::Corrupt("BTH page missing"))?;
                 let step = cb_key + 4;
                 for i in 0..page.len() / step {
-                    next.push(u32le(page, i * step + cb_key));
+                    let child = u32le(page, i * step + cb_key);
+                    // One visit per distinct HID: a page listing the same
+                    // child many times multiplies the next level by the
+                    // entry count, and the entry count is the file's own.
+                    if !next.contains(&child) {
+                        next.push(child);
+                    }
                 }
             }
             pages = next;

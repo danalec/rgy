@@ -75,13 +75,14 @@
 //! ## Dispatch
 //!
 //! [`scan`] checks AVX2 and PCLMULQDQ at runtime and calls the vector path;
-//! everything else lands in [`scan_scalar`]. Under the `std` feature the check
-//! *is* `is_x86_feature_detected!`; `no_std` builds — the primary target of
-//! this crate — cannot call that macro, so they read CPUID and XGETBV
-//! themselves, and `tests::cpuid_detection_matches_the_std_macro` holds the two
-//! to each other. All `unsafe` is confined to the `#[target_feature]` functions
-//! in the private [`avx2`] module, each of which documents the check that
-//! guards it.
+//! everything else lands in [`scan_scalar`]. The check is [`crate::detect`]'s
+//! -- the crate's own CPUID and XGETBV read, shared by every caller and by
+//! both configurations of the crate, so a `std` build and a `no_std` build
+//! reach the same kernel on the same machine -- and
+//! `tests::cpuid_detection_matches_the_std_macro` holds it to the standard
+//! library's answer. All `unsafe` is confined to the `#[target_feature]`
+//! functions in the private [`avx2`] module, each of which documents the
+//! check that guards it.
 
 use alloc::vec::Vec;
 
@@ -620,120 +621,21 @@ impl Builder {
 
 /// Whether this CPU can run the AVX2 path.
 ///
-/// `is_x86_feature_detected!` lives in `std` and not in `core`, so a `no_std`
-/// build — the primary target of this crate — cannot call it. Under `std` this
-/// is that macro; without it, the same test written out, because the bits it
-/// reads are fixed by the architecture:
-///
-/// * `CPUID.(EAX=7, ECX=0):EBX[5]` — AVX2.
-/// * `CPUID.(EAX=1):ECX[27]` — OSXSAVE, and then `XCR0[2:1] == 0b11`.
-///
-/// The last line is the one a naive check leaves out, and the omission is not
-/// a slow path: on a kernel that does not save the YMM state an AVX2
-/// instruction traps.
+/// The answer comes from [`crate::detect`], the hand-written CPUID/XGETBV
+/// read: `is_x86_feature_detected!` lives in `std`, and this crate is
+/// `no_std` + `alloc`, and a build that dispatched on one answer and a build
+/// that dispatched on the other would not be comparable. The probe is tested
+/// against the standard library's answer rather than trusted.
 #[must_use]
 pub fn has_avx2() -> bool {
-    #[cfg(target_arch = "x86_64")]
-    {
-        #[cfg(feature = "std")]
-        {
-            std::is_x86_feature_detected!("avx2")
-        }
-        #[cfg(not(feature = "std"))]
-        {
-            cpu_avx2_bits()
-        }
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        false
-    }
+    crate::detect::avx2()
 }
 
 /// Whether this CPU can run the block path: AVX2 *and* PCLMULQDQ, the latter
 /// because the string state is carried across blocks by a carry-less multiply.
 #[must_use]
 pub fn has_avx2_pclmulqdq() -> bool {
-    #[cfg(target_arch = "x86_64")]
-    {
-        #[cfg(feature = "std")]
-        {
-            std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("pclmulqdq")
-        }
-        #[cfg(not(feature = "std"))]
-        {
-            cpu_pclmulqdq_bits() && cpu_avx2_bits()
-        }
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        false
-    }
-}
-
-/// The no_std half of the detection: CPUID and XGETBV, by hand.
-///
-/// Compiled on every x86_64 build so the `std` path can be *tested* against it
-/// rather than trusted. `dead_code` is allowed here and only here: the module
-/// exists on every x86_64 build, so in a build without the test harness
-/// nothing calls it and warnings would stand where the module is the thing
-/// that is correct.
-#[cfg(target_arch = "x86_64")]
-#[allow(dead_code)]
-pub(crate) mod detect {
-    use core::arch::x86_64::{__cpuid, __cpuid_count};
-
-    /// Read `XCR0`, the set of register states the OS saves on a context
-    /// switch.
-    ///
-    /// # Safety
-    ///
-    /// Requires XSAVE, which is what `CPUID.1:ECX[27]` (OSXSAVE) reports. The
-    /// caller must have established it.
-    #[target_feature(enable = "xsave")]
-    pub(crate) unsafe fn xgetbv0() -> u64 {
-        // SAFETY: the target feature is this function's contract.
-        unsafe { core::arch::x86_64::_xgetbv(0) }
-    }
-
-    /// `CPUID.(EAX=1):ECX[1]`.
-    #[allow(unused_unsafe)]
-    pub(crate) fn pclmulqdq() -> bool {
-        // SAFETY: __cpuid is safe to call on x86_64.
-        unsafe { __cpuid(1) }.ecx & (1 << 1) != 0
-    }
-
-    /// `CPUID.(EAX=7, ECX=0):EBX[5]`, plus the OS support an AVX2 instruction
-    /// needs on top of the CPU feature.
-    #[allow(unused_unsafe)]
-    pub(crate) fn avx2() -> bool {
-        let leaf1 = unsafe { __cpuid(1) };
-        let osxsave = leaf1.ecx & (1 << 27) != 0;
-        let avx = leaf1.ecx & (1 << 28) != 0;
-        if !(unsafe { __cpuid_count(7, 0) }.ebx & (1 << 5) != 0 && osxsave && avx) {
-            return false;
-        }
-        // SAFETY: OSXSAVE was just read as set, which is the precondition of
-        // `xgetbv0` — without it the instruction faults, and a CPU that sets
-        // it also supports XSAVE.
-        let xcr0 = unsafe { xgetbv0() };
-        (xcr0 & 0b110) == 0b110
-    }
-}
-
-// The two shims the `not(feature = "std")` branch calls. Unused in that
-// configuration on x86_64 and used nowhere else, for the same reason `detect`
-// is compiled anyway: both halves ship, only one is live.
-#[cfg(target_arch = "x86_64")]
-#[allow(dead_code)]
-fn cpu_avx2_bits() -> bool {
-    detect::avx2()
-}
-
-#[cfg(target_arch = "x86_64")]
-#[allow(dead_code)]
-fn cpu_pclmulqdq_bits() -> bool {
-    detect::pclmulqdq()
+    crate::detect::avx2() && crate::detect::pclmulqdq()
 }
 
 /// Scan `bytes` with the best implementation this CPU admits to.

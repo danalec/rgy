@@ -192,6 +192,12 @@ impl RangeDecoder {
     /// Divide the range by `total` and return which sub-interval the code
     /// falls in.
     fn threshold(&mut self, total: u32) -> Result<u32> {
+        // A context whose `SummFreq` wrapped to zero -- every writer
+        // adds with `wrapping_add` -- divides by zero here, and the
+        // division panics in release too.
+        if total == 0 {
+            return Err(Error::Malformed("ppmd zero symbol total"));
+        }
         self.range /= total;
         if self.range == 0 {
             return Err(Error::Malformed("ppmd zero range"));

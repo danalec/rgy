@@ -266,6 +266,7 @@ mod tests {
 
     /// A checksum that panics on arbitrary bytes is a crash every
     /// corrupted file can trigger; Err is fine, panic is not.
+    #[cfg(feature = "std")]
     #[test]
     fn never_panics_on_arbitrary_bytes() {
         let corpus: alloc::vec::Vec<(&str, alloc::vec::Vec<u8>)> = alloc::vec![

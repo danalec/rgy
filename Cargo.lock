@@ -357,7 +357,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rar-codec"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "redox_syscall"
@@ -399,7 +399,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "rgx-adapters-archive"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rar-codec",
  "rgx-core",
@@ -408,7 +408,7 @@ dependencies = [
 
 [[package]]
 name = "rgx-adapters-docs"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rgx-adapters-office",
  "rgx-adapters-pdf",
@@ -417,14 +417,14 @@ dependencies = [
 
 [[package]]
 name = "rgx-adapters-inspect"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rgx-core",
 ]
 
 [[package]]
 name = "rgx-adapters-llm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rgx-adapters-archive",
  "rgx-core",
@@ -432,21 +432,21 @@ dependencies = [
 
 [[package]]
 name = "rgx-adapters-mail"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rgx-core",
 ]
 
 [[package]]
 name = "rgx-adapters-media"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rgx-core",
 ]
 
 [[package]]
 name = "rgx-adapters-office"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rgx-adapters-archive",
  "rgx-core",
@@ -454,14 +454,14 @@ dependencies = [
 
 [[package]]
 name = "rgx-adapters-pdf"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rgx-core",
 ]
 
 [[package]]
 name = "rgx-adapters-tabular"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rgx-core",
  "rusqlite",
@@ -469,14 +469,14 @@ dependencies = [
 
 [[package]]
 name = "rgx-adapters-threed"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rgx-core",
 ]
 
 [[package]]
 name = "rgx-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ignore",
  "libc",

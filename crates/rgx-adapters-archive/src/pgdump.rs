@@ -55,6 +55,7 @@
 //! reader declines. A *tar* dump (`-Ft`) is a tar archive of that same
 //! directory, so the tar adapter already walks it.
 
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
@@ -139,7 +140,10 @@ fn int_at(d: &[u8], p: &mut usize, int_size: usize) -> Result<i64> {
         *p += 1;
         v |= (byte as i64) << (b * 8);
     }
-    Ok(if sign != 0 { -v } else { v })
+    // `wrapping_neg` because a sign-magnitude magnitude of 2^63 has no
+    // positive other side: the file can name it, `i64` cannot hold it, and
+    // a debug build must not die on the negation.
+    Ok(if sign != 0 { v.wrapping_neg() } else { v })
 }
 
 /// A cursor over the archive, with the two widths the header declares.
@@ -575,12 +579,32 @@ impl Adapter for PgDump {
         let mut rows = 0usize;
         let mut body = String::new();
 
-        for entry in &toc {
+        // The block of an entry is found by dump id, and a linear scan per
+        // entry is quadratic in a table of contents the header allows to
+        // run to a million entries. Bucketed once, the lookup walks only
+        // the blocks that share an id, and the first of them is the one
+        // the scan used to find.
+        let mut blocks_by_id: BTreeMap<i64, Vec<&Block>> = BTreeMap::new();
+        for b in &blocks {
+            blocks_by_id.entry(b.dump_id).or_default().push(b);
+        }
+
+        'entries: for entry in &toc {
+            // The aggregate cap is enforced as the blocks arrive, not once
+            // they have all been held: `body` used to accumulate every
+            // block's payload before the check, which is the shape the
+            // per-block cap exists to prevent. The truncation note is the
+            // one the final check writes.
+            if body.len() > MAX_TOTAL_BYTES as usize {
+                break;
+            }
             let name = match &entry.namespace {
                 Some(ns) if !ns.is_empty() => format!("{ns}.{}", entry.tag),
                 _ => entry.tag.clone(),
             };
-            let block = blocks.iter().find(|b| b.dump_id == entry.dump_id);
+            let block = blocks_by_id
+                .get(&entry.dump_id)
+                .and_then(|same| same.first().copied());
             if let Some(defn) = &entry.defn {
                 // The definition and the COPY statement are SQL fragments
                 // that end in a newline of their own, so they are trimmed
@@ -604,6 +628,13 @@ impl Adapter for PgDump {
                     }
                     let (payload, _capped) = decompress(&header, &comp)?;
                     emit_blob(&mut body, *oid, &payload);
+                    // One entry may hold any number of blobs, and each is
+                    // capped on its own: the aggregate is checked here too
+                    // or one entry alone could pass the per-block cap N
+                    // times.
+                    if body.len() > MAX_TOTAL_BYTES as usize {
+                        break 'entries;
+                    }
                 }
                 let _ = writeln!(body);
                 continue;

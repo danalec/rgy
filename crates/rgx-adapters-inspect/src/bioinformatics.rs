@@ -2240,7 +2240,12 @@ fn cram_decode_records(
 ) -> Option<Vec<CramRecord>> {
     let mut out = Vec::new();
     let mut last_position = header.alignment_start;
-    for _ in 0..header.records.max(0) {
+    // The record count is an ITF-8 of the slice header, and a compression
+    // header whose data series are all zero-bit constants decodes a
+    // record without consuming a single bit -- so the count is the only
+    // bound, and a crafted one walks it billions of times. The BAM path
+    // holds the same line with `MAX_TALLY_RECORDS`.
+    for _ in 0..header.records.max(0).min(MAX_TALLY_RECORDS as i32) {
         out.push(cram_decode_record(
             compression,
             header,

@@ -107,7 +107,11 @@ use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-#[cfg(feature = "std")]
+// The crate is `no_std`, but the test harness is not: `cargo test` links
+// `libtest`, which needs `std`. So `std` is linked for the tests even when
+// the `std` feature is off -- the library's own code still cannot use it, and
+// the `no_std` configuration still has to be *run*, not only built.
+#[cfg(any(feature = "std", test))]
 extern crate std;
 
 pub mod base64;
@@ -119,6 +123,7 @@ mod charset_state_table;
 mod charset_table;
 pub mod compress;
 pub mod crypt;
+pub mod detect;
 pub mod encoding;
 pub mod error;
 pub mod filetype;
@@ -239,23 +244,15 @@ pub fn parse_decimal(s: &str) -> Result<f64, ()> {
     //  a digit at a time instead rounds at every step and is a ULP off
     // the standard parser on ordinary input -- 3.14159 came out as
     // 3.1415900000000003, which  caught.
-    let mut mant: u128 = 0;
+    let mut mant = numparse::Mantissa::new();
     let mut scale: i32 = 0;
-    let push = |d: u8, mant: &mut u128, _scale: &mut i32| {
-        // past u128 the remaining digits are dropped and the scale absorbs
-        // them; a JSON number with 39 integer digits is not a real case
-        if *mant <= (u128::MAX - u128::from(d)) / 10 {
-            *mant = *mant * 10 + u128::from(d);
-            true
-        } else {
-            false
-        }
-    };
 
     let int_start = i;
     while i < b.len() && b[i].is_ascii_digit() {
-        let keep = push(b[i] - b'0', &mut mant, &mut scale);
-        if !keep {
+        // Past what the accumulator holds the remaining digits are dropped
+        // and the scale absorbs them; a JSON number with 39 integer digits
+        // is not a real case.
+        if !mant.push(b[i] - b'0') {
             scale += 1;
         }
         i += 1;
@@ -271,7 +268,7 @@ pub fn parse_decimal(s: &str) -> Result<f64, ()> {
         i += 1;
         let frac_start = i;
         while i < b.len() && b[i].is_ascii_digit() {
-            if push(b[i] - b'0', &mut mant, &mut scale) {
+            if mant.push(b[i] - b'0') {
                 scale -= 1;
             }
             i += 1;
@@ -306,11 +303,8 @@ pub fn parse_decimal(s: &str) -> Result<f64, ()> {
         return Err(());
     }
 
-    Ok(if neg {
-        -numparse::scale_decimal(mant, scale)
-    } else {
-        numparse::scale_decimal(mant, scale)
-    })
+    let value = numparse::scale_decimal(mant.value(), scale, mant.dropped_nonzero());
+    Ok(if neg { -value } else { value })
 }
 
 #[cfg(not(feature = "std"))]
@@ -1277,6 +1271,13 @@ pub fn profile_dump() -> Vec<(&'static str, u64, u64)> {
 /// that to give the file the raw on-disk treatment instead of searching a
 /// copy. A member that recursed to raw inside a `Members` expansion does
 /// NOT count: the outer adapter did produce output.
+///
+/// **The single unit is the whole rule.** A note beside the bytes -- an
+/// adapter that failed, or an adapter whose external tool is not on PATH --
+/// is a second unit, so the return is `false` and the caller searches the
+/// units. A caller that reads `true` as "the file's own bytes, search it
+/// raw" and drops the units drops the note with them, and the note is the
+/// only thing that says what happened.
 pub fn process(
     reg: &Registry,
     path: &str,
@@ -1579,7 +1580,18 @@ fn process_scoped(
     // off the presence of a unit would have made every failure note a silent
     // downgrade, which is how the note came to be invisible in the first
     // place.
-    let raw_only = notes.is_empty();
+    //
+    // The skip note counts as a record, and it used not to: `missing` was
+    // empty for every file whose claimant was on PATH, so a file whose
+    // external tool is absent returned `true` with TWO units appended -- the
+    // note and the file's own bytes -- and every caller reads `true` as
+    // "the units are the file's own bytes, search it raw instead". The note
+    // was built, allocated and dropped on the floor: `rgx` on a `.pub` file
+    // with no `soffice` on PATH printed nothing about the tool, which is the
+    // silence the note above exists to end. The rule the house writes down is
+    // that `true` means the SOLE unit is the file's own bytes, and two units
+    // are not one.
+    let raw_only = notes.is_empty() && missing.is_empty();
     for (via, note) in notes {
         out.push(Found {
             path: path.to_string(),
@@ -1848,8 +1860,14 @@ mod tests {
         assert!(reg.unavailable_claimants("txt").is_empty());
 
         let mut out = Vec::new();
-        process(&reg, "a.gone", b"payload", 0, &Ctx::default(), &mut out);
+        let raw = process(&reg, "a.gone", b"payload", 0, &Ctx::default(), &mut out);
         assert_eq!(out.len(), 2, "note plus the file's own bytes, got {out:?}");
+        assert!(
+            !raw,
+            "a file with a note beside it is not the raw passthrough: the caller \
+             reads `true` as 'the units are the file's own bytes' and drops the \
+             note, and the note is the only thing that says the tool is missing"
+        );
         assert!(
             out[0]
                 .bytes
@@ -2231,7 +2249,12 @@ mod tests {
     }
 }
 
-#[cfg(all(test, feature = "std"))]
+// The oracle is the standard library's parser, and the `no_std` *test*
+// build links the standard library even though the crate does not: the
+// test harness is not `no_std`. Gating this on the `std` feature would
+// take the only curated oracle out of the configuration the parser was
+// written for.
+#[cfg(test)]
 mod no_std_float_tests {
     use super::*;
 

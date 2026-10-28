@@ -7,10 +7,11 @@
 //! cargo run --release -p rar-codec --example crc32_bench_rar
 //! ```
 //!
-//! Not a harness with a gate — this crate's gated benches live in
-//! `benchmark/`. This is here to answer "did the fold pay for itself" on the
-//! machine that is being worked on, over the payload sizes `Archive::extract`
-//! actually hashes.
+//! Not a harness with a gate: the tree carries no `benches/` directory and
+//! no `[[bench]]` section, and `benchmark/` holds the engine's own
+//! measurement harnesses, none of them about this crate's CRC-32. This is here
+//! to answer "did the fold pay for itself" on the machine that is being
+//! worked on, over the payload sizes `Archive::extract` actually hashes.
 
 use std::time::Instant;
 

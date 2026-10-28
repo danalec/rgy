@@ -211,6 +211,12 @@ const DIST_EXTRA: [u8; 30] = [
 
 const MAX_INFLATE: usize = 256 << 20; // hard cap on any single stream
 
+/// The most xref entries one stream may add to the table. A real PDF has
+/// one entry per indirect object and `MAX_PAGES` bounds the objects a
+/// page tree can name; a quarter of a billion one-byte rows at the
+/// inflate cap is a bomb, not a document.
+const MAX_XREF_ENTRIES: usize = 1 << 22;
+
 fn fixed_litlen() -> Huffman {
     let mut l = [0u8; 288];
     for (i, v) in l.iter_mut().enumerate() {
@@ -1410,6 +1416,19 @@ fn parse_xref_stream(
     if w.len() < 3 {
         return parse_err("xref stream /W too short");
     }
+    // The widths are fields of the file, and a negative one cast to
+    // usize is a huge one: the row length used to wrap on it and a
+    // zero row length walked `Index` forever on a stream that held no
+    // rows at all. The PDF spec caps every field at 8 bytes, and a row
+    // must cost at least one byte of the decoded stream or no row can
+    // exist. The total row count is bounded by the stream's own length.
+    if w.iter().any(|&x| x > 8) {
+        return parse_err("xref stream /W field wider than 8 bytes");
+    }
+    let row_len: usize = w.iter().sum();
+    if row_len == 0 || row_len > decoded.len() {
+        return parse_err("xref stream /W row does not fit the stream");
+    }
     let size = PdfObject::dict_get(&dict, "Size")
         .and_then(|v| v.as_int())
         .unwrap_or(0) as u32;
@@ -1420,7 +1439,6 @@ fn parse_xref_stream(
             .collect(),
         _ => vec![0, size],
     };
-    let row_len: usize = w.iter().sum();
     let read_field = |row: &[u8], start: usize, len: usize| -> u64 {
         let mut v: u64 = 0;
         for k in 0..len {
@@ -1428,6 +1446,12 @@ fn parse_xref_stream(
         }
         v
     };
+    // A stream of N bytes holds N/row_len rows at most; the entry map is
+    // also ceilinged, because a `count` from /Index walks before the
+    // rows run out only on a stream at the inflate cap, and 256 MB of
+    // one-byte rows is still a quarter of a billion map entries.
+    let max_rows = decoded.len() / row_len;
+    let mut rows_read = 0usize;
     let mut row_pos = 0usize;
     for pair in index.chunks(2) {
         if pair.len() < 2 {
@@ -1435,11 +1459,12 @@ fn parse_xref_stream(
         }
         let (start, count) = (pair[0], pair[1]);
         for i in 0..count {
-            if row_pos + row_len > decoded.len() {
+            if rows_read >= max_rows || entries.len() >= MAX_XREF_ENTRIES {
                 break;
             }
             let row = &decoded[row_pos..row_pos + row_len];
             row_pos += row_len;
+            rows_read += 1;
             let kind = if w[0] == 0 {
                 1
             } else {
@@ -1447,9 +1472,10 @@ fn parse_xref_stream(
             };
             let f2 = read_field(row, w[0], w[1]);
             let f3 = read_field(row, w[0] + w[1], w[2]);
-            entries
-                .entry(start + i)
-                .or_insert(XrefEntry { kind, f2, f3 });
+            let Some(id) = start.checked_add(i) else {
+                break;
+            };
+            entries.entry(id).or_insert(XrefEntry { kind, f2, f3 });
         }
     }
     Ok((dict, l.pos))
@@ -1810,12 +1836,14 @@ impl<'a> PdfDocument<'a> {
         let decoded = decode_stream_data(&dict, &raw)?;
         let n = PdfObject::dict_get(&dict, "N").and_then(|v| v.as_int())? as usize;
         let first = PdfObject::dict_get(&dict, "First").and_then(|v| v.as_int())? as usize;
-        // header: N pairs of "objnum offset"
+        // The reservation is clamped to what the decoded stream can hold:
+        // `N` is a field of the file, and a negative or huge one used to
+        // buy the capacity before the header parse could refuse it.
         let mut l = Lexer {
             data: &decoded,
             pos: 0,
         };
-        let mut slots: Vec<(u32, usize)> = Vec::with_capacity(n);
+        let mut slots: Vec<(u32, usize)> = Vec::with_capacity(n.min(decoded.len() / 3));
         for _ in 0..n {
             let onum = match l.next_tok() {
                 Tok::Int(v) => v as u32,
@@ -1829,9 +1857,13 @@ impl<'a> PdfDocument<'a> {
         }
         for (onum, off) in slots {
             if onum == num {
+                // checked: both halves are fields of the file, and a huge
+                // pair must refuse the object rather than overflow the
+                // position.
+                let pos = first.checked_add(off)?;
                 let mut ol = Lexer {
                     data: &decoded,
-                    pos: first + off,
+                    pos,
                 };
                 return parse_object(&mut ol, 0).ok();
             }
@@ -2337,10 +2369,19 @@ impl CMap {
     }
 
     fn insert_range(&mut self, lo: &[u8], hi: &[u8], dst: &[u8], idx: u32) {
+        const MAX_CMAP_ENTRIES: usize = 1 << 20;
         let lo_v = be_value(lo);
         let hi_v = be_value(hi);
         let count = hi_v.saturating_sub(lo_v).min(65535);
+        // The budget is the map's, not the range's: a small ToUnicode
+        // stream of maximal `<lo> <ffff>` ranges used to insert tens of
+        // thousands of entries each, and a megabyte of them was billions
+        // of strings. A real CMap maps its glyphs once.
+        let budget = MAX_CMAP_ENTRIES.saturating_sub(self.map.len());
         for k in 0..=count {
+            if (k as usize) >= budget {
+                return;
+            }
             let mut d = dst.to_vec();
             // increment dst as a big-endian number by (idx + k)
             add_be(&mut d, idx + k);

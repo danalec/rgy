@@ -119,7 +119,7 @@ impl<'a> Cfb<'a> {
         let mini_fat_start = u32at(60)?;
         let mini_fat_count = u32at(64)? as usize;
         let difat_start = u32at(68)?;
-        let difat_count = u32at(72)? as usize;
+        let _difat_count = u32at(72)? as usize;
 
         let mut me = Cfb {
             data,
@@ -144,7 +144,11 @@ impl<'a> Cfb<'a> {
         }
         let mut difat = difat_start;
         let mut guard = 0usize;
-        while difat != ENDOFCHAIN && difat != FREESECT && guard < difat_count + 8 {
+        // The bound is a constant, not the header's own `difat_count`:
+        // that count is a field of the file, and a chain that points at
+        // itself walks it however many times the header claims. The CFB
+        // twin in `cad.rs` holds the same line with `MAX_CHAIN`.
+        while difat != ENDOFCHAIN && difat != FREESECT && guard < (1usize << 16) {
             guard += 1;
             let Some(sector) = me.sector(difat) else {
                 break;

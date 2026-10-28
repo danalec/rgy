@@ -1,6 +1,6 @@
 [package]
 name = "rar-codec"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
 description = "Pure-Rust, no_std RAR codec: RAR4/RAR5 parsing, LZ+Huffman and PPMd decode (solid, multivolume, VM filters), RAR5 store encode. Zero dependencies."
@@ -19,6 +19,12 @@ repository = "https://github.com/danalec/rgx"
 # here because they are the law on the code.
 include = [
     "/src/**",
+    # The EGM contracts are the working documents of the review loop: they
+    # are gitignored, they are not source, and `/src/**` would have carried
+    # every one of them into the published crate. `exclude` cannot say it --
+    # cargo ignores the exclude list when an include list is there -- so the
+    # exclusion is a negation of the include.
+    "!/src/**/EGM.md",
     "/Cargo.toml",
     "/README.md",
     "/LICENSE-APACHE",

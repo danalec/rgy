@@ -168,8 +168,13 @@ pub struct Unit {
     pub first: u32,
     pub last: u32,
     /// Byte range within the pack payload: `start..start + len`.
-    pub start: u32,
-    pub len: u32,
+    ///
+    /// A pack is a u64 range by construction — the builder gives a file
+    /// larger than the pack target a dedicated pack of its own, and an LLM
+    /// checkpoint shard is routinely past 4 GiB. These were `u32` once, and
+    /// the cast silently searched only the first 4 GiB of such a pack.
+    pub start: u64,
+    pub len: u64,
 }
 
 /// The size a claim aims for, in bytes. A file larger than this is a unit of
@@ -286,29 +291,32 @@ pub fn cut_units(files: &[u32], bounds: &[u32], locs: &[FileLoc]) -> Vec<Unit> {
         let mut k = from;
         while k < to {
             let first = k;
-            let start = locs[files[k] as usize].offset as u32;
+            let start = locs[files[k] as usize].offset;
             let mut end = start;
             while k < to {
                 let f = &locs[files[k] as usize];
-                let f_end = (f.offset + f.length) as u32;
+                let f_end = f.offset.saturating_add(f.length);
                 if k > first {
                     // A hole at or past the threshold ends the unit rather
                     // than being read. `RGX_ABLATE_EXTENTS` spans every
                     // hole: the ablation's arm reads the whole pack exactly
                     // as the plan always did.
                     if !crate::ablate_extents()
-                        && (f.offset as u32).saturating_sub(end) >= MAX_EXTENT_GAP
+                        && f.offset.saturating_sub(end) >= u64::from(MAX_EXTENT_GAP)
                     {
                         break;
                     }
                     // A file that does not fit joins the next unit; a file that is
                     // bigger than a whole unit is one by itself, because there is
                     // no legal cut inside it.
-                    if f_end - start > UNIT_BYTES {
+                    if f_end.saturating_sub(start) > u64::from(UNIT_BYTES) {
                         break;
                     }
                 }
-                end = f_end;
+                // `max` because `end` is the furthest byte reached, not the
+                // last file's own end: a manifest whose offsets do not
+                // ascend must not shrink a unit below its own start.
+                end = end.max(f_end);
                 k += 1;
             }
             units.push(Unit {
@@ -316,7 +324,7 @@ pub fn cut_units(files: &[u32], bounds: &[u32], locs: &[FileLoc]) -> Vec<Unit> {
                 first: first as u32,
                 last: k as u32,
                 start,
-                len: end - start,
+                len: end.saturating_sub(start),
             });
         }
     }
@@ -393,14 +401,14 @@ mod tests {
                 "file {i} must be claimed by exactly one unit"
             );
             let u = covering[0];
-            let (s, e) = (u.start as u64, (u.start + u.len) as u64);
+            let (s, e) = (u.start, u.start + u.len);
             assert!(
                 f.offset >= s && f.offset + f.length <= e,
                 "file {i} must sit whole inside its unit's byte range"
             );
         }
         for u in &units {
-            let (s, e) = (u.start as u64, (u.start + u.len) as u64);
+            let (s, e) = (u.start, u.start + u.len);
             assert!(
                 !(s < 250 && e > 100_000),
                 "no unit may span the hole past the threshold"
@@ -429,7 +437,7 @@ mod tests {
             2,
             "the rejected record's 70,000-byte span is a hole the cut skips"
         );
-        let read: u64 = units.iter().map(|u| u64::from(u.len)).sum();
+        let read: u64 = units.iter().map(|u| u.len).sum();
         assert_eq!(
             read, 200,
             "only the kept spans are read; the hole is never paid for"

@@ -166,11 +166,17 @@ impl Adapter for Gguf {
             let klen = rd_u64(data, p) as usize;
             p += 8;
             // checked_add: klen comes from the file and may be usize::MAX —
-            // `p + klen + 4` would overflow before the bound check ran
+            // `p + klen + 4` would overflow before the bound check ran, and
+            // the one value the first check let through (`kend ==
+            // usize::MAX`) wrapped the second add to a pass and panicked
+            // the key slice below.
             let Some(kend) = p.checked_add(klen) else {
                 break;
             };
-            if kend + 4 > data.len() {
+            let Some(after_key) = kend.checked_add(4) else {
+                break;
+            };
+            if after_key > data.len() {
                 break;
             }
             // Borrow the key as `&str`; the previous shape allocated
@@ -381,9 +387,16 @@ fn st_read(data: &[u8]) -> Result<Option<StHeader>> {
     };
 
     // Collected in source order, deduped last-wins by key name -- the
-    // `BTreeMap` lookup semantics of the parser being replaced.
+    // `BTreeMap` lookup semantics of the parser being replaced. The
+    // duplicate test is a map lookup on both groups: a linear scan per
+    // entry made a header of hundreds of thousands of keys quadratic,
+    // and the header cap is 64 MB of them.
     let mut meta: Vec<(String, String)> = Vec::new();
+    let mut meta_idx: alloc::collections::BTreeMap<String, usize> =
+        alloc::collections::BTreeMap::new();
     let mut tensors: Vec<TensorInfo> = Vec::new();
+    let mut tensor_idx: alloc::collections::BTreeMap<String, usize> =
+        alloc::collections::BTreeMap::new();
 
     let mut root = doc.root().map_err(jerr)?;
     if root.is_object().map_err(jerr)? {
@@ -391,6 +404,7 @@ fn st_read(data: &[u8]) -> Result<Option<StHeader>> {
             if k.as_ref() == "__metadata__" {
                 // The LAST `__metadata__` entry wins outright.
                 meta.clear();
+                meta_idx.clear();
                 if v.is_object()? {
                     v.object_entries(|mk, mv| {
                         let key = mk.into_owned();
@@ -398,9 +412,12 @@ fn st_read(data: &[u8]) -> Result<Option<StHeader>> {
                             .as_str()?
                             .map(|s| s.into_owned())
                             .unwrap_or_else(|| String::from("?"));
-                        match meta.iter_mut().find(|(ek, _)| *ek == key) {
-                            Some(slot) => slot.1 = val,
-                            None => meta.push((key, val)),
+                        match meta_idx.get(&key) {
+                            Some(&i) => meta[i].1 = val,
+                            None => {
+                                meta_idx.insert(key.clone(), meta.len());
+                                meta.push((key, val));
+                            }
                         }
                         Ok(true)
                     })?;
@@ -439,9 +456,12 @@ fn st_read(data: &[u8]) -> Result<Option<StHeader>> {
             } else {
                 v.skip()?;
             }
-            match tensors.iter_mut().find(|t| t.name == name) {
-                Some(slot) => *slot = TensorInfo { name, dtype, shape },
-                None => tensors.push(TensorInfo { name, dtype, shape }),
+            match tensor_idx.get(&name) {
+                Some(&i) => tensors[i] = TensorInfo { name, dtype, shape },
+                None => {
+                    tensor_idx.insert(name.clone(), tensors.len());
+                    tensors.push(TensorInfo { name, dtype, shape });
+                }
             }
             Ok(true)
         })
@@ -607,10 +627,12 @@ impl Adapter for Npy {
             .collect::<String>()
             .parse()
             .unwrap_or(0);
+        // saturating: the shape is the file's own arithmetic, and a plain
+        // product panics under overflow checks and wraps without them.
         let count: usize = shape
             .split(',')
             .filter_map(|s| s.trim().parse::<usize>().ok())
-            .product();
+            .fold(1usize, usize::saturating_mul);
         let payload = data.len() - (hoff + hlen);
         let text = format!(
             "npy: descr={descr} fortran_order={fortran} shape=({shape}) elements={count} payload_bytes={payload} itemsize={itemsize}\n"

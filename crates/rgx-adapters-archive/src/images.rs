@@ -248,8 +248,16 @@ fn rock_ridge_name(sysuse: &[u8]) -> Option<String> {
             break;
         }
         if sig == b"NM" {
-            // NM carries the CURRENT name in the flag word and the name itself right
-            // after it. Without the CURRENT bit the name lives in the parent
+            // NM carries the CURRENT name in the flag word and the name
+            // itself right after it. A real NM is six bytes at the least —
+            // signature, length, flags and one character of the name — so
+            // a shorter one is a malformed entry and not this file's name:
+            // reading its flags or its empty name slice would run past the
+            // system-use area the record declared.
+            if len < 6 {
+                break;
+            }
+            // Without the CURRENT bit the name lives in the parent
             // directory, so there is nothing to read here and returning the
             // following bytes would print a fragment as a filename.
             let flags = sysuse[p + 5];
@@ -1812,6 +1820,17 @@ mod tests {
         // the bytes after the flag word are not a filename.
         let sysuse = b"NM\x00\x0b\x01\x04xyzST\x00\x08\x01\x00\x00\x00\x00";
         assert_eq!(rock_ridge_name(sysuse), None);
+    }
+
+    #[cfg(feature = "iso9660")]
+    #[test]
+    fn a_rock_ridge_entry_shorter_than_its_own_fields_is_not_a_name() {
+        // A real NM is six bytes at the least — signature, length, flags
+        // and one character of the name. These two are shorter, and the
+        // reader used to read the flags or the name slice past the end of
+        // the system-use area to say so.
+        assert_eq!(rock_ridge_name(b"NM\x00\x04\x02"), None);
+        assert_eq!(rock_ridge_name(b"NM\x00\x05\x02x"), None);
     }
 
     // ---------- raw image ----------

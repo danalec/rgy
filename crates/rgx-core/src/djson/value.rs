@@ -15,15 +15,15 @@
 //! (the parser interns on first sight), so a walker that uses that
 //! order matches the YAML shape of the document.
 //!
-//! `no_std` + `alloc`. `serde` is opt-in.
+//! `no_std` + `alloc`, with no `serde` anywhere: the arena is the data
+//! model and `to_string` writes the document.
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-#[cfg(feature = "std")]
-use std::collections::HashMap;
-
 use core::fmt;
+
+use super::intern::StringIndex;
 
 /// A JSON number, keeping integers exact.
 ///
@@ -38,21 +38,32 @@ pub enum Number {
     F64(f64),
 }
 
-/// The fractional part, without needing `std`.
+/// Whether a number is a whole number, without needing `std`.
 ///
-/// `f64::fract` is std-only. Every use here is the integrality test
-/// below, and a saturating trip through `i64` answers that: values past
-/// the range are integral at `f64` precision anyway.
-fn fract_of(v: f64) -> f64 {
-    #[cfg(feature = "std")]
-    {
-        v.fract()
-    }
-    #[cfg(not(feature = "std"))]
-    {
-        v - (v as i64 as f64)
-    }
+/// `f64::fract` is std-only, and the replacement that reads the number as
+/// an `i64` loses every value above 2^63: the cast saturates, and the
+/// "fraction" that comes out of it is not zero -- so the same number was
+/// an integer in one configuration and not in the other. Every f64 past
+/// 2^63 is a whole number anyway (the spacing there is two or more), so
+/// the answer is decided before the cast is ever taken.
+fn is_integral(v: f64) -> bool {
+    // 2^63 exactly: past it every f64 is a whole number, and the cast
+    // below saturates.
+    v.abs() >= 9_223_372_036_854_775_808.0 || v - (v as i64 as f64) == 0.0
 }
+
+/// 2^63, the first `f64` past the top of `i64`.
+///
+/// `i64::MAX as f64` rounds *up* to this value, so a bound written as
+/// `<= i64::MAX as f64` admits 2^63 itself -- a number that does not fit in
+/// an `i64` at all -- and the cast then saturates and reports `i64::MAX` for
+/// it. The bound is exclusive, and the number one past the top is refused
+/// rather than rounded into a lie.
+const I64_LIMIT: f64 = 9_223_372_036_854_775_808.0;
+
+/// 2^64, the first `f64` past the top of `u64`. The same rounding, the
+/// same answer.
+const U64_LIMIT: f64 = 18_446_744_073_709_551_616.0;
 
 impl Number {
     /// Lossy numeric view (what most callers want).
@@ -68,9 +79,7 @@ impl Number {
         match self {
             Number::I64(i) => Some(*i),
             Number::U64(u) => i64::try_from(*u).ok(),
-            Number::F64(f)
-                if fract_of(*f) == 0.0 && *f >= i64::MIN as f64 && *f <= i64::MAX as f64 =>
-            {
+            Number::F64(f) if is_integral(*f) && *f >= i64::MIN as f64 && *f < I64_LIMIT => {
                 Some(*f as i64)
             }
             Number::F64(_) => None,
@@ -81,9 +90,7 @@ impl Number {
         match self {
             Number::I64(i) => u64::try_from(*i).ok(),
             Number::U64(u) => Some(*u),
-            Number::F64(f) if fract_of(*f) == 0.0 && *f >= 0.0 && *f <= u64::MAX as f64 => {
-                Some(*f as u64)
-            }
+            Number::F64(f) if is_integral(*f) && *f >= 0.0 && *f < U64_LIMIT => Some(*f as u64),
             Number::F64(_) => None,
         }
     }
@@ -157,18 +164,16 @@ pub struct Arena {
     /// arena interned, index N-1 the last.
     strings: Vec<String>,
     /// Shadow of `strings`: maps the interned string to its index in
-    /// `strings` for O(1) `intern`. Only present with the `std` feature
-    /// -- `HashMap` is `std`-only on Rust 1.82+, where the crate is
-    /// `#![no_std]` + `alloc` and the `std` feature is on by default.
-    /// Without `std`, `intern` falls back to the linear scan (still
-    /// correct; the hashmap shadow is a perf optimisation, not a
-    /// semantic change). Built lazily, kept in lockstep with `strings`:
-    /// the only writer to `strings` is `intern`, and it inserts into
-    /// `index` before pushing so the two never disagree. `strings` is
-    /// the source of truth; the existing `get_string` / `get_array` /
+    /// `strings`, so `intern` does not have to scan the table to find out
+    /// whether it has seen the string before. The table is this crate's own
+    /// (see [`super::intern`]): the `alloc` crate has no `HashMap` at all,
+    /// and what this slot holds is the *index* of the key rather than a
+    /// second copy of it. Kept in lockstep with `strings`: the only writer
+    /// to `strings` is `intern`, and it pushes into `strings` before it
+    /// records the index, so the two never disagree. `strings` is the
+    /// source of truth; the existing `get_string` / `get_array` /
     /// `get_object` / `strings()` API stays unchanged.
-    #[cfg(feature = "std")]
-    index: HashMap<String, usize>,
+    index: StringIndex,
     /// One `Vec<Value>` per array literal in the source.
     arrays: Vec<Vec<Value>>,
     /// One `BTreeMap<usize, Value>` per object literal in the source.
@@ -182,7 +187,6 @@ impl Clone for Arena {
     fn clone(&self) -> Self {
         Self {
             strings: self.strings.clone(),
-            #[cfg(feature = "std")]
             index: self.index.clone(),
             arrays: self.arrays.clone(),
             objects: self.objects.clone(),
@@ -195,8 +199,7 @@ impl Default for Arena {
     fn default() -> Self {
         Self {
             strings: Vec::new(),
-            #[cfg(feature = "std")]
-            index: HashMap::new(),
+            index: StringIndex::new(),
             arrays: Vec::new(),
             objects: Vec::new(),
             root: Value::Null,
@@ -208,7 +211,6 @@ impl fmt::Debug for Arena {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut dbg = f.debug_struct("Arena");
         dbg.field("strings", &self.strings);
-        #[cfg(feature = "std")]
         dbg.field("index", &self.index);
         dbg.field("arrays", &self.arrays);
         dbg.field("objects", &self.objects);
@@ -234,10 +236,9 @@ impl Arena {
         a.strings.reserve(n_strings);
         a.arrays.reserve(n_arrays);
         a.objects.reserve(n_objects);
-        #[cfg(feature = "std")]
-        {
-            a.index.reserve(n_strings);
-        }
+        // The shadow is sized with the strings it will hold, so the parse
+        // does not grow it one doubling at a time.
+        a.index.reserve(n_strings);
         a
     }
 
@@ -285,45 +286,28 @@ impl Arena {
     /// Intern a string. Returns the existing index if `s` is already
     /// interned, otherwise pushes and returns the new index.
     ///
-    /// With the `std` feature (the default): O(1) amortised. The
-    /// `index` shadow is the only cost on a hit; the `insert` on a
-    /// miss is amortised to O(1) by Rust's default hasher + capacity
-    /// growth. The dedup is what makes the cost less than the savings
-    /// on the workloads that dominate rgx: the same key repeated
-    /// across thousands of tensor entries in a safetensors header, the
-    /// same `nodes` / `meshes` arrays in a GLB scene, the same field
-    /// names in an LLM manifest. The clone on miss is one `String`
-    /// per distinct key, which is also the only allocation the old
-    /// linear search ever paid -- it just paid it in O(n) byte
-    /// comparisons instead.
+    /// O(1) amortised in both configurations. The `index` shadow is the
+    /// only cost on a hit; the `insert` on a miss is amortised to O(1) by
+    /// the table's own growth. The dedup is what makes the cost less than
+    /// the savings on the workloads that dominate rgx: the same key
+    /// repeated across thousands of tensor entries in a safetensors
+    /// header, the same `nodes` / `meshes` arrays in a GLB scene, the same
+    /// field names in an LLM manifest.
     ///
-    /// Without the `std` feature (`HashMap` is `std`-only on stable
-    /// Rust, and the crate is `#![no_std]` + `alloc`): O(n) over the
-    /// string table on the first sight of a new string, O(1) hit for a
-    /// repeat -- the original behaviour, unchanged in semantics.
-    #[cfg(feature = "std")]
+    /// A miss costs one `String` allocation -- the one the arena keeps --
+    /// and nothing else: the shadow holds the *index* of the key, not a
+    /// second copy of it, so the key's bytes are written once and read
+    /// once. The old linear search paid that same allocation, and paid it
+    /// in O(n) byte comparisons on top.
     pub fn intern(&mut self, s: String) -> usize {
-        if let Some(&idx) = self.index.get(&s) {
-            return idx;
+        let hash = self.index.hash_of(s.as_bytes());
+        if let Some(index) = self.index.lookup(hash, &s, &self.strings) {
+            return index;
         }
-        let idx = self.strings.len();
-        self.index.insert(s.clone(), idx);
+        let index = self.strings.len();
         self.strings.push(s);
-        idx
-    }
-
-    /// `no_std` (no `HashMap` in `alloc::collections` on stable) path:
-    /// same semantics, linear scan. See the `std`-featured `intern` for
-    /// the rationale on why dedup is still worth it at O(n).
-    #[cfg(not(feature = "std"))]
-    pub fn intern(&mut self, s: String) -> usize {
-        if let Some(idx) = self.strings.iter().position(|t| t == &s) {
-            idx
-        } else {
-            let idx = self.strings.len();
-            self.strings.push(s);
-            idx
-        }
+        self.index.insert(hash, index);
+        index
     }
 
     /// Reserve a new empty array slot and return its index. The parser
@@ -359,10 +343,11 @@ impl Arena {
 
     /// Look up an object value by key text. Used by adapters that
     /// already have the key as a `&str` (GLB scene keys, safetensors
-    /// tensor names). Walks the string table linearly to translate
-    /// the key into an index, then a `BTreeMap::get` for the value.
+    /// tensor names). The shadow translates the key into an index in one
+    /// probe, then a `BTreeMap::get` finds the value.
     pub fn object_get(&self, obj_idx: usize, key: &str) -> Option<Value> {
-        let key_idx = self.strings.iter().position(|s| s == key)?;
+        let hash = self.index.hash_of(key.as_bytes());
+        let key_idx = self.index.lookup(hash, key, &self.strings)?;
         self.objects[obj_idx].get(&key_idx).copied()
     }
 
@@ -730,6 +715,96 @@ mod tests {
 
     use super::*;
     use crate::djson::{parse, to_string, to_string_pretty};
+
+    /// The window where the two configurations used to disagree.
+    ///
+    /// Past 2^63 the `i64` cast saturates, so the "fraction" that came
+    /// out of it was not zero: the same number was a whole number under
+    /// `std` and not under `no_std`. This test runs in both
+    /// configurations and has to give the same answer in both.
+    #[test]
+    fn a_number_above_the_i64_range_is_still_a_whole_number() {
+        assert_eq!(Number::F64(1e19).as_u64(), Some(10_000_000_000_000_000_000));
+        assert_eq!(
+            Number::F64(1.5e19).as_u64(),
+            Some(15_000_000_000_000_000_000)
+        );
+        assert_eq!(Number::F64(1e19).as_i64(), None);
+        assert_eq!(Number::F64(1.5e19).as_i64(), None);
+        // And what is not a whole number stays not one.
+        assert_eq!(Number::F64(1.5).as_u64(), None);
+        assert_eq!(Number::F64(0.5).as_i64(), None);
+        assert_eq!(Number::F64(1.0).as_u64(), Some(1));
+        assert_eq!(Number::F64(-1.0).as_i64(), Some(-1));
+        assert_eq!(Number::F64(f64::INFINITY).as_u64(), None);
+        assert_eq!(Number::F64(f64::NAN).as_u64(), None);
+    }
+
+    /// The number past the top of the range is not the number below it.
+    ///
+    /// `i64::MAX as f64` is 2^63 and `u64::MAX as f64` is 2^64, so a
+    /// bound written with `<=` against them admits a number that does not
+    /// fit, and the cast saturates: 2^63 came back as `i64::MAX` and 2^64
+    /// as `u64::MAX` -- both of them numbers the file never held. Both are
+    /// refused now, and the refusal is the same in both configurations.
+    #[test]
+    fn the_number_past_the_top_of_the_range_is_refused() {
+        assert_eq!(Number::F64(I64_LIMIT).as_i64(), None);
+        assert_eq!(Number::F64(-I64_LIMIT).as_i64(), Some(i64::MIN));
+        assert_eq!(Number::F64(U64_LIMIT).as_u64(), None);
+        // The largest f64 below 2^64 still fits, and it says so exactly.
+        assert_eq!(
+            Number::F64(18_446_744_073_709_549_568.0).as_u64(),
+            Some(18_446_744_073_709_549_568)
+        );
+    }
+
+    /// The answers, written down.
+    ///
+    /// Rust has no `f64::as_i64` and no `f64::as_u64` -- the `as` cast
+    /// saturates and says nothing about what it could not represent --
+    /// so the oracle here is a table and not the standard library. The
+    /// table runs in both configurations, and the two have to answer it
+    /// the same way.
+    #[test]
+    fn the_integer_views_answer_the_same_in_both_configurations() {
+        let cases: &[(f64, Option<i64>, Option<u64>)] = &[
+            (0.0, Some(0), Some(0)),
+            (-0.0, Some(0), Some(0)),
+            (1.0, Some(1), Some(1)),
+            (-1.0, Some(-1), None),
+            (1.5, None, None),
+            (-1.5, None, None),
+            (0.5, None, None),
+            (
+                9007199254740992.0,
+                Some(9007199254740992),
+                Some(9007199254740992),
+            ),
+            (
+                9_223_372_036_854_775_808.0,
+                None,
+                Some(9_223_372_036_854_775_808),
+            ),
+            (-9_223_372_036_854_775_808.0, Some(i64::MIN), None),
+            (1e19, None, Some(10_000_000_000_000_000_000)),
+            (1.5e19, None, Some(15_000_000_000_000_000_000)),
+            (
+                18_446_744_073_709_549_568.0,
+                None,
+                Some(18_446_744_073_709_549_568),
+            ),
+            (18_446_744_073_709_551_616.0, None, None),
+            (1e308, None, None),
+            (f64::INFINITY, None, None),
+            (f64::NEG_INFINITY, None, None),
+            (f64::NAN, None, None),
+        ];
+        for (v, i, u) in cases {
+            assert_eq!(Number::F64(*v).as_i64(), *i, "as_i64 at {v}");
+            assert_eq!(Number::F64(*v).as_u64(), *u, "as_u64 at {v}");
+        }
+    }
 
     /// A float whose magnitude needs exponent notation must use it. Rust's
     /// `{}` on an `f64` never does, so `f64::MAX` came out as 309 digits and

@@ -429,6 +429,7 @@ fn compact_serialisation_reproduces_rank_order_and_dedupe() {
 // Never panic on arbitrary bytes
 // ---------------------------------------------------------------------
 
+#[cfg(feature = "std")]
 #[test]
 fn the_lazy_walk_never_panics_on_mutation() {
     let corpus: Vec<(&str, Vec<u8>)> = vec![

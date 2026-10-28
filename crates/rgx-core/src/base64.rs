@@ -457,6 +457,7 @@ mod tests {
         assert_eq!(base64_encode_with(b"f", URL_SAFE_NO_PAD), "Zg");
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn decode_never_panics_on_arbitrary_bytes() {
         let corpus: Vec<(&'static str, Vec<u8>)> = vec![

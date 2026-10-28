@@ -763,7 +763,7 @@ impl FileSource for IndexedFiles {
     }
 }
 
-type Bucket = ((u32, u32), Vec<SearchMatch>);
+type Bucket = ((u32, u64), Vec<SearchMatch>);
 
 /// What one worker of the mapping path hands back.
 struct ChunkOut {
@@ -1143,7 +1143,16 @@ fn pack_worker(
         for ui in claim..claim_end {
             let unit = plan.units[ui];
             let p = unit.pack as usize;
-            let len = unit.len as usize;
+            // A unit is a u64 range; a platform whose address space cannot
+            // hold one skips it by name rather than reading a truncated
+            // slice and answering from half the bytes.
+            let Ok(len) = usize::try_from(unit.len) else {
+                eprintln!(
+                    "rgx-tv: warning: unit of {} bytes does not fit this platform",
+                    unit.len
+                );
+                continue;
+            };
             if buf.len() < len {
                 buf.resize(len, 0);
             }
@@ -1169,7 +1178,7 @@ fn pack_worker(
                         &mut current_file.as_mut().unwrap().1
                     }
                 };
-                file.seek(SeekFrom::Start(PackHeader::SIZE as u64 + unit.start as u64))?;
+                file.seek(SeekFrom::Start(PackHeader::SIZE as u64 + unit.start))?;
                 file.read_exact(&mut buf[..len])?;
             }
             let read_pack_ns = t.elapsed().as_nanos();
@@ -1201,8 +1210,11 @@ fn pack_worker(
                     }
                 }
 
-                // Relative to the unit, which starts at the first file's offset.
-                let start = f.offset as usize - unit.start as usize;
+                // Relative to the unit, which starts at the first file's
+                // offset. The saturating subtraction is for the manifest
+                // that does not ascend: a file placed before its unit's
+                // start is out of the unit, not a wrapped huge offset.
+                let start = f.offset.saturating_sub(unit.start) as usize;
                 let end = start + f.length as usize;
                 if end > pack_bytes.len() {
                     eprintln!(

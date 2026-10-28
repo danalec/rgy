@@ -1181,6 +1181,15 @@ impl<'a> Arith<'a> {
 
     /// Decode a symbol with the given model.
     fn decode_symbol(&mut self, m: &mut ArithModel) -> u32 {
+        // A collapsed interval divides by zero below, and `renorm`'s
+        // guard stops the loop without repairing the length: a wrapped
+        // product in the previous symbol can leave exactly that, and
+        // `starved` is only read between points, not between the four
+        // decodes one point performs.
+        if self.length == 0 {
+            self.starved = true;
+            return 0;
+        }
         // The reference takes the interval length as the upper bound
         // before it shifts the length down, so the bound is the length
         // the decoder came in with.
@@ -1243,6 +1252,12 @@ impl<'a> Arith<'a> {
             let low = self.read_short();
             return (self.read_bits(bits - 16) << 16) | low;
         }
+        // As in `decode_symbol`: a zero interval must not reach the
+        // division.
+        if self.length == 0 {
+            self.starved = true;
+            return 0;
+        }
         self.length >>= bits;
         let sym = self.value / self.length;
         self.value -= self.length.wrapping_mul(sym);
@@ -1254,6 +1269,12 @@ impl<'a> Arith<'a> {
 
     /// Decode sixteen bits without a model.
     fn read_short(&mut self) -> u32 {
+        // As in `decode_symbol`: a zero interval must not reach the
+        // division.
+        if self.length == 0 {
+            self.starved = true;
+            return 0;
+        }
         self.length >>= 16;
         let sym = self.value / self.length;
         self.value -= self.length.wrapping_mul(sym);

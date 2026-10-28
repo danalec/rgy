@@ -420,7 +420,12 @@ impl RawManifest {
         let root_path = c.string()?;
 
         let pack_count = c.u32()? as usize;
-        let mut packs = Vec::with_capacity(pack_count);
+        // The count is a field of the file, so the reservation is clamped
+        // to what the remaining bytes can hold: a pack record is 24 bytes
+        // at the least, and a corrupted count must fail in the parse, not
+        // in a multi-gigabyte allocation the checksum gate cannot see.
+        let max_packs = (self.payload_len - c.position()) / 24 + 1;
+        let mut packs = Vec::with_capacity(pack_count.min(max_packs));
         for _ in 0..pack_count {
             let pack_id = c.u32()?;
             let filename = c.string()?;
@@ -466,7 +471,8 @@ impl RawManifest {
                 "manifest larger than 4 GiB: a file record's path offset would not fit",
             ));
         }
-        let mut locs = Vec::with_capacity(file_count);
+        let mut locs =
+            Vec::with_capacity(file_count.min((self.payload_len - c.position()) / 113 + 1));
         // One bounds check per field was costing more than the fields: twelve
         // `try_into().unwrap()` conversions per record over 20,000 records is
         // 240,000 runtime length checks, and the whole parse measured 59 MB/s
@@ -556,7 +562,10 @@ impl RawManifest {
         let root_path = c.string()?;
 
         let pack_count = c.u32()? as usize;
-        let mut packs = Vec::with_capacity(pack_count);
+        // Same clamp as `head_unchecked`: the reservation answers to the
+        // bytes the file actually holds, never to the count it declares.
+        let max_packs = (self.payload_len - c.position()) / 24 + 1;
+        let mut packs = Vec::with_capacity(pack_count.min(max_packs));
         for _ in 0..pack_count {
             let pack_id = c.u32()?;
             let filename = c.string()?;
@@ -573,7 +582,9 @@ impl RawManifest {
         }
 
         let file_count = c.u64()? as usize;
-        let mut files = Vec::with_capacity(file_count);
+        // A file record is 113 bytes at the least, empty path included.
+        let mut files =
+            Vec::with_capacity(file_count.min((self.payload_len - c.position()) / 113 + 1));
         for _ in 0..file_count {
             let file_id = c.u64()?;
             let rel_path = c.string()?;

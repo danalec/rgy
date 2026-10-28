@@ -230,6 +230,9 @@ impl MmapInner {
     }
 
     pub fn advise(&self, advice: libc::c_int, offset: usize, len: usize) -> io::Result<()> {
+        // Linux has the seven, so this refuses nothing: the call is here so
+        // that the three unix platforms share one rule and one place.
+        super::refuse_unavailable(advice)?;
         let r = unsafe {
             libc::madvise(
                 self.ptr.add(offset) as *mut libc::c_void,

@@ -88,9 +88,15 @@ pub const INTERNAL_ERROR: i32 = -32603;
 /// tree the client pointed at may be the whole disk. The ceiling is
 /// reported when it is reached, because a truncated answer that looks
 /// complete is the one answer nobody can act on.
+///
+/// The ceiling belongs to the tools, and the tools are the half that reads
+/// files, so a build without `std` does not read it. The constant stays so
+/// that the two builds describe the same server.
+#[cfg_attr(not(feature = "std"), allow(dead_code))]
 const MAX_FILES: usize = 20_000;
 
 /// Ceiling on the lines one search reports.
+#[cfg_attr(not(feature = "std"), allow(dead_code))]
 const MAX_MATCHES: usize = 1_000;
 
 /// The identifier a request carries.
@@ -187,6 +193,11 @@ fn tool_json(
 }
 
 /// The tool arguments, read out of the request.
+///
+/// The tools are the half that reads files, so a build without `std` does
+/// not read these either. The shape stays so that the two builds describe
+/// the same server.
+#[cfg_attr(not(feature = "std"), allow(dead_code))]
 struct ToolArgs<'a> {
     pattern: Option<&'a str>,
     path: Option<&'a str>,
@@ -215,6 +226,11 @@ impl<'a> ToolArgs<'a> {
 
 /// The MCP server: the protocol layer, the two tools, and the registry
 /// the tools read the corpus through.
+///
+/// The registry and the context are the tools' half, and a build without
+/// `std` has no files for the tools to read; the fields stay so that the
+/// two builds describe the same server.
+#[cfg_attr(not(feature = "std"), allow(dead_code))]
 pub struct McpServer {
     /// The registry is shared, not owned: a registry is a list of
     /// adapters, each of which may hold a handle to an external tool,
@@ -455,6 +471,10 @@ impl McpServer {
     }
 
     /// The context the pipeline runs under inside the tools.
+    ///
+    /// The tools are the half that reads files, so a build without `std`
+    /// does not read this.
+    #[cfg_attr(not(feature = "std"), allow(dead_code))]
     fn pipeline_ctx(&self) -> Ctx {
         Ctx {
             max_depth: self.ctx.max_depth,
@@ -795,6 +815,9 @@ fn is_repo_state(path: &std::path::Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The module's own `Vec` import is behind the `std` feature, and the
+    // tests are not: a `no_std` test run still builds them.
+    use alloc::vec::Vec;
 
     fn server() -> McpServer {
         McpServer::new(Registry::new(Vec::new()))

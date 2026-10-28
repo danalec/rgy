@@ -26,9 +26,10 @@
 //!
 //! `no_std + alloc` is the constraint: the BTreeMap is the only
 //! structure, and the `Vec`s it holds are the only allocations. The
-//! [`super::index_io`] module serializes this with `postcard`, a
-//! `no_std`-cleaned crate, so the on-disk format is independent of
-//! the in-memory layout.
+//! [`super::index_io`] module serializes this into rgx's own `.ugi`
+//! byte format — hand-rolled, `no_std`-clean, and nothing another
+//! tool reads — so the on-disk format is independent of the in-memory
+//! layout.
 //!
 //! # Query model
 //!

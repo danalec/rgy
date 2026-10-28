@@ -67,6 +67,7 @@ use rgx_core::compress::lzma::LzmaDecoder;
 use rgx_core::compress::{ZlibDecoder, ZstdDecoder};
 use rgx_core::{bail, decline, Adapter, Outcome, Result};
 
+use crate::budget;
 use crate::lz4::Lz4Decoder;
 use crate::msgpack::{Decoder as Msgpack, Value};
 
@@ -148,9 +149,15 @@ impl Adapter for Borg {
         }
 
         // The payload of every PUT, decompressed, keyed by the id of the
-        // entry that carried it.
+        // entry that carried it. Each entry's expansion is capped on its
+        // own; the budget caps them together, because every payload is
+        // held at once for the passes that follow, and a segment of a few
+        // megabytes can name thousands of entries.
         let mut payloads: Vec<([u8; 32], Vec<u8>)> = Vec::new();
         let mut encrypted = false;
+        let cap = budget::budget_for_depth(rgx_core::current_depth()).bytes;
+        let mut spent: u64 = 0;
+        let mut skipped_puts = 0usize;
         for e in &entries {
             if e.tag != TAG_PUT {
                 continue;
@@ -158,7 +165,19 @@ impl Adapter for Borg {
             match envelope(e.payload)? {
                 Envelope::Encrypted => encrypted = true,
                 Envelope::Compressed { compressor, body } => {
-                    payloads.push((e.id, decompress(compressor, body)?));
+                    if spent >= cap {
+                        // The walk continues so the count is the truth; the
+                        // decode is what the budget refused.
+                        skipped_puts += 1;
+                        continue;
+                    }
+                    let payload = decompress(compressor, body)?;
+                    spent = spent.saturating_add(payload.len() as u64);
+                    if spent > cap {
+                        skipped_puts += 1;
+                        continue;
+                    }
+                    payloads.push((e.id, payload));
                 }
             }
         }
@@ -173,6 +192,13 @@ impl Adapter for Borg {
             commits,
             payload_bytes
         );
+        if skipped_puts > 0 {
+            let _ = writeln!(
+                text,
+                "[rgx: borg: {skipped_puts} put entries were not decoded; {cap} bytes of \
+                 payload is the budget; raise RGX_MAX_MEMBER_BYTES to read them]"
+            );
+        }
 
         if encrypted {
             // The structure is readable and the contents are not, and the

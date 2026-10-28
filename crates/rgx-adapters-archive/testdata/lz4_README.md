@@ -50,13 +50,13 @@ directory. The reference `-f` flag overwrites.
 | `lz4_big_bx` | big | `lz4 -f -1 -B4 -BX` | 2452 | four blocks + per-block checksums |
 | `lz4_big_bd` | big | `lz4 -f -1 -B4 -BD` | 1982 | **dependent blocks**: a match in block N reaches into block N-1 |
 
-## Known gap, deliberately not covered
+## The legacy container
 
-`lz4 -l` (legacy container, magic `0x184C2102`) is **not** covered: the
-vendored decoder does not implement it, and `lz4_flex` — the crate it
-replaces — did. See the "Known gap" section of `src/lz4/mod.rs`. Adding a
-vector here would only pin the failure; the fix is a second container
-format, not a vendored port.
+`lz4 -l` (legacy container, magic `0x184C2102`) is **covered**: the
+vendored decoder reads it, as a bare run of length-prefixed blocks under
+that magic, with no frame header and no checksums. The decoder that
+replaced `lz4_flex` is `src/lz4/lz4.rs`, and the legacy reader is
+`decode_legacy` in it.
 
 Dictionary frames (`lz4 -D`) are likewise not covered. Frames that do not
 match across the dictionary decode fine; those that do are rejected, and

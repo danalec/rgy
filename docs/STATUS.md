@@ -48,7 +48,7 @@ verification on machines this host does not have.
 | Content index (trigram + bloom) | `crates/name-core` (`content`) | ✅ transported from fsearch |
 | Cloud placeholders (never hydrated) | `crates/name-core` (`placeholder`) | ✅ the recall bits on Windows, `SF_DATALESS` in `st_flags` on macOS — asked at the open, so the bytes are never fetched |
 | Confirm via rgx engine + `grep:`/`regex:`/`sym:` | `crates/name-core` (`content`), `crates/rgx-core` | ✅ |
-| rgx engine, TV packs, adapters | `crates/rgx-*` | ✅ upstream's crates, verbatim (re-synced 2026-10-25, at upstream `11ce39a`) |
+| rgx engine, TV packs, adapters | `crates/rgx-*` | ✅ upstream's crates, verbatim (re-synced 2026-10-27, at upstream `4d35a02`, the `rgx-v0.1.1` release) |
 | One regex engine (vendored copy deleted) | `crates/name-core` (`regex`) → `rgx-core` | ✅ (`rgx-core` stays `no_std`) — the name path (`re:`, `path:`, the rules) and the content path's query plan both run on rgx-core's AST; the `regex` crate is left only as the content grep's fallback for the patterns rgx's byte parser refuses (Unicode properties, say), which is the same gap upstream's rgx still has |
 | Pack compaction | `crates/rgx-core` (`tv_runtime`) | ✅ opt-in, `--compact` |
 
@@ -542,7 +542,16 @@ the three platforms behaving alike.
   abandons keeps spinning, so the test binary never exits: on the Linux
   box that took the whole VM down. The same test passes three times out of
   three on an idle FreeBSD guest, so the input that does it is not the
-  same one every time. Both belong in rgx, not here.
+  same one every time. Both belong in rgx, not here — and both were
+  fixed there: the AVX2 test asks the machine instead of the
+  architecture, and the watchdog has a round budget and stops the
+  worker it abandons. A third, worse one came out of the same box:
+  the LZMA decoder sized its literal table by the number of
+  probabilities where it wanted the number of rows, so a 21-byte
+  header asking for lc=8 and lp=4 asked for 4,831,838,208 bytes
+  where the model needs 6 MiB — 768 times too much. All three are
+  fixed upstream, and the vendored copy carries them as of the
+  `rgx-v0.1.1` sync.
 - **The CI has never run.** The workflow is written and pinned to the
   images this project is verified against: Windows Server 2022, macOS 15 on
   arm64 (the only place the NEON scorer and the macOS discovery backend

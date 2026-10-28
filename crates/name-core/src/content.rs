@@ -2585,10 +2585,10 @@ impl Grep {
         let case_insensitive = smart_ci && mode != GrepMode::Symbol;
         let short = (1..=4096).contains(&pattern.len());
         let literal = match mode {
-            GrepMode::Symbol if short => Some(Literal::Definition(rgx_core::memchr::memmem::Finder::new(pattern.as_bytes()).into_owned())),
+            GrepMode::Symbol if short => Some(Literal::Definition(pattern.as_bytes().to_vec())),
             GrepMode::Literal if short && pattern.is_ascii() => Some(match case_insensitive {
                 true => Literal::folded(pattern.as_bytes()),
-                false => Literal::Exact(rgx_core::memchr::memmem::Finder::new(pattern.as_bytes()).into_owned()),
+                false => Literal::Exact(pattern.as_bytes().to_vec()),
             }),
             _ => None,
         };
@@ -2906,14 +2906,17 @@ fn lines_at(g: &Grep, buf: &[u8], starts: impl Iterator<Item = usize>) -> Vec<(u
 /// folds onto ASCII ones (ſ for s, the Kelvin sign for k): a file holding
 /// one of those goes to the regex.
 enum Literal {
-    Exact(rgx_core::memchr::memmem::Finder<'static>),
+    /// The pattern's own bytes, owned. Upstream's finder borrows the needle
+    /// rather than taking it over, and this enum lives inside a `Grep` that
+    /// outlives the string the pattern was cut from.
+    Exact(Vec<u8>),
     /// A `sym:` name: as a whole word after a declaring keyword on its line
     /// (the definition regex, with its keyword part compiled once).
-    Definition(rgx_core::memchr::memmem::Finder<'static>),
+    Definition(Vec<u8>),
     Folded {
         needle: Vec<u8>,
         pair: (usize, usize),
-        odd: Vec<rgx_core::memchr::memmem::Finder<'static>>,
+        odd: Vec<Vec<u8>>,
     },
 }
 
@@ -2931,25 +2934,25 @@ impl Literal {
         by_rarity.sort_by_key(|&i| (common(needle[i]), i));
         let (a, b) = (by_rarity[0], *by_rarity.get(1).unwrap_or(&by_rarity[0]));
         let odd = [(b's', "\u{17F}"), (b'k', "\u{212A}")].iter().filter(|(c, _)| needle.contains(c));
-        let odd = odd.map(|(_, u)| rgx_core::memchr::memmem::Finder::new(u.as_bytes()).into_owned()).collect();
+        let odd = odd.map(|(_, u)| u.as_bytes().to_vec()).collect();
         Literal::Folded { needle, pair: (a.min(b), a.max(b)), odd }
     }
 
     fn needs_regex(&self, hay: &[u8]) -> bool {
-        matches!(self, Literal::Folded { odd, .. } if odd.iter().any(|f| f.find(hay).is_some()))
+        matches!(self, Literal::Folded { odd, .. } if odd.iter().any(|n| rgx_core::memchr::memmem::find(hay, n).is_some()))
     }
 
     /// Where its matches start, left to right.
     fn starts<'a>(&'a self, hay: &'a [u8]) -> impl Iterator<Item = usize> + 'a {
         let len = match self {
-            Literal::Exact(f) | Literal::Definition(f) => f.needle().len(),
+            Literal::Exact(n) | Literal::Definition(n) => n.len(),
             Literal::Folded { needle, .. } => needle.len(),
         };
         let mut at = 0;
         std::iter::from_fn(move || {
             loop {
                 let p = match self {
-                    Literal::Exact(f) | Literal::Definition(f) => f.find(hay.get(at..)?).map(|p| at + p),
+                    Literal::Exact(n) | Literal::Definition(n) => rgx_core::memchr::memmem::find(hay.get(at..)?, n).map(|p| at + p),
                     Literal::Folded { needle, pair, .. } => find_folded(hay, at, needle, *pair),
                 }?;
                 if !matches!(self, Literal::Definition(_)) {

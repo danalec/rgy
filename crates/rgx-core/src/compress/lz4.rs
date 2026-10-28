@@ -9,11 +9,12 @@
 //! match copies that many bytes from that distance back. A length of fifteen
 //! means the real length follows in extra bytes of 255 and a remainder.
 //!
-//! **The frame wrapper is still absent.** A `.lz4` file is a frame around
-//! this, and that frame is not interop-proven here, so `.lz4` files still go
-//! through `lz4_flex`. What is here is the block, because the blosc frame is
-//! made of blocks and that frame *is* interop-proven: the chunks
-//! zarr-python writes with the blosc codec are read with it.
+//! **The frame wrapper is not read here.** A `.lz4` file is a frame around
+//! this, and the frame is read by the archive crate's own decoder — the one
+//! that replaced `lz4_flex` for the search path. What is here is the block,
+//! because the blosc frame is made of blocks and that frame *is*
+//! interop-proven: the chunks zarr-python writes with the blosc codec are
+//! read with it.
 //!
 //! Two properties of the format are worth naming, because each one is a way
 //! to write a decoder that passes the easy cases and fails on real data:

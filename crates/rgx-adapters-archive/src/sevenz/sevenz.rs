@@ -437,16 +437,22 @@ impl<'a> SevenzArchive<'a> {
     /// -- this is the expensive call. See the adapter: one decode per folder,
     /// not one per file.
     pub fn folder_output(&self, folder_idx: usize) -> CompressResult<Vec<u8>> {
-        let unpack_size = self
-            .folders
-            .get(folder_idx)
-            .ok_or(CompressError::InvalidFormat("folder index out of range"))?
-            .unpack_size;
         Self::decode_folder_bytes(
             &self.folders[folder_idx],
             self.folder_packed(folder_idx)?,
-            unpack_size,
+            self.folder_unpack_size(folder_idx)?,
         )
+    }
+
+    /// The bytes a folder declares it will unpack to, before anything is
+    /// decoded. A caller with a byte budget asks this first: decoding
+    /// materializes the whole folder whether or not the entries inside it
+    /// fit what the caller has left.
+    pub fn folder_unpack_size(&self, folder_idx: usize) -> CompressResult<u64> {
+        self.folders
+            .get(folder_idx)
+            .map(|f| f.unpack_size)
+            .ok_or(CompressError::InvalidFormat("folder index out of range"))
     }
 
     /// One file's bytes, carved out of a folder output decoded earlier.
@@ -996,6 +1002,14 @@ impl<'a> SevenzArchive<'a> {
         for c in &folder.coders {
             in_base.push(acc);
             acc += c.num_in;
+        }
+
+        // The length is checked before the index below needs it: a folder
+        // may declare no packed stream at all (every input bound to a bind
+        // pair), and the encoded-header path reaches this decoder without
+        // the guard the normal path has.
+        if folder.packed_streams.is_empty() {
+            return Err(CompressError::InvalidFormat("folder with no packed stream"));
         }
 
         // First coder: the one owning the first packed stream.

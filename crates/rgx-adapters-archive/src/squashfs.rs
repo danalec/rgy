@@ -546,9 +546,17 @@ impl Adapter for Squashfs {
                     }
                     "file" => {
                         if let Some(c) = &child {
-                            let bytes = read_file(&meta, child_off, c, &positions, &sizes);
-                            if !bytes.is_empty() && sink.reserve(bytes.len() as u64) {
-                                sink.push(full, bytes);
+                            // The declared size is reserved before the file
+                            // is read: a sparse-block file extends to its
+                            // full size with no input bytes at all, so the
+                            // sink's refusal has to come before the
+                            // allocation rather than after it.
+                            let declared = c.file_size as u64;
+                            if declared > 0 && sink.reserve(declared) {
+                                let bytes = read_file(&meta, child_off, c, &positions, &sizes);
+                                if !bytes.is_empty() {
+                                    sink.push(full, bytes);
+                                }
                             }
                         }
                     }

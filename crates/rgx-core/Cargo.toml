@@ -1,9 +1,9 @@
 [package]
 name = "rgx-core"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
-description = "Core adapter trait and extraction pipeline for rgx"
+description = "rgx's engine: the adapter contract, the byte-search kernels, the JSON arena and the pack store -- no_std + alloc, with an opt-in std feature"
 # Every file in this crate is Apache-2.0 and carries the SPDX header saying
 # so — the pack store, the compression codecs and the JSON layer alike. See
 # the repository's COPYING.
@@ -19,6 +19,12 @@ repository = "https://github.com/danalec/rgx"
 # they are the law on the code.
 include = [
     "/src/**",
+    # The EGM contracts are the working documents of the review loop: they
+    # are gitignored, they are not source, and `/src/**` would have carried
+    # every one of them into the published crate. `exclude` cannot say it --
+    # cargo ignores the exclude list when an include list is there -- so the
+    # exclusion is a negation of the include.
+    "!/src/**/EGM.md",
     "/Cargo.toml",
     "/README.md",
     "/LICENSE-APACHE",
@@ -31,12 +37,13 @@ include = [
 # `std` feature nothing gated, so `cargo build --no-default-features` still
 # linked std and proved nothing.
 #
-# With `std` off: the AVX2 kernels go (their runtime detection is the
-# `std::arch::is_x86_feature_detected!` macro) and the SWAR path serves both
-# memchr and the per-position scan; `Error` keeps messages but loses the
-# typed `dyn Error` chain; the profiler's global map goes and its flag, a
-# core atomic, stays; and the JSON float parser becomes this crate's own,
-# since `f64::from_str` is std-only.
+# With `std` off: the vector kernels stay -- they are chosen at runtime by
+# this crate's own CPU probe (`src/detect.rs`), which is why the `std` build
+# and the `no_std` build reach the same kernel on the same machine and the
+# two configurations' numbers are comparable; `Error` keeps messages but
+# loses the typed `dyn Error` chain; the profiler's global map goes and its
+# flag, a core atomic, stays; and the JSON float parser becomes this crate's
+# own, since `f64::from_str` is std-only.
 default = ["std", "sha256-hw", "gzip", "zlib", "deflate", "bzip2", "lzma", "xz", "zstd", "snappy", "lz4", "blosc", "zip"]
 std = ["dep:libc", "memchr/std"]
 # The Tesla Valve pack store's codec, query vocabulary and planner. The
@@ -80,21 +87,27 @@ bwt = []
 tv = []
 # The std-bound half of `crates/rgx-tv`: filesystem wrappers for the
 # format tables, the inspector, the builder, the searcher and the store.
-# NOT in `default` -- that is `["std"]` alone. `rgx-tv` turns it on; nothing
-# else does, because a binary that does not read a pack store should not
-# link its format tables. Turn it off explicitly with
-# `--no-default-features --features std` for the no_std engine alone
-# (AVX2/SWAR + regex core, no pack store).
+# NOT in `default` -- `default` is the engine and its codecs, and it carries
+# no pack store. `rgx-tv` turns it on; nothing else does, because a binary
+# that does not read a pack store should not link its format tables. The
+# engine alone, with no pack store, is `--no-default-features --features std`
+# (AVX2/SWAR + regex core).
 tv-runtime = ["tv", "std", "dep:ignore"]
-# SHA-256 hardware acceleration. Off by default. Two backends are wired:
-# SHA-NI on x86_64 (detected at runtime via `is_x86_feature_detected!`)
-# and ARMv8 SHA2 on aarch64 (detected the same way). When the feature
-# is on but the runtime lacks the instruction set, the SHA-256 falls
-# back to the scalar path with no behaviour change. The hardware path
-# is verified against the scalar path on the FIPS 180-4 test vectors
-# and on randomized split inputs -- both tests run unconditionally
-# when this feature is on, so a silent correctness regression cannot
-# ship.
+# SHA-256 hardware acceleration. It is in `default` above, and the path it
+# turns on replaces the scalar one rather than answering differently. One
+# backend is wired: SHA-NI on x86_64, detected at runtime by this crate's own
+# CPU probe (`src/detect.rs`) -- not by `std::arch::is_x86_feature_detected!`,
+# which lives in `std` while this feature does not require `std`, so asking it
+# here put `std` into a build that asks for `no_std` and the combination did
+# not compile at all. No aarch64 backend exists: reporting the extension as
+# available would make `hardware_available()` claim a backend that
+# `compress_block` does not have, and the benchmark would print "Available:
+# true" next to a 1.00x ratio measured against the scalar it silently fell
+# back to. When the feature is on but the runtime lacks the instruction set,
+# the SHA-256 falls back to the scalar path with no behaviour change. The
+# hardware path is verified against the scalar path on the FIPS 180-4 test
+# vectors and on randomized split inputs -- both tests run unconditionally
+# when this feature is on, so a silent correctness regression cannot ship.
 sha256-hw = []
 # Deflate/Bzip2/Lz77 ENCODERS. The rgx build never writes a compressed
 # archive -- it searches inside them. The encoders stay in the binary
@@ -138,16 +151,16 @@ ignore = { version = "0.4", default-features = false, optional = true }
 # this crate's `regex` does with the same bytes. It is already in the lock
 # file through the workspace's `regex`; nothing in the library links it.
 #
-# The previous `grep-searcher` / `grep-matcher` / `grep-regex` triple here
-# served the same role for the line searcher: the differential test in
-# `crates/rgx-core/src/differential.rs` held the in-house searcher
-# against the upstream `grep-searcher` runner. That file is gone; the
-# differential it held lives in `crates/rgx-core/src/searcher/tests.rs`,
-# and it no longer needs the upstream crates -- the in-house searcher is
-# now the only engine, so the differential compares rgx's slice path
-# against its own reader path. The 89 tests still pin the in-house
-# searcher; the 3 dev-deps are gone.
-regex = "1"
+# `default-features = false` is load-bearing. The `regex` crate's `std`
+# feature turns on `memchr/std`, and `memchr`'s `std` feature is what links
+# the standard library into the binary -- so a dev-dependency with `std` on
+# would put `std` back into the `--no-default-features` build through the
+# back door, and the `no_std` gate would be testing a build that is not
+# `no_std`. Cargo unifies features across the whole graph, dev-dependencies
+# included, so the leak is real and it is silent: the build succeeds and the
+# tests pass. With `default-features = false` the oracle is the `alloc`-only
+# build of `regex`, which answers the same questions.
+regex = { version = "1", default-features = false, features = ["perf", "unicode"] }
 # `aho-corasick` is gone. The only consumer was the
 # `examples/prefilter_ablate.rs` ablation, which used the packed
 # search as a Teddy-shaped reference; the bench now compares rgx's

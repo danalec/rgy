@@ -613,7 +613,14 @@ fn read_len(reader: &mut Reader<'_>) -> Option<usize> {
 /// index `i` of the stream `j` is the byte at the index `i * n + j` of the
 /// whole.
 #[cfg(feature = "cram")]
-fn decode_stripe(reader: &mut Reader<'_>, len: usize) -> Option<Vec<u8>> {
+fn decode_stripe(reader: &mut Reader<'_>, len: usize, depth: usize) -> Option<Vec<u8>> {
+    // A sub-stream of a stripe may itself claim the stripe flag, and each
+    // nesting level costs four bytes of the block: unbounded, a small
+    // crafted block nests until the stack goes. Stripes do not
+    // legitimately nest at all, so the depth bound is generous.
+    if depth > 8 {
+        return None;
+    }
     let n = usize::from(reader.byte()?);
     if n < 1 {
         // There is at least one stream.
@@ -638,7 +645,11 @@ fn decode_stripe(reader: &mut Reader<'_>, len: usize) -> Option<Vec<u8>> {
         // The length of a stream is not stored in it: the length of the
         // whole says how long each one is.
         let ulen = len / n + usize::from((len % n) > j);
-        streams.push(decode_frame(&mut Reader::new(bytes), Some(ulen))?);
+        streams.push(decode_frame(
+            &mut Reader::new(bytes),
+            Some(ulen),
+            depth + 1,
+        )?);
     }
     let mut out = vec![0u8; len];
     for (j, stream) in streams.iter().enumerate() {
@@ -654,7 +665,7 @@ fn decode_stripe(reader: &mut Reader<'_>, len: usize) -> Option<Vec<u8>> {
 /// The `expected` length is the length of the data when the frame does not
 /// carry it, which is the case of the streams of a striped frame.
 #[cfg(feature = "cram")]
-fn decode_frame(reader: &mut Reader<'_>, expected: Option<usize>) -> Option<Vec<u8>> {
+fn decode_frame(reader: &mut Reader<'_>, expected: Option<usize>, depth: usize) -> Option<Vec<u8>> {
     let flags = reader.byte()?;
     if flags & RESERVED != 0 {
         // The specification reserves the bit for a future order and does
@@ -676,7 +687,7 @@ fn decode_frame(reader: &mut Reader<'_>, expected: Option<usize>) -> Option<Vec<
         }
     }
     if flags & STRIPE != 0 {
-        return decode_stripe(reader, len);
+        return decode_stripe(reader, len, depth);
     }
 
     let n = if flags & N32 != 0 { 32 } else { 4 };
@@ -744,7 +755,7 @@ fn decode_frame(reader: &mut Reader<'_>, expected: Option<usize>) -> Option<Vec<
 #[cfg(feature = "cram")]
 pub(crate) fn decode(block: &[u8]) -> Option<Vec<u8>> {
     let mut reader = Reader::new(block);
-    decode_frame(&mut reader, None)
+    decode_frame(&mut reader, None, 0)
 }
 /// The frame of "abracadabra" four times and a "d", with order 0, written
 /// by the reference implementation of the codec.

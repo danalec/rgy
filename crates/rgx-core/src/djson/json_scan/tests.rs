@@ -123,22 +123,20 @@ fn avx2_scan(_bytes: &[u8]) -> Option<StructuralIndex> {
 
 #[test]
 fn cpuid_detection_matches_the_std_macro() {
-    // `scan` dispatches on `is_x86_feature_detected!` when `std` is on and on
-    // the hand-written CPUID/XGETBV read when it is not. Only one of them is
-    // live in a given build, so this is the only place the two are ever both
-    // run -- and it is here because a no_std build that dispatched on a
-    // detection that disagrees with `std`'s would trap on a kernel that
-    // reports AVX2 without saving the YMM state.
-    //
-    // `std::` is out of reach without the feature, so on a `no_std` test run
-    // this asserts the weaker half: that the hand-written read is
-    // self-consistent with the vector path being callable.
+    // The dispatch reads the hand-written CPUID/XGETBV probe in every build,
+    // `std` or not, so the standard library's answer is the one this crate is
+    // measured against. The probe lives in `crate::detect` and is tested
+    // against the standard library there; what is checked here is the half
+    // that is this module's own: the vector path is callable exactly when the
+    // detection says it is. A no_std build that dispatched on a detection
+    // that disagrees with `std`'s would trap on a kernel that reports AVX2
+    // without saving the YMM state.
     #[cfg(all(target_arch = "x86_64", feature = "std"))]
     {
         assert_eq!(has_avx2(), std::is_x86_feature_detected!("avx2"));
-        assert_eq!(detect::avx2(), std::is_x86_feature_detected!("avx2"));
+        assert_eq!(crate::detect::avx2(), std::is_x86_feature_detected!("avx2"));
         assert_eq!(
-            detect::pclmulqdq(),
+            crate::detect::pclmulqdq(),
             std::is_x86_feature_detected!("pclmulqdq")
         );
         assert_eq!(
@@ -151,7 +149,10 @@ fn cpuid_detection_matches_the_std_macro() {
         // Whatever the answer, the vector path is callable exactly when it is
         // said to be.
         assert_eq!(avx2_scan(b"{}").is_some(), has_avx2_pclmulqdq());
-        assert_eq!(has_avx2_pclmulqdq(), detect::avx2() && detect::pclmulqdq(),);
+        assert_eq!(
+            has_avx2_pclmulqdq(),
+            crate::detect::avx2() && crate::detect::pclmulqdq(),
+        );
     }
 }
 
@@ -645,8 +646,12 @@ fn the_predicate_on_a_small_document_is_what_it_looks_like() {
     assert_eq!(scan_swar(input), got);
     // On x86_64 this holds the vector path to the same answer as well; on a
     // target without AVX2 there is no fourth implementation to compare.
+    // The question is the *feature*, not the architecture: an x86_64 that
+    // cannot run the vector path has no answer to compare, and asking it
+    // for one failed on a CPU without AVX2 -- the two tests above ask
+    // `has_avx2_pclmulqdq()` first, and this one did not.
     #[cfg(target_arch = "x86_64")]
-    assert_eq!(avx2_scan(input), Some(got.clone()));
+    assert_eq!(avx2_scan(input), has_avx2_pclmulqdq().then(|| got.clone()));
 }
 
 #[test]

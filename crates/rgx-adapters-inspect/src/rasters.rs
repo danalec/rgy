@@ -602,6 +602,12 @@ const DJVU_ANTZ: &[u8] = b"ANTz";
 const DJVU_ANTA: &[u8] = b"ANTa";
 #[cfg(feature = "djvu")]
 const DJVU_FORM: &[u8] = b"FORM";
+/// The inflation ceiling for one annotation chunk, the same rule every
+/// other inflate in this crate follows: a chunk that expands past it is
+/// taken capped rather than whole, and the bytes past the cap are the
+/// bomb's, not the answer's.
+#[cfg(feature = "djvu")]
+const DJVU_MAX_INFLATE: u64 = 32 << 20;
 
 #[cfg(feature = "djvu")]
 pub struct Djvu;
@@ -692,9 +698,13 @@ fn djvu_report(data: &[u8]) -> Vec<u8> {
                 // Both are zlib-framed except ANTa, whose name says it is
                 // not. Inflating a chunk that is not framed is the single
                 // most common way a DjVu reader loses its annotations.
+                // The decode is bounded: an annotation chunk has no
+                // business expanding past the ceiling, and the walk
+                // accumulates every chunk it meets.
                 let body_bytes = &data[body..body + len];
                 let plain = rgx_core::compress::zlib::ZlibDecoder::new()
-                    .decode(body_bytes)
+                    .decode_bounded(body_bytes, DJVU_MAX_INFLATE)
+                    .map(|b| b.bytes)
                     .unwrap_or_else(|_| body_bytes.to_vec());
                 annotations.extend_from_slice(&plain);
             }

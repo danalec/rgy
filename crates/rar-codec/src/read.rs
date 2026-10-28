@@ -252,14 +252,16 @@ impl core::fmt::Debug for Archive<'_> {
 }
 
 impl<'a> Archive<'a> {
-    /// Open a single volume and parse it strictly: every header CRC32 must
-    /// verify.
+    /// Open a single volume and parse it strictly: every RAR5 header CRC32
+    /// must verify. A RAR4 header CRC is read but never enforced, so the
+    /// two functions differ for RAR5 alone.
     pub fn open(data: &'a [u8]) -> Result<Self> {
         Self::parse(data, true)
     }
 
-    /// Open a single volume without checking header CRC32s. Used on a
-    /// damaged archive where the structure is intact but a checksum is not.
+    /// Open a single volume without checking the RAR5 header CRC32s. Used
+    /// on a damaged archive where the structure is intact but a checksum is
+    /// not. A RAR4 header CRC is not enforced either way.
     pub fn open_lenient(data: &'a [u8]) -> Result<Self> {
         Self::parse(data, false)
     }
@@ -810,7 +812,19 @@ impl<'a> Archive<'a> {
         let version = (cinfo & 0x3f) as u8;
         let solid = cinfo & 0x40 != 0;
         let dict_exp = ((cinfo >> 10) & 0x1f) as u32;
-        let dictionary_size = 128 * 1024u64 * (1u64 << dict_exp.min(30));
+        // The exponent is five bits of the file: an unclamped 30 asks the
+        // unpacker for a 128 GiB window, and a window allocation that
+        // fails aborts the process -- an allocation cap cannot be caught.
+        // Clamping instead would decode a real large-dictionary archive
+        // through a window too small for its back-references, which is a
+        // wrong answer rather than a loud one, so past 1 GiB the entry is
+        // refused by name.
+        if dict_exp > 13 {
+            return Err(Error::Malformed(
+                "dictionary larger than this reader supports (max 1 GiB)",
+            ));
+        }
+        let dictionary_size = 128 * 1024u64 * (1u64 << dict_exp);
 
         let kind = match extra {
             Extra::Redirect { kind: k } => match k {

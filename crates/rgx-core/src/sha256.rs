@@ -332,6 +332,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn never_panics_on_arbitrary_bytes() {
         let corpus: Vec<(&'static str, Vec<u8>)> = vec![

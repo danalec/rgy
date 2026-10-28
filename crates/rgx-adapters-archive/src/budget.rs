@@ -253,6 +253,15 @@ impl MemberSink {
         self.declared = Some(entries);
     }
 
+    /// How many member bytes are left under the budget. For a producer
+    /// whose next step materializes more than the member it is about to
+    /// push — a 7z folder is decoded whole before any entry of it can be
+    /// refused — the declaration is checked against this before the
+    /// materialization, not after.
+    pub fn remaining_bytes(&self) -> u64 {
+        self.limit.bytes.saturating_sub(self.used)
+    }
+
     /// Reserve room for a member of `declared_size` bytes. False means it
     /// does not fit and the producer must stop; the sink has recorded which
     /// budget said so.

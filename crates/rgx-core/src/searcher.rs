@@ -39,7 +39,7 @@
 use alloc::vec::Vec;
 use core::fmt;
 
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::*;
 
 use super::matcher::Matcher;
@@ -1039,9 +1039,9 @@ fn count_set_in(words: &[u64], from: usize, to: usize) -> u64 {
     if words.len() < to.div_ceil(64) {
         return 0;
     }
-    #[cfg(all(feature = "std", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     {
-        if std::arch::is_x86_feature_detected!("avx2") {
+        if crate::detect::avx2() {
             // SAFETY: guarded by the runtime feature check above, which is
             // `avx2_count_set_in`'s documented precondition; the coverage
             // check above establishes the other half, that `[from, to)` lies
@@ -1104,7 +1104,7 @@ fn scalar_count_set_in(words: &[u64], from: usize, to: usize) -> u64 {
 /// # Safety
 ///
 /// The caller must have established that the CPU supports AVX2.
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn avx2_count_set_in(words: &[u64], from: usize, to: usize) -> u64 {
     if to <= from {
@@ -1224,9 +1224,9 @@ fn prev_term(words: &[u64], from: usize) -> Option<usize> {
     if from == 0 {
         return None;
     }
-    #[cfg(all(feature = "std", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     {
-        if std::arch::is_x86_feature_detected!("avx2") {
+        if crate::detect::avx2() {
             // SAFETY: guarded by the runtime feature check above, which is
             // `avx2_prev_term`'s documented precondition.
             return unsafe { avx2_prev_term(words, from) };
@@ -1266,7 +1266,7 @@ fn scalar_prev_term(words: &[u64], from: usize) -> Option<usize> {
 /// # Safety
 ///
 /// The caller must have established that the CPU supports AVX2.
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn avx2_prev_term(words: &[u64], from: usize) -> Option<usize> {
     if from == 0 {

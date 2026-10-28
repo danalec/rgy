@@ -387,12 +387,22 @@ impl TarReader {
             let Ok(len) = len_str.trim().parse::<usize>() else {
                 break;
             };
-            if len == 0 || pos + len > body.len() {
+            // A declared length can lie in both directions: a huge one
+            // wraps `pos + len` past `usize::MAX` and a tiny one leaves
+            // the record shorter than its own `<digits> ` prefix. Both
+            // end the walk rather than slicing what is not there.
+            let Some(end) = pos.checked_add(len) else {
+                break;
+            };
+            if len == 0 || end > body.len() {
                 break;
             }
             // Skip "<len> " then take everything up to the final newline.
             let start = pos + sp + 1;
-            let record = &body[start..pos + len];
+            if start > end {
+                break;
+            }
+            let record = &body[start..end];
             if let Some(nl) = record.iter().rposition(|&b| b == b'\n') {
                 let record = &record[..nl];
                 if let Some(eq) = record.iter().position(|&b| b == b'=') {
@@ -711,6 +721,27 @@ mod tests {
         assert_eq!(got.len(), 2, "got {got:?}");
         assert_eq!(got[0], ("path".to_string(), "a/b.txt".to_string()));
         assert_eq!(got[1], ("size".to_string(), "42".to_string()));
+    }
+
+    /// A record's declared length can lie in both directions, and neither
+    /// one may panic: a length near `usize::MAX` used to wrap the bounds
+    /// check past itself, and a length shorter than its own `<digits> `
+    /// prefix used to invert the record slice.
+    #[test]
+    fn a_pax_record_length_that_lies_ends_the_walk_rather_than_panicking() {
+        // One honest record, then one whose length wraps `pos + len`.
+        let mut body = pax_record("path", "a/b.txt");
+        body.extend_from_slice(b"18446744073709551615 y=z\n");
+        let got = TarReader::parse_pax_records(&body);
+        assert_eq!(got.len(), 1, "the lying record ends the walk: {got:?}");
+        assert_eq!(got[0].0, "path");
+
+        // A length too small to hold even the space after its own digits.
+        let got = TarReader::parse_pax_records(b"1 x=y\n");
+        assert!(
+            got.is_empty(),
+            "a record shorter than its prefix is not a record"
+        );
     }
 
     #[test]

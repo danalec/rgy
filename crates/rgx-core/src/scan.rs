@@ -29,15 +29,15 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::*;
 
 use super::literal::NibbleMask;
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 use super::literal::MAX_FINGERPRINT;
 
 /// The number of bytes one AVX2 iteration consumes.
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 const LANES: usize = 32;
 
 /// Every offset where a fingerprint **could start**.
@@ -64,9 +64,9 @@ pub fn candidates(mask: &NibbleMask, hay: &[u8]) -> Vec<usize> {
             });
         }
     };
-    #[cfg(all(feature = "std", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     {
-        if std::arch::is_x86_feature_detected!("avx2") {
+        if crate::detect::avx2() {
             // SAFETY: guarded by the runtime feature check above, which
             // is `simd_candidates`'s documented precondition.
             let out = unsafe { simd_candidates(mask, hay) };
@@ -102,9 +102,9 @@ pub fn candidates_count(mask: &NibbleMask, hay: &[u8]) -> usize {
 /// scratch, the prefilter drops to one allocation per thread.
 /// Append candidate offsets for `mask` in `hay` to `out`.
 pub fn candidates_append(mask: &NibbleMask, hay: &[u8], out: &mut Vec<usize>) {
-    #[cfg(all(feature = "std", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     {
-        if std::arch::is_x86_feature_detected!("avx2") {
+        if crate::detect::avx2() {
             // SAFETY: feature check above is the documented precondition.
             unsafe { simd_candidates_into(mask, hay, out) };
             record_stats(mask, hay, out);
@@ -133,7 +133,7 @@ fn record_stats(mask: &NibbleMask, hay: &[u8], out: &[usize]) {
     let _ = mask;
 }
 
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn simd_candidates_into(mask: &NibbleMask, hay: &[u8], out: &mut Vec<usize>) {
     let positions = mask.positions();
@@ -182,9 +182,9 @@ unsafe fn simd_candidates_into(mask: &NibbleMask, hay: &[u8], out: &mut Vec<usiz
 /// 32 where AVX2 is in play, 1 for the scalar path. "Candidates per block"
 /// only means something against the block size that actually produced them.
 pub fn block_width() -> usize {
-    #[cfg(all(feature = "std", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     {
-        if std::arch::is_x86_feature_detected!("avx2") {
+        if crate::detect::avx2() {
             return LANES;
         }
     }
@@ -197,7 +197,7 @@ pub fn block_width() -> usize {
 ///
 /// The caller must have established that the CPU supports AVX2. Calling this
 /// without it is undefined behaviour, not a wrong answer.
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 pub unsafe fn simd_candidates(mask: &NibbleMask, hay: &[u8]) -> Vec<usize> {
     let positions = mask.positions();
@@ -261,7 +261,7 @@ pub unsafe fn simd_candidates(mask: &NibbleMask, hay: &[u8]) -> Vec<usize> {
 ///
 /// The caller must have established that the CPU supports AVX2, and
 /// `tables` must hold the mask's `P` broadcast table pairs.
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn scan_body<const P: usize>(
     hay: &[u8],
@@ -294,7 +294,7 @@ unsafe fn scan_body<const P: usize>(
 /// `pshufb` indexes its table with the low four bits of each byte and zeroes
 /// the lane if bit 7 is set, so masking the index to 0x0F is what keeps the
 /// lookup defined.
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn block<const P: usize>(
     p: *const u8,
@@ -328,7 +328,7 @@ unsafe fn block<const P: usize>(
 }
 
 /// Append every start in `cand`, whose bit `k` is a candidate at `base + k`.
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 #[inline]
 fn emit(mut cand: u32, base: usize, out: &mut Vec<usize>) {
     if (cand & (cand - 1)) == 0 {
@@ -348,7 +348,7 @@ fn emit(mut cand: u32, base: usize, out: &mut Vec<usize>) {
 /// [`super::literal::MAX_BUCKETS`] = 8 bits, so the high byte of every `u16`
 /// is zero. The assertion below is what stops that from silently becoming
 /// wrong if the bucket count ever grows past 8.
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 fn nibble_table(src: &[u16; 16]) -> __m256i {
     let mut bytes = [0u8; 32];
@@ -638,7 +638,7 @@ impl BitMap {
     /// it. The version that split the mask across `lo` and `lo + 1` put the
     /// high half at offsets `base + 64 ..` -- bytes the haystack does not have
     /// -- and every test that compared against the scalar definition found it.
-    #[cfg(all(feature = "std", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     #[inline]
     fn push32(&mut self, base: usize, lanes: u32) {
         if lanes == 0 {
@@ -655,7 +655,7 @@ impl BitMap {
     /// One word, never two, for the reason [`Self::push32`] gives: a 64-byte
     /// chunk at a 64-aligned base covers `[base, base + 64)`, which is exactly
     /// the word, so there is no straddle to get wrong.
-    #[cfg(all(feature = "std", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     #[inline]
     fn push64(&mut self, base: usize, bits: u64) {
         if bits == 0 {
@@ -867,13 +867,13 @@ impl Default for BitMap {
 /// than calling anything per line.
 pub fn term_bits(term: u8, hay: &[u8], out: &mut BitMap) {
     out.clear(hay.len());
-    #[cfg(all(feature = "std", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     {
-        if std::arch::is_x86_feature_detected!("avx512bw") {
+        if crate::detect::avx512bw() {
             unsafe { avx512_bits(&[term, 0, 0], 1, hay, out) };
             return;
         }
-        if std::arch::is_x86_feature_detected!("avx2") {
+        if crate::detect::avx2() {
             unsafe { avx2_bits(&[term, 0, 0], 1, hay, out) };
             return;
         }
@@ -903,13 +903,13 @@ pub fn term_bits(term: u8, hay: &[u8], out: &mut BitMap) {
 /// groups of three.
 pub fn byte_bits(needles: &[u8; 3], count: usize, hay: &[u8], out: &mut BitMap) {
     out.clear(hay.len());
-    #[cfg(all(feature = "std", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     {
-        if std::arch::is_x86_feature_detected!("avx512bw") {
+        if crate::detect::avx512bw() {
             unsafe { avx512_bits(needles, count, hay, out) };
             return;
         }
-        if std::arch::is_x86_feature_detected!("avx2") {
+        if crate::detect::avx2() {
             unsafe { avx2_bits(needles, count, hay, out) };
             return;
         }
@@ -947,13 +947,13 @@ pub fn byte_bits_many(needles: &[u8], hay: &[u8], out: &mut BitMap) {
     for chunk in needles.chunks(3) {
         let mut pad = [0u8; 3];
         pad[..chunk.len()].copy_from_slice(chunk);
-        #[cfg(all(feature = "std", target_arch = "x86_64"))]
+        #[cfg(target_arch = "x86_64")]
         {
-            if std::arch::is_x86_feature_detected!("avx512bw") {
+            if crate::detect::avx512bw() {
                 unsafe { avx512_bits(&pad, chunk.len(), hay, out) };
                 continue;
             }
-            if std::arch::is_x86_feature_detected!("avx2") {
+            if crate::detect::avx2() {
                 unsafe { avx2_bits(&pad, chunk.len(), hay, out) };
                 continue;
             }
@@ -977,13 +977,13 @@ pub fn byte_bits_many(needles: &[u8], hay: &[u8], out: &mut BitMap) {
 /// load per chunk feeds both masks (`pcmpeqb`+`pmovmskb` for the
 /// terminator, bare `pmovmskb` for the high bytes).
 pub fn term_high_bits(term: u8, hay: &[u8], terms: &mut BitMap, high: &mut BitMap) {
-    #[cfg(all(feature = "std", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     {
-        if std::arch::is_x86_feature_detected!("avx512bw") {
+        if crate::detect::avx512bw() {
             unsafe { avx512_term_high_bits(term, hay, terms, high) };
             return;
         }
-        if std::arch::is_x86_feature_detected!("avx2") {
+        if crate::detect::avx2() {
             unsafe { avx2_term_high_bits(term, hay, terms, high) };
             return;
         }
@@ -999,7 +999,7 @@ pub fn term_high_bits(term: u8, hay: &[u8], terms: &mut BitMap, high: &mut BitMa
 /// byte j -- which is the map word layout already, so there is no
 /// `pmovmsask` extraction and no merge: one load, two stores per 64 bytes.
 /// This is the kernel the two-pass baseline was already running twice.
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512bw")]
 unsafe fn avx512_term_high_bits(term: u8, hay: &[u8], terms: &mut BitMap, high: &mut BitMap) {
     use core::arch::x86_64::*;
@@ -1038,7 +1038,7 @@ unsafe fn avx512_term_high_bits(term: u8, hay: &[u8], terms: &mut BitMap, high: 
 /// high-byte mask, and the term mask is one compare more. The broadcast is
 /// hoisted and the word stores are unconditional -- the mask pairs are
 /// what the iteration is for, and branches there cost more than the writes.
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn avx2_term_high_bits(term: u8, hay: &[u8], terms: &mut BitMap, high: &mut BitMap) {
     use core::arch::x86_64::*;
@@ -1096,13 +1096,13 @@ unsafe fn avx2_term_high_bits(term: u8, hay: &[u8], terms: &mut BitMap, high: &m
 /// [`byte_bits_many`] clears.
 pub fn high_bits(hay: &[u8], out: &mut BitMap) {
     out.clear(hay.len());
-    #[cfg(all(feature = "std", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     {
-        if std::arch::is_x86_feature_detected!("avx512bw") {
+        if crate::detect::avx512bw() {
             unsafe { avx512_high_bits(hay, out) };
             return;
         }
-        if std::arch::is_x86_feature_detected!("avx2") {
+        if crate::detect::avx2() {
             unsafe { avx2_high_bits(hay, out) };
             return;
         }
@@ -1119,7 +1119,7 @@ pub fn high_bits(hay: &[u8], out: &mut BitMap) {
 
 /// AVX-2 fill of [`high_bits`]: `_mm256_movemask_epi8` of the raw register
 /// is the `>= 0x80` mask, so the compare the other kernels need is absent.
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 unsafe fn avx2_high_bits(hay: &[u8], out: &mut BitMap) {
     use core::arch::x86_64::*;
     if hay.is_empty() {
@@ -1153,7 +1153,7 @@ unsafe fn avx2_high_bits(hay: &[u8], out: &mut BitMap) {
 
 /// AVX-512BW fill of [`high_bits`]: `vpmovb2m` is the mask itself, one
 /// 64-byte chunk to one map word with no compare and no merge.
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 unsafe fn avx512_high_bits(hay: &[u8], out: &mut BitMap) {
     use core::arch::x86_64::*;
     if hay.is_empty() {
@@ -1211,12 +1211,12 @@ fn scalar_high_bits(hay: &[u8], base: usize, out: &mut BitMap) {
 /// Uses AVX-512 (64 bytes/cycle) or AVX2 (32 bytes/cycle) on x86_64,
 /// ARM NEON (16 bytes/cycle) on aarch64, and falls back to scalar counting.
 pub fn count_byte(target: u8, data: &[u8]) -> u64 {
-    #[cfg(all(feature = "std", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     {
-        if std::arch::is_x86_feature_detected!("avx512bw") {
+        if crate::detect::avx512bw() {
             return unsafe { avx512_count_byte(target, data) };
         }
-        if std::arch::is_x86_feature_detected!("avx2") {
+        if crate::detect::avx2() {
             return unsafe { avx2_count_byte(target, data) };
         }
     }
@@ -1246,7 +1246,7 @@ fn scalar_count_byte(target: u8, data: &[u8]) -> u64 {
     count
 }
 
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn avx2_count_byte(target: u8, data: &[u8]) -> u64 {
     let mut count = 0u64;
@@ -1299,7 +1299,7 @@ unsafe fn avx2_count_byte(target: u8, data: &[u8]) -> u64 {
     count
 }
 
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512bw")]
 unsafe fn avx512_count_byte(target: u8, data: &[u8]) -> u64 {
     let mut count = 0u64;
@@ -1365,7 +1365,7 @@ unsafe fn neon_count_byte(target: u8, data: &[u8]) -> u64 {
 }
 
 /// AVX-512 vector fill: 64 bytes per iteration directly into a 64-bit mask.
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512bw")]
 unsafe fn avx512_bits(needles: &[u8; 3], count: usize, hay: &[u8], out: &mut BitMap) {
     if hay.is_empty() {
@@ -1434,7 +1434,7 @@ unsafe fn avx512_bits(needles: &[u8; 3], count: usize, hay: &[u8], out: &mut Bit
 /// # Safety
 ///
 /// The caller must have established that the CPU supports AVX2.
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn avx2_bits(needles: &[u8; 3], count: usize, hay: &[u8], out: &mut BitMap) {
     if hay.is_empty() {
@@ -1610,13 +1610,13 @@ pub fn pair_offsets(needle: &[u8], hay: &[u8], out: &mut Vec<usize>) {
         return;
     }
     let k = k_for_pair(needle);
-    #[cfg(all(feature = "std", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     {
-        if std::arch::is_x86_feature_detected!("avx512bw") {
+        if crate::detect::avx512bw() {
             unsafe { avx512_pair_offsets(needle, k, hay, out) };
             return;
         }
-        if std::arch::is_x86_feature_detected!("avx2") {
+        if crate::detect::avx2() {
             unsafe { avx2_pair_offsets(needle, k, hay, out) };
             return;
         }
@@ -1638,13 +1638,13 @@ pub fn pair_bits(needle: &[u8], hay: &[u8], out: &mut BitMap) {
         return;
     }
     let k = k_for_pair(needle);
-    #[cfg(all(feature = "std", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     {
-        if std::arch::is_x86_feature_detected!("avx512bw") {
+        if crate::detect::avx512bw() {
             unsafe { avx512_pair_bits(needle, k, hay, out) };
             return;
         }
-        if std::arch::is_x86_feature_detected!("avx2") {
+        if crate::detect::avx2() {
             unsafe { avx2_pair_bits(needle, k, hay, out) };
             return;
         }
@@ -1657,6 +1657,417 @@ pub fn pair_bits(needle: &[u8], hay: &[u8], out: &mut BitMap) {
     {
         scalar_pair_bits(needle, k, hay, out);
     }
+}
+
+/// The first match of `needle` in `hay`, by the paired-byte scanner.
+///
+/// **This is the early-exit twin of [`pair_offsets`].** The
+/// offset-collecting scanner walks the whole haystack, because a caller
+/// that wants every match cannot stop at the first one; a caller that wants
+/// the first one can, and stopping is the difference between a scan that
+/// ends at the hit and a scan that ends at the end of the file.
+///
+/// **The pair is the needle's two rarest bytes, not its first byte and its
+/// rarest.** [`pair_offsets`] pairs the first byte with the rarest one,
+/// which is the right pair when the first byte is rare and a poor one when
+/// it is not: `needle12345` starts with an `n`, and every `n` in the
+/// haystack is a candidate that has to be confirmed and thrown away. The
+/// pair here is [`frequency::rarest_pair`]'s -- the same two offsets
+/// `memchr`'s own packed-pair kernel uses -- so the candidates are the rare
+/// ones whichever byte they sit at.
+///
+/// **The pair may be any two offsets, so the loads are not at the block's
+/// start.** The block at `s` loads the bytes at `s + i` and `s + j`, and
+/// the candidate is `s` itself: the needle starts at the candidate, and
+/// the two rare bytes sit at `i` and `j` inside it.
+pub fn pair_find(needle: &[u8], hay: &[u8]) -> Option<usize> {
+    if needle.len() < 2 || hay.len() < needle.len() {
+        return None;
+    }
+    let pair = super::frequency::rarest_pair(needle)?;
+    #[cfg(target_arch = "x86_64")]
+    {
+        // AVX-512 first, and the reason is measured rather than assumed.
+        //
+        // **The AVX2 kernel's speed depends on where the linker puts it.**
+        // The two builds of this crate differ by a few kilobytes of code,
+        // which moves the kernel to a different address, and the kernel's
+        // hot path then either straddles a 64-byte window or does not.
+        // Straddling costs the front end a cycle per block -- the same
+        // instructions measured 103 us in one build and 154 us in the
+        // other, reproducibly, with the machine code byte for byte the
+        // same. The AVX-512 kernel is not sensitive to it: 113 us, 112 us
+        // and 112 us in three builds whose layouts differ.
+        //
+        // So the forwards scan takes the 512-bit path where the CPU has
+        // it, and the AVX2 kernel below stays as the path for the CPUs
+        // that have AVX2 without AVX-512BW. The backwards scan already
+        // preferred AVX-512, and for a different and better reason: its
+        // AVX2 kernel is the one that runs out of registers, and the
+        // k-mask is what saves it (98 us against 139 us).
+        if crate::detect::avx512bw() {
+            return unsafe { avx512_pair_find(needle, pair, hay) };
+        }
+        if crate::detect::avx2() {
+            return unsafe { avx2_pair_find(needle, pair, hay) };
+        }
+    }
+    scalar_pair_find(needle, pair, hay)
+}
+
+/// The last match of `needle` in `hay`, by the paired-byte scanner.
+///
+/// The twin of [`pair_find`] that walks the haystack from its end. The
+/// blocks are the same 32 candidates wide and the pair is the same two
+/// rarest bytes; what differs is the order the blocks and the bits inside
+/// them are visited, because a backwards search wants the *highest*
+/// candidate first and a forwards one wants the lowest.
+pub fn pair_rfind(needle: &[u8], hay: &[u8]) -> Option<usize> {
+    if needle.len() < 2 || hay.len() < needle.len() {
+        return None;
+    }
+    let pair = super::frequency::rarest_pair(needle)?;
+    #[cfg(target_arch = "x86_64")]
+    {
+        if crate::detect::avx512bw() {
+            return unsafe { avx512_pair_rfind(needle, pair, hay) };
+        }
+        if crate::detect::avx2() {
+            return unsafe { avx2_pair_rfind(needle, pair, hay) };
+        }
+    }
+    scalar_pair_rfind(needle, pair, hay)
+}
+
+/// Whether the needle sits at the haystack's `hay`.
+///
+/// **This compares through raw pointers and never calls `memcmp`, and that
+/// is the whole point.** A call inside the scanner's loop clobbers every
+/// vector register, so the two broadcast vectors have to be spilled and
+/// reloaded on every block and the loop becomes load-bound: the same
+/// kernel measured 167 us with the call in it and 103 us without it.
+///
+/// **A bounds check is just as bad, for a different reason.** The panic
+/// path a bounds check drags in keeps the needle's pointer and length
+/// alive across the block, and the register pressure that follows is what
+/// makes the compiler hand the `movemask` result the very register the
+/// haystack's base pointer was living in -- a copy out of the loop and a
+/// copy back into it, on every block. The raw pointers below have no
+/// panic path to keep alive, and the block that uses them measures the
+/// same 103 us the upstream crate's own packed-pair kernel measures.
+///
+/// The comparison is on the candidate path, which is the rare one, so the
+/// byte at a time costs nothing that matters.
+///
+/// # Safety
+///
+/// `needle` and `hay` must each be valid for reads of `len` bytes.
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn needle_at(needle: *const u8, hay: *const u8, len: usize) -> bool {
+    let mut k = 0usize;
+    while k < len {
+        if *needle.add(k) != *hay.add(k) {
+            return false;
+        }
+        k += 1;
+    }
+    true
+}
+
+/// AVX2 paired-byte scan, forwards.
+///
+/// **The block walks the haystack with one induction variable -- the
+/// block's own address -- and the candidate's offset is computed from it
+/// only when there is a candidate to confirm.** A loop that carries the
+/// block's start as an index *and* the haystack's base as a pointer needs
+/// both, plus the two offsets of the pair's bytes, plus the mask; that is
+/// one register too many, and the compiler answers the shortage by
+/// handing the `movemask` result the register the base pointer was in.
+/// The block then copies the base out and back on every iteration. The
+/// single-pointer shape has nothing to copy: the same scan measured 154 us
+/// with the index loop and 103 us with this one, and the upstream crate's
+/// own packed-pair kernel -- the shape this follows -- measures the same
+/// 103 us.
+///
+/// The pair is the needle's two rarest bytes, so the candidates are the
+/// rare ones; [`pair_find`] says why that is not the needle's first byte
+/// and its rarest.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn avx2_pair_find(
+    needle: &[u8],
+    pair: super::frequency::RarePair,
+    hay: &[u8],
+) -> Option<usize> {
+    let len = needle.len();
+    let (i, j) = (pair.first, pair.second);
+    let vi = _mm256_set1_epi8(needle[i] as i8);
+    let vj = _mm256_set1_epi8(needle[j] as i8);
+    let limit = hay.len() - len;
+    let hi = i.max(j);
+
+    let start = hay.as_ptr();
+    let mut cur = start;
+    // The block at `cur` reads 32 bytes at `cur + i` and 32 bytes at
+    // `cur + j`, so it fits while `cur + hi + 32` is inside the haystack.
+    // When even the first block does not fit there is nothing to scan
+    // with vectors and the tail below does the whole haystack.
+    if let Some(fit) = hay.len().checked_sub(hi + 32) {
+        let max = start.add(fit + 1);
+        while cur < max {
+            let ci = _mm256_loadu_si256(cur.add(i) as *const __m256i);
+            let cj = _mm256_loadu_si256(cur.add(j) as *const __m256i);
+            let mut mask = _mm256_movemask_epi8(_mm256_and_si256(
+                _mm256_cmpeq_epi8(ci, vi),
+                _mm256_cmpeq_epi8(cj, vj),
+            )) as u32;
+
+            while mask != 0 {
+                let bit = mask.trailing_zeros() as usize;
+                let cand = cur.offset_from(start) as usize + bit;
+                if cand <= limit && needle_at(needle.as_ptr(), cur.add(bit), len) {
+                    return Some(cand);
+                }
+                mask &= mask - 1;
+            }
+            cur = cur.add(32);
+        }
+    }
+
+    // The candidates the blocks did not cover.
+    //
+    // **The tail reads the needle through raw pointers, and that is not a
+    // detail.** A tail that reads `needle[i]` has a bounds check, and the
+    // panic path behind it keeps the needle's *length* alive across the
+    // vector loop; the tail that reads `needle[j]` keeps the needle's
+    // *byte* alive across it. Either one is a value the loop has to carry
+    // in a register it does not have, and the compiler answers the
+    // shortage by spilling it and reloading it on every block -- the
+    // reload lands in the loop's latch, where it costs a cycle per block,
+    // and the scan measured 155 us with it and 103 us without it.
+    let nptr = needle.as_ptr();
+    let hptr = hay.as_ptr();
+    let mut s = cur.offset_from(start) as usize;
+    while s <= limit {
+        if *nptr.add(i) == *hptr.add(s + i)
+            && *nptr.add(j) == *hptr.add(s + j)
+            && needle_at(nptr, hptr.add(s), len)
+        {
+            return Some(s);
+        }
+        s += 1;
+    }
+    None
+}
+
+/// AVX2 paired-byte scan, backwards.
+///
+/// The twin of [`avx2_pair_find`] that walks the haystack from its end.
+/// The blocks are the same 32 candidates wide and the pair is the same two
+/// rarest bytes; what differs is the order the blocks and the bits inside
+/// them are visited, because a backwards search wants the *highest*
+/// candidate first and a forwards one wants the lowest.
+///
+/// **The block that covers the highest candidate starts at `limit - 31`,
+/// and its loads reach `limit + hi + 1`.** That is inside the haystack
+/// because `hi` is inside the needle: `limit` is the last start a needle
+/// of this length can have, so `limit + hi + 1` is the needle's own end
+/// plus one at worst. Every block below it fits for the same reason.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn avx2_pair_rfind(
+    needle: &[u8],
+    pair: super::frequency::RarePair,
+    hay: &[u8],
+) -> Option<usize> {
+    let len = needle.len();
+    let (i, j) = (pair.first, pair.second);
+    let vi = _mm256_set1_epi8(needle[i] as i8);
+    let vj = _mm256_set1_epi8(needle[j] as i8);
+    let limit = hay.len() - len;
+
+    let start = hay.as_ptr();
+    // One past the highest candidate the blocks have covered.
+    let mut top = limit + 1;
+    while top >= 32 {
+        let b = top - 32;
+        let p = start.add(b);
+        let ci = _mm256_loadu_si256(p.add(i) as *const __m256i);
+        let cj = _mm256_loadu_si256(p.add(j) as *const __m256i);
+        let mut mask = _mm256_movemask_epi8(_mm256_and_si256(
+            _mm256_cmpeq_epi8(ci, vi),
+            _mm256_cmpeq_epi8(cj, vj),
+        )) as u32;
+
+        while mask != 0 {
+            // The highest set bit first: a backwards search wants the
+            // last match, and the block is visited from its top.
+            let bit = 31 - mask.leading_zeros() as usize;
+            let cand = b + bit;
+            if cand <= limit && needle_at(needle.as_ptr(), p.add(bit), len) {
+                return Some(cand);
+            }
+            mask &= !(1u32 << bit);
+        }
+        top = b;
+    }
+
+    // The candidates the blocks did not cover, from the top down.
+    let nptr = needle.as_ptr();
+    let hptr = hay.as_ptr();
+    let mut cand = top;
+    while cand > 0 {
+        cand -= 1;
+        if *nptr.add(i) == *hptr.add(cand + i)
+            && *nptr.add(j) == *hptr.add(cand + j)
+            && needle_at(nptr, hptr.add(cand), len)
+        {
+            return Some(cand);
+        }
+    }
+    None
+}
+
+/// AVX-512 paired-byte scan, forwards.
+///
+/// The twin of [`avx2_pair_find`] with 64 candidates to a block. The
+/// mask is a `k` register here, so the block never round-trips through a
+/// general-purpose register the way the AVX2 one does.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512bw")]
+unsafe fn avx512_pair_find(
+    needle: &[u8],
+    pair: super::frequency::RarePair,
+    hay: &[u8],
+) -> Option<usize> {
+    let len = needle.len();
+    let (i, j) = (pair.first, pair.second);
+    let vi = _mm512_set1_epi8(needle[i] as i8);
+    let vj = _mm512_set1_epi8(needle[j] as i8);
+    let limit = hay.len() - len;
+    let hi = i.max(j);
+
+    let start = hay.as_ptr();
+    let mut cur = start;
+    if let Some(fit) = hay.len().checked_sub(hi + 64) {
+        let max = start.add(fit + 1);
+        while cur < max {
+            let ci = _mm512_loadu_si512(cur.add(i) as *const _);
+            let cj = _mm512_loadu_si512(cur.add(j) as *const _);
+            let mut mask = _mm512_cmpeq_epi8_mask(ci, vi) & _mm512_cmpeq_epi8_mask(cj, vj);
+
+            while mask != 0 {
+                let bit = mask.trailing_zeros() as usize;
+                let cand = cur.offset_from(start) as usize + bit;
+                if cand <= limit && needle_at(needle.as_ptr(), cur.add(bit), len) {
+                    return Some(cand);
+                }
+                mask &= mask - 1;
+            }
+            cur = cur.add(64);
+        }
+    }
+
+    let mut s = cur.offset_from(start) as usize;
+    let nptr = needle.as_ptr();
+    let hptr = hay.as_ptr();
+    while s <= limit {
+        if *nptr.add(i) == *hptr.add(s + i)
+            && *nptr.add(j) == *hptr.add(s + j)
+            && needle_at(nptr, hptr.add(s), len)
+        {
+            return Some(s);
+        }
+        s += 1;
+    }
+    None
+}
+
+/// AVX-512 paired-byte scan, backwards.
+///
+/// The twin of [`avx512_pair_find`] that walks the haystack from its end,
+/// with the same 64 candidates to a block and the same reason the highest
+/// block fits: the candidate `limit` is the needle's last start, so the
+/// block that covers it reads no further than the needle's own end.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512bw")]
+unsafe fn avx512_pair_rfind(
+    needle: &[u8],
+    pair: super::frequency::RarePair,
+    hay: &[u8],
+) -> Option<usize> {
+    let len = needle.len();
+    let (i, j) = (pair.first, pair.second);
+    let vi = _mm512_set1_epi8(needle[i] as i8);
+    let vj = _mm512_set1_epi8(needle[j] as i8);
+    let limit = hay.len() - len;
+
+    let start = hay.as_ptr();
+    let mut top = limit + 1;
+    while top >= 64 {
+        let b = top - 64;
+        let p = start.add(b);
+        let ci = _mm512_loadu_si512(p.add(i) as *const _);
+        let cj = _mm512_loadu_si512(p.add(j) as *const _);
+        let mut mask = _mm512_cmpeq_epi8_mask(ci, vi) & _mm512_cmpeq_epi8_mask(cj, vj);
+
+        while mask != 0 {
+            let bit = 63 - mask.leading_zeros() as usize;
+            let cand = b + bit;
+            if cand <= limit && needle_at(needle.as_ptr(), p.add(bit), len) {
+                return Some(cand);
+            }
+            mask &= !(1u64 << bit);
+        }
+        top = b;
+    }
+
+    let mut cand = top;
+    let nptr = needle.as_ptr();
+    let hptr = hay.as_ptr();
+    while cand > 0 {
+        cand -= 1;
+        if *nptr.add(i) == *hptr.add(cand + i)
+            && *nptr.add(j) == *hptr.add(cand + j)
+            && needle_at(nptr, hptr.add(cand), len)
+        {
+            return Some(cand);
+        }
+    }
+    None
+}
+
+// The oracle of the paired-byte paths, for the reason `scalar_pair_offsets`
+// carries: it stays compiled on every target, and a build without the
+// test harness calls nothing here.
+#[allow(dead_code)]
+fn scalar_pair_find(needle: &[u8], pair: super::frequency::RarePair, hay: &[u8]) -> Option<usize> {
+    let len = needle.len();
+    let (i, j) = (pair.first, pair.second);
+    let limit = hay.len() - len;
+    for s in 0..=limit {
+        if hay[s + i] == needle[i] && hay[s + j] == needle[j] && &hay[s..s + len] == needle {
+            return Some(s);
+        }
+    }
+    None
+}
+
+// The oracle of the paired-byte paths, for the reason `scalar_pair_offsets`
+// carries: it stays compiled on every target, and a build without the
+// test harness calls nothing here.
+#[allow(dead_code)]
+fn scalar_pair_rfind(needle: &[u8], pair: super::frequency::RarePair, hay: &[u8]) -> Option<usize> {
+    let len = needle.len();
+    let (i, j) = (pair.first, pair.second);
+    let limit = hay.len() - len;
+    for s in (0..=limit).rev() {
+        if hay[s + i] == needle[i] && hay[s + j] == needle[j] && &hay[s..s + len] == needle {
+            return Some(s);
+        }
+    }
+    None
 }
 
 /// Fill `cands` and `terms` in one haystack pass — the pair scan and the
@@ -1679,9 +2090,9 @@ pub fn pair_term_bits(needle: &[u8], term: u8, hay: &[u8], cands: &mut BitMap, t
         return;
     }
     let k = k_for_pair(needle);
-    #[cfg(all(feature = "std", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     {
-        if std::arch::is_x86_feature_detected!("avx2") {
+        if crate::detect::avx2() {
             unsafe { avx2_pair_term_bits(needle, k, term, hay, cands, terms) };
             return;
         }
@@ -1691,13 +2102,13 @@ pub fn pair_term_bits(needle: &[u8], term: u8, hay: &[u8], cands: &mut BitMap, t
 
 /// Fill only `terms` from a pre-cleared map (the pair scan was skipped).
 fn term_bits_into(term: u8, hay: &[u8], terms: &mut BitMap) {
-    #[cfg(all(feature = "std", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     {
-        if std::arch::is_x86_feature_detected!("avx512bw") {
+        if crate::detect::avx512bw() {
             unsafe { avx512_bits(&[term, 0, 0], 1, hay, terms) };
             return;
         }
-        if std::arch::is_x86_feature_detected!("avx2") {
+        if crate::detect::avx2() {
             unsafe { avx2_bits(&[term, 0, 0], 1, hay, terms) };
             return;
         }
@@ -1712,7 +2123,7 @@ fn term_bits_into(term: u8, hay: &[u8], terms: &mut BitMap) {
 /// term comparison — that is the whole saving. Six loads become four per
 /// 64-byte chunk, and two `movemask`+store rounds happen from one pass
 /// instead of two.
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn avx2_pair_term_bits(
     needle: &[u8],
@@ -1919,7 +2330,7 @@ fn scalar_pair_term_bits(
     }
 }
 
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512bw")]
 unsafe fn avx512_pair_offsets(needle: &[u8], k: usize, hay: &[u8], out: &mut Vec<usize>) {
     let len = needle.len();
@@ -1986,7 +2397,7 @@ unsafe fn avx512_pair_offsets(needle: &[u8], k: usize, hay: &[u8], out: &mut Vec
     }
 }
 
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512bw")]
 unsafe fn avx512_pair_bits(needle: &[u8], k: usize, hay: &[u8], out: &mut BitMap) {
     let len = needle.len();
@@ -2057,7 +2468,7 @@ unsafe fn avx512_pair_bits(needle: &[u8], k: usize, hay: &[u8], out: &mut BitMap
     }
 }
 
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn avx2_pair_offsets(needle: &[u8], k: usize, hay: &[u8], out: &mut Vec<usize>) {
     let len = needle.len();
@@ -2131,7 +2542,7 @@ unsafe fn avx2_pair_offsets(needle: &[u8], k: usize, hay: &[u8], out: &mut Vec<u
     }
 }
 
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn avx2_pair_bits(needle: &[u8], k: usize, hay: &[u8], out: &mut BitMap) {
     let len = needle.len();
@@ -2967,14 +3378,14 @@ impl MatchMask {
 
     /// Fill `out` with a bit at every offset of `hay` where a match can start.
     pub fn match_bits(&self, hay: &[u8], out: &mut BitMap) {
-        #[cfg(all(feature = "std", target_arch = "x86_64"))]
+        #[cfg(target_arch = "x86_64")]
         {
-            if std::arch::is_x86_feature_detected!("avx512bw") {
+            if crate::detect::avx512bw() {
                 // SAFETY: guarded by the runtime feature check above.
                 unsafe { avx512_match_bits(self, hay, out) };
                 return;
             }
-            if std::arch::is_x86_feature_detected!("avx2") {
+            if crate::detect::avx2() {
                 // SAFETY: guarded by the runtime feature check above, which is
                 // `avx2_match_bits`'s documented precondition.
                 unsafe { avx2_match_bits(self, hay, out) };
@@ -3018,7 +3429,7 @@ fn scalar_match_bits(plan: &MatchMask, hay: &[u8], out: &mut BitMap) {
 /// The vector fill for AVX-512BW: 64 bytes per iteration directly into a 64-bit mask.
 /// Single-byte ops evaluate in a single `_mm512_cmpeq_epi8_mask` instruction, short-circuiting
 /// branch evaluation immediately when the accumulator is zero.
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,avx512bw")]
 unsafe fn avx512_match_bits(plan: &MatchMask, hay: &[u8], out: &mut BitMap) {
     out.clear(hay.len());
@@ -3106,7 +3517,7 @@ unsafe fn avx512_match_bits(plan: &MatchMask, hay: &[u8], out: &mut BitMap) {
     }
 }
 
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn avx2_match_bits(plan: &MatchMask, hay: &[u8], out: &mut BitMap) {
     out.clear(hay.len());
@@ -3227,7 +3638,7 @@ unsafe fn avx2_match_bits(plan: &MatchMask, hay: &[u8], out: &mut BitMap) {
 }
 
 /// Broadcast one 16-byte table into both `pshufb` lanes.
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 fn broadcast(src: &[u8; 32]) -> __m256i {
     // Both lanes carry the same table because `pshufb` is lane-local: the
@@ -3244,7 +3655,7 @@ fn broadcast(src: &[u8; 32]) -> __m256i {
 /// intrinsics callable without an `unsafe` block: the caller of *this*
 /// function has already established AVX2 and `#[target_feature]` carries that
 /// into the body.
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 fn lookup(v: __m256i, tl: __m256i, th: __m256i, k0f: __m256i) -> __m256i {
     let lo = _mm256_and_si256(v, k0f);
@@ -3254,7 +3665,7 @@ fn lookup(v: __m256i, tl: __m256i, th: __m256i, k0f: __m256i) -> __m256i {
 
 /// One 32-byte lane set as the low 32 bits of a `u64`, a set bit for every
 /// byte whose sign bit came out of [`lookup`].
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 fn lanes(v: __m256i) -> u64 {
     u64::from(_mm256_movemask_epi8(v) as u32)
@@ -3427,7 +3838,7 @@ mod mask_tests {
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn the_vector_fill_agrees_with_the_definition_at_every_length() {
-        if !std::arch::is_x86_feature_detected!("avx2") {
+        if !crate::detect::avx2() {
             return;
         }
         let mut lens: Vec<usize> = (0..200).collect();
@@ -3758,7 +4169,7 @@ mod mask_tests {
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn the_fill_does_not_read_past_the_haystack() {
-        if !std::arch::is_x86_feature_detected!("avx2") {
+        if !crate::detect::avx2() {
             return;
         }
         let plan = pub_fn_mask();
@@ -4114,7 +4525,7 @@ mod bit_tests {
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn avx2_and_scalar_agree_at_every_boundary() {
-        if !std::arch::is_x86_feature_detected!("avx2") {
+        if !crate::detect::avx2() {
             return;
         }
         let mut lens: Vec<usize> = (0..200).collect();
@@ -4337,7 +4748,7 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn simd_matches_scalar_on_random_input() {
-        if !std::arch::is_x86_feature_detected!("avx2") {
+        if !crate::detect::avx2() {
             return;
         }
         // A dependency-free xorshift, so the test does not need a crate and
@@ -4371,7 +4782,7 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn simd_matches_scalar_on_document_shaped_input() {
-        if !std::arch::is_x86_feature_detected!("avx2") {
+        if !crate::detect::avx2() {
             return;
         }
         let mask = mask_for(&[b"error", b"parse"], true);
@@ -4396,7 +4807,7 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn a_uniform_haystack_agrees() {
-        if !std::arch::is_x86_feature_detected!("avx2") {
+        if !crate::detect::avx2() {
             return;
         }
         let mask = mask_for(&[b"aa"], false);
@@ -4420,7 +4831,7 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn the_scan_does_not_read_past_the_haystack() {
-        if !std::arch::is_x86_feature_detected!("avx2") {
+        if !crate::detect::avx2() {
             return;
         }
         let mask = mask_for(&[b"abcd"], false);
@@ -4456,7 +4867,7 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn every_start_is_found_at_every_length_around_the_chunk_boundary() {
-        if !std::arch::is_x86_feature_detected!("avx2") {
+        if !crate::detect::avx2() {
             return;
         }
         assert_eq!(
@@ -4494,7 +4905,7 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn every_fingerprint_depth_agrees_with_scalar() {
-        if !std::arch::is_x86_feature_detected!("avx2") {
+        if !crate::detect::avx2() {
             return;
         }
         let doc = b"a ab abc abcd abcde abcd abc ab abcde aaa abcd abcd".to_vec();
@@ -4514,7 +4925,7 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn an_empty_mask_finds_nothing() {
-        if !std::arch::is_x86_feature_detected!("avx2") {
+        if !crate::detect::avx2() {
             return;
         }
         let mask = NibbleMask::new();
@@ -4532,7 +4943,7 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn the_result_is_strictly_ascending() {
-        if !std::arch::is_x86_feature_detected!("avx2") {
+        if !crate::detect::avx2() {
             return;
         }
         let mask = mask_for(&[b"error", b"parse"], true);
@@ -4560,7 +4971,7 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn a_candidate_in_the_high_lane_is_not_lost() {
-        if !std::arch::is_x86_feature_detected!("avx2") {
+        if !crate::detect::avx2() {
             return;
         }
         let mask = mask_for(&[b"zq"], false);

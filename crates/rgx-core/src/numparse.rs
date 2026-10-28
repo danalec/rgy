@@ -328,8 +328,93 @@ fn any_below(n: &[u32], below: usize) -> bool {
     rem > 0 && full < n.len() && n[full] & ((1u32 << rem) - 1) != 0
 }
 
+/// The digits of a decimal number, as they are read.
+///
+/// A `u64` holds 19 decimal digits and a `u128` holds 39, so the number a
+/// JSON document usually carries never leaves the narrow accumulator. The
+/// overflow check is a *counter*: the 128-bit division per digit that this
+/// replaced was the parser's whole cost, and the parser is on the path of
+/// every number in the document.
+///
+/// Past what the accumulator holds, a digit is refused: the caller drops it
+/// and the scale absorbs it.
+pub(crate) struct Mantissa {
+    /// The digits, while there are fewer than 19 of them.
+    narrow: u64,
+    /// The digits, once there are 19 or more.
+    wide: u128,
+    /// How many digits the accumulator holds.
+    digits: u32,
+    /// Whether a refused digit was nonzero. The truncated mantissa alone
+    /// cannot tell a value that lands exactly on a rounding tie from one
+    /// that is past it: a 39-digit midpoint with `+1` truncated back onto
+    /// the tie rounded to even, where the standard parser rounds up.
+    dropped_nonzero: bool,
+}
+
+impl Mantissa {
+    /// An empty accumulator.
+    pub(crate) fn new() -> Self {
+        Self {
+            narrow: 0,
+            wide: 0,
+            digits: 0,
+            dropped_nonzero: false,
+        }
+    }
+
+    /// Add one digit. `false` means the digit did not fit.
+    pub(crate) fn push(&mut self, d: u8) -> bool {
+        if self.digits < 19 {
+            // 19 digits fit in a `u64` exactly: 10^19 - 1 < u64::MAX.
+            self.narrow = self.narrow * 10 + u64::from(d);
+            self.digits += 1;
+            true
+        } else if self.digits == 19 {
+            // The 20th digit moves the accumulator to the wide one.
+            self.wide = u128::from(self.narrow) * 10 + u128::from(d);
+            self.digits += 1;
+            true
+        } else if self.digits < 38 {
+            // 38 digits fit in a `u128` exactly: 10^38 - 1 < u128::MAX.
+            self.wide = self.wide * 10 + u128::from(d);
+            self.digits += 1;
+            true
+        } else if self.wide <= (u128::MAX - u128::from(d)) / 10 {
+            self.wide = self.wide * 10 + u128::from(d);
+            self.digits += 1;
+            true
+        } else {
+            if d != 0 {
+                self.dropped_nonzero = true;
+            }
+            false
+        }
+    }
+
+    /// The digits, as the integer they spell.
+    pub(crate) fn value(&self) -> u128 {
+        if self.digits <= 19 {
+            u128::from(self.narrow)
+        } else {
+            self.wide
+        }
+    }
+
+    /// Whether any refused digit was nonzero — the value is strictly
+    /// greater than the one [`Mantissa::value`] spells.
+    pub(crate) fn dropped_nonzero(&self) -> bool {
+        self.dropped_nonzero
+    }
+}
+
 /// `mant * 10^scale`, correctly rounded.
-pub fn scale_decimal(mant: u128, scale: i32) -> f64 {
+///
+/// `sticky` says the true value is strictly greater than `mant * 10^scale`
+/// by something under the last digit's place — digits the mantissa refused.
+/// It only matters at an exact tie, and there it is the difference between
+/// rounding to even and rounding up.
+pub fn scale_decimal(mant: u128, scale: i32, sticky: bool) -> f64 {
     let scale = scale.clamp(-MAX_SCALE, MAX_SCALE);
 
     // Clinger's fast path: both operands exact in f64 means the single
@@ -345,11 +430,11 @@ pub fn scale_decimal(mant: u128, scale: i32) -> f64 {
 
     let base = from_u128(mant);
     if scale >= 0 {
-        round_to_f64(&mul(&base, &pow10(scale as u32)), 0, false)
+        round_to_f64(&mul(&base, &pow10(scale as u32)), 0, sticky)
     } else {
         let k = (-scale) as u32;
         let (q, r) = divmod(&shl(&base, SHIFT), &pow10(k));
-        round_to_f64(&q, -(SHIFT as i32), r != [0])
+        round_to_f64(&q, -(SHIFT as i32), r != [0] || sticky)
     }
 }
 
@@ -365,6 +450,7 @@ fn exact_pow10(n: u32) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::alloc::string::{String, ToString};
     use std::println;
 
     #[test]
@@ -442,10 +528,84 @@ mod tests {
 
     #[test]
     fn extremes_are_finite_and_right() {
-        assert_eq!(scale_decimal(1, 308), 1e308);
-        assert!(scale_decimal(1, 309).is_infinite());
-        assert_eq!(scale_decimal(1, -324), 0.0);
-        assert_eq!(scale_decimal(5, -324), 5e-324);
+        assert_eq!(scale_decimal(1, 308, false), 1e308);
+        assert!(scale_decimal(1, 309, false).is_infinite());
+        assert_eq!(scale_decimal(1, -324, false), 0.0);
+        assert_eq!(scale_decimal(5, -324, false), 5e-324);
+    }
+
+    /// A 40-digit tie that truncation lands back on must still round up.
+    ///
+    /// The accumulator holds every number of 39 digits or fewer; refusal
+    /// begins at the 40th digit. A midpoint whose last two decimal digits
+    /// are `00` puts `midpoint + 1` one digit past the cut, and the
+    /// truncated mantissa spells the midpoint itself. Without the sticky
+    /// flag that tie rounded to even — down — where the standard parser,
+    /// which sees the `+1`, rounds up.
+    #[test]
+    fn a_truncated_tie_rounds_up_when_the_dropped_digit_is_nonzero() {
+        // A 40-digit midpoint cannot be built in a u128, so its decimal
+        // form is doubled out one bit at a time. An odd 54-bit significand
+        // on 2^77 is a midpoint in the 2^130 binade, and the first such
+        // significand divisible by 25 puts two zeros at the end of it.
+        let mut odd = (1u128 << 53) + 1;
+        while !odd.is_multiple_of(25) {
+            odd += 2;
+        }
+        let mut p = odd.to_string();
+        for _ in 0..77 {
+            p = double_the_digits(&p);
+        }
+        assert_eq!(p.len(), 40, "a 40-digit midpoint, got {p}");
+        assert!(p.ends_with("00"), "the truncation drops onto the tie: {p}");
+
+        let want: f64 = p.parse().unwrap();
+        assert_eq!(
+            crate::parse_decimal(&p).unwrap().to_bits(),
+            want.to_bits(),
+            "the tie itself still rounds to even"
+        );
+
+        let up = plus_one_digit(&p);
+        let want: f64 = up.parse().unwrap();
+        assert_eq!(
+            crate::parse_decimal(&up).unwrap().to_bits(),
+            want.to_bits(),
+            "the dropped `01` is strictly past the tie: {up}"
+        );
+    }
+
+    /// A decimal string doubled, by school arithmetic.
+    fn double_the_digits(s: &str) -> String {
+        let mut digits: Vec<u8> = s.bytes().map(|b| b - b'0').collect();
+        let mut carry = 0u8;
+        for d in digits.iter_mut().rev() {
+            let v = *d * 2 + carry;
+            *d = v % 10;
+            carry = v / 10;
+        }
+        let mut out = String::new();
+        if carry > 0 {
+            out.push((b'0' + carry) as char);
+        }
+        out.extend(digits.iter().map(|d| (b'0' + d) as char));
+        out
+    }
+
+    /// A decimal string plus one. The midpoint ends in `00`, so the carry
+    /// never runs off the front.
+    fn plus_one_digit(s: &str) -> String {
+        let mut digits: Vec<u8> = s.bytes().map(|b| b - b'0').collect();
+        let mut i = digits.len();
+        loop {
+            i -= 1;
+            if digits[i] < 9 {
+                digits[i] += 1;
+                break;
+            }
+            digits[i] = 0;
+        }
+        digits.iter().map(|d| (b'0' + d) as char).collect()
     }
     #[test]
     fn dbg_below_grid() {

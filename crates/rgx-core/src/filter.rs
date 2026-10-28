@@ -234,13 +234,24 @@ pub fn matches(expr: &Expr, facts: &[Field]) -> bool {
                     if op.compare(&fact.value, value) {
                         found = true;
                     }
-                } else if let Some(rest) = fact.name.strip_prefix(path) {
+                } else if let Some(rest) = fact
+                    .name
+                    .strip_prefix(path)
+                    .and_then(|rest| rest.strip_prefix('.'))
+                {
                     // A fact inside the path's namespace: the operator
                     // compares the fact's own name, and exactly — `exif:gps`
                     // asks for a fact called `gps`, not for one whose name
-                    // contains it.
-                    let rest = rest.strip_prefix('.').unwrap_or(rest);
-                    if op.compare(rest, value) {
+                    // contains it. The namespace ends at the `.`, so
+                    // `mailx.from` is not inside the namespace `mail`, and
+                    // the default operator is promoted to the exact one —
+                    // a contains over names made `exif:gps` find `gpsalt`.
+                    let exact = if matches!(op, Op::Contains) {
+                        Op::Equals
+                    } else {
+                        *op
+                    };
+                    if exact.compare(rest, value) {
                         found = true;
                     }
                 }
@@ -622,6 +633,23 @@ mod tests {
         let e = parse("exif:gps").expect("parses");
         assert!(matches(&e, &facts(&[("exif.gps", "12.34, 56.78")])));
         assert!(!matches(&e, &facts(&[("exif.camera", "Nikon D850")])));
+    }
+
+    #[test]
+    fn a_namespace_predicate_matches_the_name_exactly() {
+        // The name is compared exactly, not by substring: `exif:gps` asks
+        // for a fact called `gps`, and `gpsalt` is a different fact.
+        let e = parse("exif:gps").expect("parses");
+        assert!(!matches(&e, &facts(&[("exif.gpsalt", "51.5 N")])));
+    }
+
+    #[test]
+    fn a_namespace_does_not_end_mid_name() {
+        // The namespace ends at the `.`: `mailx.from` is a fact of the
+        // `mailx` namespace, and a predicate over `mail` must not reach it.
+        let e = parse("mail:from").expect("parses");
+        assert!(!matches(&e, &facts(&[("mailx.from", "ana@example.org")])));
+        assert!(matches(&e, &facts(&[("mail.from", "ana@example.org")])));
     }
 
     #[test]

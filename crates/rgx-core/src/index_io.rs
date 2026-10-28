@@ -135,7 +135,10 @@ pub fn load(bytes: &[u8], case_insensitive: bool) -> Result<TokenIndex, &'static
         let n = take_u32(&mut p)? as usize;
         let tok = take(&mut p, n)?.to_vec();
         let post_n = take_u32(&mut p)? as usize;
-        let mut postings = Vec::with_capacity(post_n);
+        // The reservation is clamped to what the remaining bytes can hold:
+        // a posting is 8 bytes on the disk, and a corrupted count must
+        // fail in the read, not in the allocation.
+        let mut postings = Vec::with_capacity(post_n.min((bytes.len() - p) / 8));
         for _ in 0..post_n {
             let file_id = take_u32(&mut p)?;
             let line = take_u32(&mut p)?;

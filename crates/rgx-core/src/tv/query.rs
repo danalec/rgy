@@ -91,7 +91,20 @@ pub fn line_anchored(pattern: &str) -> bool {
     if b.first() == Some(&b'^') {
         return true;
     }
-    if b.last() != Some(&b'$') || b.len() < 2 || b[b.len() - 2] == BACKSLASH {
+    if b.last() != Some(&b'$') || b.len() < 2 {
+        return false;
+    }
+    // An odd run of backslashes before the `$` escapes it; an even run is
+    // escaped backslashes, and the `$` still anchors. Testing only the one
+    // byte before the `$` read `\\$` — an escaped backslash, real anchor —
+    // as an escaped anchor.
+    let mut run = 0;
+    let mut i = b.len() - 1;
+    while i > 0 && b[i - 1] == BACKSLASH {
+        run += 1;
+        i -= 1;
+    }
+    if run % 2 == 1 {
         return false;
     }
     let mut in_class = false;

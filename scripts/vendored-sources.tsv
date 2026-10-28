@@ -21,19 +21,19 @@
 # (scripts/vendored-sources.tsv in the rgx checkout), and the
 # third-party notices are in NOTICE and the licence files at the root.
 
-# The upstream commit the copy was taken from: 11ce39a66b601467d1703089a5efda261932d308
+# The upstream commit the copy was taken from: 4d35a02e7938f65c0d2cce5dd705749605552272
 
-crates/rgx-core	crates/rgx-core	11ce39a66b601467d1703089a5efda261932d308	tree	upstream rgx's crate, transported verbatim
-crates/rar-codec	crates/rar-codec	11ce39a66b601467d1703089a5efda261932d308	tree	upstream rgx's crate, transported verbatim
-crates/rgx-adapters-archive	crates/rgx-adapters-archive	11ce39a66b601467d1703089a5efda261932d308	tree	upstream rgx's crate, transported verbatim
-crates/rgx-adapters-docs	crates/rgx-adapters-docs	11ce39a66b601467d1703089a5efda261932d308	tree	upstream rgx's crate, transported verbatim
-crates/rgx-adapters-inspect	crates/rgx-adapters-inspect	11ce39a66b601467d1703089a5efda261932d308	tree	upstream rgx's crate, transported verbatim
-crates/rgx-adapters-llm	crates/rgx-adapters-llm	11ce39a66b601467d1703089a5efda261932d308	tree	upstream rgx's crate, transported verbatim
-crates/rgx-adapters-mail	crates/rgx-adapters-mail	11ce39a66b601467d1703089a5efda261932d308	tree	upstream rgx's crate, transported verbatim
-crates/rgx-adapters-media	crates/rgx-adapters-media	11ce39a66b601467d1703089a5efda261932d308	tree	upstream rgx's crate, transported verbatim
-crates/rgx-adapters-office	crates/rgx-adapters-office	11ce39a66b601467d1703089a5efda261932d308	tree	upstream rgx's crate, transported verbatim
-crates/rgx-adapters-pdf	crates/rgx-adapters-pdf	11ce39a66b601467d1703089a5efda261932d308	tree	upstream rgx's crate, transported verbatim
-crates/rgx-adapters-tabular	crates/rgx-adapters-tabular	11ce39a66b601467d1703089a5efda261932d308	tree	upstream rgx's crate, transported verbatim
-crates/rgx-adapters-threed	crates/rgx-adapters-threed	11ce39a66b601467d1703089a5efda261932d308	tree	upstream rgx's crate, transported verbatim
-scripts/rgx-local-patches/crates/rgx-adapters-archive/src/images.rs.patch	crates/rgx-adapters-archive/src/images.rs	11ce39a66b601467d1703089a5efda261932d308	patch	a divergence from upstream: the patch is applied on top of the copy
-scripts/rgx-local-patches/crates/rgx-adapters-inspect/src/firebird.rs.patch	crates/rgx-adapters-inspect/src/firebird.rs	11ce39a66b601467d1703089a5efda261932d308	patch	a divergence from upstream: the patch is applied on top of the copy
+crates/rgx-core	crates/rgx-core	4d35a02e7938f65c0d2cce5dd705749605552272	tree	upstream rgx's crate, transported verbatim
+crates/rar-codec	crates/rar-codec	4d35a02e7938f65c0d2cce5dd705749605552272	tree	upstream rgx's crate, transported verbatim
+crates/rgx-adapters-archive	crates/rgx-adapters-archive	4d35a02e7938f65c0d2cce5dd705749605552272	tree	upstream rgx's crate, transported verbatim
+crates/rgx-adapters-docs	crates/rgx-adapters-docs	4d35a02e7938f65c0d2cce5dd705749605552272	tree	upstream rgx's crate, transported verbatim
+crates/rgx-adapters-inspect	crates/rgx-adapters-inspect	4d35a02e7938f65c0d2cce5dd705749605552272	tree	upstream rgx's crate, transported verbatim
+crates/rgx-adapters-llm	crates/rgx-adapters-llm	4d35a02e7938f65c0d2cce5dd705749605552272	tree	upstream rgx's crate, transported verbatim
+crates/rgx-adapters-mail	crates/rgx-adapters-mail	4d35a02e7938f65c0d2cce5dd705749605552272	tree	upstream rgx's crate, transported verbatim
+crates/rgx-adapters-media	crates/rgx-adapters-media	4d35a02e7938f65c0d2cce5dd705749605552272	tree	upstream rgx's crate, transported verbatim
+crates/rgx-adapters-office	crates/rgx-adapters-office	4d35a02e7938f65c0d2cce5dd705749605552272	tree	upstream rgx's crate, transported verbatim
+crates/rgx-adapters-pdf	crates/rgx-adapters-pdf	4d35a02e7938f65c0d2cce5dd705749605552272	tree	upstream rgx's crate, transported verbatim
+crates/rgx-adapters-tabular	crates/rgx-adapters-tabular	4d35a02e7938f65c0d2cce5dd705749605552272	tree	upstream rgx's crate, transported verbatim
+crates/rgx-adapters-threed	crates/rgx-adapters-threed	4d35a02e7938f65c0d2cce5dd705749605552272	tree	upstream rgx's crate, transported verbatim
+scripts/rgx-local-patches/crates/rgx-adapters-archive/src/images.rs.patch	crates/rgx-adapters-archive/src/images.rs	4d35a02e7938f65c0d2cce5dd705749605552272	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-adapters-inspect/src/firebird.rs.patch	crates/rgx-adapters-inspect/src/firebird.rs	4d35a02e7938f65c0d2cce5dd705749605552272	patch	a divergence from upstream: the patch is applied on top of the copy

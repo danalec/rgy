@@ -490,6 +490,12 @@ struct BiFourierPacking {
 /// and 99 the diamond.
 #[cfg(feature = "grib")]
 fn bi_fourier_limits(shape: u8, ni: u32, nj: u32) -> Option<(Vec<i64>, Vec<i64>)> {
+    // The two resolutions are u32s of the grid definition: a truncation
+    // wider than every value this reader reads is a crafted geometry, not
+    // a field, and both vectors are refused rather than reserved.
+    if ni as u64 >= MAX_GRIB1_VALUES as u64 || nj as u64 >= MAX_GRIB1_VALUES as u64 {
+        return None;
+    }
     let ni = i64::from(ni);
     let nj = i64::from(nj);
     let mut rows = vec![0i64; usize::try_from(nj + 1).ok()?];
@@ -1565,7 +1571,10 @@ fn grib2_complex(payload: &[u8], drs: &Drs, out: &mut String) {
             "  data: template 5.{} complex packing, no groups, {differencing}, reference {}, E {}, D {}, {} points",
             drs.template, drs.reference, drs.binary_scale, drs.decimal_scale, drs.points
         );
-        let values = vec![drs.reference; drs.points as usize];
+        // The point count is four octets of the file and the field is
+        // constant, so no payload bit ever contradicts it: the cap is the
+        // reader's, on the same number edition 1 holds.
+        let values = vec![drs.reference; (drs.points as usize).min(MAX_GRIB1_VALUES)];
         print_field(out, &values);
         return;
     }
@@ -1676,14 +1685,22 @@ fn grib2_complex_values(payload: &[u8], drs: &Drs, groups: usize) -> Option<Vec<
     if total != drs.points as u64 {
         return None;
     }
-    // The values, group by group.
-    let mut values: Vec<i64> = Vec::with_capacity(drs.points as usize);
+    // The values, group by group. The capacity and the per-group count
+    // are both ceilinged: a sign-extended group length can wrap the
+    // total into agreement with a huge `points` while a width-0 group
+    // consumes no bits, and the loop below would run forever pushing.
+    let mut values: Vec<i64> = Vec::with_capacity((drs.points as usize).min(MAX_GRIB1_VALUES));
     for group in 0..groups {
         let width = widths[group] as u32;
         if width > 64 {
             return None;
         }
         let count = lengths[group] as usize;
+        if count > MAX_GRIB1_VALUES.saturating_sub(values.len()) {
+            // A group longer than every value the reader reads is not
+            // this layout.
+            return None;
+        }
         for _ in 0..count {
             let raw = if width == 0 {
                 0
@@ -1808,6 +1825,13 @@ fn spectral_values(subset: &[f64], packed: &[u8], spec: &Spectral) -> Option<Vec
     let total = spec.whole.values()?;
     let in_subset = spec.subset.values()?;
     if subset.len() != in_subset {
+        return None;
+    }
+    // The truncation numbers are three u32s of the file and the whole-
+    // spectrum count is their product: the reservation is ceilinged on
+    // the same number edition 1 holds, so a crafted truncation is
+    // refused here rather than paid for in gigabytes.
+    if total > MAX_GRIB1_VALUES {
         return None;
     }
     let mut values = Vec::with_capacity(total);

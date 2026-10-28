@@ -299,6 +299,17 @@ impl Adapter for SevenZ {
                 continue;
             };
             if decoded.as_ref().map(|(f, _)| *f) != Some(folder_idx) {
+                // A folder is decoded whole, so its *declared* output is
+                // materialized before any entry of it can be refused by
+                // the sink — the substream sizes are the file's own, and a
+                // folder of `[1 byte, budget-sized]` substreams passed the
+                // per-entry reserve and then paid for the whole folder.
+                // The declaration is checked first, and the truncation
+                // note says what was not extracted.
+                if archive.folder_unpack_size(folder_idx)? > sink.remaining_bytes() {
+                    sink.stop(budget::Stopped::Bytes);
+                    break;
+                }
                 decoded = Some((folder_idx, archive.folder_output(folder_idx)?));
             }
             let (_, folder_out) = decoded.as_ref().expect("just populated");

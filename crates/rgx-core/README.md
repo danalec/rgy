@@ -1,11 +1,16 @@
 # rgx-core
 
-The adapter contract and the extraction pipeline. Every `rgx` adapter is
-written against the `Adapter` trait defined here, and `process()` is what
-turns a file into searchable units: it owns adapter resolution, recursion,
-depth limits, member caps and bail semantics, so those live in one place
-rather than once per adapter. The crate is `#![no_std]` + `alloc`; the
-`std` feature decides what else it may use.
+The engine. Every `rgx` adapter is written against the `Adapter` trait
+defined here, and `process()` is what turns a file into searchable units:
+it owns adapter resolution, recursion, depth limits, member caps and bail
+semantics, so those live in one place rather than once per adapter. The
+byte searches, the JSON arena and the pack store are here too.
+
+The crate is `#![no_std]` + `alloc`; the `std` feature decides what else it
+may use, and what it turns on is the typed error chain, the profiler map
+and the `f64` JSON parser. An embedder that wants to search its own files
+without the standard library can have the engine and the same vector
+kernels the full build uses.
 
 ## The adapter contract
 
@@ -48,10 +53,18 @@ otherwise pushes that adapter once per literal.
 
 Byte scanning is the upstream `memchr` crate 2.x, re-exported as
 `pub mod memchr` so every call site keeps the `rgx_core::memchr::*` path it
-used when the in-house module was still in the tree. It is a re-export, not
-a vendored copy. `default-features = false` is what keeps this crate
-`no_std + alloc` with the `std` feature off; with `std` on, the upstream
-crate's own `memchr/std` feature lights up its SIMD dispatch.
+used when the in-house module was still in the tree. The *dispatch* is this
+crate's own: `src/detect.rs` answers "may this CPU run AVX2?" by hand
+(CPUID and XGETBV, no `std`), and `src/memchr/dispatch.rs` picks the kernel
+from that answer. So the `no_std` build reaches the same AVX2 kernel the
+`std` build reaches, and the two configurations' numbers are comparable.
+The upstream crate still supplies the searchers themselves, and its own
+compile-time choices -- SSE2, and NEON on aarch64 -- are what run when the
+CPU has no AVX2.
+
+The substring search is the one thing that is not the upstream crate's:
+`src/memchr/memmem.rs` is this crate's own, because the upstream packed-pair
+kernel cannot be reached without `std`.
 
 `pub mod charset` decodes a byte stream in an encoding the data itself
 names — a MIME part's `charset=`, an HTML `<meta charset>`, an RFC 2047
@@ -68,9 +81,10 @@ else is read as Latin-1.
 
 ## Feature flags
 
-- `std` (default) — the AVX2 kernels, the typed error chain, the profiler
-  map and the `f64` JSON parser. Off, the crate stays `no_std + alloc`
-  and the SWAR path serves both memchr and the per-position scan.
+- `std` (default) — the typed error chain, the profiler map and the `f64`
+  JSON parser, and nothing else that matters. Off, the crate stays
+  `no_std + alloc`, and the byte searches still reach the same AVX2 kernel:
+  the probe that decides is this crate's own, and it does not need `std`.
 - `sha256-hw` (default) — runtime-detected SHA-NI on x86_64 and ARMv8
   SHA2 on aarch64, falling back to the scalar path.
 - `tv`, `tv-runtime` — the pack-store storage tier. Not in `default`.

@@ -24,7 +24,8 @@
 //!   compress their blocks with it, and without it their `.ldb`/`.sst` files
 //!   are compressed noise to a search tool.
 //! - `lz4` — the LZ4 block format, decoding only. The `.lz4` file wrapper is
-//!   still not read; the block is, because the blosc frame is made of blocks.
+//!   not read *here*; the archive crate's own decoder reads it, and it
+//!   replaced `lz4_flex` for the search path.
 //! - `blosc` — the frame of c-blosc, decoding only: the header, the table of
 //!   block offsets, the blocks and the byte shuffle. It is here because the
 //!   chunks zarr-python writes by default are blosc frames.
@@ -35,9 +36,11 @@
 //! measuring afterwards costs exactly what a compression bomb was built to
 //! cost.
 //!
-//! The `.lz4` file wrapper is deliberately absent — it is not
-//! interop-proven here, so `.lz4` files still go through `lz4_flex`. The
-//! block format is read, because the blosc frame is made of blocks.
+//! The `.lz4` file wrapper is not read here: this module reads the block
+//! format, because the blosc frame is made of blocks. The frame itself is
+//! read by the archive crate's own decoder, which replaced `lz4_flex` for
+//! the search path; `lz4_flex` stays in the tree for the extraction cache
+//! alone.
 
 #[cfg(feature = "blosc")]
 pub mod blosc;

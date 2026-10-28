@@ -474,7 +474,18 @@ fn decode_ext(data: &[u8], len: usize) -> Option<Vec<u8>> {
 /// byte, and the block is the bytes of the sub-streams interleaved: the
 /// first byte of each in turn, then the second of each, and so on.
 #[cfg(feature = "cram")]
-fn decode_stripe(reader: &mut Reader<'_>, known_len: Option<usize>) -> Option<Vec<u8>> {
+fn decode_stripe(
+    reader: &mut Reader<'_>,
+    known_len: Option<usize>,
+    depth: usize,
+) -> Option<Vec<u8>> {
+    // A sub-stream of a stripe may itself claim the stripe flag, and each
+    // nesting level costs four bytes of the block: unbounded, a small
+    // crafted block nests until the stack goes. Stripes do not
+    // legitimately nest at all, so the depth bound is generous.
+    if depth > 8 {
+        return None;
+    }
     // The stripe frame always carries the length of the whole block: the
     // sub-streams do not, and their lengths are fractions of it.
     let len = reader.uint7()? as usize;
@@ -506,7 +517,7 @@ fn decode_stripe(reader: &mut Reader<'_>, known_len: Option<usize>) -> Option<Ve
         let bytes = reader.bytes(clen)?;
         let ulen = len / n + usize::from(len % n > streams.len());
         let mut sub = Reader::new(bytes);
-        streams.push(decode_frame(&mut sub, Some(ulen))?);
+        streams.push(decode_frame(&mut sub, Some(ulen), depth + 1)?);
     }
     let mut out = vec![0u8; len];
     for (j, stream) in streams.iter().enumerate() {
@@ -523,14 +534,18 @@ fn decode_stripe(reader: &mut Reader<'_>, known_len: Option<usize>) -> Option<Ve
 /// `known_len` is the length of the uncompressed data when the frame does
 /// not carry it, which is the case of the sub-streams of a stripe frame.
 #[cfg(feature = "cram")]
-fn decode_frame(reader: &mut Reader<'_>, known_len: Option<usize>) -> Option<Vec<u8>> {
+fn decode_frame(
+    reader: &mut Reader<'_>,
+    known_len: Option<usize>,
+    depth: usize,
+) -> Option<Vec<u8>> {
     let flags = reader.byte()?;
     if flags & flag::RESERVED != 0 {
         // The specification reserves the second bit of the flag byte.
         return None;
     }
     if flags & flag::STRIPE != 0 {
-        return decode_stripe(reader, known_len);
+        return decode_stripe(reader, known_len, depth);
     }
     // The length of the uncompressed data, unless the frame does not carry
     // it: then the caller has to know it.
@@ -602,7 +617,7 @@ fn decode_frame(reader: &mut Reader<'_>, known_len: Option<usize>) -> Option<Vec
 #[cfg(feature = "cram")]
 pub(crate) fn decode(block: &[u8]) -> Option<Vec<u8>> {
     let mut reader = Reader::new(block);
-    decode_frame(&mut reader, None)
+    decode_frame(&mut reader, None, 0)
 }
 
 #[cfg(all(test, feature = "cram"))]

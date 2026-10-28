@@ -900,10 +900,10 @@ fn inspect(data: &[u8], path: &str) -> Outcome {
 /// to extension classification or skip the file.
 ///
 /// The returned names line up with the `rgx` `TypeDb` defaults where one
-/// entry covers the format (`pdf`, `zip`, `png`, `jpeg`, `gif`, `elf`, `sqlite`,
-/// `gzip`, `bzip2`, `xz`, `zstd`, `7z`, `rar`, `wasm`, `class`, `dex`,
-/// `blender`, `hdf5`, `webp`, `tiff`, `bmp`, `pcx`, `ico`, `wmf`,
-/// `psd`, `riff`, `ogg`, `mpeg-ts`, `flac`, `mp3`, `midi`, `neson`).
+/// entry covers the format (`pdf`, `zip`, `elf`, `sqlite`, `png`, `jpeg`,
+/// `gif`, `bmp`, `gzip`, `bzip2`, `xz`, `zstd`, `7z`, `rar`, `wasm`,
+/// `class`, `dex`, `blender`, `hdf5`, `webp`, `tiff`, `cfb`, `macho`,
+/// `psd`, `ogg`, `mpeg-ts`, `flac`, `mp3`, `midi`, `ico`, `wmf`).
 pub fn magic_classify(data: &[u8]) -> Option<&'static str> {
     let s = data;
     if s.len() < 2 {
@@ -1823,6 +1823,12 @@ impl Adapter for Lnk {
 
         let mut pos = 76usize;
         if link_flags & LNK_HAS_ID_LIST != 0 {
+            // The length field needs its own two bytes before the size
+            // guard below runs: a header of exactly 76 ends here, and
+            // the read used to go one past it.
+            if pos + 2 > data.len() {
+                bail!("truncated .lnk IDList");
+            }
             let idlist_size = rd_u16(data, pos) as usize;
             pos += 2;
             if pos + idlist_size > data.len() {

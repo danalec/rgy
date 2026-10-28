@@ -163,7 +163,7 @@ $knownExternal = @{
 
     # --- plumbing ---
     'clap'          = 'argument parsing; no upstream equivalent identified yet'
-    'memchr'        = 'crates/rgx-core/src/memchr.rs re-exports the external memchr 2.x crate; there is no in-house memchr tree in this checkout. The old note describing an AVX2 in-house module was about a vendored tree that is not here.'
+    'memchr'        = 'crates/rgx-core/src/memchr.rs re-exports the external memchr 2.x crate and carries an in-house tree beside it: src/memchr/dispatch.rs picks the byte kernels with the CPU probe the crate writes itself (src/detect.rs), and src/memchr/memmem.rs is the substring search, because the upstream packed-pair kernel cannot be reached without std. The external crate stays as the fallback for a CPU without AVX2 and for the architectures whose vector width is decided at compile time.'
     'libc'          = 'the constants and `mmap(2)` / `msync(2)` / `madvise(2)` syscall FFI the vendored `memmap2` module (crates/rgx-core/src/memmap2) reaches for on Unix, and the `dirent` / `stat` layouts the portable reader of the seam (crates/discovery/src/dir.rs) reads on Unix. Both are gated on the target, not on the `std` feature, so the bare-metal build does not link it. Will go away when the `memmap2` module is rewritten in pure inline FFI (a follow-up) or when Linux / macOS gating moves to `std::sys::pal`.'
     'anyhow'        = 'rgx-core/src/error.rs is the in-house replacement; leftover entry'
 

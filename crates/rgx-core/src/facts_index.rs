@@ -50,9 +50,11 @@
 //!
 //! The `facts` object maps a fact's name to its value. A name that
 //! appears twice — two facts with the same name are two chances to match
-//! in the filter — is written with the last value, and the index says so:
-//! [`FactsIndex::load`] reports a duplicate as an error rather than
-//! silently dropping one of the two answers.
+//! in the filter — cannot be written at all: JSON holds one value per
+//! name, and an index that silently kept the last would answer a
+//! `--filter` the live walk answers differently. [`FactsIndex::to_jsonl`]
+//! refuses the record and names it, so the loss is a refusal rather than
+//! a wrong answer.
 
 extern crate alloc;
 
@@ -137,7 +139,12 @@ impl FactsIndex {
     ///
     /// The order is the order of the records, so a query that reads the
     /// file back gets the same order it was written in.
-    pub fn to_jsonl(&self) -> String {
+    ///
+    /// A record holding the same fact name twice is refused: the JSON
+    /// object holds one value per name, and the reader would keep the
+    /// last — an index that answers a `--filter` differently from the
+    /// live walk is worse than one that says it cannot be written.
+    pub fn to_jsonl(&self) -> Result<String, String> {
         let mut out = String::new();
         for rec in &self.records {
             out.push_str("{\"path\":");
@@ -148,7 +155,17 @@ impl FactsIndex {
             out.push_str(&rec.mtime.to_string());
             out.push_str(",\"facts\":{");
             let mut first = true;
+            let mut seen: Vec<&str> = Vec::new();
             for fact in &rec.facts {
+                if seen.contains(&fact.name.as_str()) {
+                    return Err(alloc::format!(
+                        "record {} holds the fact {:?} twice, and one JSON \
+                         object cannot hold two values for one name",
+                        rec.path,
+                        fact.name
+                    ));
+                }
+                seen.push(&fact.name);
                 if !first {
                     out.push(',');
                 }
@@ -159,7 +176,7 @@ impl FactsIndex {
             }
             out.push_str("}}\n");
         }
-        out
+        Ok(out)
     }
 
     /// Read an index back from JSON Lines.
@@ -288,7 +305,7 @@ mod tests {
         let mut idx = FactsIndex::new();
         idx.records.push(record("a.pdf", 10));
         idx.records.push(record("dir/b.zip!inner.txt", 20));
-        let text = idx.to_jsonl();
+        let text = idx.to_jsonl().expect("writes");
         let back = FactsIndex::from_jsonl(&text).expect("round-trip");
         assert_eq!(back, idx);
     }
@@ -296,8 +313,8 @@ mod tests {
     #[test]
     fn an_empty_index_round_trips() {
         let idx = FactsIndex::new();
-        assert_eq!(idx.to_jsonl(), "");
-        let back = FactsIndex::from_jsonl(&idx.to_jsonl()).expect("round-trip");
+        assert_eq!(idx.to_jsonl().expect("writes"), "");
+        let back = FactsIndex::from_jsonl(&idx.to_jsonl().expect("writes")).expect("round-trip");
         assert!(back.records.is_empty());
     }
 
@@ -308,7 +325,7 @@ mod tests {
         r.mtime = 2;
         let mut idx = FactsIndex::new();
         idx.records.push(r);
-        let back = FactsIndex::from_jsonl(&idx.to_jsonl()).expect("round-trip");
+        let back = FactsIndex::from_jsonl(&idx.to_jsonl().expect("writes")).expect("round-trip");
         assert_eq!(back.records[0].facts[0].value, "he said \"hi\"");
     }
 
@@ -319,10 +336,29 @@ mod tests {
         r.mtime = 2;
         let mut idx = FactsIndex::new();
         idx.records.push(r);
-        let text = idx.to_jsonl();
+        let text = idx.to_jsonl().expect("writes");
         assert_eq!(text.lines().count(), 1);
         let back = FactsIndex::from_jsonl(&text).expect("round-trip");
         assert_eq!(back.records[0].facts[0].value, "one\ntwo");
+    }
+
+    #[test]
+    fn a_record_with_one_fact_name_twice_is_refused() {
+        // Two facts with the same name are two chances to match in the
+        // live filter, and one JSON object holds one value per name: the
+        // writer refuses the record rather than keeping the last value
+        // and answering a filter the walk answers differently.
+        let mut r = Record::new(
+            "a.pdf",
+            vec![Field::new("author", "ana"), Field::new("author", "bo")],
+        );
+        r.size = 1;
+        r.mtime = 2;
+        let mut idx = FactsIndex::new();
+        idx.records.push(r);
+        let err = idx.to_jsonl().expect_err("the duplicate must be refused");
+        assert!(err.contains("a.pdf"), "{err}");
+        assert!(err.contains("author"), "{err}");
     }
 
     #[test]

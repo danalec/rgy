@@ -112,6 +112,24 @@ pub fn mutate(rng: &mut Rng, base: &[u8]) -> Vec<u8> {
     v
 }
 
+/// The wall-clock budget one round of the fuzzer gets.
+///
+/// The budget is wall-clock and not a count of steps, so it says as much
+/// about the machine as about the parser: a loaded runner, a guest under
+/// KVM on a shared host, a laptop with the fan spinning -- all of them
+/// make the same round take longer. It is generous for that reason, and
+/// a round that overruns it is a hang worth failing on: the parser is
+/// either looping or allocating without end.
+#[cfg(feature = "std")]
+pub const ROUND_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The code the process leaves with when a round hangs.
+///
+/// The same code a failed test leaves with, so a harness that watches the
+/// exit code cannot tell a hang from an assertion.
+#[cfg(feature = "std")]
+pub const HANG_EXIT_CODE: i32 = 101;
+
 /// Run `rounds` mutated inputs per corpus entry through `f`, failing the
 /// test with the round, seed and (hex) repro input on any panic.
 /// `Err`/`Outcome::Bail` from the parser are expected and ignored — the
@@ -122,6 +140,12 @@ pub fn mutate(rng: &mut Rng, base: &[u8]) -> Vec<u8> {
 /// The closure must be `Send + Sync + 'static` because the watcher and
 /// worker threads both reference it.
 ///
+/// A round that overruns the budget takes the process down with it: a
+/// thread in Rust cannot be killed, and a watchdog that gave up while the
+/// thread kept running reported a failure *and* left the machine to the
+/// thread that was known to be stuck. The repro is printed before the
+/// process goes, because a hang is the case where the repro matters most.
+///
 /// Available with `feature = "std"` (the default). `rgx-core` is
 /// `no_std + alloc`; this parallel runner is the only `std`-gated piece
 /// of the fuzzkit, and a `no_std` build drops it entirely (callers in
@@ -131,6 +155,21 @@ pub fn assert_never_panics(
     corpus: Vec<(&'static str, Vec<u8>)>,
     rounds: usize,
     name: &str,
+    f: impl Fn(&[u8]) + Send + Sync + 'static,
+) {
+    assert_never_panics_within(corpus, rounds, name, ROUND_BUDGET, f)
+}
+
+/// [`assert_never_panics`] with the budget the caller chooses.
+///
+/// The budget is a parameter so that a test can watch the timeout path
+/// without waiting out the real one.
+#[cfg(feature = "std")]
+pub fn assert_never_panics_within(
+    corpus: Vec<(&'static str, Vec<u8>)>,
+    rounds: usize,
+    name: &str,
+    budget: std::time::Duration,
     f: impl Fn(&[u8]) + Send + Sync + 'static,
 ) {
     let mut rng = Rng::new(0x9E37_79B9_7F4A_7C15);
@@ -145,7 +184,7 @@ pub fn assert_never_panics(
                 f(&work);
                 let _ = tx.send(());
             });
-            match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            match rx.recv_timeout(budget) {
                 Ok(()) => {
                     // propagate a parser panic with the repro input
                     if handle.join().is_err() {
@@ -165,11 +204,19 @@ pub fn assert_never_panics(
                         repro_hex(&input)
                     );
                 }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!(
-                    "{name}: hung on round {round} (seed '{seed_name}')\n\
-                     repro hex: {}\n",
-                    repro_hex(&input)
-                ),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    // The worker is stuck and Rust cannot kill it. The only
+                    // way to keep the invariant that no thread outlives
+                    // the test is to take the process down with it -- and
+                    // the repro is printed first, because a hang is where
+                    // the repro matters most.
+                    std::eprintln!(
+                        "{name}: hung on round {round} (seed '{seed_name}')\n\
+                         repro hex: {}\n",
+                        repro_hex(&input)
+                    );
+                    std::process::exit(HANG_EXIT_CODE);
+                }
             }
         }
     }
@@ -222,6 +269,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn parallel_runner_completes() {
         // The parallel runner spawns one worker thread per round, each
@@ -232,5 +280,79 @@ mod tests {
         // is checked by `mutations_are_deterministic` above; here we
         // only verify the harness itself runs end-to-end.
         assert_never_panics(vec![("seed", b"abc".to_vec())], 4, "t", |_data| {});
+    }
+
+    /// A round that hangs takes the process down with it: a thread in Rust
+    /// cannot be killed, and a watchdog that gave up while the thread kept
+    /// running reported a failure *and* left the machine to the thread
+    /// that was known to be stuck.
+    ///
+    /// The child below hangs on purpose, and its worker counts what it
+    /// does, so the parent can tell the two shapes apart: a runner that
+    /// took the process down, and a runner that came back with the worker
+    /// still in there.
+    #[cfg(feature = "std")]
+    #[test]
+    fn a_hung_round_leaves_no_thread_running() {
+        /// The code the child leaves with when the worker was still running
+        /// after the runner came back: the shape this test forbids.
+        const STILL_RUNNING: i32 = 43;
+        const CHILD: &str = "RGX_FUZZKIT_HANG_CHILD";
+
+        if std::env::var_os(CHILD).is_some() {
+            // The child: a closure that never returns, and a counter that
+            // says what it does while it is in there.
+            let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let counted = std::sync::Arc::clone(&counter);
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                assert_never_panics_within(
+                    vec![("hang", alloc::vec![1, 2, 3])],
+                    1,
+                    "hang",
+                    std::time::Duration::from_millis(200),
+                    move |_data| loop {
+                        counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    },
+                );
+            }));
+            // The runner came back, which is the shape this test forbids:
+            // the worker is still in there and still counting.
+            let before = counter.load(std::sync::atomic::Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            let after = counter.load(std::sync::atomic::Ordering::SeqCst);
+            std::eprintln!("the worker went from {before} to {after}");
+            std::process::exit(if after > before { STILL_RUNNING } else { 0 });
+        }
+
+        let exe = std::env::current_exe().expect("the test binary");
+        let out = std::process::Command::new(exe)
+            .arg("--exact")
+            .arg("fuzzkit::tests::a_hung_round_leaves_no_thread_running")
+            // Without this the harness would capture what the child
+            // prints and take it with it when the process goes.
+            .arg("--nocapture")
+            .env(CHILD, "1")
+            .output()
+            .expect("the child runs");
+        let err = String::from_utf8_lossy(&out.stderr);
+        // The child is gone: the round that hung took the process down
+        // with it, and nothing is still running behind it.
+        assert!(!out.status.success(), "the child did not fail");
+        assert_ne!(
+            out.status.code(),
+            Some(STILL_RUNNING),
+            "the worker was still running after the timeout:\n{err}"
+        );
+        // The repro is what a hang is for: the round and the bytes that
+        // hung it have to be in what the child left behind.
+        assert!(
+            err.contains("hung on round 0"),
+            "the child did not say which round hung:\n{err}"
+        );
+        assert!(
+            err.contains("repro hex:"),
+            "the child did not print the repro:\n{err}"
+        );
     }
 }

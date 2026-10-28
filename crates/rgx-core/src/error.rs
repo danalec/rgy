@@ -572,76 +572,144 @@ impl Trait {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fmt;
 
-    #[derive(Debug)]
-    struct Leaf;
-    impl fmt::Display for Leaf {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.write_str("root cause")
+    /// The typed chain is the `std` half of the error type.
+    ///
+    /// The blanket `From` for a foreign error, the `Context` for a `Result`
+    /// and `as_std` are all behind the `std` feature, so the tests that
+    /// exercise them are too: a `no_std` build keeps the message chain and
+    /// nothing else, and a test that asserted the typed chain there would
+    /// be asserting an API that configuration does not have.
+    #[cfg(feature = "std")]
+    mod typed_chain {
+        use super::*;
+        use std::fmt;
+
+        #[derive(Debug)]
+        struct Leaf;
+        impl fmt::Display for Leaf {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("root cause")
+            }
         }
-    }
-    impl StdError for Leaf {}
+        impl StdError for Leaf {}
 
-    #[derive(Debug)]
-    struct Middle;
-    impl fmt::Display for Middle {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.write_str("middle")
+        #[derive(Debug)]
+        struct Middle;
+        impl fmt::Display for Middle {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("middle")
+            }
         }
-    }
-    impl StdError for Middle {
-        fn source(&self) -> Option<&(dyn StdError + 'static)> {
-            Some(&Leaf)
+        impl StdError for Middle {
+            fn source(&self) -> Option<&(dyn StdError + 'static)> {
+                Some(&Leaf)
+            }
         }
-    }
 
-    #[test]
-    fn alternate_chain_reaches_the_cause() {
-        // The contract `rgx_core::process` depends on. A replacement whose
-        // two Display forms are identical passes every other test here and
-        // silently drops the cause from the corpus.
-        let e: Error = Middle.into();
-        assert_eq!(e.to_string(), "middle");
-        assert_eq!(format!("{e:#}"), "middle: root cause");
-    }
+        #[test]
+        fn alternate_chain_reaches_the_cause() {
+            // The contract `rgx_core::process` depends on. A replacement whose
+            // two Display forms are identical passes every other test here and
+            // silently drops the cause from the corpus.
+            let e: Error = Middle.into();
+            assert_eq!(e.to_string(), "middle");
+            assert_eq!(format!("{e:#}"), "middle: root cause");
+        }
 
-    #[test]
-    fn debug_renders_the_cause_chain() {
-        // `fn main() -> Result<()>` prints through `Termination`, which
-        // uses `{:?}`. Collapsing to the top message would make every CLI
-        // failure a dead end.
-        let r: StdResult<(), Middle> = Err(Middle);
-        let e = r.context("bad size").unwrap_err();
-        let dbg = format!("{e:?}");
-        assert!(dbg.starts_with("bad size"), "{dbg}");
-        assert!(dbg.contains("Caused by:"), "{dbg}");
-        assert!(dbg.contains("middle"), "{dbg}");
-        assert!(dbg.contains("root cause"), "{dbg}");
-    }
+        #[test]
+        fn debug_renders_the_cause_chain() {
+            // `fn main() -> Result<()>` prints through `Termination`, which
+            // uses `{:?}`. Collapsing to the top message would make every CLI
+            // failure a dead end.
+            let r: StdResult<(), Middle> = Err(Middle);
+            let e = r.context("bad size").unwrap_err();
+            let dbg = format!("{e:?}");
+            assert!(dbg.starts_with("bad size"), "{dbg}");
+            assert!(dbg.contains("Caused by:"), "{dbg}");
+            assert!(dbg.contains("middle"), "{dbg}");
+            assert!(dbg.contains("root cause"), "{dbg}");
+        }
 
-    #[test]
-    fn context_keeps_the_message_outermost() {
-        let result: StdResult<(), Middle> = Err(Middle);
-        let e = result.context("while reading the table").unwrap_err();
-        // `.lines().next()` in process() keeps only this first segment,
-        // so the context must be the outermost part of the chain.
-        assert_eq!(e.to_string(), "while reading the table");
-        assert_eq!(
-            format!("{e:#}"),
-            "while reading the table: middle: root cause"
-        );
-    }
+        #[test]
+        fn context_keeps_the_message_outermost() {
+            let result: StdResult<(), Middle> = Err(Middle);
+            let e = result.context("while reading the table").unwrap_err();
+            // `.lines().next()` in process() keeps only this first segment,
+            // so the context must be the outermost part of the chain.
+            assert_eq!(e.to_string(), "while reading the table");
+            assert_eq!(
+                format!("{e:#}"),
+                "while reading the table: middle: root cause"
+            );
+        }
 
-    #[test]
-    fn context_works_on_an_already_converted_error() {
-        // The idiomatic `?` then `.context(..)` pattern. This needs a
-        // dedicated impl, because `Error` does not implement `StdError`
-        // and so cannot satisfy the generic `Result` impl.
-        let inner: Result<u8> = Err(Middle.into());
-        let e = inner.context("outer").unwrap_err();
-        assert_eq!(e.to_string(), "outer");
-        assert_eq!(format!("{e:#}"), "outer: middle: root cause");
+        #[test]
+        fn context_works_on_an_already_converted_error() {
+            // The idiomatic `?` then `.context(..)` pattern. This needs a
+            // dedicated impl, because `Error` does not implement `StdError`
+            // and so cannot satisfy the generic `Result` impl.
+            let inner: Result<u8> = Err(Middle.into());
+            let e = inner.context("outer").unwrap_err();
+            assert_eq!(e.to_string(), "outer");
+            assert_eq!(format!("{e:#}"), "outer: middle: root cause");
+        }
+
+        #[test]
+        fn context_closure_is_lazy() {
+            let mut called = false;
+            let ok: StdResult<u8, Middle> = Ok(1);
+            let _ = ok.with_context(|| {
+                called = true;
+                "built"
+            });
+            assert!(!called, "the message must only be built on the error path");
+        }
+
+        #[test]
+        fn question_mark_converts_foreign_errors() {
+            fn inner() -> StdResult<u8, Leaf> {
+                Err(Leaf)
+            }
+            fn outer() -> Result<u8> {
+                Ok(inner()?)
+            }
+            assert_eq!(outer().unwrap_err().to_string(), "root cause");
+        }
+
+        #[test]
+        fn anyhow_macro_accepts_literal_and_error() {
+            let from_literal: Error = anyhow!("bad tag {:#x}", 0x2f);
+            assert_eq!(from_literal.to_string(), "bad tag 0x2f");
+
+            let from_error: Error = anyhow!(Leaf);
+            assert_eq!(from_error.to_string(), "root cause");
+        }
+
+        #[test]
+        fn anyhow_macro_error_arm_survives_a_trailing_comma() {
+            // The format arm used to match this (it accepted zero arguments)
+            // and expand to `format!(Middle,)`, which does not compile.
+            let e: Error = anyhow!(Middle,);
+            assert_eq!(e.to_string(), "middle");
+        }
+
+        #[test]
+        fn anyhow_macro_accepts_a_non_error_display_value() {
+            // A String is not a `StdError`, so this cannot go through `From`.
+            // The tagged dispatch must fall through to the bare-message path.
+            let s = String::from("from a string");
+            let e: Error = anyhow!(s);
+            assert_eq!(e.to_string(), "from a string");
+            assert!(e.as_std().is_none(), "a bare message has no cause");
+
+            // and the preferred arm still wins for a real error, keeping the
+            // chain rather than flattening it to a message
+            let e: Error = anyhow!(Middle);
+            assert_eq!(e.to_string(), "middle");
+            assert!(e.as_std().is_some(), "a real error must keep its cause");
+            assert_eq!(format!("{e:#}"), "middle: root cause");
+        }
     }
 
     #[test]
@@ -655,62 +723,6 @@ mod tests {
         );
         let e = found.with_context(|| "no such entry either").unwrap_err();
         assert_eq!(e.to_string(), "no such entry either");
-    }
-
-    #[test]
-    fn context_closure_is_lazy() {
-        let mut called = false;
-        let ok: StdResult<u8, Middle> = Ok(1);
-        let _ = ok.with_context(|| {
-            called = true;
-            "built"
-        });
-        assert!(!called, "the message must only be built on the error path");
-    }
-
-    #[test]
-    fn question_mark_converts_foreign_errors() {
-        fn inner() -> StdResult<u8, Leaf> {
-            Err(Leaf)
-        }
-        fn outer() -> Result<u8> {
-            Ok(inner()?)
-        }
-        assert_eq!(outer().unwrap_err().to_string(), "root cause");
-    }
-
-    #[test]
-    fn anyhow_macro_accepts_literal_and_error() {
-        let from_literal: Error = anyhow!("bad tag {:#x}", 0x2f);
-        assert_eq!(from_literal.to_string(), "bad tag 0x2f");
-
-        let from_error: Error = anyhow!(Leaf);
-        assert_eq!(from_error.to_string(), "root cause");
-    }
-
-    #[test]
-    fn anyhow_macro_error_arm_survives_a_trailing_comma() {
-        // The format arm used to match this (it accepted zero arguments)
-        // and expand to `format!(Middle,)`, which does not compile.
-        let e: Error = anyhow!(Middle,);
-        assert_eq!(e.to_string(), "middle");
-    }
-
-    #[test]
-    fn anyhow_macro_accepts_a_non_error_display_value() {
-        // A String is not a `StdError`, so this cannot go through `From`.
-        // The tagged dispatch must fall through to the bare-message path.
-        let s = String::from("from a string");
-        let e: Error = anyhow!(s);
-        assert_eq!(e.to_string(), "from a string");
-        assert!(e.as_std().is_none(), "a bare message has no cause");
-
-        // and the preferred arm still wins for a real error, keeping the
-        // chain rather than flattening it to a message
-        let e: Error = anyhow!(Middle);
-        assert_eq!(e.to_string(), "middle");
-        assert!(e.as_std().is_some(), "a real error must keep its cause");
-        assert_eq!(format!("{e:#}"), "middle: root cause");
     }
 
     #[test]

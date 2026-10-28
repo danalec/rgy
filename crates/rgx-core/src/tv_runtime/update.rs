@@ -616,9 +616,15 @@ mod tests {
         .unwrap();
         assert_eq!(live_records(&store), vec!["a.box/x".to_string()]);
 
+        // The second text is not the same length as the first on purpose:
+        // the update decides that a file has not changed when its length
+        // and its mtime are the ones the manifest holds, and two writes in
+        // the same tick of the clock share the mtime. With the two lengths
+        // equal, the test was a coin toss on a filesystem whose clock ticks
+        // in coarse steps -- and the CI's Windows runner lost it.
         fs::write(
             root.join("a.box"),
-            format!("y\t{}\n", hex("second member text")),
+            format!("y\t{}\n", hex("the second member text")),
         )
         .unwrap();
         let stats = update_store_with(
@@ -647,7 +653,7 @@ mod tests {
         assert_eq!(live, vec!["a.box/y"]);
         let rec = m.files.iter().find(|f| f.rel_path == "a.box/y").unwrap();
         assert!(rec.sig_covers_adapter);
-        let q = crate::ngram::query_sig512("second member text", false).expect("literal run");
+        let q = crate::ngram::query_sig512("the second member text", false).expect("literal run");
         assert!(
             crate::ngram::NgramSig512::from_words(rec.ngram).contains_query(&q),
             "the update re-signs through the same signer as the build"

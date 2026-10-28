@@ -993,11 +993,20 @@ mod fuzz {
     //! The never-panic floor on arbitrary bytes, per AGENTS.md §6: the
     //! scanner, the confirm loop and the screen all run on mutated input.
 
+    // The import is the one the only test in this module needs, and that
+    // test needs `std`. A `no_std` test build would otherwise carry an
+    // import nothing uses -- a warning the CI turns into an error.
+    #[cfg(feature = "std")]
     use super::*;
 
     /// A small rule bank: one planned rule, one the analysis declines, one
     /// that matches the empty string — the three paths arbitrary bytes can
     /// reach.
+    ///
+    /// The gate is the one its only caller carries: the test that uses this
+    /// needs `std`, and a `no_std` test build would otherwise carry a
+    /// function nothing calls -- a warning the CI turns into an error.
+    #[cfg(feature = "std")]
     fn fuzz_rules() -> Vec<RuleSpec<'static>> {
         vec![
             RuleSpec {

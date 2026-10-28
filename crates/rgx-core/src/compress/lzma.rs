@@ -310,9 +310,26 @@ struct LzmaEngine {
 }
 
 impl LzmaEngine {
-    fn new(props: LzmaProps) -> Self {
-        let lit_len = 0x300 << (props.lc + props.lp);
-        Self {
+    /// Build the probability model for `props`.
+    ///
+    /// The literal table is one row of `0x300` probabilities per literal
+    /// context, and there are `1 << (lc + lp)` contexts. The row count was
+    /// `0x300 << (lc + lp)`, which made the table 768 times the model: the
+    /// default properties asked for 9 MiB where the model is 12 KiB, and a
+    /// properties byte of 44 -- `lc = 8`, `lp = 4` -- asked for 4.5 GiB out
+    /// of twenty-one bytes of input.
+    ///
+    /// The specification bounds `lc` at 8, `lp` at 4 and `pb` at 4, and
+    /// properties outside that cannot be modelled: the table would not fit
+    /// and the position model would be indexed out of bounds. A properties
+    /// byte from a file always lands in range (`from_byte` cannot produce
+    /// another), so this refuses the hand-made ones.
+    fn new(props: LzmaProps) -> CompressResult<Self> {
+        if props.lc > 8 || props.lp > 4 || props.pb > 4 {
+            return Err(CompressError::InvalidFormat("LZMA properties out of range"));
+        }
+        let lit_len = 1usize << (props.lc + props.lp);
+        Ok(Self {
             machine: Machine::new(),
             is_match: [[PROB_INIT; 1 << NUM_POS_BITS_MAX]; NUM_STATES],
             is_rep: [PROB_INIT; NUM_STATES],
@@ -326,7 +343,7 @@ impl LzmaEngine {
             pos_slot: [[PROB_INIT; NUM_POS_SLOTS]; NUM_LEN_TO_POS_STATES],
             pos_special: [PROB_INIT; NUM_POS_SPECIAL],
             align: [PROB_INIT; ALIGN_TABLE_SIZE],
-        }
+        })
     }
 
     fn reset_state(&mut self) {
@@ -615,7 +632,7 @@ impl LzmaDecoder {
         limit: u64,
     ) -> CompressResult<Bounded> {
         let mut rc = RangeReader::new(input)?;
-        let mut core = LzmaEngine::new(props);
+        let mut core = LzmaEngine::new(props)?;
         let mut out: Vec<u8> = Vec::with_capacity(unpack_size.unwrap_or(0).min(1 << 26) as usize);
         let mut cap = super::cap::OutputCap::new(limit);
         let mut counted = 0u64;
@@ -778,7 +795,7 @@ impl LzmaDecoder {
                     input = &input[1..];
                     let p = LzmaProps::from_byte(b)?;
                     props = Some(p);
-                    core = Some(LzmaEngine::new(p));
+                    core = Some(LzmaEngine::new(p)?);
                     state_valid = true;
                     need_props = false;
                 } else if !state_valid {
@@ -791,7 +808,7 @@ impl LzmaDecoder {
                     let p = props.ok_or(CompressError::InvalidFormat(
                         "LZMA2 chunk without properties",
                     ))?;
-                    core = Some(LzmaEngine::new(p));
+                    core = Some(LzmaEngine::new(p)?);
                     state_valid = true;
                 } else if control >= 0xA0 {
                     // State reset (keeps props)
@@ -860,6 +877,84 @@ mod tests {
     fn test_props_roundtrip() {
         let props = LzmaProps::default();
         assert_eq!(props, LzmaProps::from_byte(props.to_byte()).unwrap());
+    }
+
+    /// The literal table is one row of `0x300` probabilities per literal
+    /// context, and there are `1 << (lc + lp)` contexts. The row count was
+    /// `0x300 << (lc + lp)`, which made the table 768 times the model: the
+    /// default properties asked for 9 MiB where the model is 12 KiB.
+    #[test]
+    fn the_literal_table_is_one_row_per_context() {
+        for props in [
+            LzmaProps::default(),
+            LzmaProps {
+                lc: 0,
+                lp: 0,
+                pb: 0,
+            },
+            LzmaProps {
+                lc: 8,
+                lp: 4,
+                pb: 0,
+            },
+        ] {
+            let engine = LzmaEngine::new(props).expect("the properties are in range");
+            assert_eq!(engine.literal.len(), 1usize << (props.lc + props.lp));
+        }
+    }
+
+    /// A properties byte of 44 is `lc = 8`, `lp = 4` -- the largest the
+    /// specification allows: 4096 contexts, 6 MiB of model. The table used
+    /// to be 768 times that, which is four and a half gibibytes out of
+    /// twenty-one bytes of input: on a small machine an abort rather than
+    /// an answer.
+    #[test]
+    fn a_header_with_the_worst_properties_byte_is_an_error_and_not_a_bomb() {
+        let mut input = alloc::vec![44u8];
+        input.extend_from_slice(&(1u32 << 16).to_le_bytes()); // the dictionary size
+        input.extend_from_slice(&u64::MAX.to_le_bytes()); // the size: unknown
+        input.extend_from_slice(&[0u8; 8]); // a truncated payload
+        let err = LzmaDecoder::new()
+            .decode(&input)
+            .expect_err("the payload is truncated");
+        assert!(
+            matches!(
+                err,
+                CompressError::UnexpectedEof
+                    | CompressError::CorruptedData(_)
+                    | CompressError::InvalidFormat(_)
+            ),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// The properties the specification does not allow are refused rather
+    /// than modelled: `lc = 8` and `lp = 4` are the limits, and a model
+    /// beyond them would ask for a table that does not fit.
+    #[test]
+    fn properties_outside_the_specification_are_refused() {
+        for props in [
+            LzmaProps {
+                lc: 9,
+                lp: 0,
+                pb: 0,
+            },
+            LzmaProps {
+                lc: 0,
+                lp: 5,
+                pb: 0,
+            },
+            LzmaProps {
+                lc: 0,
+                lp: 0,
+                pb: 5,
+            },
+        ] {
+            assert!(
+                matches!(LzmaEngine::new(props), Err(CompressError::InvalidFormat(_))),
+                "the properties out of range were not refused"
+            );
+        }
     }
 
     /// Vectors produced by CPython's lzma module (liblzma), FORMAT_ALONE.

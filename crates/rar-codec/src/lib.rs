@@ -52,7 +52,8 @@
 //! multivolume archives reassemble across volumes via
 //! [`Archive::open_multi`]. Encrypted payloads, PPMd filters, arbitrary
 //! RAR VM program filters and the RAR 7.x compression algorithm
-//! (version 1) are reported as [`Error::Unsupported`].
+//! (version 1) are not implemented: the version is read and stored,
+//! never consulted, and such a member is handed to the RAR5 decoder.
 //!
 //! ## Encode
 //!

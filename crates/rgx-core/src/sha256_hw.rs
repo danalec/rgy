@@ -63,15 +63,17 @@ pub fn hardware_available() -> bool {
 
 #[cfg(feature = "sha256-hw")]
 fn detect() -> bool {
-    // `sha256-hw` requires `std` (see the feature table in Cargo.toml), so
-    // the runtime feature-detection path is always available here. The
-    // `not(feature = "std")` arms this used to carry fell back to
-    // `cfg!(target_feature = "sha")`, which is a compile-time constant: a
-    // portable build never sets `sha`, so it answered false forever and the
-    // hardware path could never light up in a no_std build at all.
+    // The question is asked through this crate's own probe (`crate::detect`),
+    // not through `std::arch::is_x86_feature_detected!`: the macro lives in
+    // `std` and this feature does not require `std`, so a `no_std` build with
+    // `sha256-hw` on would not compile at all. The `not(feature = "std")`
+    // arms this used to carry fell back to `cfg!(target_feature = "sha")`,
+    // which is a compile-time constant: a portable build never sets `sha`, so
+    // it answered false forever and the hardware path could never light up in
+    // a no_std build at all.
     #[cfg(target_arch = "x86_64")]
     {
-        std::is_x86_feature_detected!("sha") && std::is_x86_feature_detected!("sse4.1")
+        crate::detect::sha() && crate::detect::sse4_1()
     }
     // No aarch64 backend exists. Reporting the extension as available would
     // make `hardware_available()` claim a backend that `compress_block` does

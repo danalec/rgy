@@ -219,6 +219,7 @@ impl MmapInner {
     }
 
     pub fn advise(&self, advice: libc::c_int, offset: usize, len: usize) -> io::Result<()> {
+        super::refuse_unavailable(advice)?;
         let r = unsafe {
             libc::madvise(
                 self.ptr.add(offset) as *mut libc::c_void,

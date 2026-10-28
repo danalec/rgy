@@ -842,6 +842,12 @@ impl Adapter for Dicom {
                 break; // implicit VR or garbage — stop cleanly
             }
             let (vlen, header_len) = if LONG_VR.contains(&&vr) {
+                // A long VR's length is the four bytes after the short
+                // header, so the element needs twelve of them: the loop's
+                // own eight-byte guarantee does not cover the read.
+                if p + 12 > data.len() {
+                    break;
+                }
                 (rd_u32le(data, p + 8) as usize, 12usize)
             } else {
                 (rd_u16le(data, p + 6) as usize, 8usize)
@@ -850,14 +856,17 @@ impl Adapter for Dicom {
                 break;
             } // undefined length
             let voff = p + header_len;
-            if voff + vlen > data.len() {
+            let Some(end) = voff.checked_add(vlen) else {
+                break;
+            };
+            if end > data.len() {
                 break;
             }
             let tag = format!("({:04X},{:04X})", group, element);
             let value = match &vr {
                 b"PN" | b"LO" | b"SH" | b"ST" | b"LT" | b"UT" | b"DA" | b"TM" | b"UI" | b"CS"
                 | b"AS" | b"AE" | b"DS" | b"IS" | b"DT" => {
-                    let s = String::from_utf8_lossy(&data[voff..voff + vlen]);
+                    let s = String::from_utf8_lossy(&data[voff..end]);
                     Some(s.trim_matches(char::from(0)).trim().to_string())
                 }
                 b"US" if vlen == 2 => Some(rd_u16le(data, voff).to_string()),
@@ -870,7 +879,7 @@ impl Adapter for Dicom {
                     let _ = writeln!(out, "{tag} {vr_s}: {v}");
                 }
             }
-            p = voff + vlen;
+            p = end;
         }
         if out.trim().is_empty() {
             decline!("no DICOM elements decoded");
@@ -1148,6 +1157,35 @@ mod tests {
             Outcome::Text(t) => {
                 let s = String::from_utf8(t).unwrap();
                 assert!(s.contains("(0008,0060) CS: MR"), "{s}");
+            }
+            _ => panic!("expected text"),
+        }
+    }
+
+    /// A long VR's 32-bit length sits in the four bytes after the short
+    /// header, so an element whose eight-byte header ends at the end of
+    /// the file has not declared its length at all: the walk used to read
+    /// those four bytes anyway, past the end of the file.
+    #[test]
+    #[cfg(feature = "dicom")]
+    fn a_dicom_element_whose_long_vr_header_ends_the_file_stops_there() {
+        let mut data = vec![0u8; 128];
+        data.extend_from_slice(b"DICM");
+        data.extend_from_slice(&[0x08, 0x00, 0x60, 0x00]);
+        data.extend_from_slice(b"CS");
+        data.extend_from_slice(&2u16.to_le_bytes());
+        data.extend_from_slice(b"MR");
+        // (0008,1150) with VR OB — a long VR — and no length bytes.
+        data.extend_from_slice(&[0x08, 0x00, 0x50, 0x11]);
+        data.extend_from_slice(b"OB\x00\x00");
+        match Dicom.extract(&data, "x.dcm").unwrap() {
+            Outcome::Text(t) => {
+                let s = String::from_utf8_lossy(&t);
+                assert!(s.contains("(0008,0060) CS: MR"), "{s}");
+                assert!(
+                    !s.contains("(0008,1150)"),
+                    "the element was never read: {s}"
+                );
             }
             _ => panic!("expected text"),
         }

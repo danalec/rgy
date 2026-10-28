@@ -904,7 +904,16 @@ impl Unpacker3 {
         // Read order is fixed by the format: the dictionary size (0x20)
         // precedes the escape byte (0x40).
         let dict_size = if flags & 0x20 != 0 {
-            (br.take(8)? + 1) << 20
+            let mb = br.take(8)? + 1;
+            // One byte, so a crafted header can name 256 MiB of arena,
+            // and a window allocation that fails aborts the process --
+            // the failure cannot be caught. WinRAR 3's own switch tops
+            // out at 128 MiB, so past that the block is refused by name
+            // rather than paid for.
+            if mb > 128 {
+                return Err(Error::Malformed("PPMd memory beyond 128 MiB"));
+            }
+            mb << 20
         } else {
             0
         };
@@ -1205,8 +1214,13 @@ fn filter_e8(region: &[u8], pos: usize, e9also: bool) -> Result<Vec<u8>> {
 /// byte offset of the pixel grid.
 fn filter_rgb(region: &[u8], stride: u32, byteoffset: u32) -> Result<Vec<u8>> {
     let blocklength = region.len();
+    // A stride under 3 passes `> blocklength` and sends the predictor's
+    // `prev + 3` read past the block's end: a real RGB row is at least
+    // one pixel wide, which is three bytes, so less than that is a
+    // crafted register, not a filter.
     if blocklength > PROGRAM_WORK_SIZE as usize / 2
         || stride as usize > blocklength
+        || stride < 3
         || blocklength < 3
         || byteoffset > 2
     {

@@ -97,6 +97,28 @@ pub(crate) fn file_len(file: &File) -> io::Result<u64> {
     Ok(file.metadata()?.len())
 }
 
+/// The refusal of an advice this platform does not have.
+///
+/// The seven advices that only Linux has are numbers Linux owns, and a
+/// number a kernel does not know is not an error but an instruction it
+/// does know: FreeBSD's `MADV_PROTECT` is 10 and Linux's `MADV_DONTFORK`
+/// is 10 too, so handing the number over would change the protection of
+/// the mapping instead of turning the advice down.
+///
+/// The rule is one rule for the three unix platforms: Linux has the seven
+/// and refuses nothing, and the two BSDs have the five that every unix
+/// kernel has and refuse the other seven.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
+pub(crate) fn refuse_unavailable(advice: libc::c_int) -> io::Result<()> {
+    if crate::memmap2::advice::is_available(advice) {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "this advice is a Linux one and this kernel does not have it",
+    ))
+}
+
 pub(crate) fn file_len_for_desc(desc: &MmapRawDescriptor) -> io::Result<u64> {
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
     {

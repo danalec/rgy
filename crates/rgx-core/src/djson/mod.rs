@@ -21,12 +21,14 @@
 //! (deduped), so an escaped key whose source bytes needed decoding is
 //! owned by the arena just like a non-escaped one. The `BTreeMap` key
 //! type is `usize` and the arena's allocator owns every string in the
-//! document. `parse` returns `(Value, Arena)`; the caller drops the
-//! arena when it is done with the value.
+//! document. `parse` returns the arena alone; the values are handles into
+//! it, and the caller drops the arena when it is done with them.
 //!
-//! `no_std` + `alloc`. `serde` is opt-in. The streaming layer
-//! ([`stream`]) is `std`-only and feeds one document at a time into
-//! the parser; the rest of the suite is `no_std`-clean.
+//! `no_std` + `alloc`, with no `serde` anywhere: the arena is the data
+//! model and `to_string` writes the document. The streaming layer
+//! ([`stream`]) feeds one document at a time into the parser and is
+//! `no_std` + `alloc` too; only its `from_reader` convenience is
+//! `std`-only.
 
 /// Byte-walking helpers shared by [`stream`] and [`raw_value`]. The
 /// two functions here are the only piece of the streaming layer that
@@ -39,6 +41,11 @@ pub mod error;
 /// an [`Arena`]; it is the only public entry point
 /// [`crate::djson::parse`] uses.
 pub mod index_parser;
+/// The shadow of the arena's string table: the hash index that answers
+/// "have I seen this string?". This crate's own, because the `alloc` crate
+/// has no `HashMap` at all -- and because a slot that holds the *index* of
+/// a key does not hold a second copy of it.
+mod intern;
 /// Stage 1: structural-index scanner. rgx's own code, like the rest of this
 /// suite; its provenance note is in `scripts/vendored-sources.tsv`.
 pub mod json_scan;

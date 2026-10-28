@@ -15,10 +15,12 @@
 //! not on a flag in the header. Dependent blocks decode into the
 //! frame's running output so a match can resolve against the previous
 //! block's bytes. The legacy container is a bare sequence of
-//! length-prefixed blocks with no frame header, no block checksums and
-//! no end-mark semantics, so it shares only the block compressor with
-//! the frame reader. Dictionary-compressed frames (`lz4 -D`) that
-//! match across the dictionary are still rejected.
+//! length-prefixed blocks with no frame header and no block checksums,
+//! so it shares only the block compressor with the frame reader; its
+//! stream ends where the frame's does not, on a zero block size or on a
+//! size past the ceiling, and not on an end mark. Dictionary-compressed
+//! frames (`lz4 -D`) that match across the dictionary are still
+//! rejected.
 //!
 //! The blanket allow below matches `sevenz`/`tar`: rgx never encodes,
 //! so the encoder half and its match finder are carried along unused,

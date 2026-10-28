@@ -14,79 +14,61 @@
 
 use libfuzzer_sys::fuzz_target;
 
-/// Extensions with a claiming adapter, one per family. The first byte of
-/// input selects which parser gets the rest of the bytes.
+/// Every adapter the fuzz target drives, in one place.
 ///
-/// Every adapter the registry can reach by extension belongs here. A missing
-/// entry is not a smaller hole than it looks: the fuzzer is the only thing in
-/// the tree that drives the parsers with bytes no fixture ever produces, so an
-/// unlisted extension is an adapter whose deep states nothing can reach.
-const EXTS: &[&str] = &[
-    // archive
-    "zip", "7z", "rar", "tar", "gz", "bz2", "xz", "zst", "cpio", "ar", "deb",
-    "br", "lz4", "lzma", "tbz", "txz", "tzst",
-    // backups
-    "bundle", "dump",
-    // disk images (block containers and the catalogues they carry)
-    "iso", "img", "wim", "vhd", "vhdx", "qcow2", "vmdk", "vdi", "erofs",
-    "apfs", "hfs", "hfsplus", "dmg", "sqsh", "squashfs",
-    // office
-    "docx", "xlsx", "pptx", "odt", "ods", "odp", "odg", "odi", "doc", "xls",
-    "ppt", "epub", "vsd", "vsdx", "xps", "rtf", "abw", "wpd", "wps", "wfb", "hwd",
-    // markup renderers (Reach::Render, reached through process regardless)
-    "md", "markdown", "html", "htm", "xhtml", "org", "textile", "wiki",
-    "mediawiki", "man", "t2t", "fb2", "latex", "ltx",
-    // threed
-    "glb", "stl", "ply", "fbx", "pcd", "las", "vtk", "blend", "3ds", "laz",
-    "mrc", "nii",
-    // llm
-    "gguf", "safetensors", "npy", "pb", "onnx", "model", "mlmodel", "tiktoken",
-    "keras", "pt", "pt2", "pth", "pkl", "pickle",
-    // media
-    "jpg", "png", "tiff", "tif", "mp3", "flac", "wav", "fits", "dcm", "ttf",
-    "woff", "mobi", "mkv", "avi", "asf", "flv", "mpeg", "mpg", "ts", "bmp", "gif",
-    // tabular
-    "sqlite", "dbf", "dbc", "shp", "parquet", "arrow", "feather", "mat", "nc",
-    "cdf", "h5", "hdf5", "slk", "dif", "wk1", "wk2", "wk3", "wk4", "wks", "123",
-    "mdb", "accdb", "accde", "accdt", "bson", "rdb", "duckdb",
-    // firebird / interbase
-    "fdb", "gdb",
-    // compound files (OLE2/CFB)
-    "hwp", "one", "nsf", "mpp", "cdr", "wab", "rvt",
-    // apple property lists and ISO-BMFF
-    "bplist", "icloud", "mobileconfig", "heic", "avif", "3gp", "mp4", "m4a", "mov",
-    // raw rasters and djvu
-    "nef", "dng", "cr2", "djvu", "djv",
-    // genomics
-    "bam", "bcf", "cram", "sam",
-    // cad
-    "dwg", "x_t", "x_b", "sab", "dgn",
-    // scientific
-    "grb", "grb1", "grb2", "grib", "bufr", "segy", "sgy", "root", "n5", "n5z",
-    // docs
-    "pdf", "rst", "tex",
-    // mail
-    "eml", "emlx", "mbox", "msg", "pst", "ost", "mmdf", "msf", "mboxindex",
-    // wasm + inspect (magic-based; ext is a fallback hint)
-    "wasm", "bin", "dat", "exe", "dll", "dylib", "elf", "dex", "rsrc",
-];
+/// The registry and the extension list are built from THIS list, so there is
+/// no second copy to drift: adding an adapter here puts it in both.
+fn adapters() -> Vec<Box<dyn rgx_core::Adapter>> {
+    let mut v: Vec<Box<dyn rgx_core::Adapter>> = Vec::new();
+    v.extend(rgx_adapters_archive::adapters());
+    v.extend(rgx_adapters_office::adapters());
+    v.extend(rgx_adapters_threed::adapters());
+    v.extend(rgx_adapters_llm::adapters());
+    v.extend(rgx_adapters_media::adapters());
+    v.extend(rgx_adapters_tabular::adapters());
+    v.extend(rgx_adapters_docs::adapters());
+    v.extend(rgx_adapters_mail::adapters());
+    v.extend(rgx_adapters_inspect::adapters());
+    v.extend(rgx_adapters_pdf::adapters());
+    v
+}
+
+/// The registry, and every extension it can reach, out of ONE build.
+///
+/// The two used to be two hand-written lists that agreed by hand. They did
+/// not: the extension list named 206 extensions and the registry reached
+/// 443, so a fifth of the parsers were never driven by the fuzzer at all --
+/// and the fuzzer is the only thing in the tree that drives the parsers
+/// with bytes no fixture ever produces. A list kept beside the code is a
+/// list that goes stale, and nothing in the build notices: the same lesson
+/// `tests/crate_readmes.rs` writes down for the adapter READMEs ("a copy of
+/// the list in the test would drift exactly the way the README does, and
+/// two wrong copies agreeing would look like a pass").
+///
+/// So the list is derived. The extension strings are `&'static str`, so they
+/// outlive the adapters that declared them: the boxes can go when the
+/// vector does.
+fn parts() -> (&'static rgx_core::Registry, &'static [&'static str]) {
+    static PARTS: std::sync::OnceLock<(rgx_core::Registry, Vec<&'static str>)> =
+        std::sync::OnceLock::new();
+    PARTS.get_or_init(|| {
+        let v = adapters();
+        let mut exts: Vec<&'static str> =
+            v.iter().flat_map(|a| a.extensions().iter().copied()).collect();
+        exts.sort_unstable();
+        exts.dedup();
+        (rgx_core::Registry::new(v), exts)
+    });
+    let (reg, exts) = PARTS.get().expect("the registry is built above");
+    (reg, exts.as_slice())
+}
 
 fn registry() -> &'static rgx_core::Registry {
-    static REG: std::sync::OnceLock<rgx_core::Registry> = std::sync::OnceLock::new();
-    REG.get_or_init(|| {
-        let mut v: Vec<Box<dyn rgx_core::Adapter>> = Vec::new();
-        v.extend(rgx_adapters_archive::adapters());
-        v.extend(rgx_adapters_office::adapters());
-        v.extend(rgx_adapters_threed::adapters());
-        v.extend(rgx_adapters_llm::adapters());
-        v.extend(rgx_adapters_media::adapters());
-        v.extend(rgx_adapters_tabular::adapters());
-        v.extend(rgx_adapters_docs::adapters());
-        v.extend(rgx_adapters_mail::adapters());
-        v.extend(rgx_adapters_inspect::adapters());
-        v.extend(rgx_adapters_pdf::adapters());
-        rgx_core::Registry::new(v)
-    })
+    parts().0
+}
+
+fn extensions() -> &'static [&'static str] {
+    &parts().1
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -101,7 +83,8 @@ fuzz_target!(|data: &[u8]| {
         facts_sink: None,
     };
     // rotate extensions across runs: byte 0 picks, rest is the payload
-    let ext = EXTS[data[0] as usize % EXTS.len()];
+    let exts = extensions();
+    let ext = exts[data[0] as usize % exts.len()];
     let path = format!("fuzz/sample.{ext}");
     let mut out = Vec::new();
     rgx_core::process(registry(), &path, &data[1..], 0, &ctx, &mut out);

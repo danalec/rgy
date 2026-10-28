@@ -73,10 +73,10 @@ OPTIONS:
     -B, --before-context  Number of lines of before-context
     -C, --context         Number of lines of before and after context
     -a, --text            Search files the build marked binary
-    --engine <which>      auto (default: in-house for a line-anchored pattern,
-                          grep otherwise -- measured, see EngineMode::pick), rgx
-                          (always in-house where the pattern compiles), grep, or
-                          both (cross-checked, divergences named on stderr)
+    --engine <which>      auto (the default) or rgx (always in-house). The
+                          retired names grep and both still parse, resolve to
+                          the in-house engine and say so on stderr; there is
+                          no cross-check engine and no divergence report
     -M, --max-filesize N  Skip files larger than N (suffixes k/m/g, as in rg)
     --validate           Stat every file the manifest claims and report the ones
                           the filesystem disagrees about. A stat per file, the
