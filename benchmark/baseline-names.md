@@ -4,7 +4,8 @@
 
 Host: AMD Ryzen 9 7950X3D (16 cores / 32 logical), Windows 11 Pro N
 10.0.26300. Measured on 2026-10-24, from the commit the rank key lands
-on — the code before it.
+on — the code before it. The Linux rows below were taken by the same
+recipe, on the Linux host, from the same commit.
 
     python scripts/bench-names.py measure --runs 7 --threads 4 \
         --names 200000 --names 5000000 --gate 200000 \
@@ -71,7 +72,19 @@ The gate is a regression detector, not a latency claim.
 
 ## The gate's tables
 
-<!-- BEGIN: bench-names-table -->
+A baseline is a machine as well as a number. The same Rust is not the same
+machine code on Linux and on Windows — the code generator is the OS's — and
+the measurement is a memory-bound one, so the CPU's memory system is in it
+too. A baseline recorded on one host cannot rule on another, so each table
+below is one host, the rows carry the host they were taken on, and the gate
+compares against the rows of the host it runs on. The host is the OS and the
+CPU, normalized: `windows-amd-ryzen-9-7950x3d-16-core-processor` and
+`linux-amd-ryzen-7-255`. A gate run on a machine the baseline has no rows
+for says so and exits 3, rather than comparing two machines.
+
+### Windows: AMD Ryzen 9 7950X3D, Windows 11 Pro
+
+<!-- BEGIN: bench-names-table host=windows-amd-ryzen-9-7950x3d-16-core-processor -->
 
 Corpus: 200,000 names, 4 threads, best of 7 runs.
 
@@ -99,17 +112,60 @@ Corpus: 5,000,000 names, 4 threads, best of 7 runs.
 | `rep` | 716,000 | 1582 | 1642 | 2020 | 1% | full |
 | `report` | 716,000 | 1564 | 1682 | 2060 | 3% | full |
 
-<!-- END: bench-names-table -->
+<!-- END: bench-names-table host=windows-amd-ryzen-9-7950x3d-16-core-processor -->
 
-**The gate rules on the 200k rows. The 5M rows are measured and reported,
-not gated.** The 5M measurement does not reproduce on this host: the spread
-across the seven runs of the same code reaches 52% on `rep` and 39% on
-`^src`, and two sessions of identical code disagree by 28% on `mod` — wider
-than the 20% the gate applies. A gate that fires on noise is worse than no
-gate, so the 5M rows are recorded, printed and compared, and the script says
-`REPORTED` instead of failing. The 200k rows, at a 3–8% spread, are the ones
-that can carry a verdict, and they have held across four sessions of the
-same code.
+### Linux: AMD Ryzen 7 255, CachyOS
+
+<!-- BEGIN: bench-names-table host=linux-amd-ryzen-7-255 -->
+
+Corpus: 200,000 names, 4 threads, best of 7 runs.
+
+| query | hits | min µs | med µs | p90 µs | spread | plan |
+|---|---|---|---|---|---|---|
+| `'report_00000.pdf` | 1 | 0 | 0 | 0 | — | selective |
+| `^src` | 57,000 | 108 | 141 | 191 | 10% | full |
+| `dat$` | 114,000 | 174 | 208 | 278 | 5% | full |
+| `f1` | 80,547 | 143 | 166 | 240 | 5% | full |
+| `file` | 114,000 | 170 | 212 | 304 | 8% | full |
+| `mod` | 57,000 | 108 | 139 | 186 | 2% | full |
+| `rep` | 29,000 | 77 | 97 | 112 | 16% | full |
+| `report` | 29,000 | 76 | 96 | 131 | 10% | full |
+
+Corpus: 5,000,000 names, 4 threads, best of 7 runs.
+
+| query | hits | min µs | med µs | p90 µs | spread | plan |
+|---|---|---|---|---|---|---|
+| `'report_00000.pdf` | 1 | 1 | 1 | 1 | — | selective |
+| `^src` | 1,428,000 | 2637 | 2904 | 3191 | 5% | full |
+| `dat$` | 2,856,000 | 4250 | 4469 | 4798 | 6% | full |
+| `f1` | 1,639,704 | 2929 | 3062 | 3237 | 4% | full |
+| `file` | 2,856,000 | 4258 | 4636 | 5209 | 5% | full |
+| `mod` | 1,428,000 | 2643 | 2809 | 3322 | 4% | full |
+| `rep` | 716,000 | 1778 | 1922 | 2190 | 13% | full |
+| `report` | 716,000 | 1770 | 1949 | 2251 | 4% | full |
+
+<!-- END: bench-names-table host=linux-amd-ryzen-7-255 -->
+
+**On the Windows host the gate rules on the 200k rows; the 5M rows are
+measured and reported, not gated.** The 5M measurement does not reproduce on
+this host: the spread across the seven runs of the same code reaches 52% on
+`rep` and 39% on `^src`, and two sessions of identical code disagree by 28%
+on `mod` — wider than the 20% the gate applies. A gate that fires on noise
+is worse than no gate, so the 5M rows are recorded, printed and compared, and
+the script says `REPORTED` instead of failing. The 200k rows, at a 3–8%
+spread, are the ones that can carry a verdict, and they have held across four
+sessions of the same code.
+
+**On the Linux host the gate rules on both corpora.** Those rows come from
+the same commit the Windows rows come from (`121532e`, "the priority is a
+level, not a term added to the score"), so the two references are one code
+measured on two machines. That host's noise moves between corpora and between
+recordings — the same code measured four times put the 5M spread at 4–13% in
+one recording and 72–193% in another, and the 200k rows at 2–16% in one and
+88% in another — so each corpus is taken from the recording in which it
+reproduced, with the spread recorded beside it: 2–16% at 200k, 4–13% at 5M,
+both under the threshold the gate applies. The daemon ships on that host, so
+it is the one that has to rule on the 5M corpus.
 
 **The 5M rows are a number about a machine, not about the code.** The two
 trees that the `no_std` rewrite put apart measure 3% to 6% apart on this
@@ -141,6 +197,10 @@ Notes:
 - The corpus is synthetic (`name_bench.rs`); regenerate this table when the
   corpus definition changes, and keep the machine class in mind when
   comparing.
+- `host` is the machine the row was taken on — the OS and the CPU,
+  normalized. `bench-names.py check` compares against the rows of the host it
+  runs on, and refuses (exit 3) a baseline that has no rows for it; `--host`
+  names the host when a machine has more than one name.
 - The table is generated from `benchmark/baseline-names.csv`, the way
   `docs/parity.md` is generated from `docs/parity.toml` (AGENTS.md §4). The
   CSV is the source of truth; `bench-names.py render --check` fails when the
@@ -151,8 +211,8 @@ Notes:
     python scripts/bench-names.py check --baseline benchmark/baseline-names.csv --runs 7
 
 Exit codes: 0 pass, 1 regression, 2 undecidable (the noise floor is wider
-than the threshold), 3 not comparable (a different worker width, or a row
-that is not measured at all).
+than the threshold), 3 not comparable (a different worker width, a row that is
+not measured at all, or a host the baseline has no rows for).
 
 ## The wide pool, as it was measured before
 

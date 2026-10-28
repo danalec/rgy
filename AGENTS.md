@@ -145,6 +145,13 @@ noise is otherwise wider than the threshold, and a gate that fires on noise
 is worse than no gate. A row whose spread is wider than the threshold is
 undecidable, and the script says so instead of guessing.
 
+The gate is also a machine. A baseline recorded on one host cannot rule on
+another — the code generator is the OS's, and the measurement is a
+memory-bound one, so the CPU's memory system is in it too — so every row
+carries the host it was taken on, the gate compares against the rows of the
+host it runs on, and the write-up carries a table per host. `--host` names
+the host when a machine has more than one name.
+
 The table is generated from [`benchmark/baseline-names.csv`](benchmark/baseline-names.csv),
 the way `docs/parity.md` is generated from `docs/parity.toml` (§4): the CSV
 is the source of truth, and `bench-names.py render --check` fails when the

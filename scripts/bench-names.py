@@ -21,6 +21,15 @@ recorded beside it, because a spread wider than the threshold means the
 measurement cannot decide the gate -- and the script says so instead of
 guessing.
 
+A baseline is also a machine. The same Rust is not the same machine code
+on Linux and on Windows -- the code generator is the OS's -- and the
+measurement is a memory-bound one, so the CPU's memory system is in it
+too. A baseline recorded on one host cannot rule on another, so the rows
+carry the host they were taken on, the gate compares against the rows of
+the host it runs on, and the write-up carries a table per host. The host
+is derived from the OS and the CPU, and `--host` overrides it when the
+machine has more than one name.
+
 The width of the worker pool is fixed too, because the noise is a function
 of it. On a 32-thread host with other work on it, the `mod` row measured over
 five runs of the same code, at 200k names:
@@ -45,7 +54,7 @@ match.
     python scripts/bench-names.py measure --runs 7 --names 200000 --names 5000000 \
         --out benchmark/baseline-names.csv
 
-    # gate a change against the recorded baseline
+    # gate a change against the recorded baseline, on this host
     python scripts/bench-names.py check --baseline benchmark/baseline-names.csv --runs 7
 
     # regenerate the table in the write-up, and prove it has not drifted
@@ -64,6 +73,8 @@ import argparse
 import csv
 import io
 import os
+import platform
+import re
 import statistics
 import subprocess
 import sys
@@ -73,8 +84,6 @@ ROOT = Path(__file__).resolve().parent.parent
 BASELINE_CSV = ROOT / "benchmark" / "baseline-names.csv"
 BASELINE_MD = ROOT / "benchmark" / "baseline-names.md"
 
-BLOCK_BEGIN = "<!-- BEGIN: bench-names-table -->"
-BLOCK_END = "<!-- END: bench-names-table -->"
 
 # The threshold the gate uses, and the one AGENTS.md §5 states.
 THRESHOLD_PCT = 20.0
@@ -89,6 +98,44 @@ THREADS = 4
 # 0.06 us. The gate does not rule on rows this small, and the table does
 # not print a spread for them.
 MIN_GATE_US = 10.0
+
+
+def cpu_model() -> str:
+    """The CPU, as the machine says it."""
+    if sys.platform.startswith("linux"):
+        try:
+            for line in Path("/proc/cpuinfo").read_text(encoding="utf-8").splitlines():
+                if line.startswith("model name"):
+                    return line.split(":", 1)[1].strip()
+        except OSError:
+            pass
+    elif sys.platform == "win32":
+        try:
+            import winreg
+
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"HARDWARE\DESCRIPTION\System\CentralProcessor\0",
+            ) as key:
+                return str(winreg.QueryValueEx(key, "ProcessorNameString")[0])
+        except OSError:
+            pass
+    return platform.processor() or platform.machine() or "unknown"
+
+
+def default_host() -> str:
+    """A stable name for the machine class a measurement was taken on.
+
+    The OS is in it because the code generator is: the same Rust is not the
+    same machine code on Linux and on Windows, and a baseline taken on one
+    of them cannot rule on the other. The CPU is in it because the memory
+    system is, and the measurement is a memory-bound one.
+    """
+    raw = f"{platform.system()} {cpu_model()}"
+    # A VM's copy of a CPU carries the vendor's graphics tail ("AMD Ryzen 7
+    # 255 w/ Radeon 780M Graphics"); the CPU is the part before it.
+    raw = raw.split(" w/ ")[0]
+    return re.sub(r"[^a-z0-9]+", "-", raw.lower()).strip("-")
 
 
 def bench_command(names: int) -> list[str]:
@@ -140,7 +187,9 @@ def gate_stat(row: dict) -> float:
     return float(row["min_us"])
 
 
-def aggregate(corpus: int, runs: list[list[dict]], threads: int, gated: bool) -> list[dict]:
+def aggregate(
+    host: str, corpus: int, runs: list[list[dict]], threads: int, gated: bool
+) -> list[dict]:
     """Fold K runs into one row per query, with the spread recorded.
 
     The spread is the dispersion of the per-run statistics, relative to the
@@ -175,6 +224,7 @@ def aggregate(corpus: int, runs: list[list[dict]], threads: int, gated: bool) ->
                 f"bench-names: {query} was answered by {sorted(plans)} across runs"
             )
         out.append({
+            "host": host,
             "corpus": corpus,
             "kind": "query",
             "query": query,
@@ -193,7 +243,7 @@ def aggregate(corpus: int, runs: list[list[dict]], threads: int, gated: bool) ->
 
 
 def measure(
-    names: list[int], runs: int, threads: int, gate: list[int] | None
+    host: str, names: list[int], runs: int, threads: int, gate: list[int] | None
 ) -> list[dict]:
     """Measure every corpus size asked for, and fold each into its rows.
 
@@ -210,7 +260,7 @@ def measure(
             file=sys.stderr,
         )
         runs_rows = [run_once(corpus, threads) for _ in range(runs)]
-        rows.extend(aggregate(corpus, runs_rows, threads, gated))
+        rows.extend(aggregate(host, corpus, runs_rows, threads, gated))
     return rows
 
 
@@ -220,7 +270,7 @@ def gated_corpora(base: list[dict]) -> list[int]:
 
 
 CSV_FIELDS = [
-    "corpus", "kind", "query", "hits", "best_us", "med_us", "p90_us",
+    "host", "corpus", "kind", "query", "hits", "best_us", "med_us", "p90_us",
     "spread_pct", "runs", "threads", "gated", "plan",
 ]
 
@@ -249,9 +299,14 @@ def read_csv(path: Path) -> list[dict]:
         rows = list(csv.DictReader(fh))
     if not rows:
         raise SystemExit(f"bench-names: {path} has no rows")
+    if "host" not in (rows[0].keys() if rows else {}):
+        raise SystemExit(
+            f"bench-names: {path} has no host column; a baseline without a "
+            "host cannot say which machine it was taken on"
+        )
     # The corpus size and the worker width are numbers everywhere else, and a
-    # row is matched by (corpus, query): a string here would make every row
-    # look new, and a string width would make every row look incomparable.
+    # row is matched by (host, corpus, query): a string here would make every
+    # row look new, and a string width would make every row look incomparable.
     for row in rows:
         row["corpus"] = int(row["corpus"])
         row["threads"] = int(row["threads"])
@@ -270,8 +325,9 @@ def render_table(rows: list[dict]) -> str:
         block = [r for r in rows if r["corpus"] == corpus]
         runs = block[0]["runs"]
         threads = block[0].get("threads", THREADS)
+        width = "1 thread" if int(threads) == 1 else f"{threads} threads"
         out.append(
-            f"Corpus: {int(corpus):,} names, {threads} threads, "
+            f"Corpus: {int(corpus):,} names, {width}, "
             f"best of {runs} runs."
         )
         out.append("")
@@ -386,18 +442,32 @@ def compare(base: list[dict], now: list[dict], threshold: float) -> int:
     return 0
 
 
-def replace_block(md: str, table: str) -> str:
+def block_markers(host: str) -> tuple[str, str]:
+    """The markers of one host's table."""
+    return (
+        f"<!-- BEGIN: bench-names-table host={host} -->",
+        f"<!-- END: bench-names-table host={host} -->",
+    )
+
+
+def replace_block(md: str, table: str, host: str) -> str:
     """Put the generated table between the markers."""
-    begin = md.find(BLOCK_BEGIN)
-    end = md.find(BLOCK_END)
-    if begin < 0 or end < 0 or end < begin:
+    begin, end = block_markers(host)
+    i = md.find(begin)
+    j = md.find(end)
+    if i < 0 or j < 0 or j < i:
         raise SystemExit(
-            f"bench-names: {BASELINE_MD} has no generated block; "
-            f"it needs {BLOCK_BEGIN} and {BLOCK_END}"
+            f"bench-names: {BASELINE_MD} has no generated block for {host}; "
+            f"it needs {begin} and {end}"
         )
-    head = md[: begin + len(BLOCK_BEGIN)]
-    tail = md[end:]
+    head = md[: i + len(begin)]
+    tail = md[j:]
     return f"{head}\n\n{table}\n{tail}"
+
+
+def blocks_in(md: str) -> list[str]:
+    """The hosts the write-up carries a table for."""
+    return re.findall(r"<!-- BEGIN: bench-names-table host=([a-z0-9\-]+) -->", md)
 
 
 def main() -> int:
@@ -419,6 +489,10 @@ def main() -> int:
         help="corpus size the gate rules on; repeatable (default: all of them)",
     )
     p_measure.add_argument("--out", type=Path, default=None)
+    p_measure.add_argument(
+        "--host", default=None,
+        help="the host the rows are taken on (default: this machine)",
+    )
 
     p_check = sub.add_parser("check", help="gate a change against a baseline")
     p_check.add_argument("--baseline", type=Path, default=BASELINE_CSV)
@@ -432,6 +506,10 @@ def main() -> int:
         help="the worker width (default: the baseline's own)",
     )
     p_check.add_argument("--threshold", type=float, default=THRESHOLD_PCT)
+    p_check.add_argument(
+        "--host", default=None,
+        help="the host to compare against (default: this machine)",
+    )
 
     p_render = sub.add_parser("render", help="render the table from a CSV")
     p_render.add_argument("--csv", type=Path, default=BASELINE_CSV)
@@ -443,12 +521,18 @@ def main() -> int:
         "--write", action="store_true",
         help="put the rendered table into the write-up, between the markers",
     )
+    p_render.add_argument(
+        "--host", default=None,
+        help="the host to render (default: every host in the CSV)",
+    )
 
     args = parser.parse_args()
 
     if args.command == "measure":
         names = args.names or [200_000]
-        rows = measure(names, args.runs, args.threads, args.gate)
+        host = args.host or default_host()
+        print(f"bench-names: host {host}", file=sys.stderr)
+        rows = measure(host, names, args.runs, args.threads, args.gate)
         if args.out:
             write_csv(rows, args.out)
             print(f"bench-names: wrote {args.out}", file=sys.stderr)
@@ -457,6 +541,18 @@ def main() -> int:
 
     if args.command == "check":
         base = read_csv(args.baseline)
+        host = args.host or default_host()
+        hosts = {r["host"] for r in base}
+        if host not in hosts:
+            print(
+                f"bench-names: {args.baseline} has no rows for host {host}; "
+                f"it has {sorted(hosts)}. A baseline recorded on another host "
+                "cannot rule on this one.",
+                file=sys.stderr,
+            )
+            return 3
+        base = [r for r in base if r["host"] == host]
+        print(f"bench-names: host {host}, against {args.baseline}", file=sys.stderr)
         names = args.names or sorted({int(r["corpus"]) for r in base})
         threads = args.threads
         if threads is None:
@@ -467,34 +563,48 @@ def main() -> int:
                     f"worker width ({sorted(widths)}); say which one to use"
                 )
             threads = int(widths.pop() or THREADS)
-        now = measure(names, args.runs, threads, gated_corpora(base))
+        now = measure(host, names, args.runs, threads, gated_corpora(base))
         return compare(base, now, args.threshold)
 
     if args.command == "render":
         rows = read_csv(args.csv)
-        table = render_table(rows)
+        hosts = [args.host] if args.host else sorted({r["host"] for r in rows})
+        tables = {h: render_table([r for r in rows if r["host"] == h]) for h in hosts}
         if args.write:
             md = BASELINE_MD.read_text(encoding="utf-8")
             # LF, whatever the platform: `.gitattributes` says `*.md text
             # eol=lf`, and a Python that writes CRLF on Windows would make the
             # file differ from the tree for a reason that has nothing to do
             # with the measurement.
+            for host in hosts:
+                md = replace_block(md, tables[host], host)
             with BASELINE_MD.open("w", encoding="utf-8", newline="\n") as fh:
-                fh.write(replace_block(md, table))
+                fh.write(md)
             print(f"bench-names: wrote the table into {BASELINE_MD}")
             return 0
         if not args.check:
-            print(table, end="")
+            for host in hosts:
+                print(tables[host], end="")
             return 0
         md = BASELINE_MD.read_text(encoding="utf-8")
-        wanted = replace_block(md, table)
-        if wanted != md:
-            print(
-                f"bench-names: {BASELINE_MD} does not carry the table this "
-                "renders; regenerate it",
-                file=sys.stderr,
-            )
-            return 1
+        for host in blocks_in(md):
+            if host not in hosts:
+                print(
+                    f"bench-names: {BASELINE_MD} carries a table for {host}, "
+                    f"which {args.csv} does not have rows for",
+                    file=sys.stderr,
+                )
+                return 1
+        for host in hosts:
+            wanted = replace_block(md, tables[host], host)
+            if wanted != md:
+                print(
+                    f"bench-names: {BASELINE_MD} does not carry the table this "
+                    f"renders for {host}; regenerate it",
+                    file=sys.stderr,
+                )
+                return 1
+            md = wanted
         print(f"bench-names: {BASELINE_MD} carries the table this renders")
         return 0
 

@@ -148,6 +148,14 @@ decide anything on: the same code came out 4% faster than the baseline
 in a quiet run and 44% slower in a noisy one, which is the 5–52% spread
 the baseline itself records, and the reason those rows do not rule.
 
+The baseline is a machine as well as a number. The same Rust is not the same
+machine code on Linux and on Windows, and the measurement is a memory-bound
+one, so every row of `benchmark/baseline-names.csv` now carries the host it
+was taken on, the gate compares against the rows of the host it runs on,
+and the write-up carries a table per host. The Linux host is in there
+because the daemon ships on it, and it rules on the 5M corpus — the corpus
+whose measurement does not reproduce on the Windows host.
+
 The 5M gap between the tree the rewrite left behind and the tree before it
 was chased to the bottom, and it is the platform rather than the code. On
 this Windows host the newer tree is 3% to 6% slower at 5M, doing exactly
