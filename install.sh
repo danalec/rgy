@@ -210,9 +210,27 @@ fi
 # The alias travels with the release: it is a link in the archive, and it
 # is copied as a link. A copy of the binary would be a second binary to
 # keep in step with the first.
-if [ -L "$stage/rgy" ] || [ -e "$stage/rgy" ]; then
-    cp -P "$stage/rgy" "$install_dir/rgy"
+#
+# The alias is optional. The four binaries above are the product, and an
+# archive that does not carry the alias still installs them: an installer
+# that aborts over a second name leaves a half-installed tree behind, and
+# the .ps1 twin does not abort either. It says the same thing this one
+# says, and the install goes on.
+#
+# The alias is looked for where the archive keeps it, the same way the
+# .ps1 twin looks: at the root first, and in the tree when the release
+# packed it in a subdirectory.
+alias_src=""
+if [ -e "$stage/rgy" ] || [ -L "$stage/rgy" ]; then
+    alias_src="$stage/rgy"
+else
+    alias_src=$(find "$stage" -name rgy \( -type f -o -type l \) | head -1)
+fi
+if [ -n "$alias_src" ]; then
+    cp -P "$alias_src" "$install_dir/rgy"
     echo "Added the rgy command: it runs searchctl."
+else
+    echo "the archive carries no rgy command: the install continues without it." >&2
 fi
 
 # The daemon at login.

@@ -114,23 +114,44 @@ if (-not $SkipChecksum) {
 $staging = Join-Path $env:TEMP "rgy-staging-$(Get-Random)"
 Expand-Archive -Path $tmp -DestinationPath $staging -Force
 
+# The file the archive carries, found where the archive keeps it.
+#
+# The release is flat, but a build that put the binaries in a subdirectory
+# would otherwise install nothing and say nothing. The search is bounded to
+# the staging directory on purpose: a path that is not there must not turn
+# into a walk of the temp folder -- the staging directory lives inside it,
+# and the temp folder holds thousands of files that are not ours.
+function Find-InStaging([string]$name) {
+    if (-not (Test-Path $staging)) { return $null }
+    Get-ChildItem -LiteralPath $staging -Recurse -Filter $name -File -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+}
+
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-foreach ($exe in @('searchctl.exe', 'searchd.exe', 'rgy-autostart.exe', 'rgxy.exe', 'rgy.exe')) {
+foreach ($exe in @('searchctl.exe', 'searchd.exe', 'rgy-autostart.exe', 'rgxy.exe')) {
     $src = Join-Path $staging $exe
     if (-not (Test-Path $src)) {
-        $found = Get-ChildItem $staging -Recurse -Filter $exe -File | Select-Object -First 1
-        if (-not $found) { throw "no $exe in $asset" }
+        $found = Find-InStaging $exe
+        if (-not $found) {
+            # The same line and the same exit code the .sh twin prints: an
+            # archive that does not carry a binary is a failed install, and
+            # a pair of twins that answer that in two different words is a
+            # pair nobody can compare.
+            [Console]::Error.WriteLine("no $exe in $asset")
+            exit 1
+        }
         $src = $found.FullName
     }
     Copy-Item -Path $src -Destination $InstallDir -Force
 }
 foreach ($doc in @('README.md', 'MANUAL.md', 'FORMATS.md', 'COPYING', 'NOTICE')) {
     $src = Join-Path $staging $doc
+    if (-not (Test-Path $src)) {
+        $found = Find-InStaging $doc
+        if ($found) { $src = $found.FullName }
+    }
     if (Test-Path $src) { Copy-Item -Path $src -Destination $InstallDir -Force }
 }
-
-Remove-Item $tmp -Force
-Remove-Item $staging -Recurse -Force
 
 # user PATH (idempotent prepend)
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
@@ -144,10 +165,30 @@ if (($userPath -split ';') -notcontains $InstallDir) {
 # The command the project is named after.
 #
 # The alias travels with the release: it is the same binary under another
-# name, and it was copied above like the rest.
-if (Test-Path (Join-Path $InstallDir 'rgy.exe')) {
-    Write-Host "Added the rgy command: it runs searchctl."
+# name, and it is copied as the file the archive carries. On Windows a link
+# is something only an administrator can make, so the archive carries the
+# binary itself.
+#
+# The alias is optional. The four binaries above are the product, and an
+# archive that does not carry the alias still installs them: an installer
+# that aborts over a second name leaves a half-installed tree behind, and
+# the .sh twin does not abort. It says the same thing this one says, and
+# the install goes on.
+$aliasSrc = Join-Path $staging 'rgy.exe'
+if (-not (Test-Path $aliasSrc)) {
+    $found = Find-InStaging 'rgy.exe'
+    $aliasSrc = if ($found) { $found.FullName } else { $null }
 }
+if ($aliasSrc) {
+    Copy-Item -Path $aliasSrc -Destination $InstallDir -Force
+    Write-Host "Added the rgy command: it runs searchctl."
+} else {
+    [Console]::Error.WriteLine("the archive carries no rgy command: the install continues without it.")
+}
+
+# The staging directory goes last: the alias above is still in it.
+Remove-Item $tmp -Force
+Remove-Item $staging -Recurse -Force
 
 # The daemon at login.
 #
