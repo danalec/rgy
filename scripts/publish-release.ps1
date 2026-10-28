@@ -299,7 +299,10 @@ if ($ManifestsOnly) {
 # The manifest names the zip the release carries, so its hash is the hash
 # of the file that is about to be uploaded -- not the hash of the one the
 # manifest was written for.
-$zip = $assets | Where-Object { $_.Name -like "*-windows.zip" } | Select-Object -First 1
+# The portable Windows archive, by its exact name: the release carries
+# an AVX2 and a Zen 4 zip as well, and the manifest installs the one
+# that runs on every x86_64 CPU.
+$zip = $assets | Where-Object { $_.Name -eq "rgy-v$Version-x86_64-windows.zip" } | Select-Object -First 1
 $wingetDir = Join-Path $root ".winget"
 
 function Set-Yaml([string]$file, [hashtable]$repl) {
@@ -366,7 +369,10 @@ $linuxSha = $null
 $sumsFile = ".dist\SHA256SUMS"
 if (Test-Path $sumsFile) {
     foreach ($line in (Get-Content $sumsFile)) {
-        if ($line -match '^([0-9a-fA-F]{64})\s+(\S+linux\.tar\.gz)$') {
+        # The portable Linux archive, by its exact name: the release also
+        # carries the AVX2 and the Zen 4 tarballs, and the installer is
+        # allowed to install the portable one only.
+        if ($line -match '^([0-9a-fA-F]{64})\s+(rgy-v' + [regex]::Escape($Version) + '-x86_64-linux\.tar\.gz)$') {
             $linuxSha = $Matches[1].ToUpper()
         }
     }

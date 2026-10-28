@@ -349,17 +349,18 @@ set_pin() {
 }
 
 digest_of() {
-    # The digest of the asset whose name ends with the given suffix, out of
-    # the digests the build wrote.
+    # The name, not a suffix: the release carries a portable archive and
+    # two tuned ones, and the installer is allowed to install the portable
+    # one only.
     [ -f .dist/SHA256SUMS ] || return 1
-    awk -v sfx="$1" '$2 ~ sfx { print toupper($1); exit }' .dist/SHA256SUMS
+    awk -v n="$1" '$2 == n { print toupper($1); exit }' .dist/SHA256SUMS
 }
 
 if [ "$dry_run" -eq 1 ]; then
     echo "[dry-run] installer pins -> version $tag"
 else
-    win_sha=$(digest_of 'windows[.]zip$')
-    lin_sha=$(digest_of 'linux[.]tar[.]gz$')
+    win_sha=$(digest_of "rgy-v$version-x86_64-windows.zip")
+    lin_sha=$(digest_of "rgy-v$version-x86_64-linux.tar.gz")
     if [ -n "$lin_sha" ]; then
         set_pin install.sh "$lin_sha" '^(expected=")[0-9A-Fa-f]{64}(")$'
     else

@@ -230,6 +230,45 @@ content worker that builds the trigrams, not a regex pass at query time.
   nearest-rank.
 - `searchd`: owns the indexes, the keep-warm, and the follower takeover.
 
+### 2.7 The release: the upstream's platforms, and the CPUs it tunes for
+
+The upstream rgx's release is the reference for what a release is here: one
+portable build for every CPU, the tuned ones for the CPUs that can run
+them, and every operating system the project ships for. rgy builds the same
+set.
+
+| | portable | AVX2 | Zen 4 (AVX-512) | arm64 |
+|---|---|---|---|---|
+| Windows | `x86_64-windows.zip` | `avx2-windows.zip` | `znver4-windows.zip` | `aarch64-windows.zip` |
+| Linux (gnu) | `x86_64-linux.tar.gz` | `avx2-linux.tar.gz` | `znver4-linux.tar.gz` | `aarch64-linux.tar.gz` |
+| Linux (musl) | `x86_64-linux-musl.tar.gz` | — | — | — |
+| macOS | `aarch64-apple-darwin.tar.gz`, `x86_64-apple-darwin.tar.gz` | — | — | — |
+
+Three rules about it:
+
+- **The portable archives keep their names.** `install.sh` asks for
+  `x86_64-linux.tar.gz` and `install.ps1` for `x86_64-windows.zip`, and the
+  published 0.1.0 carries those names. A rename would point the installers
+  at an archive that does not exist, so the tuned archives sit beside them
+  instead of replacing them.
+- **The installers install the portable one, by name.** The pin they carry
+  is the portable archive's digest looked up by its exact name: with three
+  Windows zips in a release, a match by suffix picks whichever comes first
+  in the digests file, and that is the AVX2 one — an installer that
+  downloads a binary tuned for a CPU it cannot assume.
+- **The archive's name is a property of the target and the flavour, never
+  of the machine that happened to run the build.** Two machines building
+  the same target produce the same archive name.
+
+The tuned builds are worth what the upstream measured for them (+1% on the
+corpus, +2.5% on the big-file literal, +5% on the big-file regex) and not
+one microsecond more: the vendored tree picks its byte kernels at *runtime*,
+by the CPU probe in `rgx-core`'s own `detect.rs`, so the compile-time
+target buys nothing on the path the name bench measures (187 µs against
+184 µs on `^src`, which is noise). They are built because the upstream
+builds them and a user on a Zen 4 should not have to wait for a runtime
+dispatch to find out what the compiler already knew.
+
 ## 3. The semantic traps
 
 These are the rules that break "parity" when they are ignored. Each one

@@ -203,11 +203,60 @@ jobs:
       - run: cargo test --workspace --no-fail-fast --locked
 
   release:
-    name: the release archive on ${{ matrix.os }}
+    name: the release archive for ${{ matrix.asset }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, windows-2022, macos-15]
+        include:
+          # --- Windows ---
+          - asset: x86_64-windows
+            os: windows-2022
+            target: x86_64-pc-windows-msvc
+            variant: portable
+          - asset: avx2-windows
+            os: windows-2022
+            target: x86_64-pc-windows-msvc
+            variant: avx2
+          - asset: znver4-windows
+            os: windows-2022
+            target: x86_64-pc-windows-msvc
+            variant: znver4
+          - asset: aarch64-windows
+            os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            variant: portable
+
+          # --- Linux ---
+          - asset: x86_64-linux
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            variant: portable
+          - asset: avx2-linux
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            variant: avx2
+          - asset: znver4-linux
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            variant: znver4
+          - asset: x86_64-linux-musl
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            variant: portable
+          - asset: aarch64-linux
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            variant: portable
+
+          # --- macOS ---
+          - asset: aarch64-apple-darwin
+            os: macos-15
+            target: aarch64-apple-darwin
+            variant: portable
+          - asset: x86_64-apple-darwin
+            os: macos-15
+            target: x86_64-apple-darwin
+            variant: portable
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -220,8 +269,13 @@ jobs:
           }
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          targets: ${{ matrix.target }}
       - uses: swatinem/rust-cache@v2
+      # The musl build links against musl, and the C compiler the crates
+      # with a C part ask for is musl-gcc on that target.
+      - name: Install musl tools (Linux musl)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
       # The archive the release publishes, built and smoked on this OS.
       # The test suite is the suite job's business; this one checks the
       # packaging: that the binaries build, that they answer a real
@@ -230,11 +284,11 @@ jobs:
       # inside -- and this job is where that is checked on three systems.
       - name: build the archive (unix)
         if: runner.os != 'Windows'
-        run: bash scripts/build-release.sh --skip-tests
+        run: bash scripts/build-release.sh --skip-tests --target ${{ matrix.target }} --variant ${{ matrix.variant }}
       - name: build the archive (windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: ./scripts/build-release.ps1 -SkipTests
+        run: ./scripts/build-release.ps1 -SkipTests -Target ${{ matrix.target }} -Variant ${{ matrix.variant }}
       # The archive is a .tar.gz on the unix runners and a .zip on the
       # Windows one, and each platform reads its own with the tool it
       # has: tar reads the tarball, and the Windows side reads the zip
@@ -322,6 +376,7 @@ jobs:
         env:
           RGY_FORGEJO_URL: http://forgejo.invalid
         run: ./scripts/publish-release.ps1 -ManifestsOnly -SkipTests
+
 
   clippy:
     name: the workspace stays formatted and warning-free

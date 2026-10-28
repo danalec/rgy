@@ -69,7 +69,7 @@ verification on machines this host does not have.
 | `rgy-autostart` (login item, per platform) | `crates/autostart` | ✅ startup task / HKCU Run, systemd user unit, launchd agent |
 | The crates on crates.io | `crates/*/Cargo.toml`, `bins/*/Cargo.toml` | ✅ all fourteen published at 0.1.0 on 2026-10-23 — see below |
 | The Listary plan | `docs/listary-parity.toml`, `scripts/listary-parity.py` | ⬜ 0 gaps and 12 degraded rows, each with work and a phase — see below |
-| Packaging (winget, brew, tarballs) | `scripts/build-release.*`, `scripts/publish-release.*`, `.winget/`, `Formula/` | ✅ machinery in place; **no release published yet** |
+| Packaging (winget, brew, tarballs) | `scripts/build-release.*`, `scripts/publish-release.*`, `.winget/`, `Formula/` | ✅ machinery in place; **no release published yet**. The release covers the platforms the upstream rgx covers — Windows x86_64 (portable, AVX2 and Zen 4), Windows on arm64, Linux x86_64 (portable, AVX2 and Zen 4), Linux on musl, Linux on arm64, and macOS on both arches — and the `release` job builds one archive per platform on every push. The portable archives keep the names the installers already ask for (`x86_64-windows.zip`, `x86_64-linux.tar.gz`), so the one-line installers and the winget manifest do not move |
 | Release flow (the one-line installers, the Linux build over ssh) | `install.sh`, `install.ps1`, `scripts/release-linux.sh` | ✅ the installers pin the digest of the artifact they install; the pins are release data |
 | Homebrew submission (the pull request to homebrew-core) | `scripts/publish-homebrew.*` | ✅ the machinery; the pull request waits for the first release to exist |
 | keep-warm / mimalloc / big-alloc (`BlobMut::anon`) | `crates/engine`, `crates/name-core` | ✅ |
@@ -78,7 +78,7 @@ verification on machines this host does not have.
 | The perf gate itself | `scripts/bench-names.py`, `benchmark/baseline-names.csv` | ✅ a fixed worker width, seven runs, the best of them, and the spread beside the number |
 | The parallel primitives (rayon gone) | `crates/par` (`rgy-par`) | ✅ `no_std` and dependency-free: `map_collect`, `for_each`, the k-way merge sort and the split that writes a chunk per worker. The width is the user's: `--threads` wins, then `RGY_NUM_THREADS`, then four for the scan and the machine's cores for the query |
 | The whole tree is `no_std` | `crates/*`, `crates/discovery-*` | ✅ every crate this repository owns declares `#![no_std]`; the `no-std` job builds the lot for `x86_64-unknown-none`, and each platform backend is proved on its own OS by the suite job |
-| The CI (the gates, on three OSes) | `.github/workflows/ci.yml`, `.gitea/workflows/drift.yml` | ✅ written and pinned to the named images (Windows Server 2022, macOS 15 on arm64, Ubuntu 24.04); ⬜ **never run** — see below |
+| The CI (the gates, on three OSes) | `.github/workflows/ci.yml`, `.gitea/workflows/drift.yml` | ✅ written and pinned to the named images (Windows Server 2022, macOS 15 on arm64, Ubuntu 24.04); ⬜ **never run** — see below. The `release` job is a matrix of eleven platforms, one archive each |
 
 ### Perf gate
 
@@ -102,6 +102,26 @@ Two things follow from it, and both are in the script:
   reported, not gated** (a 5–52% spread on this host, and two sessions of
   identical code disagreeing by 28%). A gate that fires on noise is worse
   than no gate.
+
+**The gate is red, and the regression is not where it looked.**
+Measured on 2026-10-27, right after the `rgx-v0.1.1` sync: every
+gated row of the 200k corpus is between 26% and 94% slower than the
+baseline. The A/B rules out the two obvious suspects. The sync is not
+the cause — the tree from before it measures the same (193 µs
+against 184 µs on `^src`, inside the row's own spread). The
+machine is not the cause either: the tree from before the `no_std`
+rewrite reproduces the baseline on this host, on the same day
+(101 µs against the recorded 110 µs). The rewrite is what costs
+1.8x on the scan and the rank, and it was committed without the gate
+being measured — only `bench-names.py render --check` ran, and
+that checks the table against the CSV, not the code against the
+baseline.
+
+The tuned builds do not move it either: `-C target-cpu=znver4`
+measures 187 µs against 184 µs for the portable one. The
+vendored tree's byte searches are chosen at runtime, by the CPU
+probe in `rgx-core`'s own `detect.rs`, so the compile-time target
+buys nothing on the path the bench measures.
 
 `benchmark/mmap-vs-read.md` records the mmap-vs-read measurements
 (Linux + Windows) behind the access-shape choices in
@@ -444,6 +464,18 @@ the three platforms behaving alike.
     programs (`soffice`, `tesseract`) — `std` by definition, and its own
     manifest says so. It is the one crate the bare-metal gate does not
     name.
+- **The name path is 1.8x slower than it was, and the gate that would
+  have said so never ran.** The `no_std` rewrite of the name engine
+  — the seam, the clock, the index format — was committed on
+  2026-10-26 with the perf gate's *render* check green and its
+  *measurement* never run. Measured on 2026-10-27, the gated rows of
+  the 200k corpus are between 26% and 94% slower than the baseline,
+  and the A/B puts the cost on the rewrite: the tree from before it
+  reproduces the baseline on the same host on the same day. This is
+  the one row of the scoreboard that is red, and it is red on a tree
+  that works and passes every other gate. The hunt is in what the
+  rewrite changed in `crates/name-core` and `crates/engine`; the two
+  commits to read first are `ffc0a62` and `c44d10c`.
 - **The whole tree is `no_std`, and the CI says so.** Every crate this
   repository owns — the name engine, the seam, the protocol, the selector,
   the orchestration engine, the login-item tool and the four platform
