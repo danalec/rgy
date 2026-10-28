@@ -2598,6 +2598,77 @@ mod tests {
         Live::new(Index::build(listings, 0, 1_700_000_000, b"/"))
     }
 
+    /// A negated token is about its own axis, and about nothing else.
+    ///
+    /// `ext:!txt` says "not a .txt". The folder "backup.txt" is a .txt by
+    /// name; the file under it is a .md, and a folder's extension says
+    /// nothing about the file's own. `attr:!hidden` says "not hidden"; a
+    /// file called "hidden" that is not hidden is kept, because the
+    /// attribute axis is the kind byte and not the name.
+    ///
+    /// The index path and the overlay path are two answers to one question,
+    /// and a question they answer differently is a bug in one of them.
+    #[test]
+    fn a_negated_token_is_about_its_own_axis_and_nothing_else() {
+        use rgy_discovery::walk::{KIND_DIR, KIND_FILE, Listing, NONE, RawEnt};
+        // root: backup.txt/ (dir), backup.txt/invoice.md, invoice.txt, hidden
+        let listings = vec![
+            Listing {
+                id: 0,
+                names: b"backup.txtinvoice.txthidden".to_vec(),
+                ents: vec![
+                    RawEnt { name_off: 0, name_len: 10, kind: KIND_DIR, size: 0, mtime: 7, child: 1 },
+                    RawEnt { name_off: 10, name_len: 11, kind: KIND_FILE, size: 3, mtime: 7, child: NONE },
+                    RawEnt { name_off: 21, name_len: 6, kind: KIND_FILE, size: 3, mtime: 7, child: NONE },
+                ],
+            },
+            Listing {
+                id: 1,
+                names: b"invoice.md".to_vec(),
+                ents: vec![RawEnt { name_off: 0, name_len: 10, kind: KIND_FILE, size: 3, mtime: 7, child: NONE }],
+            },
+        ];
+        let live = Live::new(Index::build(listings, 0, 1_700_000_000, b"/"));
+        let s = Searcher { live: &live };
+        let names = |query: &str| {
+            let hits = s.search(&q(query));
+            let mut v: Vec<String> = hits
+                .iter()
+                .map(|h| {
+                    let mut p = Vec::new();
+                    live.base.path(h.idx as usize, &mut p);
+                    String::from_utf8_lossy(&p).to_string()
+                })
+                .collect();
+            v.sort();
+            v
+        };
+        // The index path.
+        assert_eq!(
+            names("ext:!txt"),
+            vec!["/backup.txt/invoice.md".to_string(), "/hidden".to_string()],
+            "a negated extension rejects the .txt names, not what is under them"
+        );
+        assert_eq!(
+            names("attr:!hidden"),
+            vec!["/backup.txt".to_string(), "/backup.txt/invoice.md".to_string(), "/hidden".to_string(), "/invoice.txt".to_string(),],
+            "a negated attribute is about the kind byte, not about the name"
+        );
+        // The overlay path, which has to answer the same way.
+        for (query, path, expect) in [
+            ("ext:!txt", "/backup.txt", false),
+            ("ext:!txt", "/backup.txt/invoice.md", true),
+            ("ext:!txt", "/invoice.txt", false),
+            ("ext:!txt", "/hidden", true),
+            ("attr:!hidden", "/backup.txt", true),
+            ("attr:!hidden", "/backup.txt/invoice.md", true),
+            ("attr:!hidden", "/hidden", true),
+            ("attr:!hidden", "/invoice.txt", true),
+        ] {
+            assert_eq!(hit(query, path, KIND_FILE, 10), expect, "the overlay path answers {query} for {path} differently");
+        }
+    }
+
     /// The axes combine: a name word and a folder word are two
     /// conditions, not one.
     #[test]

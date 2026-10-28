@@ -214,6 +214,15 @@ The negation was wrong while the modes were added: `!invoice` negated an
 meant "not close to". The negation now asks the same question the match
 does, so what `!x` keeps is what `x` would not have found.
 
+A negated token stays on its own axis. `ext:!txt` rejects the names that
+end in `.txt` and nothing else: what is under a folder called
+`backup.txt` is not a `.txt`, and the extension axis is the name's own
+extension. The same went for `attr:!hidden`, which is about the kind
+byte — a file called "hidden" that is not hidden was rejected by its
+name. Both were wrong on the index path only; the overlay path always
+answered the way the manual says, and the two paths were two answers to
+one question.
+
 **The order of the results.** `sort:` picks it: `score` (the default, the
 ranking), `name`, `mtime` or `none`. The choice orders the hits the cap
 kept; it does not pick them — the cap still takes the best by score, so
