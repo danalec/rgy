@@ -111,6 +111,23 @@ gate, so the 5M rows are recorded, printed and compared, and the script says
 that can carry a verdict, and they have held across four sessions of the
 same code.
 
+**The 5M rows are a number about a machine, not about the code.** The two
+trees that the `no_std` rewrite put apart measure 3% to 6% apart on this
+Windows host, at the 5M corpus — and they do the same work: the same
+entries, the same filter, the same `score` calls, the same arrays read (the
+hashes of `ent_name`, `kind`, `parent` and `dense` are identical) and the
+same answers to every query. The scan loop compiles to 483 instructions on
+Windows where the older tree compiled to 376, and no change to the source
+recovers it there.
+
+On Linux (CachyOS, AMD Ryzen 7 255) the same two trees come out the other
+way: the `no_std` tree is 16% to 32% faster on the 200k corpus and 11% to
+18% faster on the 5M one, at one worker and at four. The same work, the
+same answers, a different code generator — and the daemon ships on the
+second one. So a 5M number is read the way the
+gate reads every number, and a change is judged by the A/B against the same
+code on the same day, on the platform the change is for.
+
 Notes:
 - `hits` is the true match count at an unbounded limit; the timed work is
   the scan+rank at `limit: 50`. The `plan` column is what `--explain`

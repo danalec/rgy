@@ -148,6 +148,22 @@ decide anything on: the same code came out 4% faster than the baseline
 in a quiet run and 44% slower in a noisy one, which is the 5–52% spread
 the baseline itself records, and the reason those rows do not rule.
 
+The 5M gap between the tree the rewrite left behind and the tree before it
+was chased to the bottom, and it is the platform rather than the code. On
+this Windows host the newer tree is 3% to 6% slower at 5M, doing exactly
+the same work: the same entries, the same `score` calls, the same arrays
+read (the hashes of `ent_name`, `kind`, `parent` and `dense` are identical)
+and the same answers. The scan loop compiles to 483 instructions on Windows
+where the older tree compiled to 376, and nothing cheap in the source
+recovers it there — taking `glob_match` out of the loop made it worse, and
+taking `score` out of the loop cost 20%.
+
+On Linux (CachyOS, AMD Ryzen 7 255) the same two trees come out the other
+way: the newer tree is 16% to 32% faster on the 200k corpus and 11% to 18%
+faster on the 5M one, at one worker and at four. The same work, the same
+answers, a different code generator — and the daemon ships on the second
+one.
+
 The tuned builds do not move it either: `-C target-cpu=znver4`
 measures 187 µs against 184 µs for the portable one. The
 vendored tree's byte searches are chosen at runtime, by the CPU
