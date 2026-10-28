@@ -199,6 +199,16 @@ content worker that builds the trigrams, not a regex pass at query time.
   that spin, because there is nothing to park on). Under `std` the chunks
   run on threads and the lock is the OS one; without it they run in order,
   in the same order, so the two configurations agree on the answer.
+- **The pool is a pool, not a thread per call.** Under `std`, `rgy-par`
+  keeps its worker threads between the calls: a search that runs a
+  hundred times does not create a hundred threads. That is the shape
+  rayon had, and the rewrite that made the tree `no_std` lost it —
+  `std::thread::scope` creates a thread per call. On the 200k-name bench
+  that was the whole of the regression the perf gate caught: at one
+  worker the new tree matched the old one to within 3%, and at four it
+  was 1.5x to 2.3x slower, because every parallel call paid for three
+  thread creations. The pool is `std` and lives behind the `std` feature,
+  so the `no_std` build still has no threads at all.
 - **The width belongs to the user.** `--threads` on `searchctl` and
   `searchd`, `RGY_NUM_THREADS` in the environment, and the default is
   four for the scan and the machine's cores for the query. The flag wins

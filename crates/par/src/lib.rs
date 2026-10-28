@@ -45,6 +45,15 @@ pub mod sync;
 /// that pushes and a reader that pulls.
 pub mod mpsc;
 
+/// The pool: the workers that live between the calls.
+///
+/// The `std` path's threads are created once and kept, so a search that
+/// runs a hundred times does not create a hundred threads. Without `std`
+/// there are no threads to keep, and the work runs on the thread that
+/// asked.
+#[cfg(feature = "std")]
+mod pool;
+
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 use core::ops::Range;
@@ -164,7 +173,9 @@ fn split_at(workers: usize, n: usize, min_len: usize) -> Vec<Range<usize>> {
 
 /// Run `f` over each chunk, and return the results in chunk order.
 ///
-/// Under `std` the chunks run on threads; without it they run in order.
+/// Under `std` the chunks run on the pool's workers; without it they run
+/// in order. The chunks are drawn from a counter, one at a time, so a
+/// worker that draws a cheap chunk does not hold the others up.
 #[cfg(feature = "std")]
 fn run_chunks<T, F>(chunks: &[Range<usize>], f: &F) -> Vec<T>
 where
@@ -174,16 +185,48 @@ where
     if chunks.len() <= 1 {
         return chunks.iter().map(|r| f(r.clone())).collect();
     }
-    std::thread::scope(|s| {
-        let handles: Vec<_> = chunks
-            .iter()
-            .map(|r| s.spawn(move || f(r.clone())))
-            .collect();
-        handles
-            .into_iter()
-            .map(|h| h.join().expect("a worker panicked"))
-            .collect()
-    })
+    use core::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+    let next = AtomicUsize::new(0);
+    let out = Cells::<T>::empty(chunks.len());
+    let work = || {
+        loop {
+            let i = next.fetch_add(1, Relaxed);
+            if i >= chunks.len() {
+                break;
+            }
+            let r = chunks[i].clone();
+            // Safety: the counter hands each chunk to one worker only.
+            unsafe { out.set(i, f(r)) };
+        }
+    };
+    let job = Job { work: &work };
+    // Safety: the job borrows the closure, and the closure borrows the
+    // counter, the cells and the chunks -- all of which live until this
+    // call returns, and the pool does not return until every worker is
+    // done with them.
+    let helpers = workers().max(1) - 1;
+    unsafe { pool::run(helpers, run_job, &job as *const Job<'_> as *mut ()) };
+    out.into_vec()
+}
+
+/// A job: the closure the pool's workers run.
+///
+/// The closure borrows -- the index, the scan's scratch, the caller's
+/// buffer -- and the pool's workers outlive the job, so the borrow is
+/// erased into a pointer. The caller waits for every worker to be done
+/// before it lets go of what it borrowed: that wait is what makes the
+/// erasure sound.
+#[cfg(feature = "std")]
+struct Job<'a> {
+    /// The work: the same closure the calling thread runs.
+    work: &'a (dyn Fn() + Sync),
+}
+
+/// The job, run: the closure, through the pointer.
+#[cfg(feature = "std")]
+unsafe fn run_job(data: *mut ()) {
+    let job = unsafe { &*(data as *const Job<'_>) };
+    (job.work)();
 }
 
 /// Run `f` over each chunk, and return the results in chunk order.
@@ -540,30 +583,13 @@ where
                 unsafe { out.set(i, f(&mut st, i)) };
             }
         };
-        // Helpers still to queue (each one queues the next).
-        let left = AtomicUsize::new((workers.max(1) - 1).min(n.saturating_sub(1)));
-        fn helper<'scope, 'env: 'scope>(
-            s: &'scope std::thread::Scope<'scope, 'env>,
-            left: &'scope AtomicUsize,
-            next: &'scope AtomicUsize,
-            n: usize,
-            work: &'scope (dyn Fn() + Sync),
-        ) {
-            s.spawn(move || {
-                if next.load(Relaxed) < n {
-                    if left.fetch_sub(1, Relaxed) > 1 {
-                        helper(s, left, next, n, work);
-                    }
-                    work();
-                }
-            });
-        }
-        std::thread::scope(|s| {
-            if left.load(Relaxed) > 0 {
-                helper(s, &left, &next, n, &work);
-            }
-            work();
-        });
+        let job = Job { work: &work };
+        // Safety: the job borrows the closure, and the closure borrows the
+        // counter, the cells, the setup and the work -- all of which live
+        // until this call returns, and the pool does not return until
+        // every worker is done with them.
+        let helpers = (workers.max(1) - 1).min(n.saturating_sub(1));
+        unsafe { pool::run(helpers, run_job, &job as *const Job<'_> as *mut ()) };
         out.into_vec()
     }
     #[cfg(not(feature = "std"))]
@@ -760,6 +786,44 @@ mod tests {
         let (a, b) = join(|| 1 + 1, || "x");
         assert_eq!(a, 2);
         assert_eq!(b, "x");
+    }
+
+    /// The pool keeps its workers: a search that runs a hundred times
+    /// does not make a hundred threads.
+    ///
+    /// This is the regression the pool was written for. The rewrite that
+    /// made the tree `no_std` replaced rayon's pool with
+    /// `std::thread::scope`, which creates a thread per call: on the
+    /// 200k-name bench that was the whole of the slowdown, and it showed
+    /// as 1.5x to 2.3x on the query rows at four workers.
+    #[cfg(feature = "std")]
+    #[test]
+    fn the_pool_keeps_its_workers_between_calls() {
+        let _ = each_index(
+            10_000,
+            || 0usize,
+            |st, i| {
+                *st += i;
+                i
+            },
+        );
+        let first = pool::threads();
+        for _ in 0..5 {
+            let _ = each_index(
+                10_000,
+                || 0usize,
+                |st, i| {
+                    *st += i;
+                    i
+                },
+            );
+        }
+        assert_eq!(
+            pool::threads(),
+            first,
+            "five calls made {} workers, and the first made {first}",
+            pool::threads()
+        );
     }
 
     #[test]
