@@ -149,12 +149,13 @@ searchctl --root ~ "invoice" --limit 100    # more than the 50 default
 Exit codes: **0** found something, **1** nothing matched, **2** the run
 failed.
 
-## The three binaries
+## The binaries
 
 | binary | what it does |
 |---|---|
 | `searchctl` | the command-line tool — the one you type |
 | `searchd` | the daemon: it holds the index warm between queries |
+| `rgxy` | the window: a floating launcher over the daemon |
 | `rgy-autostart` | puts the daemon in place at login, and takes it out again |
 
 `rgy` is another name for `searchctl` — the same binary.
@@ -190,6 +191,40 @@ The entry names where the daemon listens: a socket on Linux and macOS, a
 named pipe on Windows. The daemon reads requests from standard input by
 default, and a login entry has no standard input — a daemon registered
 that way would start, walk the tree, and exit. `doctor` prints the line.
+
+### The window
+
+`rgxy` is the daemon's **client**: the index lives in `searchd`, and a
+keystroke is a question sent down a pipe. That is why the window is there
+in a few milliseconds — it is not building an index, it is asking one that
+is already built.
+
+```sh
+rgxy                  # the resident launcher: Control twice opens the window
+rgxy --query invoice  # one search, printed, and out — the scriptable face
+rgxy --tui            # the terminal interface, for a machine with no desktop
+```
+
+In the field:
+
+| you write | the launcher does |
+|---|---|
+| `invoice` | the **name** layer: the engine ranks the names |
+| `grep:total` | the **content** layer: which files *say* it |
+| `invoice grep:total` | both: the files called invoice, that say total |
+| `doc:invoice` | the documents called invoice |
+| `file:` `folder:` `doc:` `pic:` `video:` `audio:` | the short filters |
+| `>open` `>folder` `>copy` `>preview` `>menu` | the commands |
+
+`Control` twice opens the window, over whatever is on screen. The keys are
+all of them: arrows, `Enter` to open, `Control+Enter` for the folder,
+`Escape` to close, `Control+C` to copy the path, `Control+P` to preview
+the file, `Control+K` for the actions.
+
+The window is a Windows thing for now — the double-`Control` hotkey is a
+low-level keyboard hook, and the hook this repository has is the Windows
+one. Everywhere else the terminal interface is the launcher, over the same
+daemon.
 
 ## When it goes wrong
 

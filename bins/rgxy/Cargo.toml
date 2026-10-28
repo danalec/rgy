@@ -1,0 +1,36 @@
+[package]
+name = "rgy-rgxy"
+version = "0.1.0"
+edition = "2024"
+authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
+description = "rgxy: the floating launcher for the rgy search daemon"
+license = "Apache-2.0"
+repository = "https://github.com/danalec/rgy"
+homepage = "https://github.com/danalec/rgy"
+documentation = "https://docs.rs/rgy-rgxy"
+keywords = ["search", "launcher", "gui", "daemon"]
+categories = ["gui", "command-line-utilities"]
+readme = "../../README.md"
+
+# The binary keeps its own name: the package is `rgy-rgxy` because the
+# name `rgxy` is free on crates.io, and the program the user types is
+# `rgxy`.
+[[bin]]
+name = "rgxy"
+path = "src/main.rs"
+
+[dependencies]
+# The launcher's model: the query, the rows, the actions, the geometry.
+rgy-launcher = { path = "../../crates/launcher", version = "0.1.0" }
+# The client of the daemon, and the rule that says where the daemon is.
+rgy-proto = { path = "../../crates/proto", version = "0.1.0" }
+# The terminal interface, for the machine that has no desktop.
+rgy-search-ui = { path = "../search-ui", version = "0.1.0" }
+# The console's UTF-8 code page: the name is the product.
+rgy-engine = { path = "../../crates/engine", version = "0.1.0" }
+
+# The window is a platform thing, and it only exists on the platform that
+# has one. The binary is the same everywhere: the launcher falls back to
+# the terminal where there is no desktop.
+[target.'cfg(windows)'.dependencies]
+rgy-launcher-windows = { path = "../../crates/launcher-windows", version = "0.1.0" }

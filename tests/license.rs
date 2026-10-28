@@ -47,10 +47,15 @@ const PRODUCT: &[&str] = &[
     "crates/engine/",
     "crates/proto/",
     "crates/autostart/",
+    "crates/launcher/",
+    "crates/launcher-windows/",
+    "crates/pick/",
+    "crates/adapters/",
     "bins/searchctl/",
     "bins/searchd/",
     "bins/search-ui/",
     "bins/zen-rs/",
+    "bins/rgxy/",
 ];
 
 /// The vendored rgx crates: upstream's own files, under upstream's terms.

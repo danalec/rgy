@@ -768,6 +768,10 @@ fn handle(req: Request, ctx: &Ctx) -> Vec<Response> {
                 docs: live.base.n - live.dead_count + live.over.len(),
                 event_id: live.event_id,
                 catch_up: ctx.catch_up(),
+                // Whether the content layer is answered by the pack store
+                // or by a walk. A client that knows the difference can say
+                // which one it is getting.
+                tv: ctx.tv_dir.is_some(),
             });
         }
         Request::Search { q, limit, session } => match Alternatives::parse(&q, &ctx.home) {
@@ -794,6 +798,16 @@ fn handle(req: Request, ctx: &Ctx) -> Vec<Response> {
                     None => searcher.search_alternatives(&alts.alts, limit),
                 };
                 let mut buf = Vec::new();
+                // The characters the query matched: the span the score came
+                // from, and the thing an interface needs to say *which* part
+                // of the name matched. With more than one alternative a hit
+                // does not say which alternative it came from, so the span
+                // would be a guess and it is left out — the same rule the
+                // CLI's `--json` follows, so both say the same thing.
+                let single = match alts.alts.as_slice() {
+                    [one] => Some(&one.tokens),
+                    _ => None,
+                };
                 let wire: Vec<WireHit> = hits
                     .iter()
                     .map(|h| {
@@ -801,27 +815,49 @@ fn handle(req: Request, ctx: &Ctx) -> Vec<Response> {
                         // an entry the base index does not have, so reading it
                         // back from the base would index `parent[u32::MAX]`
                         // -- out of bounds -- and panic.
-                        let full = match &h.over {
+                        let (full, name) = match &h.over {
                             // The overlay's paths are the index's internal
                             // form (`/`); the answer is the platform's.
-                            Some(path) => String::from_utf8_lossy(path)
-                                .replace('/', std::path::MAIN_SEPARATOR_STR),
+                            Some(path) => {
+                                let text = String::from_utf8_lossy(path).into_owned();
+                                let name = text
+                                    .rsplit(['/', '\\'])
+                                    .next()
+                                    .unwrap_or(&text)
+                                    .to_string();
+                                (
+                                    text.replace('/', std::path::MAIN_SEPARATOR_STR),
+                                    name,
+                                )
+                            }
                             None => {
                                 live_guard.base.path(h.idx as usize, &mut buf);
                                 let rel = String::from_utf8_lossy(&buf).into_owned();
                                 buf.clear();
+                                let name = rel
+                                    .rsplit(['/', '\\'])
+                                    .next()
+                                    .unwrap_or(&rel)
+                                    .to_string();
                                 let mut full = String::from_utf8_lossy(&ctx.root).into_owned();
                                 let rel = rel.trim_start_matches(['/', '\\']);
                                 if !rel.is_empty() {
                                     full.push(std::path::MAIN_SEPARATOR);
                                     full.push_str(rel);
                                 }
-                                full
+                                (full, name)
                             }
+                        };
+                        let span = match single {
+                            Some(tokens) => {
+                                rgy_name_core::name_query::matched_chars(name.as_bytes(), tokens)
+                            }
+                            None => Vec::new(),
                         };
                         WireHit {
                             path: full,
                             score: h.score(),
+                            span,
                         }
                     })
                     .collect();
@@ -835,10 +871,182 @@ fn handle(req: Request, ctx: &Ctx) -> Vec<Response> {
             }
         },
         Request::Grep { q, limit } => responses.extend(grep(&q, limit, ctx)),
+        Request::Content { q, paths, limit, .. } => {
+            responses.extend(scoped_content(&q, &paths, limit, ctx))
+        }
         Request::Resolve { path } => responses.push(resolve(&path, ctx)),
     }
     warm_stop();
     responses
+}
+
+/// A content search over a scope: the files a name search already chose.
+///
+/// This is the second layer of an interface, and **the scope is what makes
+/// it affordable**. A content search over the tree reads the tree; a
+/// content search over the two hundred files a name search chose reads two
+/// hundred files.
+///
+/// Three ways to answer, and the daemon takes the cheapest one it has:
+///
+/// 1. **the pack store** (`--tv-dir`): the corpus is packed once and
+///    mmap'd, and the scope is applied to its answer — the fastest answer
+///    there is, and the scope costs nothing on top of it;
+/// 2. **the adapters**: a PDF, a `.docx`, a zip, a mail file — the bytes on
+///    disk are not searchable text, and an adapter is what turns them into
+///    text. This is the rgx layer, and it is the reason the vendored
+///    adapters exist at all;
+/// 3. **the files**: the plain path, which is rgx's own regex engine over
+///    raw bytes, read by the daemon's read threads.
+///
+/// The pattern is the query language's: `grep:` is literal and `regex:` is
+/// a regex, and a bare word is literal — the same words the rest of rgy
+/// answers with, so the second layer speaks the first layer's language.
+fn scoped_content(q: &str, paths: &[String], limit: usize, ctx: &Ctx) -> Vec<Response> {
+    let t0 = Instant::now();
+    let home = ctx.home.clone();
+    let alts = match Alternatives::parse(q, &home) {
+        Ok(a) => a,
+        Err(e) => return vec![Response::Error { message: e }],
+    };
+    // The warnings travel with the answer: a query that failed closed is
+    // part of what the client has to show.
+    let mut out: Vec<Response> = alts
+        .warnings
+        .iter()
+        .map(|w| Response::Warning { message: w.clone() })
+        .collect();
+    // The pattern and its mode, from the first alternative that carries
+    // one. A bare word is a literal, and `regex:` asks for the engine.
+    let (pattern, mode) = alts
+        .alts
+        .iter()
+        .find_map(|a| a.grep.as_ref().map(|p| (p.clone(), a.grep_mode)))
+        .unwrap_or_else(|| (q.to_string(), rgy_name_core::name_query::GrepMode::Literal));
+
+    // The scope, in the bytes the filesystem speaks.
+    let scope: Vec<Vec<u8>> = paths.iter().map(|p| p.as_bytes().to_vec()).collect();
+    if scope.is_empty() {
+        out.push(Response::GrepFiles {
+            files: Vec::new(),
+            took_us: t0.elapsed().as_micros() as u64,
+        });
+        out.push(Response::Done { count: 0 });
+        return out;
+    }
+
+    // 1. The pack store.
+    if let Some(dir) = &ctx.tv_dir {
+        return match rgy_engine::tv::grep_tv(dir, &pattern) {
+            Ok(fs) => {
+                let files: Vec<GrepFile> = fs
+                    .into_iter()
+                    .filter(|f| scope.iter().any(|s| same_path(s, f.path.as_bytes())))
+                    .map(|f| GrepFile {
+                        path: f.path,
+                        lines: f.lines.into_iter().map(|(n, t)| (n as usize, t)).collect(),
+                    })
+                    .collect();
+                let count = files.len();
+                out.push(Response::GrepFiles {
+                    files,
+                    took_us: t0.elapsed().as_micros() as u64,
+                });
+                out.push(Response::Done { count });
+                out
+            }
+            Err(e) => vec![Response::Error {
+                message: format!("tv store: {e}"),
+            }],
+        };
+    }
+
+    let g = match Grep::new(&pattern, mode) {
+        Ok(g) => g,
+        Err(e) => return vec![Response::Error { message: e }],
+    };
+
+    // 2. The adapters: the files whose bytes are not searchable text.
+    //
+    // The registry is built ONCE, on the first scoped search, and kept: it
+    // is ten families of adapters, and building it again for every
+    // keystroke of the second layer would cost more than the search it
+    // serves.
+    static REGISTRY: std::sync::OnceLock<rgx_core::Registry> = std::sync::OnceLock::new();
+    let reg = REGISTRY.get_or_init(rgy_adapters::registry);
+    let mut files: Vec<GrepFile> = Vec::new();
+    let mut plain: Vec<Vec<u8>> = Vec::new();
+    for p in &scope {
+        let as_text = String::from_utf8_lossy(p).into_owned();
+        if reg.may_claim_for_path(&as_text) {
+            let Some(data) = read_for_adapter(p) else {
+                continue;
+            };
+            let mut found = Vec::new();
+            rgx_core::process(reg, &as_text, &data, 0, &rgx_core::Ctx::default(), &mut found);
+            for f in found {
+                let lines = g.lines_in(&f.bytes);
+                if !lines.is_empty() {
+                    files.push(GrepFile {
+                        path: f.path,
+                        lines,
+                    });
+                }
+            }
+        } else {
+            plain.push(p.clone());
+        }
+    }
+
+    // 3. The plain path: the files ripgrep could already read.
+    if !plain.is_empty() {
+        let res = content::verify_paths(&g, &plain, limit.saturating_sub(files.len()));
+        for f in res.files {
+            files.push(GrepFile {
+                path: String::from_utf8_lossy(&f.path).into_owned(),
+                lines: f.lines,
+            });
+        }
+    }
+
+    let count = files.len();
+    out.push(Response::GrepFiles {
+        files,
+        took_us: t0.elapsed().as_micros() as u64,
+    });
+    out.push(Response::Done { count });
+    out
+}
+
+/// Two paths are the same file when they are the same bytes, or when they
+/// are the same bytes once the separators are spelled the same way.
+///
+/// The scope comes from the name index and the answer from the pack store,
+/// and the two do not always spell the separators the same.
+fn same_path(a: &[u8], b: &[u8]) -> bool {
+    if a == b {
+        return true;
+    }
+    let norm = |p: &[u8]| {
+        let s = String::from_utf8_lossy(p).replace('\\', "/");
+        s.trim_start_matches("./").trim_end_matches('/').to_ascii_lowercase()
+    };
+    norm(a) == norm(b)
+}
+
+/// Read a file for an adapter: the same policy the plain path uses, and no
+/// more.
+///
+/// The size cap is the content engine's (`MAX_FILE`), and the cap on the
+/// bytes read is four times it — the same pair the plain path reads with,
+/// so a file the plain path would refuse is a file the adapter path
+/// refuses too.
+fn read_for_adapter(path: &[u8]) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let file = content::open_regular(path)?;
+    let mut buf = Vec::new();
+    file.take(content::MAX_FILE * 4).read_to_end(&mut buf).ok()?;
+    Some(buf)
 }
 
 /// Resolve a path through the lookup surface.
@@ -1041,7 +1249,7 @@ fn serve_stream(mut input: impl BufRead, mut out: impl Write, ctx: &Ctx) {
                 continue;
             }
         };
-        let (pattern, fixed) = match serve_pattern(&argv) {
+        let (pattern, fixed, scope) = match serve_pattern(&argv) {
             Some(p) => p,
             None => {
                 serve_end(&mut out, seq, &tag, 2, false, Some("no pattern given"));
@@ -1095,7 +1303,15 @@ fn serve_stream(mut input: impl BufRead, mut out: impl Write, ctx: &Ctx) {
             };
             let live_guard = ctx.live.read().unwrap();
             let searcher = Searcher { live: &live_guard };
-            let paths = content::scan_paths(&ctx.root, searcher.live, Query::default());
+            // The scope: the files the caller named, or the whole tree when
+            // it named none. A caller that already chose its files must not
+            // pay for a tree it did not ask about — that is the difference
+            // between a search and a walk.
+            let paths: Vec<Vec<u8>> = if scope.is_empty() {
+                content::scan_paths(&ctx.root, searcher.live, Query::default())
+            } else {
+                scope.iter().map(|p| p.as_bytes().to_vec()).collect()
+            };
             let res = content::verify(&g, &paths, 100);
             for f in &res.files {
                 matched = true;
@@ -1114,10 +1330,12 @@ fn serve_stream(mut input: impl BufRead, mut out: impl Write, ctx: &Ctx) {
 }
 
 /// rgx argv: pattern is `-e`/`--regexp`'s value or the first positional;
-/// `-F`/`--fixed-strings` makes it literal.
-fn serve_pattern(argv: &[String]) -> Option<(String, bool)> {
+/// `-F`/`--fixed-strings` makes it literal; the positionals after the
+/// pattern are the **scope** — the files to search, and not the tree.
+fn serve_pattern(argv: &[String]) -> Option<(String, bool, Vec<String>)> {
     let mut fixed = false;
     let mut pattern = None;
+    let mut scope = Vec::new();
     let mut i = 0;
     while i < argv.len() {
         match argv[i].as_str() {
@@ -1128,11 +1346,11 @@ fn serve_pattern(argv: &[String]) -> Option<(String, bool)> {
             }
             a if a.starts_with('-') => {}
             a if pattern.is_none() => pattern = Some(a.to_string()),
-            _ => {}
+            a => scope.push(a.to_string()),
         }
         i += 1;
     }
-    pattern.map(|p| (p, fixed))
+    pattern.map(|p| (p, fixed, scope))
 }
 
 fn serve_file(out: &mut impl Write, path: &str, lines: &[(usize, String)]) {

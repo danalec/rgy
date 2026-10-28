@@ -188,6 +188,25 @@ pub fn spawn_pipe(exe: &Path, args: &[&str]) -> Daemon {
     )
 }
 
+/// Spawn `searchd` listening on a unix socket, left running.
+///
+/// The unix counterpart of [`spawn_pipe`]: the socket has to be in a
+/// directory that exists, and the path has to be short enough for the
+/// platform's own limit.
+#[cfg(unix)]
+pub fn spawn_uds(exe: &Path, args: &[&str]) -> Daemon {
+    Daemon(
+        Command::new(exe)
+            .args(args)
+            .env("RGY_INDEX_DIR", index_cache_dir())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap_or_else(|e| panic!("spawn {}: {e}", exe.display())),
+    )
+}
+
 /// A named-pipe client held open by the caller.
 ///
 /// Opening blocks until the server has a free instance, so constructing two

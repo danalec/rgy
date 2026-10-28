@@ -11,6 +11,10 @@ members = [
     "crates/discovery-dispatch",
     "crates/engine",
     "crates/proto",
+    "crates/pick",
+    "crates/adapters",
+    "crates/launcher",
+    "crates/launcher-windows",
     "crates/autostart",
     "crates/rgx-core",
     "crates/rar-codec",
@@ -28,6 +32,7 @@ members = [
     "bins/searchctl",
     "bins/searchd",
     "bins/search-ui",
+    "bins/rgxy",
     # e2e harnesses over the user-facing bins (tests/cli.rs, tests/serve.rs).
     # The workspace root is virtual, so this lives as its own member crate.
     "tests",

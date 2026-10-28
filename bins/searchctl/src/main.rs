@@ -57,7 +57,11 @@ fn usage(code: i32) -> ! {
            --explain           report the query plan on stderr\n  \
            --index <file>     reuse/persist an index (default: cache dir)\n  \
            --reindex          rebuild even if a usable index exists\n  \
-           --max-age <dur>    rebuild an index older than this (default 30m; 0 = never reuse)\n\n\
+           --max-age <dur>    rebuild an index older than this (default 30m; 0 = never reuse)\n  \
+           --pick             hand the results to a picker (fzf) and print the choice\n  \
+           --fzf-binary <p>   the picker to run (default: the first of fzf, sk, peco, fz on PATH)\n  \
+           --fzf-arg <arg>    one argument for the picker, repeatable\n  \
+           --daemon           ask the running searchd, not the local index\n\n\
          query: fsearch tokens (bare=fuzzy, 'x exact, ^x prefix, x$ suffix,\n\
          !x negate) + zen-rs filters (ext: dir: type: size: re:),\n\
          | alternates, * and ? glob the whole path."
@@ -108,6 +112,10 @@ fn main() {
     let mut explain = false;
     let mut max_age: Option<std::time::Duration> = None;
     let mut threads: Option<usize> = None;
+    let mut pick = false;
+    let mut fzf_binary: Option<String> = None;
+    let mut fzf_arg: Vec<String> = Vec::new();
+    let mut daemon = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -148,6 +156,16 @@ fn main() {
                 );
             }
             "--json" => json = true,
+            "--pick" => pick = true,
+            "--daemon" => daemon = true,
+            "--fzf-binary" => {
+                i += 1;
+                fzf_binary = Some(args.get(i).cloned().unwrap_or_else(|| usage(2)));
+            }
+            "--fzf-arg" => {
+                i += 1;
+                fzf_arg.push(args.get(i).cloned().unwrap_or_else(|| usage(2)));
+            }
             "-h" | "--help" => usage(0),
             a if a.starts_with('-') => {
                 rgy_engine::errln!("searchctl: unknown option {a}");
@@ -176,6 +194,10 @@ fn main() {
         explain,
         max_age,
         threads,
+        pick,
+        fzf_binary,
+        fzf_arg,
+        daemon,
     };
     if let Err(e) = run(&opts, &query) {
         rgy_engine::errln!("searchctl: {e}");
@@ -197,6 +219,14 @@ struct Opts {
     /// How many workers the scan and the query use. `None` keeps each
     /// one's own default.
     threads: Option<usize>,
+    /// Hand the results to a picker and print what the user chose.
+    pick: bool,
+    /// The picker to run.
+    fzf_binary: Option<String>,
+    /// One argument for the picker, repeatable.
+    fzf_arg: Vec<String>,
+    /// Ask the running daemon, never the local index.
+    daemon: bool,
 }
 
 /// The width the scan and the query use.
@@ -306,7 +336,149 @@ fn obtain_index(opts: &Opts) -> Result<Index, String> {
     Ok(idx)
 }
 
+/// Hand the results to a picker and print what the user chose.
+///
+/// The daemon first, when it answers: its index is warm, so the picker
+/// opens over a list that is already there and the whole exchange is a
+/// keystroke. The local index is the fallback, and it says so — a silent
+/// fallback would leave the user wondering why the picker was slow.
+///
+/// The records are the paths, separated by NUL. A path may carry a tab or
+/// a newline on unix, and a separator a path can carry is a separator that
+/// breaks: the NUL byte cannot appear in a path anywhere.
+///
+/// The order is rgy's. The picker narrows the list as the user types; it
+/// does not re-score it, because a search engine's ranking is the product
+/// and a picker that replaces it throws the product away.
+fn run_pick(opts: &Opts, query: &str) -> Result<i32, String> {
+    use std::io::Write;
+
+    let req = rgy_pick::Request {
+        args: &opts.fzf_arg,
+        binary: opts.fzf_binary.as_deref(),
+        separator: rgy_pick::Separator::Nul,
+        order: rgy_pick::Order::Keep,
+    };
+
+    let mut client = match rgy_proto::endpoint::Endpoint::registered() {
+        Some(ep) => match rgy_proto::Client::connect(&ep) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                if opts.daemon {
+                    return Err(format!("the daemon at {} did not answer: {e}", ep.describe()));
+                }
+                rgy_engine::errln!(
+                    "searchctl: no daemon at {} ({e}); using the local index",
+                    ep.describe()
+                );
+                None
+            }
+        },
+        None => {
+            if opts.daemon {
+                return Err("this machine has no registered daemon to ask".to_string());
+            }
+            None
+        }
+    };
+
+    if let Some(mut c) = client.take() {
+        let limit = opts.limit;
+        let q = query.to_string();
+        rgy_engine::errln!("searchctl: asking the running daemon (its own tree, not --root)");
+        let search = Box::new(
+            move |out: &mut (dyn Write + Send + 'static)| -> Result<bool, String> {
+                let outcome = c.search(&q, limit).map_err(|e| e.to_string())?;
+                let mut any = false;
+                for hit in &outcome.hits {
+                    out.write_all(hit.path.as_bytes()).map_err(|e| {
+                        format!("the results could not reach the picker: {e}")
+                    })?;
+                    out.write_all(&[0])
+                        .map_err(|e| format!("the results could not reach the picker: {e}"))?;
+                    any = true;
+                }
+                Ok(any)
+            },
+        );
+        let (code, records) = rgy_pick::pick_records(search, &req)?;
+        print_selection(&records);
+        return Ok(code);
+    }
+
+    // The local index: the same walk and the same ranking, paid for here.
+    let idx = obtain_index(opts)?;
+    let live = Live::with_root(idx, opts.root.as_bytes());
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_default();
+    let alts = Alternatives::parse(query, &home)?;
+    for w in &alts.warnings {
+        rgy_engine::errln!("warning: {w}");
+    }
+    let root_disp = opts.root.trim_end_matches(['/', '\\']).to_string();
+    let limit = opts.limit;
+    let search = Box::new(
+        move |out: &mut (dyn Write + Send + 'static)| -> Result<bool, String> {
+            let searcher = Searcher { live: &live };
+            let hits = searcher.search_alternatives(&alts.alts, limit);
+            let mut buf = Vec::new();
+            let mut any = false;
+            for h in &hits {
+                let owned;
+                let rel: &str = match &h.over {
+                    Some(p) => {
+                        owned = String::from_utf8_lossy(p).into_owned();
+                        &owned
+                    }
+                    None => {
+                        searcher.live.base.path(h.idx as usize, &mut buf);
+                        owned = String::from_utf8_lossy(&buf).into_owned();
+                        &owned
+                    }
+                };
+                let path = if rel.is_empty() {
+                    root_disp.clone()
+                } else {
+                    let rel = rel.trim_start_matches(['/', '\\']);
+                    format!("{root_disp}{}{rel}", std::path::MAIN_SEPARATOR)
+                };
+                out.write_all(path.as_bytes())
+                    .map_err(|e| format!("the results could not reach the picker: {e}"))?;
+                out.write_all(&[0])
+                    .map_err(|e| format!("the results could not reach the picker: {e}"))?;
+                any = true;
+            }
+            Ok(any)
+        },
+    );
+    let (code, records) = rgy_pick::pick_records(search, &req)?;
+    print_selection(&records);
+    Ok(code)
+}
+
+/// Print what the picker chose, one path per line.
+///
+/// The path, and not the record: the record is a path, and a picker that
+/// chose one has chosen a path.
+fn print_selection(records: &[Vec<u8>]) {
+    use std::io::Write;
+    let mut out = std::io::stdout();
+    for record in records {
+        let _ = out.write_all(record);
+        let _ = out.write_all(b"\n");
+    }
+    let _ = out.flush();
+}
+
 fn run(opts: &Opts, query: &str) -> Result<(), String> {
+    // `--pick` owns the whole run: it asks, it feeds a picker, and it exits
+    // with the picker's status. It is before the index, because the daemon
+    // already has one and the local build is the fallback.
+    if opts.pick {
+        let code = run_pick(opts, query)?;
+        std::process::exit(code);
+    }
     let root = &opts.root;
     let limit = opts.limit;
     let json = opts.json;

@@ -2628,6 +2628,21 @@ impl Grep {
         self.re.get_or_init(|| self.build().expect("literal regex"))
     }
 
+    /// The matching lines of a buffer the caller already has.
+    ///
+    /// The adapter path has the rendered text in hand — a PDF's words, an
+    /// archive member's content — and needs the same confirmation the file
+    /// path uses. This is that confirmation, over bytes that are not a
+    /// file: the same matcher, the same line numbering, the same
+    /// `max_per_file` cap.
+    pub fn lines_in(&self, buf: &[u8]) -> Vec<(usize, String)> {
+        let starts: Vec<usize> = match self.literal.as_ref().filter(|l| !l.needs_regex(buf)) {
+            Some(l) => l.starts(buf).collect(),
+            None => self.re().starts(buf),
+        };
+        lines_at(self, buf, starts.into_iter())
+    }
+
     /// Hashes of the grams every match holds (see `SHORT`).
     fn probes(&self) -> Probes {
         let grams = |n: usize| {

@@ -485,8 +485,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "rgy-adapters"
+version = "0.1.0"
+dependencies = [
+ "rgx-adapters-archive",
+ "rgx-adapters-docs",
+ "rgx-adapters-inspect",
+ "rgx-adapters-llm",
+ "rgx-adapters-mail",
+ "rgx-adapters-media",
+ "rgx-adapters-office",
+ "rgx-adapters-pdf",
+ "rgx-adapters-tabular",
+ "rgx-adapters-threed",
+ "rgx-core",
+]
+
+[[package]]
 name = "rgy-autostart"
 version = "0.1.0"
+dependencies = [
+ "rgy-proto",
+]
 
 [[package]]
 name = "rgy-discovery"
@@ -546,6 +566,9 @@ dependencies = [
 [[package]]
 name = "rgy-e2e-tests"
 version = "0.0.0"
+dependencies = [
+ "rgx-core",
+]
 
 [[package]]
 name = "rgy-engine"
@@ -554,6 +577,17 @@ dependencies = [
  "rgx-core",
  "rgy-discovery",
  "rgy-name-core",
+]
+
+[[package]]
+name = "rgy-launcher"
+version = "0.1.0"
+
+[[package]]
+name = "rgy-launcher-windows"
+version = "0.1.0"
+dependencies = [
+ "rgy-launcher",
 ]
 
 [[package]]
@@ -572,8 +606,23 @@ name = "rgy-par"
 version = "0.1.0"
 
 [[package]]
+name = "rgy-pick"
+version = "0.1.0"
+
+[[package]]
 name = "rgy-proto"
 version = "0.1.0"
+
+[[package]]
+name = "rgy-rgxy"
+version = "0.1.0"
+dependencies = [
+ "rgy-engine",
+ "rgy-launcher",
+ "rgy-launcher-windows",
+ "rgy-proto",
+ "rgy-search-ui",
+]
 
 [[package]]
 name = "rgy-search-ui"
@@ -582,6 +631,7 @@ dependencies = [
  "crossterm",
  "rgy-discovery",
  "rgy-engine",
+ "rgy-launcher",
  "rgy-name-core",
 ]
 
@@ -595,6 +645,7 @@ dependencies = [
  "rgy-engine",
  "rgy-name-core",
  "rgy-par",
+ "rgy-pick",
  "rgy-proto",
 ]
 
@@ -604,6 +655,7 @@ version = "0.1.0"
 dependencies = [
  "mimalloc",
  "rgx-core",
+ "rgy-adapters",
  "rgy-discovery",
  "rgy-discovery-dispatch",
  "rgy-discovery-linux",

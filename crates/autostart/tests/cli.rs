@@ -164,6 +164,51 @@ fn an_unknown_command_is_refused() {
     assert!(stderr.contains("unknown command"), "{stderr}");
 }
 
+/// The launcher is registered too, and the help says so.
+///
+/// The launcher is a program of its own: the window is there in a few
+/// milliseconds because the **daemon** has the index warm, not because
+/// the launcher built one. So it needs its own login entry, and a user
+/// who has to find out about it from a missing hotkey is a user who
+/// never gets the hotkey.
+#[test]
+fn the_launcher_is_registered_too() {
+    let output = tool().arg("--help").output().expect("the tool runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("--launcher"),
+        "the launcher has to be in the help: {stdout}"
+    );
+}
+
+/// The launcher's entry is named apart from the daemon's.
+///
+/// The two are two programs with two names: the daemon is `rgy-searchd`
+/// and the launcher is `rgy-rgxy`, and one entry cannot hold both.
+#[test]
+fn the_launcher_has_an_entry_of_its_own() {
+    let output = tool().arg("--help").output().expect("the tool runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("rgxy"), "the launcher's name has to be in the help: {stdout}");
+}
+
+/// The launcher's entry points at the daemon.
+///
+/// The launcher is a client: the index lives in the daemon, and a
+/// keystroke is a question sent down a pipe. The endpoint is named in the
+/// entry, for the same reason the daemon's root is: a login entry does
+/// not inherit the environment of the session that installed it.
+#[test]
+fn the_launcher_is_pointed_at_the_daemon() {
+    // The rule is in the code, and the code is what the tests read.
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let text = std::fs::read_to_string(root.join("src/main.rs")).expect("the source is text");
+    assert!(
+        text.contains("--endpoint"),
+        "the launcher has to be told where the daemon is: the entry names the endpoint"
+    );
+}
+
 #[test]
 fn no_build_directory_is_hard_coded() {
     // The daemon's path is the user's to give: a tool that guesses one

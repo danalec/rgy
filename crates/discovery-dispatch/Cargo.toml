@@ -24,7 +24,13 @@ std = ["rgy-discovery/std", "rgy-discovery-macos/std"]
 rgy-discovery = { path = "../discovery", version = "0.1.0", default-features = false }
 # The catch-up rule answers with the wire value the status response carries
 # (`replayed` / `relisted`), so the rule and the spelling cannot drift.
-rgy-proto = { path = "../proto", version = "0.1.0" }
+#
+# The default features are off, and that is the point: what this crate
+# takes from the protocol is the wire value, and the protocol's own
+# `std` half is the sockets and the environment — the machine. A crate
+# that is in the bare-metal gate cannot pull the machine in through a
+# side door, and this dependency is that side door.
+rgy-proto = { path = "../proto", version = "0.1.0", default-features = false }
 
 # The platform walks, pulled in per-target so `source_for` can build the
 # native one on its own OS. Every crate is empty off-target.

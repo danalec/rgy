@@ -29,6 +29,10 @@ rgy-par = { path = "../../crates/par", version = "0.1.0" }
 rgy-proto = { path = "../../crates/proto", version = "0.1.0" }
 # rgx --serve front reads argv arrays with rgx's own JSON parser.
 rgx-core = { path = "../../crates/rgx-core", version = "0.1.0" }
+# The adapter registry: the formats a search can read *into* — a PDF, a
+# .docx, a zip, a mail file. This is the second layer of the launcher, and
+# the reason the vendored adapters are here.
+rgy-adapters = { path = "../../crates/adapters", version = "0.1.0" }
 # One allocator story (plan 4.4): mimalloc for the general heap —
 # MSVCRT's HeapAlloc serialises the parallel content readers on Windows.
 mimalloc = { version = "0.1", default-features = false }

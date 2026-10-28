@@ -17,7 +17,23 @@ path = "cli.rs"
 name = "serve"
 path = "serve.rs"
 
+# The launcher, from the outside: the window is a client of the daemon,
+# and this asks it questions the way a user does.
+[[test]]
+name = "launcher"
+path = "launcher.rs"
+
 # Not a harness: the licensing invariant over the Apache-2.0-only trees.
 [[test]]
 name = "license"
 path = "license.rs"
+
+[dev-dependencies]
+# The pack store, for the test that proves the third backend of the
+# content layer: the daemon started with `--tv-dir` answers from a packed
+# corpus instead of reading the files. The builder is upstream's, and it
+# is behind the `tv-runtime` feature because it is the only consumer.
+rgx-core = { path = "../crates/rgx-core", version = "0.1.1", default-features = false, features = [
+    "std",
+    "tv-runtime",
+] }

@@ -52,8 +52,9 @@ use rgy_autostart::plan::{
 use rgy_autostart::render::{reg_add_command_line, schtasks_command_line, windows_task_command};
 use rgy_autostart::windows;
 use rgy_autostart::{
-    DAEMON_NAME, Removal, Report, cache_dir, display_path, effective_args, find_daemon, home_dir,
-    listen_of, mechanism_label, pipe_name, resolve_binary, root_of, socket_path_in,
+    DAEMON_NAME, Removal, Report, cache_dir, display_path, effective_args, find_daemon,
+    find_launcher, home_dir, launcher_default_name, listen_of, mechanism_label, pipe_name,
+    resolve_binary, root_of, socket_path_in,
 };
 
 /// The console's output code page.
@@ -106,6 +107,7 @@ fn usage() -> String {
            --binary <path>   the daemon to start (default: the {daemon} next to this tool)\n  \
            --args \"<args>\"    arguments handed to the daemon (default: --root <your home> --listen <transport>)\n  \
            --name <name>     the name of the entry (default: {default})\n  \
+           --launcher        also register the launcher (rgxy), under its own name\n  \
            -h, --help        this text\n  \
            -V, --version     the version\n\
          \n\
@@ -136,6 +138,8 @@ struct Options {
     args: Vec<String>,
     /// The name of the entry.
     name: Option<String>,
+    /// Whether the launcher is registered too.
+    launcher: bool,
 }
 
 fn main() -> ExitCode {
@@ -200,6 +204,7 @@ fn parse_options(argv: &[String]) -> Result<Options, String> {
                 let value = argv.get(index).ok_or("--name needs a name")?;
                 options.name = Some(value.clone());
             }
+            "--launcher" => options.launcher = true,
             other => return Err(format!("unknown option `{other}`\n\n{}", usage())),
         }
         index += 1;
@@ -295,9 +300,46 @@ fn install(options: &Options) -> Result<ExitCode, String> {
     });
 
     print_report(&report);
+
+    // The launcher is a program of its own, and it gets its own entry.
+    //
+    // It is **resident**: the window is there in a few milliseconds
+    // because the daemon has the index warm, not because the launcher
+    // built one. A launcher that started at login would pay for the
+    // startup on every opening, and an opening that takes a second is
+    // not a launcher.
+    //
+    // The endpoint is named explicitly, for the same reason the daemon's
+    // root is: a login entry does not inherit the environment of the
+    // session that installed it.
+    let mut armed = report.armed;
+    if options.launcher {
+        let launcher_binary = find_launcher()?;
+        let launcher_name = launcher_default_name(platform);
+        let launcher_args = vec!["--endpoint".to_string(), listen.clone()];
+        let launcher_report = match platform {
+            Platform::Windows => {
+                install_windows(launcher_name, &launcher_binary, &launcher_args)?
+            }
+            Platform::Linux => {
+                install_linux(launcher_name, &launcher_binary, &launcher_args)?
+            }
+            Platform::MacOs => {
+                install_macos(launcher_name, &launcher_binary, &launcher_args)?
+            }
+            Platform::Unsupported => {
+                return Err("autostart is not implemented here".to_string());
+            }
+        };
+        armed = armed && launcher_report.armed;
+        println!();
+        println!("the launcher:");
+        print_report(&launcher_report);
+    }
+
     // 2 says what happened without dressing it up: the entry is written,
     // the platform could not arm it, and the note says how.
-    Ok(if report.armed {
+    Ok(if armed {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(2)

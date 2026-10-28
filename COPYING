@@ -30,10 +30,15 @@ appears or if one of them stops being MIT.
     crates/engine/                     orchestration: keep-warm, TV pack store glue
     crates/proto/                      the daemon protocol
     crates/autostart/                  the login-item registration (parity row 4.13)
+    crates/launcher/                   the launcher's model: query, results, actions, geometry
+    crates/launcher-windows/           the launcher's window on Windows: Win32 + GDI
+    crates/pick/                       the hand-off to an external picker (fzf and its family)
+    crates/adapters/                   the rgx adapter registry: the formats a search reads into
     bins/searchctl/                   the CLI
     bins/searchd/                      the daemon
     bins/search-ui/                    the terminal UI
     bins/zen-rs/                       the zen CLI (NTFS indexer)
+    bins/rgxy/                         the launcher: the floating window over the daemon
     tests/                             the end-to-end harness over the user-facing bins
     .winget/                           the winget package manifests (parity row 4.15)
     Formula/                           the Homebrew formula (parity row 4.15)

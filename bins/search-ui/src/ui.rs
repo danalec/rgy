@@ -185,7 +185,6 @@ impl Drop for TerminalGuard {
 
 struct App {
     /// The fsearch name index + overlay, the same searcher `searchctl` uses.
-    live: Live,
     /// Volume root, shown in the header.
     root: String,
     indexed: usize,
@@ -213,6 +212,15 @@ struct App {
     /// Per-keystroke search latency: cold `first` kept out of the window,
     /// which reports nearest-rank p50/p90 and the sparkline.
     meter: LatencyMeter,
+    /// Where the answers come from, when they come from somewhere else.
+    ///
+    /// `None` is the index in this process, which is what the UI has
+    /// always done. `Some` is a source the caller owns — the daemon, for
+    /// the launcher — and then the index in this process is not built at
+    /// all, which is the whole point: the answers are already there.
+    source: Option<Box<dyn rgy_launcher::Source>>,
+    /// The index in this process, when there is one.
+    live: Option<Live>,
 }
 
 /// What a key press did to the app.
@@ -228,7 +236,7 @@ enum Action {
 impl App {
     fn new(live: Live, root: String, indexed: usize) -> Self {
         let mut app = App {
-            live,
+            live: Some(live),
             root,
             indexed,
             input: String::new(),
@@ -243,6 +251,31 @@ impl App {
             painted: Vec::new(),
             painted_width: 0,
             meter: LatencyMeter::new(),
+            source: None,
+        };
+        app.search();
+        app
+    }
+
+    /// An app that asks a source instead of the index in this process.
+    fn with_source(source: Box<dyn rgy_launcher::Source>, root: String) -> Self {
+        let mut app = App {
+            live: None,
+            root,
+            indexed: 0,
+            input: String::new(),
+            caret: 0,
+            results: Vec::new(),
+            matched: Vec::new(),
+            total: 0,
+            filtered: false,
+            selected: 0,
+            top: 0,
+            page: 1,
+            painted: Vec::new(),
+            painted_width: 0,
+            meter: LatencyMeter::new(),
+            source: Some(source),
         };
         app.search();
         app
@@ -256,18 +289,32 @@ impl App {
         let started = Instant::now();
         self.filtered = !self.input.trim().is_empty();
 
+        // A source answers the whole question: the paths, and the span
+        // that earned each one.
+        if let Some(source) = self.source.as_mut() {
+            let answer = source.search(&self.input, MAX_RESULTS);
+            self.results = answer.paths;
+            self.matched = answer.spans;
+            self.total = self.results.len();
+            self.selected = 0;
+            self.top = 0;
+            self.meter.record(started.elapsed().as_micros());
+            return;
+        }
+
         // The UI starts with an empty box and must show the world, not a
         // parse error. `Alternatives::parse("")` matches everything, but
         // listing every path through the index is cheaper than scoring.
         if !self.filtered {
             self.results.clear();
             self.matched.clear();
-            self.total = self.live.base.n.saturating_sub(1); // skip synthetic root
+            let live = self.live.as_ref().expect("the in-process path has an index");
+            self.total = live.base.n.saturating_sub(1); // skip synthetic root
             let mut out = Vec::new();
             // Entry 0 is the synthetic root; the cap is on the range rather
             // than a counter checked inside the loop.
-            for i in 1..self.live.base.n.min(MAX_RESULTS + 1) {
-                self.live.base.path(i, &mut out);
+            for i in 1..live.base.n.min(MAX_RESULTS + 1) {
+                live.base.path(i, &mut out);
                 self.results
                     .push(String::from_utf8_lossy(&out).into_owned());
             }
@@ -287,8 +334,9 @@ impl App {
         // comparisons on every keystroke.
         let mut hits: Vec<Hit> = Vec::new();
         let mut tokens: Vec<rgy_name_core::name_query::Token> = Vec::new();
+        let live = self.live.as_ref().expect("the in-process path has an index");
         if let Ok(alts) = Alternatives::parse(&self.input, &home) {
-            let searcher = Searcher { live: &self.live };
+            let searcher = Searcher { live };
             hits = searcher.search_alternatives(&alts.alts, MAX_RESULTS);
             if let [one] = alts.alts.as_slice() {
                 tokens = one.tokens.clone();
@@ -302,7 +350,7 @@ impl App {
                 if let Some(p) = h.over.clone() {
                     return String::from_utf8_lossy(&p).into_owned();
                 }
-                self.live.base.path(h.idx as usize, &mut out);
+                live.base.path(h.idx as usize, &mut out);
                 String::from_utf8_lossy(&out).into_owned()
             })
             .collect();
@@ -784,6 +832,24 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Action {
 /// Run the interactive search. Enter prints the selected path to stdout after
 /// the screen is restored, so the result can be piped onward.
 pub fn run(live: Live, root: String, indexed: usize) -> Result<(), String> {
+    run_app(App::new(live, root, indexed))
+}
+
+/// Run the interactive search over a source.
+///
+/// The source is the daemon, or anything else that answers a query: the
+/// same terminal UI over either, and the caller is the one that chooses.
+/// This is the launcher's fallback — the same interface, in a terminal,
+/// on a machine with no desktop.
+pub fn run_with_source(
+    source: Box<dyn rgy_launcher::Source>,
+    root: String,
+) -> Result<(), String> {
+    run_app(App::with_source(source, root))
+}
+
+/// The runner, over an app that is already built.
+fn run_app(mut app: App) -> Result<(), String> {
     // The console decides how the UTF-8 bytes are decoded, so it is put
     // into UTF-8 before the first frame is painted: a
     // name with an accent has to reach the screen as itself.
@@ -797,7 +863,6 @@ pub fn run(live: Live, root: String, indexed: usize) -> Result<(), String> {
     let mut out = rgy_engine::console::stdout();
     let _guard = TerminalGuard::enter(&mut out)?;
 
-    let mut app = App::new(live, root, indexed);
     let mut chosen = None;
 
     loop {
@@ -1080,8 +1145,7 @@ mod bench {
 mod tests {
     use super::*;
     use rgy_discovery::walk::{KIND_DIR, KIND_FILE, Listing, NONE, RawEnt};
-    use rgy_name_core::name_index;
-
+    
     /// The same four entries the old zen fixture had, as the two DFS
     /// [`Listing`]s `name_index::Index::build` wants.
     fn sample_listings() -> Vec<Listing> {
@@ -1128,7 +1192,7 @@ mod tests {
     }
 
     pub(crate) fn sample_live() -> Live {
-        let idx = name_index::Index::build(sample_listings(), 0, 0, b"");
+        let idx = rgy_name_core::name_index::Index::build(sample_listings(), 0, 0, b"");
         Live::new(idx)
     }
 

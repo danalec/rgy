@@ -77,6 +77,29 @@ pub const DAEMON_NAME: &str = if cfg!(windows) {
     "searchd"
 };
 
+/// The name the launcher's entry gets on this platform.
+///
+/// The launchd label is a reverse-DNS name, because that is what launchd
+/// expects; the other two are plain names.
+pub fn launcher_default_name(platform: Platform) -> &'static str {
+    match platform {
+        Platform::MacOs => "com.rgy.rgxy",
+        _ => "rgy-rgxy",
+    }
+}
+
+/// The launcher's file name on this platform.
+///
+/// The launcher is a program of its own: the window is there in a few
+/// milliseconds because the **daemon** has the index warm, not because
+/// the launcher built one. So it needs its own login entry, under its
+/// own name, and the release ships it next to the daemon.
+pub const LAUNCHER_NAME: &str = if cfg!(windows) {
+    "rgxy.exe"
+} else {
+    "rgxy"
+};
+
 /// The arguments the daemon is registered with, when the user names none.
 ///
 /// The root is **always** explicit, and that is the whole point of it.
@@ -213,21 +236,17 @@ pub fn listen_of(command: &str) -> Option<String> {
 /// Split from the path logic so the test does not have to mutate the
 /// process environment: a test that sets `HOME` races every other test in
 /// the process.
+///
+/// The rule itself lives in `rgy-proto`, next to the client that has to
+/// find this daemon: a registration that writes one path and a client that
+/// looks for another is a client that never answers.
 #[cfg(feature = "std")]
 pub fn cache_dir_from(
     xdg: Option<&std::ffi::OsStr>,
     home: Option<&std::ffi::OsStr>,
     local: Option<&std::ffi::OsStr>,
 ) -> Option<std::path::PathBuf> {
-    let some =
-        |v: Option<&std::ffi::OsStr>| v.filter(|s| !s.is_empty()).map(std::path::PathBuf::from);
-    if cfg!(windows) {
-        return some(local).or_else(|| some(home).map(|h| h.join("AppData").join("Local")));
-    }
-    if cfg!(target_os = "macos") {
-        return some(xdg).or_else(|| some(home).map(|h| h.join("Library").join("Caches")));
-    }
-    some(xdg).or_else(|| some(home).map(|h| h.join(".cache")))
+    rgy_proto::endpoint::cache_dir_from(xdg, home, local)
 }
 
 /// The platform's cache directory.
@@ -238,11 +257,7 @@ pub fn cache_dir_from(
 /// directory.
 #[cfg(feature = "std")]
 pub fn cache_dir() -> Option<std::path::PathBuf> {
-    cache_dir_from(
-        std::env::var_os("XDG_CACHE_HOME").as_deref(),
-        std::env::var_os(home_key()).as_deref(),
-        std::env::var_os("LOCALAPPDATA").as_deref(),
-    )
+    rgy_proto::endpoint::cache_dir()
 }
 
 /// The socket the registered daemon listens on, under a cache directory.
@@ -251,7 +266,7 @@ pub fn cache_dir() -> Option<std::path::PathBuf> {
 /// one directory for this root's files, in the place the platform owns.
 #[cfg(feature = "std")]
 pub fn socket_path_in(cache_dir: &std::path::Path) -> std::path::PathBuf {
-    cache_dir.join("rgy").join("searchd.sock")
+    rgy_proto::endpoint::socket_path_in(cache_dir)
 }
 
 /// The name of the named pipe the registered daemon listens on, for a user.
@@ -264,27 +279,13 @@ pub fn socket_path_in(cache_dir: &std::path::Path) -> std::path::PathBuf {
 /// anything else becomes an underscore — a name the platform will refuse
 /// is a service that does not start.
 pub fn pipe_name_for(user: &str) -> String {
-    let clean: String = user
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    if clean.is_empty() {
-        "rgy-searchd".to_string()
-    } else {
-        format!("rgy-searchd-{clean}")
-    }
+    rgy_proto::endpoint::pipe_name_for(user)
 }
 
 /// The named pipe the registered daemon listens on.
 #[cfg(feature = "std")]
 pub fn pipe_name() -> String {
-    pipe_name_for(&std::env::var("USERNAME").unwrap_or_default())
+    rgy_proto::endpoint::pipe_name()
 }
 
 /// The mechanism's name, with the fallback's caveat.
@@ -410,6 +411,60 @@ pub fn find_daemon() -> Result<std::path::PathBuf, String> {
         .ok()
         .and_then(|exe| exe.parent().map(|dir| dir.to_path_buf()));
     find_daemon_in(sibling.as_deref(), std::env::var_os("PATH").as_deref())
+}
+
+/// The launcher this tool registers.
+///
+/// The same two places, and in the same order: next to this tool, and
+/// then the PATH.
+#[cfg(feature = "std")]
+pub fn find_launcher() -> Result<std::path::PathBuf, String> {
+    let sibling = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.to_path_buf()));
+    find_launcher_in(sibling.as_deref(), std::env::var_os("PATH").as_deref())
+}
+
+/// The launcher, looked for in two places.
+///
+/// The launcher is optional: the daemon is the product and the launcher
+/// is a face on it. A machine without the launcher has a daemon and no
+/// window, and that is a machine that works.
+#[cfg(feature = "std")]
+pub fn find_launcher_in(
+    sibling_dir: Option<&std::path::Path>,
+    path_var: Option<&std::ffi::OsStr>,
+) -> Result<std::path::PathBuf, String> {
+    let mut looked = Vec::new();
+
+    if let Some(dir) = sibling_dir {
+        let candidate = dir.join(LAUNCHER_NAME);
+        looked.push(candidate.display().to_string());
+        if candidate.is_file() && is_executable(&candidate) {
+            return resolve_binary(&candidate);
+        }
+    }
+
+    if let Some(path) = path_var {
+        for dir in std::env::split_paths(path) {
+            let candidate = dir.join(LAUNCHER_NAME);
+            if candidate.is_file() && is_executable(&candidate) {
+                return resolve_binary(&candidate);
+            }
+        }
+        looked.push(format!("the PATH ({})", path.to_string_lossy()));
+    }
+
+    Err(format!(
+        "there is no {LAUNCHER_NAME} next to this tool and none on the PATH.\n  \
+         looked in: {}\n  \
+         the launcher is optional: the daemon works without it",
+        if looked.is_empty() {
+            "nowhere: this tool has no directory and the PATH is empty".to_string()
+        } else {
+            looked.join(", ")
+        }
+    ))
 }
 
 /// The daemon, looked for in two places.

@@ -8,9 +8,18 @@ license = "Apache-2.0"
 repository = "https://github.com/danalec/rgy"
 homepage = "https://github.com/danalec/rgy"
 documentation = "https://docs.rs/rgy-proto"
-keywords = ["search", "json", "protocol", "daemon"]
+keywords = ["json", "protocol", "daemon"]
 categories = ["encoding", "command-line-utilities"]
 readme = "../../README.md"
 
+
+[features]
+default = ["std"]
+# The machine: the sockets, the files, the environment, the process. Without
+# it the crate is `core` plus `alloc`, and what is left is the protocol --
+# the types and the bytes on the wire. The bare-metal gate builds this crate
+# with the feature off, so the wire types stay linkable into an embedded
+# search box.
+std = []
 
 [dependencies]

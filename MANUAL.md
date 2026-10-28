@@ -16,9 +16,10 @@ the part you keep open while using it.
 5. [The query language](#5-the-query-language)
 6. [The flags](#6-the-flags)
 7. [The daemon](#7-the-daemon)
-8. [The pack store](#8-the-pack-store)
-9. [When it goes wrong](#9-when-it-goes-wrong)
-10. [See also](#10-see-also)
+8. [The window](#8-the-window)
+9. [The pack store](#9-the-pack-store)
+10. [When it goes wrong](#10-when-it-goes-wrong)
+11. [See also](#11-see-also)
 
 ## 1. What it is
 
@@ -469,7 +470,110 @@ searchd --root ~ --listen pipe:rgy-search      # Windows
 one JSON argv-array per line in, `rg --json` match lines out, framed by
 `{"rgx":"begin"}` and `{"rgx":"end"}`.
 
-## 8. The pack store
+## 8. The window
+
+`rgxy` is the daemon's **client**. The index lives in `searchd`, and a
+keystroke is a question sent down a pipe — which is why the window is
+there in a few milliseconds: it is not building an index, it is asking
+one that is already built.
+
+```sh
+rgxy                  # the resident launcher; Control twice opens the window
+rgxy --query invoice  # one search, printed, and out
+rgxy --tui            # the terminal interface, for a machine with no desktop
+```
+
+### The two layers
+
+The field takes a query, and the query has two halves:
+
+| you write | the launcher asks |
+|---|---|
+| `invoice` | the **name** layer: the engine ranks the names in the index |
+| `grep:total` | the **content** layer: which files *say* it |
+| `invoice grep:total` | both: the files called invoice, that say total |
+| `regex:^inv` | the content layer, with a regular expression |
+
+The content prefix **splits** the query. What comes before it is the
+scope — the files the name layer chose — and what comes after it is the
+pattern that is read inside them. With nothing before it, the whole tree
+is the scope.
+
+That split is the whole performance story of the second layer: a content
+search over the tree reads the tree, and a content search over the two
+hundred files a name search chose reads two hundred files.
+
+The name layer answers on every keystroke: it is a re-rank of a warm
+index. The content layer **reads files**, so it waits for the window's
+clock (120 ms) and answers once for a burst of typing.
+
+### The short filters
+
+The launcher has a small vocabulary of its own, and it rewrites it into
+the engine's:
+
+| you write | the engine reads |
+|---|---|
+| `file:` | `type:file` |
+| `folder:` | `type:dir` |
+| `doc:` | `type:doc` |
+| `pic:` | `type:image` |
+| `video:` | `type:video` |
+| `audio:` | `type:audio` |
+
+The short word is a **prefix**: `doc:invoice` is the filter *and* a name
+— "the documents called invoice" — and the engine reads the two as
+separate words.
+
+### The commands
+
+Some things are not searches. A line that starts with `>` is a command:
+
+| you write | it does |
+|---|---|
+| `>open` | opens the selected result |
+| `>folder` | opens the folder that holds it |
+| `>copy` | puts the path on the clipboard |
+| `>preview` | shows the beginning of the file |
+| `>menu` | the actions of the selected result |
+
+### The keys
+
+| key | what it does |
+|---|---|
+| `Control` twice | opens and closes the window |
+| arrows | moves the selection |
+| `Enter` | opens the selected result |
+| `Control+Enter` | opens the folder that holds it |
+| `Escape` | closes the preview, the menu, and then the window |
+| `Control+C` | copies the path |
+| `Control+P` | previews the file |
+| `Control+K` | the actions |
+| `Control+W` | deletes the word |
+| `Control+U` | empties the field |
+
+### Where it runs
+
+The window needs a desktop. A machine without one gets the terminal
+interface instead, over the same daemon: the same query, the same list,
+the same answers — in a terminal.
+
+The window itself is a Windows thing for now. The double-`Control`
+hotkey is a low-level keyboard hook, and the hook this repository has is
+the Windows one; the rest of the launcher is the same everywhere.
+
+### At login
+
+```sh
+rgy-autostart install --launcher
+```
+
+The launcher is a program of its own, and it needs its own login entry:
+the window is there in a few milliseconds because the *daemon* has the
+index warm, not because the launcher built one. A launcher that started
+at login would pay for the startup on every opening.
+
+## 9. The pack store
 
 Searching a folder means reading it. Doing that again for every query is
 wasteful when the folder does not change.
@@ -526,7 +630,7 @@ want them.
 A flag the subcommand does not own is an **error**, not a no-op: `rgx-tv
 build . --store d --stats` exits 1 and says so.
 
-## 9. When it goes wrong
+## 10. When it goes wrong
 
 **No results, and a warning on stderr.** An unknown `type:` or a filter
 that does not apply fails closed. Read the warning; it names the token.
@@ -550,7 +654,7 @@ what it has indexed.
 **A file cannot be read.** Permission, a broken link, a file that is
 being written. rgy skips it and lists it rather than failing the run.
 
-## 10. See also
+## 11. See also
 
 | file | what it is |
 |---|---|
