@@ -32,6 +32,16 @@ const READY: Duration = Duration::from_secs(20);
 struct Fixture {
     /// The guard that kills the daemon when the test ends.
     _daemon: Daemon,
+    /// The directory the socket lives in.
+    ///
+    /// The socket is a file in a directory, and the directory has to be
+    /// there while the daemon listens: a client that arrives at a path
+    /// whose directory is gone finds nothing there, and the test would be
+    /// measuring the removal instead of the answer. The field is declared
+    /// after the daemon so that it is dropped after it — the daemon goes
+    /// first, and the directory goes with it.
+    #[cfg(unix)]
+    _dir: harness::TempDir,
     /// The endpoint the launcher is pointed at.
     endpoint: String,
 }
@@ -106,6 +116,7 @@ fn start_with(root: &Path, extra: &[&str]) -> Fixture {
     let daemon = harness::spawn_uds(&bin("searchd"), &borrowed);
     Fixture {
         _daemon: daemon,
+        _dir: dir,
         endpoint: format!("uds:{}", socket.display()),
     }
 }

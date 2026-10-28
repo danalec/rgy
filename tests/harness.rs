@@ -68,19 +68,72 @@ fn assert_up_to_date(name: &str, exe: &Path) {
     }
 }
 
-/// Unique temp fixture root; removed by the OS temp cleaner eventually
-/// (same approach as rgx's tests/cli.rs — no tempfile crate).
-pub fn fixture_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "rgy-e2e-{tag}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// A directory in the temp folder that takes itself away.
+///
+/// The fixture of a test is a fresh tree, and a fresh tree per test means
+/// a directory per test: twenty thousand of them, and a hundred and fifty
+/// megabytes of index caches, were measured in the temp folder of the
+/// machine that ran the suite all day. The guard removes the directory
+/// when the test is done with it, and a directory that something still
+/// holds stays where it is — the platform's own rules about an open file
+/// say what happens then, and a directory that cannot be removed is not
+/// worth a failed test.
+pub struct TempDir {
+    path: PathBuf,
+}
+
+impl TempDir {
+    /// A fresh directory, named after what it is for.
+    fn new(tag: &str) -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "rgy-e2e-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        Self { path }
+    }
+
+    /// The directory itself.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl std::ops::Deref for TempDir {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl AsRef<Path> for TempDir {
+    fn as_ref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl AsRef<std::ffi::OsStr> for TempDir {
+    fn as_ref(&self) -> &std::ffi::OsStr {
+        self.path.as_os_str()
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        // A directory that cannot be removed — a daemon still holding it,
+        // say — stays. The test is worth more than the tidy folder.
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+/// Unique temp fixture root, taken away when the test is done with it.
+pub fn fixture_dir(tag: &str) -> TempDir {
+    TempDir::new(tag)
 }
 
 /// A small tree with a known name and a known content string.
@@ -108,24 +161,16 @@ pub fn text_tree(root: &Path) {
 /// index behind — and since fixtures are fresh temp trees, a cached index
 /// from a previous run could answer a query it has no business answering.
 /// `RGY_INDEX_DIR` is the same override `rgy_name_core::persist` reads.
-fn index_cache_dir() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "rgy-e2e-cache-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+fn index_cache_dir() -> TempDir {
+    TempDir::new("cache")
 }
 
 /// Run a bin capturing (exit code, stdout, stderr).
 pub fn run(exe: &Path, args: &[&str]) -> (i32, String, String) {
+    let cache = index_cache_dir();
     let out = Command::new(exe)
         .args(args)
-        .env("RGY_INDEX_DIR", index_cache_dir())
+        .env("RGY_INDEX_DIR", &cache)
         .stdin(Stdio::null())
         .output()
         .unwrap_or_else(|e| panic!("spawn {}: {e}", exe.display()));
@@ -161,12 +206,21 @@ pub fn run_in_cache(exe: &Path, args: &[&str], cache: &Path) -> (i32, String, St
 /// Without this a test that panics leaves `searchd.exe` alive, which then
 /// holds the binary and makes the *next* `cargo build` fail with "failed to
 /// remove file" — a failure that looks nothing like its real cause.
-pub struct Daemon(pub std::process::Child);
+pub struct Daemon {
+    /// The daemon itself.
+    pub child: std::process::Child,
+    /// The index cache it writes into.
+    ///
+    /// The cache lives as long as the daemon does: a daemon whose cache
+    /// was taken away underneath it would answer from nothing, and the
+    /// test would be measuring the removal instead of the answer.
+    _cache: TempDir,
+}
 
 impl Drop for Daemon {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
@@ -176,16 +230,19 @@ impl Drop for Daemon {
 /// clients open at the same time.
 #[cfg(windows)]
 pub fn spawn_pipe(exe: &Path, args: &[&str]) -> Daemon {
-    Daemon(
-        Command::new(exe)
-            .args(args)
-            .env("RGY_INDEX_DIR", index_cache_dir())
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap_or_else(|e| panic!("spawn {}: {e}", exe.display())),
-    )
+    let cache = index_cache_dir();
+    let child = Command::new(exe)
+        .args(args)
+        .env("RGY_INDEX_DIR", &cache)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap_or_else(|e| panic!("spawn {}: {e}", exe.display()));
+    Daemon {
+        child,
+        _cache: cache,
+    }
 }
 
 /// Spawn `searchd` listening on a unix socket, left running.
@@ -195,16 +252,19 @@ pub fn spawn_pipe(exe: &Path, args: &[&str]) -> Daemon {
 /// platform's own limit.
 #[cfg(unix)]
 pub fn spawn_uds(exe: &Path, args: &[&str]) -> Daemon {
-    Daemon(
-        Command::new(exe)
-            .args(args)
-            .env("RGY_INDEX_DIR", index_cache_dir())
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap_or_else(|e| panic!("spawn {}: {e}", exe.display())),
-    )
+    let cache = index_cache_dir();
+    let child = Command::new(exe)
+        .args(args)
+        .env("RGY_INDEX_DIR", &cache)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap_or_else(|e| panic!("spawn {}: {e}", exe.display()));
+    Daemon {
+        child,
+        _cache: cache,
+    }
 }
 
 /// A named-pipe client held open by the caller.
@@ -270,26 +330,18 @@ impl PipeClient {
 }
 
 /// A cache directory a test can reuse across spawns.
-pub fn shared_cache_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "rgy-e2e-shared-{tag}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    dir
+pub fn shared_cache_dir(tag: &str) -> TempDir {
+    TempDir::new(&format!("shared-{tag}"))
 }
 
 /// Run a bin with a stdin payload, then close stdin (EOF) and collect output.
 /// Closing stdin matters: `searchd` serves until EOF and must not hang.
 pub fn run_stdin(exe: &Path, args: &[&str], input: &str) -> (i32, String, String) {
     use std::io::Write;
+    let cache = index_cache_dir();
     let mut child = Command::new(exe)
         .args(args)
-        .env("RGY_INDEX_DIR", index_cache_dir())
+        .env("RGY_INDEX_DIR", &cache)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
