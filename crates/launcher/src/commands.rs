@@ -94,7 +94,7 @@ pub fn unknown(text: &str) -> alloc::string::String {
         .unwrap_or("")
         .trim();
     if name.is_empty() {
-        alloc::string::String::from("escreva um comando: >open, >folder, >copy, >preview")
+        alloc::string::String::from("escreva um comando: >open, >folder, >copy, >preview, >menu")
     } else {
         alloc::format!("comando desconhecido: >{name}")
     }
@@ -106,11 +106,23 @@ mod tests {
 
     #[test]
     fn the_commands_are_the_actions_the_launcher_has() {
-        assert_eq!(COMMANDS.len(), Action::menu().len());
+        // Every action the menu offers is a command...
+        for action in Action::menu() {
+            assert!(
+                COMMANDS.iter().any(|c| c.action == *action),
+                "the menu offers an action that no command names: {action:?}"
+            );
+        }
+        // ...and every command is an action of the launcher, the menu
+        // itself included: `>menu` opens the list of the actions.
         for c in COMMANDS {
             assert!(!c.name.is_empty());
             assert!(!c.label.is_empty());
-            assert!(Action::menu().contains(&c.action));
+            assert!(
+                c.action == Action::Menu || Action::menu().contains(&c.action),
+                "the command >{} is not an action of the launcher",
+                c.name
+            );
         }
     }
 
@@ -158,5 +170,24 @@ mod tests {
         assert!(empty.contains(">open"), "{empty}");
         let wrong = unknown(">nope");
         assert!(wrong.contains("nope"), "{wrong}");
+    }
+
+    #[test]
+    fn the_sentence_names_every_command_the_table_has() {
+        let sentence = unknown(">");
+        for command in COMMANDS {
+            assert!(
+                sentence.contains(&alloc::format!(">{}", command.name)),
+                "the sentence does not name >{}: {sentence}",
+                command.name
+            );
+        }
+        // And nothing else: a command the table does not have would send
+        // the user looking for a word the launcher does not know.
+        assert_eq!(
+            sentence.matches('>').count(),
+            COMMANDS.len(),
+            "the sentence names another number of commands: {sentence}"
+        );
     }
 }

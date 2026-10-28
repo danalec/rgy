@@ -349,9 +349,17 @@ same shape `rg` prints.
 | `sym:` | the symbols in the file, for code |
 
 ```sh
-searchctl --root ~ "grep:quarterly revenue"
+searchctl --root ~ 'grep:"quarterly revenue"'
 searchctl --root ~ "regex:fn\s+list"
 ```
+
+A pattern of more than one word has to be **quoted**. Without the quotes
+the second word is not part of the pattern: it is part of the file's
+*name*, and `grep:quarterly revenue` asks for the files called revenue
+that contain quarterly — one file, where the quoted form finds two.
+
+The outer quotes are single so that the inner ones reach the engine
+whole.
 
 Note what this does **not** do yet: on a PDF or a Word document, `grep:`
 reads the compressed bytes and finds nothing useful. Those formats are
@@ -500,13 +508,29 @@ scope — the files the name layer chose — and what comes after it is the
 pattern that is read inside them. With nothing before it, the whole tree
 is the scope.
 
+The launcher quotes the pattern for you. Everything after the prefix is
+the pattern, all of it: `grep:total due` asks for the files that *say*
+"total due", and not the files called due that say total. On the command
+line the same rule is yours to carry — see
+[searching inside a file](#searching-inside-a-file).
+
 That split is the whole performance story of the second layer: a content
-search over the tree reads the tree, and a content search over the two
-hundred files a name search chose reads two hundred files.
+search over the tree reads the tree, and a content search over the
+sixty-four files a name search chose reads sixty-four files.
 
 The name layer answers on every keystroke: it is a re-rank of a warm
 index. The content layer **reads files**, so it waits for the window's
 clock (120 ms) and answers once for a burst of typing.
+
+The window is up **before** the daemon is asked. The field is there, the
+line under it says `procurando…`, and the answer lands in a window
+that is already on the screen. No single wait is longer than **two
+seconds**: the client's own window is thirty, which is right for a
+program that waits in the background and wrong for a search box — thirty
+seconds of silence is a window that stopped answering the keyboard. The
+same window covers the content layer, the scope it reads and the files
+themselves; a content query waits for the scope before it reads a byte.
+A daemon that is slow says so and the launcher carries on.
 
 ### The short filters
 
@@ -531,11 +555,17 @@ separate words.
 The daemon's order is the relevance order, and it rules. On top of it the
 launcher keeps what **you** used: a result you opened in the last thirty
 days comes up a few places — one for a single use, two for a few, three for
-many — and never more than three, so a better match is never overtaken by an
-old habit.
+many — and never more than three.
+
+It is a nudge and not a takeover. The order underneath is still the
+daemon's, and what the nudge passes goes down one place to make room: the
+file you opened every morning comes first, and the three better matches it
+passes are still there, just lower. The history can reorder the top of the
+list; it cannot put a file the daemon ranked last on top of it.
 
 The memory is a file of its own, read when the launcher starts and written
-when a result is opened. The machine-readable form (`rgxy --query`) does
+when a result is opened **and the open worked** — a file that could not be
+opened was not used. The machine-readable form (`rgxy --query`) does
 not use it: a script's output should not change because you opened a file
 yesterday.
 
@@ -547,12 +577,17 @@ The launcher can hand its results to **your own** picker, the same way
 | flag | what it does |
 |---|---|
 | `--pick` | opens the picker over the results and prints the chosen path |
-| `--fzf-binary <path>` | the picker to run — `fzf`, `sk`, `peco` or `fz` |
+| `--fzf-binary <path>` | the picker to run — `fzf` or `sk` by default; a picker that cannot read a NUL-separated list (`peco`, `fz`) gets one path per line |
 | `--fzf-arg <arg>` | one argument for the picker, repeatable |
 
 `--pick` needs `--query`: the picker chooses among the results of a search.
 The chosen path goes to stdout, one per line — the same contract as
 `--query`.
+
+The default is `fzf` or `sk`: they are the ones that read a list separated
+by NUL, and a path with a newline in it would break the other kind. A
+picker you name yourself and that cannot read one — `peco`, `fz` — gets
+the list one path per line.
 
 ### The commands
 
@@ -576,6 +611,7 @@ Some things are not searches. A line that starts with `>` is a command:
 | `Control+Enter` | opens the folder that holds it |
 | `Escape` | closes the preview, the menu, and then the window |
 | `Control+C` | copies the path |
+| `Control+V` | pastes the clipboard's text into the field |
 | `Control+P` | previews the file |
 | `Control+K` | the actions |
 | `Control+W` | deletes the word |

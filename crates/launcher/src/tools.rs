@@ -14,8 +14,6 @@
 //! content layer" is a question about the machine, and the part of it that
 //! is not about the machine can be tested from anywhere.
 
-use alloc::string::String;
-
 /// The external programs the launcher looks for.
 pub const KNOWN_TOOLS: &[&str] = &["rgx"];
 
@@ -72,27 +70,9 @@ pub fn content_backend(daemon_up: bool, rgx_present: bool) -> ContentBackend {
     }
 }
 
-/// The sentence the launcher shows when the content layer cannot answer.
-///
-/// It names what is missing, because the fix is not the same in each case:
-/// one is a daemon that is not running, the other is a program that is
-/// not installed.
-pub fn content_unavailable(daemon_up: bool, rgx_present: bool) -> String {
-    if daemon_up {
-        String::new()
-    } else if rgx_present {
-        String::from(
-            "o daemon não está a correr; a camada de conteúdo usa o rgx, sobre o escopo da última busca",
-        )
-    } else {
-        String::from("a camada de conteúdo precisa do daemon (searchd) ou do rgx no PATH")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::string::ToString;
 
     #[test]
     fn the_daemon_is_the_first_backend() {
@@ -111,17 +91,6 @@ mod tests {
         assert!(!ContentBackend::None.is_available());
         assert!(ContentBackend::Daemon.is_available());
         assert!(ContentBackend::Rgx.is_available());
-    }
-
-    #[test]
-    fn the_sentence_names_what_is_missing() {
-        assert_eq!(content_unavailable(true, false), "".to_string());
-        let without_daemon = content_unavailable(false, false);
-        assert!(without_daemon.contains("searchd"), "{without_daemon}");
-        assert!(without_daemon.contains("rgx"), "{without_daemon}");
-        let with_rgx = content_unavailable(false, true);
-        assert!(with_rgx.contains("rgx"), "{with_rgx}");
-        assert!(with_rgx.contains("escopo"), "{with_rgx}");
     }
 
     #[test]

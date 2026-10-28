@@ -21,9 +21,16 @@
 //! A path is bytes, and on unix a byte may be a tab or a newline. A picker
 //! that reads one record per line cannot be handed a path that contains one.
 //! So the record separator is a decision, and it is [`Separator::Nul`] by
-//! default: the NUL byte cannot appear in a path on any platform, and the
-//! pickers that read it (`fzf`, `sk`) are the ones this crate looks for
-//! first.
+//! default: the NUL byte cannot appear in a path on any platform.
+//!
+//! The picker has the last word on it. Only the pickers that know
+//! `--read0` and `--print0` — `fzf` and `sk` — read a NUL-separated list,
+//! and those are the ones the crate looks for when the caller named none:
+//! a picker that cannot read the list never sees the results. A picker
+//! the caller named that cannot read one is given the line separator
+//! instead, because every picker reads lines, and the crate translates
+//! the records on the way in. The caller writes its records once, in the
+//! separator it asked for.
 //!
 //! # The ranking
 //!
@@ -58,16 +65,20 @@ pub type Error = String;
 /// The result of an operation that can fail with a sentence.
 pub type Result<T> = core::result::Result<T, Error>;
 
-/// Picker binaries, first hit on `PATH` wins.
-pub const CANDIDATES: &[&str] = &["fzf", "sk", "peco", "fz"];
-
 /// The pickers that read and write NUL-separated records.
 ///
-/// The first two are the ones that know `--read0` and `--print0`; the last
-/// two do not, and a NUL-separated list handed to one of them is a list the
-/// picker cannot read. When the separator is [`Separator::Nul`] and the
-/// caller did not name a picker, only these are looked for.
+/// These are the ones the crate looks for when the caller named none: a
+/// picker that cannot read a NUL-separated list never sees the results.
+/// `peco` and `fz` do not know `--read0` and `--print0`, and a list
+/// handed to one of them is a list that never arrives.
 pub const NUL_CAPABLE: &[&str] = &["fzf", "sk"];
+
+/// The pickers the crate looks for when the caller named none.
+///
+/// The same two, because the default search looks for a picker that can
+/// answer the NUL-separated list the crate writes. First hit on `PATH`
+/// wins.
+pub const CANDIDATES: &[&str] = NUL_CAPABLE;
 
 /// How the picker reads its list and writes its selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,6 +97,14 @@ impl Separator {
         match self {
             Separator::Line => &[],
             Separator::Nul => &["--read0", "--print0"],
+        }
+    }
+
+    /// The byte that separates the records.
+    pub fn byte(&self) -> u8 {
+        match self {
+            Separator::Line => b'\n',
+            Separator::Nul => 0,
         }
     }
 
@@ -112,6 +131,40 @@ impl Separator {
     }
 }
 
+/// The separator a picker reads and writes.
+///
+/// The caller asks for one, and the picker has the last word: only the
+/// pickers in [`NUL_CAPABLE`] know `--read0` and `--print0`, so a picker
+/// outside it gets the line separator — one record per line is what
+/// every picker reads, and a path with a newline in it is the rare case.
+/// The name is the only thing the crate knows the picker by, so a path
+/// to `fzf.exe` is `fzf` and is treated as `fzf`.
+pub fn separator_for(binary: &str, requested: Separator) -> Separator {
+    match requested {
+        Separator::Line => Separator::Line,
+        Separator::Nul => {
+            let stem = stem(binary);
+            if NUL_CAPABLE
+                .iter()
+                .any(|name| stem.eq_ignore_ascii_case(name))
+            {
+                Separator::Nul
+            } else {
+                Separator::Line
+            }
+        }
+    }
+}
+
+/// The name of the picker, without the directory and without the extension.
+fn stem(binary: &str) -> &str {
+    let name = binary.rsplit(['/', '\\']).next().unwrap_or(binary);
+    match name.rfind('.') {
+        Some(dot) if dot > 0 => &name[..dot],
+        _ => name,
+    }
+}
+
 /// Whether the picker keeps the order it was given.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Order {
@@ -135,12 +188,16 @@ pub const ORDER_AWARE: &[&str] = &["fzf", "sk"];
 
 /// How the picker is invoked.
 pub struct Request<'a> {
-    /// argv appended after the binary, unparsed — one flag per element, so
-    /// nothing the user wrote is re-split by a shell.
+    /// argv appended after the binary and after the crate's own flags,
+    /// unparsed — one flag per element, so nothing the user wrote is
+    /// re-split by a shell.
     pub args: &'a [String],
     /// An explicit picker path; `PATH` is scanned when this is `None`.
     pub binary: Option<&'a str>,
-    /// How the records are separated.
+    /// The separator the records are written with.
+    ///
+    /// The picker may read another one: [`separator_for`] has the last
+    /// word, and the crate translates the records on the way in.
     pub separator: Separator,
     /// Whether the picker keeps the order it was given.
     pub order: Order,
@@ -178,6 +235,35 @@ pub fn status(code: i32, no_selection: bool) -> Result<i32> {
     }
 }
 
+/// The picker that will run, and the separator it will speak.
+#[cfg(feature = "std")]
+struct Plan {
+    binary: String,
+    separator: Separator,
+}
+
+/// The picker that will run, and the separator it will speak.
+///
+/// The separator follows the picker: one that cannot read a NUL-separated
+/// list gets the line separator, and the crate translates the records on
+/// the way in.
+#[cfg(feature = "std")]
+fn plan(req: &Request<'_>) -> Result<Plan> {
+    let binary = match req.binary {
+        Some(p) => p.to_string(),
+        None => locate().ok_or_else(|| {
+            alloc::format!(
+                "the picker needs one of {} on PATH (install one, or point --fzf-binary at another picker)",
+                CANDIDATES.join(", ")
+            )
+        })?,
+    };
+    Ok(Plan {
+        separator: separator_for(&binary, req.separator),
+        binary,
+    })
+}
+
 /// Runs `search` with its output on the picker's stdin and yields what the
 /// picker returned, plus the process exit status.
 ///
@@ -186,25 +272,21 @@ pub fn status(code: i32, no_selection: bool) -> Result<i32> {
 /// only the caller can strip a column it added.
 #[cfg(feature = "std")]
 pub fn pick_records(search: Search, req: &Request<'_>) -> Result<(i32, Vec<Vec<u8>>)> {
+    let plan = plan(req)?;
+    run(search, req, &plan)
+}
+
+/// Runs the picker and reads back what it chose.
+#[cfg(feature = "std")]
+fn run(search: Search, req: &Request<'_>, plan: &Plan) -> Result<(i32, Vec<Vec<u8>>)> {
     use std::io::Read;
     use std::process::{Command, Stdio};
     use std::sync::mpsc;
 
-    let binary = match req.binary {
-        Some(p) => p.to_string(),
-        None => locate(req.separator).ok_or_else(|| {
-            let names: Vec<&str> = candidates_for(req.separator).to_vec();
-            alloc::format!(
-                "the picker needs one of {} on PATH (install one, or point --fzf-binary at it)",
-                names.join(", ")
-            )
-        })?,
-    };
-
-    let mut command = Command::new(&binary);
+    let mut command = Command::new(&plan.binary);
     command
-        .args(req.separator.args())
-        .args(order_args(req.order, &binary))
+        .args(plan.separator.args())
+        .args(order_args(req.order, &plan.binary))
         .args(req.args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -213,15 +295,20 @@ pub fn pick_records(search: Search, req: &Request<'_>) -> Result<(i32, Vec<Vec<u
         .stderr(Stdio::inherit());
     let mut child = command
         .spawn()
-        .map_err(|e| alloc::format!("the picker cannot run {binary}: {e}"))?;
+        .map_err(|e| alloc::format!("the picker cannot run {}: {e}", plan.binary))?;
 
-    let mut stdin = child.stdin.take().expect("stdin was piped");
+    let stdin = child.stdin.take().expect("stdin was piped");
     let (tx, rx) = mpsc::channel();
+    // The records go in the separator the caller wrote them in, and come
+    // out in the one the picker reads.
+    let requested = req.separator;
+    let separator = plan.separator;
     let writer = std::thread::spawn(move || {
-        let out = search(&mut stdin);
+        let mut out = Reflow::new(stdin, requested, separator);
+        let result = search(&mut out);
         // The picker's list is only final at EOF.
-        drop(stdin);
-        let _ = tx.send(out);
+        drop(out);
+        let _ = tx.send(result);
     });
 
     let mut selected: Vec<u8> = Vec::new();
@@ -234,8 +321,7 @@ pub fn pick_records(search: Search, req: &Request<'_>) -> Result<(i32, Vec<Vec<u
     let _ = writer.join();
 
     searched?;
-    let records: Vec<Vec<u8>> = req
-        .separator
+    let records: Vec<Vec<u8>> = separator
         .split(&selected)
         .into_iter()
         .map(|r| r.to_vec())
@@ -243,24 +329,69 @@ pub fn pick_records(search: Search, req: &Request<'_>) -> Result<(i32, Vec<Vec<u
     Ok((status(code, records.is_empty())?, records))
 }
 
+/// The caller's records, in the separator the picker reads.
+///
+/// The caller writes its records separated by the separator it asked for;
+/// the picker reads them separated by the one it can speak. When the two
+/// differ the crate does the translating, so a caller that asked for NUL
+/// and named a picker that reads lines still works.
+#[cfg(feature = "std")]
+struct Reflow<W> {
+    inner: W,
+    from: u8,
+    to: u8,
+}
+
+#[cfg(feature = "std")]
+impl<W> Reflow<W> {
+    fn new(inner: W, from: Separator, to: Separator) -> Reflow<W> {
+        Reflow {
+            inner,
+            from: from.byte(),
+            to: to.byte(),
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl<W: std::io::Write> std::io::Write for Reflow<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.from == self.to {
+            return self.inner.write(buf);
+        }
+        // A record never carries the byte it is separated by, so the
+        // separator is the only byte that changes.
+        let mut start = 0;
+        for (index, &byte) in buf.iter().enumerate() {
+            if byte == self.from {
+                self.inner.write_all(&buf[start..index])?;
+                self.inner.write_all(&[self.to])?;
+                start = index + 1;
+            }
+        }
+        self.inner.write_all(&buf[start..])?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 /// Runs `search` with its output on the picker's stdin, prints what the
 /// picker returns, and yields the process exit status.
 #[cfg(feature = "std")]
 pub fn pick(search: Search, req: &Request<'_>) -> Result<i32> {
     use std::io::Write;
-    let (code, records) = pick_records(search, req)?;
+    let plan = plan(req)?;
+    let (code, records) = run(search, req, &plan)?;
     if code == 0 && !records.is_empty() {
         let mut out = std::io::stdout();
         for record in &records {
             out.write_all(record)
                 .map_err(|e| alloc::format!("the selection could not be printed: {e}"))?;
-            if req.separator == Separator::Nul {
-                out.write_all(&[0])
-                    .map_err(|e| alloc::format!("the selection could not be printed: {e}"))?;
-            } else {
-                out.write_all(b"\n")
-                    .map_err(|e| alloc::format!("the selection could not be printed: {e}"))?;
-            }
+            out.write_all(&[plan.separator.byte()])
+                .map_err(|e| alloc::format!("the selection could not be printed: {e}"))?;
         }
         out.flush()
             .map_err(|e| alloc::format!("the selection could not be printed: {e}"))?;
@@ -274,25 +405,16 @@ fn order_args(order: Order, binary: &str) -> &'static [&'static str] {
     match order {
         Order::Sort => &[],
         Order::Keep => {
-            let stem = std::path::Path::new(binary)
-                .file_stem()
-                .map(|s| s.to_string_lossy().to_ascii_lowercase())
-                .unwrap_or_default();
-            if ORDER_AWARE.contains(&stem.as_str()) {
+            let stem = stem(binary);
+            if ORDER_AWARE
+                .iter()
+                .any(|name| stem.eq_ignore_ascii_case(name))
+            {
                 &["--no-sort"]
             } else {
                 &[]
             }
         }
-    }
-}
-
-/// The candidates the separator allows.
-#[cfg(any(test, feature = "std"))]
-fn candidates_for(separator: Separator) -> &'static [&'static str] {
-    match separator {
-        Separator::Line => CANDIDATES,
-        Separator::Nul => NUL_CAPABLE,
     }
 }
 
@@ -308,7 +430,7 @@ fn wait(child: &mut std::process::Child) -> i32 {
 
 /// The picker on `PATH`, memoised per process.
 #[cfg(feature = "std")]
-fn locate(separator: Separator) -> Option<String> {
+fn locate() -> Option<String> {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
     static FOUND: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
@@ -316,7 +438,7 @@ fn locate(separator: Separator) -> Option<String> {
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .unwrap();
-    for name in candidates_for(separator) {
+    for name in CANDIDATES {
         let hit = memo
             .entry((*name).to_string())
             .or_insert_with(|| scan(name));
@@ -370,20 +492,45 @@ mod tests {
     }
 
     #[test]
-    fn candidates_include_fallbacks() {
+    fn the_default_search_looks_for_the_pickers_that_read_nul() {
+        // The default search looks for a picker that can answer the
+        // NUL-separated list: `peco` and `fz` cannot, and offering them
+        // is offering a picker that never sees the results.
+        assert_eq!(CANDIDATES, NUL_CAPABLE);
         assert!(CANDIDATES.contains(&"fzf"));
         assert!(CANDIDATES.contains(&"sk"));
-        assert!(CANDIDATES.contains(&"peco"));
-        assert!(CANDIDATES.contains(&"fz"));
+        assert!(!CANDIDATES.contains(&"peco"));
+        assert!(!CANDIDATES.contains(&"fz"));
     }
 
     #[test]
-    fn a_nul_separator_asks_for_a_picker_that_reads_it() {
-        // A NUL-separated list handed to a picker that cannot read one is a
-        // list that never arrives.
-        assert_eq!(candidates_for(Separator::Nul), NUL_CAPABLE);
-        assert!(NUL_CAPABLE.contains(&"fzf"));
-        assert!(!NUL_CAPABLE.contains(&"peco"));
+    fn the_separator_follows_the_picker() {
+        // fzf and sk read a NUL-separated list, wherever they are.
+        assert_eq!(separator_for("fzf", Separator::Nul), Separator::Nul);
+        assert_eq!(separator_for("sk", Separator::Nul), Separator::Nul);
+        assert_eq!(
+            separator_for("/usr/bin/fzf", Separator::Nul),
+            Separator::Nul
+        );
+        assert_eq!(
+            separator_for("C:/bin/sk.exe", Separator::Nul),
+            Separator::Nul
+        );
+        // A picker that does not know `--read0` gets the lines.
+        assert_eq!(separator_for("peco", Separator::Nul), Separator::Line);
+        assert_eq!(
+            separator_for("/usr/local/bin/fz", Separator::Nul),
+            Separator::Line
+        );
+        // A picker rgy does not know by name gets the lines too: every
+        // picker reads lines, and only fzf and sk are known to read NUL.
+        assert_eq!(
+            separator_for("/opt/my-picker", Separator::Nul),
+            Separator::Line
+        );
+        // A line list is a line list, whoever reads it.
+        assert_eq!(separator_for("fzf", Separator::Line), Separator::Line);
+        assert_eq!(separator_for("peco", Separator::Line), Separator::Line);
     }
 
     #[test]
@@ -425,5 +572,18 @@ mod tests {
         assert_eq!(order_args(Order::Keep, "C:/bin/sk.exe"), &["--no-sort"]);
         assert!(order_args(Order::Keep, "/usr/bin/peco").is_empty());
         assert!(order_args(Order::Sort, "/usr/bin/fzf").is_empty());
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn a_picker_that_reads_lines_gets_the_lines() {
+        // The records go in the separator the caller wrote them in, and
+        // come out in the one the picker reads.
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut out = Reflow::new(&mut buf, Separator::Nul, Separator::Line);
+            std::io::Write::write_all(&mut out, b"src/a.txt\0src/b.txt\0").unwrap();
+        }
+        assert_eq!(buf, b"src/a.txt\nsrc/b.txt\n");
     }
 }

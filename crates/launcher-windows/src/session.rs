@@ -16,12 +16,28 @@ pub fn available() -> bool {
     windows_available()
 }
 
-/// Windows: the session's window station, and whether it is visible.
+/// `WSF_VISIBLE`: the station is on a visible desktop.
+const WSF_VISIBLE: u32 = 0x0001;
+
+/// The flags the platform reports for the process's window station.
 ///
-/// A process in a non-interactive session (session 0, the services one)
-/// has a window station that is not visible: there is no desktop there,
-/// and a window would be created in a place nobody can see.
+/// `WSF_VISIBLE`: the station is on a visible desktop. A process in a
+/// non-interactive session (session 0, the services one) has a window
+/// station that is not visible: there is no desktop there, and a window
+/// would be created in a place nobody can see.
 fn windows_available() -> bool {
+    match station_flags() {
+        Ok(flags) => flags & WSF_VISIBLE != 0,
+        // The platform would not say. The launcher tries anyway: the
+        // window's own creation is the judge of whether it can be shown,
+        // and a launcher that hides itself because a question went
+        // unanswered is a launcher that does not exist.
+        Err(_) => true,
+    }
+}
+
+/// The platform's own flags, read from the window station.
+fn station_flags() -> Result<u32, ()> {
     use core::ffi::c_void;
 
     #[link(name = "user32")]
@@ -38,25 +54,49 @@ fn windows_available() -> bool {
 
     /// `UOI_FLAGS`: the station's flags.
     const UOI_FLAGS: i32 = 1;
-    /// `WSF_VISIBLE`: the station is on a visible desktop.
-    const WSF_VISIBLE: u32 = 0x0001;
 
     unsafe {
         let station = GetProcessWindowStation();
         if station.is_null() {
-            return false;
+            return Err(());
         }
-        let mut flags: u32 = 0;
-        let mut needed: u32 = 0;
+        let mut flags = UserObjectFlags::default();
+        let mut needed = 0u32;
         let ok = GetUserObjectInformationW(
             station,
             UOI_FLAGS,
-            (&mut flags as *mut u32).cast::<c_void>(),
-            core::mem::size_of::<u32>() as u32,
+            (&mut flags as *mut UserObjectFlags).cast::<c_void>(),
+            core::mem::size_of::<UserObjectFlags>() as u32,
             &mut needed,
         );
-        ok != 0 && flags & WSF_VISIBLE != 0
+        if ok == 0 {
+            return Err(());
+        }
+        Ok(flags.dw_flags)
     }
+}
+
+/// The structure the platform fills in.
+///
+/// The whole structure, whole — and the whole structure is **twelve
+/// bytes**: `GetUserObjectInformation` refuses a buffer smaller than it
+/// with `ERROR_INSUFFICIENT_BUFFER`, and a buffer of four bytes (the
+/// size of the flags alone) is refused on every machine. The answer was
+/// then "no desktop" everywhere, and the launcher — which is a window
+/// that talks to a daemon — never opened one.
+///
+/// The flags are the **third** field: the first two are `fInherit` and
+/// `fReserved`. Reading the first one would read `fInherit`, and a
+/// window station that inherits is not a window station you can see.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+struct UserObjectFlags {
+    /// Whether the objects on this station inherit it.
+    f_inherit: i32,
+    /// Reserved by the platform.
+    f_reserved: i32,
+    /// The flags: `WSF_VISIBLE` and the rest.
+    dw_flags: u32,
 }
 
 #[cfg(test)]
@@ -68,5 +108,35 @@ mod tests {
         // The question is asked on a machine that may have no desktop, and
         // it has to have an answer on every one of them.
         let _ = available();
+    }
+
+    /// The platform answers the question.
+    ///
+    /// This is the regression: the buffer was the size of the flags
+    /// instead of the size of the structure, the platform refused it with
+    /// `ERROR_INSUFFICIENT_BUFFER`, and the refusal was read as "there
+    /// is no desktop" — on every machine, including the ones with a
+    /// desktop in front of them.
+    #[test]
+    fn the_platform_answers_the_question() {
+        assert!(
+            station_flags().is_ok(),
+            "the platform answered the flags: {:?}",
+            station_flags()
+        );
+    }
+
+    #[test]
+    fn the_flags_are_the_third_field_of_the_structure() {
+        // The structure is twelve bytes and the flags are the last four:
+        // the first two are `fInherit` and `fReserved`.
+        assert_eq!(core::mem::size_of::<UserObjectFlags>(), 12);
+        let flags = UserObjectFlags {
+            f_inherit: 1,
+            dw_flags: 0x0001,
+            ..UserObjectFlags::default()
+        };
+        assert_eq!(flags.dw_flags, 0x0001);
+        assert_eq!(flags.dw_flags & WSF_VISIBLE, WSF_VISIBLE);
     }
 }

@@ -52,6 +52,26 @@
 //! daemon cannot — asks the same table what it can answer, so a prefix
 //! that only one half knows is a prefix the user gets two different
 //! answers for.
+//!
+//! # The wire
+//!
+//! What goes to the daemon is the **engine's** spelling of the query: the
+//! prefix is the table's own word, in lower case, and the pattern is
+//! **one unit**.
+//!
+//! Both halves of that are the engine's rules and not the launcher's:
+//! the filter names are exact, and their case is part of the name —
+//! `Grep:` is not `grep:` — so a word the engine does not know fails
+//! closed: `Grep:total` sent as typed is an error, not a search; and a
+//! filter takes **one word** of the query — `grep:total due` sent as
+//! typed is a filter whose value is `total`, and the daemon answers a
+//! broader question than the user asked. A **quoted run** is one word, so
+//! the pattern goes on the wire quoted.
+//!
+//! [`engine_content`] is that rewrite, and [`engine_pattern`] is what the
+//! engine reads back out of it: the daemon takes the **whole** of the
+//! rewrite — the prefix and the quoted pattern — and the byte grep takes
+//! the pattern out of it, so the two answer the same question.
 
 use alloc::string::String;
 
@@ -222,26 +242,158 @@ impl<'a> Split<'a> {
     }
 }
 
-/// The mode and the pattern of a content part.
+/// The prefix of a content part, and the pattern that follows it.
 ///
-/// `None` when the part carries no prefix: it is not a content search,
-/// and what a bare word means is the caller's business — the byte grep
-/// reads one as a literal, and the engine reads one as a pattern.
+/// The table is the vocabulary, and this is the one place it is read:
+/// the split, the mode, the wire and the fallback all come from here, so
+/// a prefix that only one half knows cannot happen.
 ///
 /// The prefix is read the way a person types it — `Grep:` is `grep:` —
 /// and it is a whole word: `grepx:total` is a word the engine does not
 /// know, and the case of the **pattern** is the user's.
-pub fn content_mode(content: &str) -> Option<(ContentMode, &str)> {
+fn prefix_of(content: &str) -> Option<(Prefix, &str)> {
     let trimmed = content.trim();
     // The lower copy keeps the byte offsets: ASCII lowercasing does not
     // move a byte, and the accents are not letters of the prefix anyway.
     let lowered = trimmed.to_ascii_lowercase();
     for prefix in CONTENT_PREFIXES {
         if lowered.starts_with(prefix.word) {
-            return Some((prefix.mode, trimmed[prefix.word.len()..].trim()));
+            return Some((*prefix, trimmed[prefix.word.len()..].trim()));
         }
     }
     None
+}
+
+/// The mode and the pattern of a content part.
+///
+/// `None` when the part carries no prefix: it is not a content search,
+/// and what a bare word means is the caller's business — the byte grep
+/// reads one as a literal, and the engine reads one as a pattern.
+pub fn content_mode(content: &str) -> Option<(ContentMode, &str)> {
+    prefix_of(content).map(|(prefix, pattern)| (prefix.mode, pattern))
+}
+
+/// The content part, in the engine's words.
+///
+/// The prefix is the **canonical** one — the table's own word, in lower
+/// case — and the pattern is **one unit**.
+///
+/// The prefix is canonical because the engine's filter names are exact,
+/// their case is part of the name, and a word it does not know fails
+/// closed: `Grep:total` sent as typed is an error, and the launcher would
+/// blame the daemon for a typo it made itself.
+///
+/// The pattern is one unit because the engine gives a filter **one word**
+/// of the query: `grep:total due` is a filter whose value is `total`,
+/// and the daemon answers a broader question than the user asked. A
+/// **quoted run** is one word, so the pattern goes on the wire quoted.
+///
+/// A part with no prefix is not a content search, and there is nothing to
+/// rewrite: the engine reads it as it is.
+pub fn engine_content(content: &str) -> String {
+    let Some((prefix, pattern)) = prefix_of(content) else {
+        return String::from(content);
+    };
+    let mut out = String::from(prefix.word);
+    out.push_str(&quoted_pattern(pattern, prefix.mode));
+    out
+}
+
+/// The pattern the engine reads out of a content part.
+///
+/// The engine gives a filter **one word** of the query, and a quoted run
+/// is one word: the quotes are the mark that says the word is a phrase,
+/// and they are not part of it. So the value of `grep:"total due"` is
+/// `total due`, and the value of `grep:total due` is `total`.
+///
+/// The string this reads is the one [`engine_content`] built, and not the
+/// text the user typed: the daemon takes the **whole** of it — the prefix
+/// and the quoted pattern — and the byte grep takes the pattern out of
+/// it. The two answer the same question because they read the same
+/// string, and the string is the rewrite.
+pub fn engine_pattern(content: &str) -> &str {
+    match prefix_of(content) {
+        Some((_, pattern)) => first_word(pattern),
+        // A part with no prefix is not a content search: the whole of it
+        // is the pattern.
+        None => content.trim(),
+    }
+}
+
+/// The pattern, as ONE unit on the wire.
+///
+/// The engine keeps a quoted run together, so a pattern with more than
+/// one word is quoted: `grep:total due` goes as `grep:"total due"`.
+///
+/// The quoting stops where the pattern stops. The `|` is the engine's
+/// alternative separator — except in a regular expression, where it
+/// belongs to the pattern — and a quote that spans it would take the
+/// separator's own words with it.
+///
+/// The user's own quotes are left alone: a second pair around them would
+/// make the engine read the quotes as part of the pattern.
+fn quoted_pattern(pattern: &str, mode: ContentMode) -> String {
+    // The user's own quoting is the user's: a second pair of quotes
+    // around it would make the engine read the quotes as part of the
+    // pattern.
+    if pattern.is_empty() || pattern.contains('"') {
+        return String::from(pattern);
+    }
+    // A pattern with one word is one word already.
+    if !pattern.contains(' ') {
+        return String::from(pattern);
+    }
+    // The `|` is the engine's alternative separator — except in a regular
+    // expression, where it belongs to the pattern. The quote stops where
+    // the pattern stops, so the separator keeps its own meaning.
+    let (head, tail) = match mode {
+        ContentMode::Regex => (pattern, ""),
+        _ => match pattern.split_once('|') {
+            Some((before, _)) => {
+                // The head ends where the word ends: the space before the
+                // separator goes with the separator, and the engine reads
+                // the two halves apart.
+                let head = before.trim_end();
+                let at = head.len();
+                (head, &pattern[at..])
+            }
+            None => (pattern, ""),
+        },
+    };
+    // The words are after the separator: they are not the pattern.
+    if !head.contains(' ') {
+        return String::from(pattern);
+    }
+    let mut out = String::with_capacity(pattern.len() + 2);
+    out.push('"');
+    out.push_str(head);
+    out.push('"');
+    out.push_str(tail);
+    out
+}
+
+/// The first word of a text, the way the engine's splitter reads it.
+///
+/// A quoted run is one word — `total due` between quotes is one word —
+/// and the quotes are not part of it.
+fn first_word(text: &str) -> &str {
+    let mut quoted = false;
+    let mut end = text.len();
+    for (at, ch) in text.char_indices() {
+        match ch {
+            '"' => quoted = !quoted,
+            ' ' if !quoted => {
+                end = at;
+                break;
+            }
+            _ => {}
+        }
+    }
+    let word = text[..end].trim();
+    // The quotes are the mark that says the word is a phrase: they are
+    // not part of it.
+    let word = word.strip_prefix('"').unwrap_or(word);
+    word.strip_suffix('"').unwrap_or(word)
 }
 
 /// The engine's query for the scope of a content search.
@@ -520,5 +672,83 @@ mod tests {
             assert_eq!(split.pattern(), pattern, "{query}");
             assert_eq!(split.pattern(), from_the_mode, "{query}");
         }
+    }
+
+    #[test]
+    fn the_prefix_on_the_wire_is_the_engines_own() {
+        // The engine's filter names are exact, their case is part of the
+        // name, and a word it does not know fails closed: `Grep:total`
+        // sent as typed is an error and not a search, and the launcher
+        // would blame the daemon for a typo it made itself.
+        assert_eq!(engine_content("Grep:total"), "grep:total");
+        assert_eq!(engine_content("grep:total"), "grep:total");
+        // The two spellings are the same query on the wire.
+        assert_eq!(engine_content("Grep:total"), engine_content("grep:total"));
+        // And the table's own word is the one that goes on it.
+        assert_eq!(engine_content("CONTENT:total"), "content:total");
+        assert_eq!(engine_content("REGEX:^inv"), "regex:^inv");
+        assert_eq!(engine_content("Sym:foo"), "sym:foo");
+        // A part with no prefix is not a content search, and there is
+        // nothing to rewrite.
+        assert_eq!(engine_content("invoice"), "invoice");
+    }
+
+    #[test]
+    fn the_pattern_goes_on_the_wire_as_one_unit() {
+        // The engine gives a filter one word of the query: `grep:total
+        // due` is a filter whose value is `total`, and the daemon would
+        // answer a broader question than the user asked. A quoted run is
+        // one word.
+        assert_eq!(engine_content("grep:total due"), "grep:\"total due\"");
+        // The user's own quotes are not doubled: the engine would read
+        // the second pair as part of the pattern.
+        assert_eq!(engine_content("grep:\"total due\""), "grep:\"total due\"");
+        assert_eq!(
+            engine_content("grep:\"total due\" extra"),
+            "grep:\"total due\" extra"
+        );
+        // A pattern with one word is one word already.
+        assert_eq!(engine_content("grep:total"), "grep:total");
+        // And the case of the pattern is the user's.
+        assert_eq!(engine_content("grep:Total due"), "grep:\"Total due\"");
+    }
+
+    #[test]
+    fn the_pattern_the_engine_reads_is_the_whole_phrase() {
+        // The engine's value of a filter is one word, and a quoted run is
+        // one word: the quotes are the mark that says the word is a
+        // phrase, and they are not part of it.
+        assert_eq!(engine_pattern("grep:\"total due\""), "total due");
+        assert_eq!(engine_pattern("grep:total due"), "total");
+        assert_eq!(engine_pattern("grep:total"), "total");
+        // The quotes are the mark that says the word is a phrase: they
+        // are not part of it.
+        assert_eq!(engine_pattern("grep:\"Total due\""), "Total due");
+    }
+
+    #[test]
+    fn the_daemon_and_the_byte_grep_read_the_same_rewritten_string() {
+        // The string production hands the two is the **rewrite**, and not
+        // the text the user typed: the daemon takes the whole of it — the
+        // prefix and the quoted pattern — and the byte grep takes the
+        // pattern out of it. Both look for `total due` and not for
+        // `total`, because the rewrite quoted the phrase.
+        let rewritten = engine_content("grep:total due");
+        assert_eq!(rewritten, "grep:\"total due\"");
+        assert_eq!(engine_pattern(&rewritten), "total due");
+    }
+
+    #[test]
+    fn the_alternative_separator_keeps_its_own_meaning() {
+        // The `|` is the engine's alternative separator, and the quote
+        // stops where the pattern stops: a quote that spanned it would
+        // take the separator's own words with it.
+        assert_eq!(
+            engine_content("grep:total due | doc:x"),
+            "grep:\"total due\" | doc:x"
+        );
+        // In a regular expression the `|` belongs to the pattern.
+        assert_eq!(engine_content("regex:a|b"), "regex:a|b");
+        assert_eq!(engine_content("regex:a b|c"), "regex:\"a b|c\"");
     }
 }

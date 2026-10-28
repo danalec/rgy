@@ -18,7 +18,7 @@
 //! `summary` — and this reads it with the protocol crate's reader, because
 //! a second JSON parser for one wire is a second thing to keep right.
 //!
-//! # The three rules of a fallback
+//! # The rules of a fallback
 //!
 //! A fallback answers **the question that was asked**, and not a bigger
 //! one. So:
@@ -29,14 +29,17 @@
 //! * the answer has a **deadline**, because a launcher that waits for a
 //!   process that will never answer is a launcher that hangs;
 //! * the exit code is part of the answer: `rg` exits 1 when nothing
-//!   matched, and that is an answer, not a failure.
+//!   matched, and that is an answer, not a failure;
+//! * the **case** is the engine's rule and not the fallback's: the
+//!   daemon folds a pattern that has no uppercase letter, and a fallback
+//!   that answered a different question would be a fallback that lies.
 
 use std::io::BufRead;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use rgy_launcher::layer::{ContentMode, content_mode};
+use rgy_launcher::layer::{ContentMode, content_mode, engine_pattern};
 use rgy_proto::GrepFile;
 
 /// How long the fallback may take before it is given up on.
@@ -72,6 +75,12 @@ pub fn grep(binary: &str, query: &str, paths: &[String]) -> Result<Vec<GrepFile>
     if fixed {
         // A bare word is a literal, the same way the daemon reads it.
         command.arg("--fixed-strings");
+    }
+    // The case is the engine's rule and not the fallback's: the daemon
+    // folds a pattern that has no uppercase letter, and the fallback
+    // that answers the same question folds it too.
+    if case_insensitive(mode, pattern) {
+        command.arg("-i");
     }
     command.arg("--json");
     command.arg("--");
@@ -158,11 +167,29 @@ fn only_files(paths: &[String]) -> Vec<String> {
 /// it is a whole word: `grepx:total` is a word the engine does not know.
 ///
 /// A bare word is a literal, the same way the daemon reads it.
+///
+/// The pattern is the one the **engine** reads: a filter takes one word
+/// of the query, and a quoted run is one word. So the byte grep and the
+/// daemon look for the same thing.
 pub fn split_pattern(query: &str) -> (ContentMode, &str) {
     match content_mode(query) {
-        Some((mode, pattern)) => (mode, pattern),
+        Some((mode, _)) => (mode, engine_pattern(query)),
         None => (ContentMode::Literal, query.trim()),
     }
+}
+
+/// The engine's smart case.
+///
+/// A pattern with no uppercase letter matches case-insensitively, and a
+/// pattern that has one matches case-sensitively: the engine's rule, read
+/// on the pattern as the user wrote it, before anything is escaped. A
+/// symbol is never folded.
+///
+/// The fallback answers the same question the daemon does, so it folds the
+/// same way — `grep:total` finds `Total` on both sides, and `grep:Total`
+/// finds only `Total` on both sides.
+fn case_insensitive(mode: ContentMode, pattern: &str) -> bool {
+    mode != ContentMode::Symbol && !pattern.chars().any(|c| c.is_uppercase())
 }
 
 /// Read the matches out of rgx's JSON stream.
@@ -376,6 +403,51 @@ mod tests {
             files.is_empty(),
             "nothing matched, and the launcher says so"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_case_is_the_engines_rule() {
+        // The engine's smart case: a pattern with no uppercase letter
+        // matches case-insensitively, and a pattern that has one matches
+        // case-sensitively. The fallback answers the same question the
+        // daemon does, so it folds the same way.
+        assert!(case_insensitive(ContentMode::Literal, "total"));
+        assert!(!case_insensitive(ContentMode::Literal, "Total"));
+        assert!(case_insensitive(ContentMode::Regex, "^inv"));
+        assert!(!case_insensitive(ContentMode::Regex, "^Inv"));
+        // The case is read on the pattern as the user wrote it, before
+        // anything is escaped: the escape is not a letter.
+        assert!(case_insensitive(ContentMode::Literal, r"total\d"));
+        assert!(!case_insensitive(ContentMode::Literal, r"Total\d"));
+        // And a symbol is never folded.
+        assert!(!case_insensitive(ContentMode::Symbol, "total"));
+    }
+
+    #[test]
+    fn the_fallback_folds_the_case_the_way_the_daemon_does() {
+        // The end of the rule: `grep:zebra` finds `Zebra` on both sides,
+        // and `grep:ZEBRA` finds nothing on either — the pattern has an
+        // uppercase letter, so the match is exact.
+        let Some(binary) = crate::tools::rgx() else {
+            eprintln!("the rgx binary is not installed here; the fallback is not exercised");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("rgy-rgxy-case-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("notes.txt");
+        std::fs::write(&file, "draft with Zebra marker\n").unwrap();
+        let scope = vec![file.to_string_lossy().into_owned()];
+
+        let folded = grep(&binary, "grep:zebra", &scope).expect("the fallback answers");
+        assert_eq!(folded.len(), 1, "the pattern has no uppercase, so it folds");
+
+        let exact = grep(&binary, "grep:ZEBRA", &scope).expect("the fallback answers");
+        assert!(
+            exact.is_empty(),
+            "the pattern has an uppercase, so the match is exact: {exact:?}"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

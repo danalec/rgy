@@ -7,7 +7,7 @@
 //! launcher's behaviour that is not a platform call — and a platform call
 //! is a window, a font, a key and a file.
 //!
-//! The state machine has four shapes, and they are the four things the
+//! The state machine has three shapes, and they are the three things the
 //! launcher can be:
 //!
 //! | mode | what is on the screen |
@@ -16,10 +16,9 @@
 //! | `Typing` | the input field, and the results under it |
 //! | `Menu` | the actions of the selected result |
 //!
-//! `Pending` is not a mode: it is a fact about the answer, and the window
-//! shows the previous results while the new ones are on their way. A
-//! launcher that blanks the list on every keystroke is a launcher that
-//! flickers.
+//! The results are the **last** answer's until a new one arrives: the list
+//! is not emptied on a keystroke. A launcher that blanks the list on every
+//! keystroke is a launcher that flickers.
 //!
 //! The preview is not a mode either: it is a panel **over** the results,
 //! and it can be there while the user is still typing. Esc closes it, and
@@ -104,8 +103,6 @@ pub struct App {
     session: u64,
     /// The warnings the last answer carried.
     warnings: Vec<String>,
-    /// Whether an answer is on its way.
-    pending: bool,
     /// The panel over the results, when there is one.
     preview: Option<Preview>,
     /// Which action of the menu is selected.
@@ -134,7 +131,6 @@ impl App {
             hotkey: DoubleCtrl::new(),
             session: 0,
             warnings: Vec::new(),
-            pending: false,
             preview: None,
             menu_index: 0,
         }
@@ -163,7 +159,6 @@ impl App {
             self.session = self.session.wrapping_add(1);
         }
         self.mode = Mode::Typing;
-        self.pending = false;
         self.preview = None;
     }
 
@@ -219,26 +214,27 @@ impl App {
     /// Type one character.
     pub fn insert(&mut self, ch: char) {
         self.query.insert(ch);
-        self.pending = true;
+    }
+
+    /// Type a whole string, the way a paste arrives.
+    pub fn insert_str(&mut self, text: &str) {
+        self.query.insert_str(text);
     }
 
     /// Delete the last character.
     pub fn backspace(&mut self) {
         self.query.backspace();
-        self.pending = true;
     }
 
     /// Delete the word before the caret.
     pub fn delete_word(&mut self) {
         self.query.delete_word();
-        self.pending = true;
     }
 
     /// Empty the query.
     pub fn clear_query(&mut self) {
         self.query.clear();
         self.results.clear();
-        self.pending = false;
     }
 
     /// Move the caret one character to the left.
@@ -310,7 +306,6 @@ impl App {
     /// The answer came back.
     pub fn set_results(&mut self, rows: Vec<Row>) {
         self.results.set(rows);
-        self.pending = false;
     }
 
     /// The answer carried these warnings.
@@ -321,11 +316,6 @@ impl App {
     /// The warnings the last answer carried.
     pub fn warnings(&self) -> &[String] {
         &self.warnings
-    }
-
-    /// Whether an answer is on its way.
-    pub fn is_pending(&self) -> bool {
-        self.pending
     }
 
     /// The geometry, for the rows the window shows.
@@ -500,14 +490,48 @@ mod tests {
         assert_eq!(app.engine_query(), "type:image invoice");
     }
 
+    /// A keystroke changes the question the engine is asked.
+    ///
+    /// The question is the model: the engine is asked what the user typed,
+    /// and a keystroke that did not change it would be a keystroke the
+    /// daemon never hears about.
     #[test]
     fn typing_asks_the_daemon_again() {
         let mut app = App::new();
         app.show();
         app.insert('a');
-        assert!(app.is_pending(), "a keystroke means a new answer");
-        app.set_results(vec![row(0)]);
-        assert!(!app.is_pending());
+        assert_eq!(app.query().text(), "a");
+        assert_eq!(
+            app.engine_query(),
+            "a",
+            "the engine is asked the new question"
+        );
+    }
+
+    /// A paste is a keystroke that arrived in bulk: the launcher has to
+    /// ask the daemon again, exactly as it does for a letter.
+    ///
+    /// What is checked is the **question**: the text the user pasted is
+    /// the text the engine is asked, in the engine's own words.
+    #[test]
+    fn a_paste_asks_the_daemon_again() {
+        let mut app = App::new();
+        app.show();
+        app.insert_str("invoice");
+        assert_eq!(app.query().text(), "invoice");
+        assert_eq!(
+            app.engine_query(),
+            "invoice",
+            "the engine is asked the pasted question"
+        );
+        assert_eq!(app.content_query(), None, "and there is no content part");
+        // A paste that carries the content prefix is the second layer's:
+        // the names go to the engine and the pattern stays with the
+        // content layer.
+        app.insert_str(" grep:total");
+        assert_eq!(app.query().text(), "invoice grep:total");
+        assert_eq!(app.engine_query(), "invoice");
+        assert_eq!(app.content_query(), Some("grep:total"));
     }
 
     #[test]

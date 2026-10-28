@@ -13,6 +13,7 @@
 //! with a match in the middle of it is drawn in pieces, each measured
 //! before it is placed.
 
+use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
@@ -129,35 +130,42 @@ fn font(height: i32, weight: i32, face: &str) -> HFONT {
     }
 }
 
-/// The icons, one per kind, resolved once.
+/// The icons, one per type of file, resolved once.
 ///
 /// The shell answers with a copy of the icon and the copy is the
 /// caller's to destroy, so they are kept here and given back when the
-/// window goes away. One icon per kind and not one per row: every
-/// `.docx` on the disk has the same icon, and asking the shell is not
+/// window goes away. One icon per **type** and not one per row: every
+/// `.pdf` on the disk has the same icon, and asking the shell is not
 /// free.
 pub struct Icons {
-    icons: Vec<Option<HICON>>,
+    /// The icons, by the key they were asked for.
+    icons: BTreeMap<String, Option<HICON>>,
 }
 
 impl Icons {
     /// An empty cache: no icon has been asked for yet.
     pub fn new() -> Icons {
-        Icons { icons: Vec::new() }
+        Icons {
+            icons: BTreeMap::new(),
+        }
     }
 
-    /// The icon of a kind, asked of the shell the first time and kept
+    /// The icon of a row, asked of the shell the first time and kept
     /// after that.
-    pub fn get(&mut self, kind: IconKind) -> Option<HICON> {
-        let slot = slot_of(kind);
-        if self.icons.len() <= slot {
-            self.icons.resize(slot + 1, None);
+    ///
+    /// The shell is asked about the **file**: its own name, with its own
+    /// extension, is what the shell looks up in the machine's own list of
+    /// handlers — and a PDF with the reader's icon is the difference
+    /// between a launcher that knows the machine and one that does not.
+    pub fn get(&mut self, row: &Row) -> Option<HICON> {
+        let kind = row.icon();
+        let source = icon_source_for(row);
+        let key = source.key();
+        if let Some(icon) = self.icons.get(key.as_str()) {
+            return *icon;
         }
-        if let Some(icon) = self.icons[slot] {
-            return Some(icon);
-        }
-        let icon = shell_icon(kind);
-        self.icons[slot] = icon;
+        let icon = icon_for(&source, kind);
+        self.icons.insert(key, icon);
         icon
     }
 }
@@ -170,7 +178,7 @@ impl Default for Icons {
 
 impl Drop for Icons {
     fn drop(&mut self) {
-        for icon in self.icons.iter().flatten() {
+        for icon in self.icons.values().flatten() {
             unsafe {
                 DestroyIcon(*icon);
             }
@@ -178,41 +186,119 @@ impl Drop for Icons {
     }
 }
 
-/// Where a kind's icon is kept.
-fn slot_of(kind: IconKind) -> usize {
-    match kind {
-        IconKind::Folder => 0,
-        IconKind::Document => 1,
-        IconKind::Image => 2,
-        IconKind::Video => 3,
-        IconKind::Audio => 4,
-        IconKind::Application => 5,
-        IconKind::File => 6,
+/// What the shell is asked about: a name, and the attributes it is said
+/// to have.
+struct IconSource {
+    /// The name the shell is asked about.
+    name: String,
+    /// The attributes the shell is told about.
+    attributes: u32,
+}
+
+impl IconSource {
+    /// The key the icon is kept under.
+    ///
+    /// The shell's answer is the icon of the **type**, not of the file:
+    /// two PDFs have the same icon, and the extension is what names the
+    /// type. So the cache is keyed by the extension, and a file with no
+    /// extension shares the one the shell gave for a file with no
+    /// extension.
+    fn key(&self) -> String {
+        if self.attributes == FILE_ATTRIBUTE_DIRECTORY {
+            return FOLDER_NAME.to_string();
+        }
+        extension_of(&self.name).unwrap_or_default()
     }
 }
 
-/// The shell's icon for a kind of file.
+/// The name a folder is asked about.
+///
+/// A folder is asked about by a plain name and said to be a folder: the
+/// shell only answers with the folder's icon when the file is said to be
+/// a folder, and a drive's root is answered with the drive's icon
+/// whatever the attributes say — so the folder's spelling is a plain
+/// name and not `C:\`.
+const FOLDER_NAME: &str = "folder";
+
+/// The name the shell is asked about, for a row.
+///
+/// A file is asked about by its **own name**: the shell looks the
+/// extension up in the machine's own list of handlers, and the name with
+/// the right extension is what gets the icon the user expects — a PDF
+/// with the reader's icon and not with Word's.
+fn icon_source_for(row: &Row) -> IconSource {
+    if row.icon() == IconKind::Folder {
+        return IconSource {
+            name: FOLDER_NAME.to_string(),
+            attributes: FILE_ATTRIBUTE_DIRECTORY,
+        };
+    }
+    IconSource {
+        name: row.name().to_string(),
+        attributes: FILE_ATTRIBUTE_NORMAL,
+    }
+}
+
+/// The extension of a name, with the dot, in lower case.
+///
+/// A dot at the start of the name is part of the name (`.gitignore`),
+/// and a dot at the end is nothing at all — the rule the model's own
+/// `IconKind` follows, so that the two never disagree about what a name
+/// is.
+fn extension_of(name: &str) -> Option<String> {
+    match name.rfind('.') {
+        Some(i) if i > 0 && i + 1 < name.len() => {
+            Some(format!(".{}", name[i + 1..].to_ascii_lowercase()))
+        }
+        _ => None,
+    }
+}
+
+/// The shell's icon for a row: the file's own, and the kind's when the
+/// shell has none for it.
+fn icon_for(source: &IconSource, kind: IconKind) -> Option<HICON> {
+    if let Some(icon) = shell_icon(source) {
+        return Some(icon);
+    }
+    // The shell has no icon for this name: the kind's own spelling is the
+    // last resort, so that a row is never left without a picture.
+    if kind == IconKind::Folder {
+        return None;
+    }
+    shell_icon(&IconSource {
+        name: kind_name(kind).to_string(),
+        attributes: FILE_ATTRIBUTE_NORMAL,
+    })
+}
+
+/// The spelling the shell is asked about when it has no icon for the
+/// file's own name.
+///
+/// It is the kind's own name: the shell knows the type of a file even
+/// when it does not know the file.
+fn kind_name(kind: IconKind) -> &'static str {
+    match kind {
+        IconKind::Folder => FOLDER_NAME,
+        IconKind::Document => "document.docx",
+        IconKind::Image => "image.png",
+        IconKind::Video => "video.mp4",
+        IconKind::Audio => "audio.mp3",
+        IconKind::Application => "application.exe",
+        IconKind::File => "file",
+    }
+}
+
+/// The shell's icon for a name.
 ///
 /// The path is a spelling and not a file: `SHGFI_USEFILEATTRIBUTES` makes
 /// the shell answer from the spelling and the attributes alone, so
 /// nothing here touches the disk.
-///
-/// The folder is the one that needs the attributes: the shell only
-/// answers with the folder's icon when the file is said to be a folder,
-/// and a drive's root is answered with the drive's icon whatever the
-/// attributes say — so the folder's spelling is a plain name and not
-/// `C:\`.
-fn shell_icon(kind: IconKind) -> Option<HICON> {
-    let (path, attributes): (&str, u32) = match kind {
-        IconKind::Folder => ("folder", FILE_ATTRIBUTE_DIRECTORY),
-        IconKind::Document => ("document.docx", FILE_ATTRIBUTE_NORMAL),
-        IconKind::Image => ("image.png", FILE_ATTRIBUTE_NORMAL),
-        IconKind::Video => ("video.mp4", FILE_ATTRIBUTE_NORMAL),
-        IconKind::Audio => ("audio.mp3", FILE_ATTRIBUTE_NORMAL),
-        IconKind::Application => ("application.exe", FILE_ATTRIBUTE_NORMAL),
-        IconKind::File => ("file", FILE_ATTRIBUTE_NORMAL),
-    };
-    let wide: Vec<u16> = path.encode_utf16().chain(core::iter::once(0)).collect();
+fn shell_icon(source: &IconSource) -> Option<HICON> {
+    let wide: Vec<u16> = source
+        .name
+        .encode_utf16()
+        .chain(core::iter::once(0))
+        .collect();
     let mut info = SHFILEINFOW {
         hIcon: core::ptr::null_mut(),
         iIcon: 0,
@@ -223,7 +309,7 @@ fn shell_icon(kind: IconKind) -> Option<HICON> {
     let got = unsafe {
         SHGetFileInfoW(
             wide.as_ptr(),
-            attributes,
+            source.attributes,
             &mut info,
             core::mem::size_of::<SHFILEINFOW>() as u32,
             SHGFI_ICON | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES,
@@ -308,8 +394,14 @@ pub unsafe fn paint(
             let w = draw_run(hdc, &view.placeholder, left, field_top + 14, colour::DIM);
             let _ = w;
         } else {
-            let w = draw_run(hdc, &view.query, left, field_top + 14, colour::TEXT);
-            // The caret: two pixels after the last character.
+            // The caret goes where the model says it is, and not after the
+            // last character: the model moves it with the arrow keys, and
+            // a paste lands where it is -- so a caret that is always at
+            // the end puts the blinking line away from the text that
+            // just arrived.
+            let (before, after) = split_at_caret(&view.query, view.caret);
+            let w = draw_run(hdc, before, left, field_top + 14, colour::TEXT);
+            // The caret: two pixels, two pixels after the text before it.
             fill(
                 hdc,
                 left + w + 2,
@@ -318,6 +410,8 @@ pub unsafe fn paint(
                 field_h - 26,
                 colour::TEXT,
             );
+            // The text after the caret starts where the caret ends.
+            draw_run(hdc, after, left + w + 5, field_top + 14, colour::TEXT);
         }
 
         // The status line, under the field.
@@ -411,8 +505,8 @@ fn draw_row(
     icons: &mut Icons,
 ) {
     // The icon, in the gutter at the left of the row: what the row is,
-    // asked of the shell and kept for the next row of the same kind.
-    if let Some(icon) = icons.get(row.icon()) {
+    // asked of the shell and kept for the next row of the same type.
+    if let Some(icon) = icons.get(row) {
         draw_icon(hdc, icon, left, top + 5);
     }
     // The text, after the gutter.
@@ -489,6 +583,20 @@ fn runs(name: &str, span: &[u32]) -> Vec<(String, bool)> {
         }
     }
     out
+}
+
+/// The query, cut at the caret.
+///
+/// The caret is counted in characters and the cut is a byte offset, so
+/// the cut has to land on a character boundary: half of an accent is not
+/// a place a caret can be.
+fn split_at_caret(query: &str, caret: usize) -> (&str, &str) {
+    let at = query
+        .char_indices()
+        .nth(caret)
+        .map(|(i, _)| i)
+        .unwrap_or(query.len());
+    (&query[..at], &query[at..])
 }
 
 /// Draw a run of text, and say how wide it was.
@@ -585,6 +693,25 @@ mod tests {
         assert!(!r[0].1);
     }
 
+    /// The cut is on a character boundary.
+    ///
+    /// The caret is counted in characters and the text is cut in bytes,
+    /// and half of an accent is not a place a caret can be.
+    #[test]
+    fn the_caret_cuts_between_characters() {
+        let (before, after) = split_at_caret("faturação", 6);
+        assert_eq!(before, "fatura");
+        assert_eq!(after, "ção");
+    }
+
+    /// A caret past the end is the end.
+    #[test]
+    fn a_caret_past_the_end_is_the_end() {
+        let (before, after) = split_at_caret("invoice", 99);
+        assert_eq!(before, "invoice");
+        assert_eq!(after, "");
+    }
+
     #[test]
     fn a_match_splits_the_name_in_two() {
         // "rel" of "relatorio.txt" is the first three bytes.
@@ -617,5 +744,59 @@ mod tests {
         let s = shorten(&"x".repeat(200), 10);
         assert_eq!(s.chars().count(), 11);
         assert!(s.starts_with('…'));
+    }
+
+    #[test]
+    fn the_icon_is_the_file_s_own_name() {
+        // The shell is asked about the file itself: a PDF asks with a
+        // PDF's name, and not with a document's.
+        let row = Row::new("C:\\Users\\dana\\relatorio.pdf".to_string(), 0);
+        let source = icon_source_for(&row);
+        assert_eq!(source.name, "relatorio.pdf");
+        assert_eq!(source.attributes, FILE_ATTRIBUTE_NORMAL);
+    }
+
+    #[test]
+    fn a_folder_asks_with_the_folder_s_own_name() {
+        // A folder is a folder: the row says so, and the shell is asked
+        // with the attributes that say it too.
+        let row = Row::new("C:\\Users\\dana\\Docs".to_string(), 0).with_folder(true);
+        let source = icon_source_for(&row);
+        assert_eq!(source.name, FOLDER_NAME);
+        assert_eq!(source.attributes, FILE_ATTRIBUTE_DIRECTORY);
+    }
+
+    #[test]
+    fn the_cache_is_keyed_by_the_type_and_not_by_the_file() {
+        // Two PDFs have the same icon, and the shell is not asked twice.
+        let one = icon_source_for(&Row::new("C:/a/relatorio.pdf".to_string(), 0));
+        let other = icon_source_for(&Row::new("C:/b/contrato.pdf".to_string(), 0));
+        assert_eq!(one.key(), other.key());
+        // And two types are two icons.
+        let doc = icon_source_for(&Row::new("C:/a/carta.docx".to_string(), 0));
+        assert_ne!(one.key(), doc.key());
+        // And a folder is not a file.
+        let folder = icon_source_for(&Row::new("C:/a/Docs".to_string(), 0).with_folder(true));
+        assert_ne!(one.key(), folder.key());
+    }
+
+    #[test]
+    fn the_key_is_the_extension_in_lower_case() {
+        // The shell answers the same for `Relatorio.PDF` and for
+        // `relatorio.pdf`, and the cache says so too.
+        let one = icon_source_for(&Row::new("C:/a/Relatorio.PDF".to_string(), 0));
+        let other = icon_source_for(&Row::new("C:/b/relatorio.pdf".to_string(), 0));
+        assert_eq!(one.key(), ".pdf");
+        assert_eq!(one.key(), other.key());
+    }
+
+    #[test]
+    fn a_name_without_an_extension_is_a_file_of_its_own() {
+        // A dot at the start of the name is part of the name, and a dot
+        // at the end is nothing at all.
+        let hidden = icon_source_for(&Row::new("C:/a/.gitignore".to_string(), 0));
+        assert_eq!(hidden.key(), "");
+        let plain = icon_source_for(&Row::new("C:/a/README".to_string(), 0));
+        assert_eq!(plain.key(), "");
     }
 }

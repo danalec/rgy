@@ -150,7 +150,7 @@ impl Client {
     /// The window is the whole answer's, not the chunk's: the deadline is
     /// computed once, here, and every read under it is measured against
     /// the same moment.
-    fn request_within(
+    pub fn request_within(
         &mut self,
         req: &Request,
         window: Duration,
@@ -244,13 +244,29 @@ impl Client {
     /// the query raised — a warning is a query that failed closed, and the
     /// caller is the one that has to say so.
     pub fn search(&mut self, q: &str, limit: usize) -> std::io::Result<SearchOutcome> {
+        self.search_within(q, limit, READ_TIMEOUT)
+    }
+
+    /// The same, with the window the caller asks for.
+    ///
+    /// The launcher asks the daemon from the thread that draws the window,
+    /// and a window that waits thirty seconds for an answer is a window
+    /// that stops answering the keyboard. A caller that lives on that
+    /// thread asks for a shorter window, and says so when the answer does
+    /// not come.
+    pub fn search_within(
+        &mut self,
+        q: &str,
+        limit: usize,
+        window: Duration,
+    ) -> std::io::Result<SearchOutcome> {
         let session = self.session;
         let req = Request::Search {
             q: q.to_string(),
             limit,
             session,
         };
-        let responses = self.request(&req)?;
+        let responses = self.request_within(&req, window)?;
         let mut out = SearchOutcome::default();
         for r in responses {
             match r {
@@ -298,24 +314,28 @@ impl Client {
 
     /// Search the contents of the files.
     pub fn grep(&mut self, q: &str, limit: usize) -> std::io::Result<GrepOutcome> {
+        self.grep_within(q, limit, READ_TIMEOUT)
+    }
+
+    /// The same, with the window the caller asks for.
+    ///
+    /// The content layer **reads files**: the answer is not the index's, it
+    /// is the disk's, and a daemon that reads them slowly would keep the
+    /// caller waiting. The launcher lives on the thread that draws the
+    /// window, so the window is the launcher's, and the launcher says so
+    /// when the answer does not come.
+    pub fn grep_within(
+        &mut self,
+        q: &str,
+        limit: usize,
+        window: Duration,
+    ) -> std::io::Result<GrepOutcome> {
         let req = Request::Grep {
             q: q.to_string(),
             limit,
         };
-        let responses = self.request(&req)?;
-        let mut out = GrepOutcome::default();
-        for r in responses {
-            match r {
-                Response::GrepFiles { files, took_us } => {
-                    out.files = files;
-                    out.took_us = took_us;
-                }
-                Response::Warning { message } => out.warnings.push(message),
-                Response::Error { message } => return Err(std::io::Error::other(message)),
-                _ => {}
-            }
-        }
-        Ok(out)
+        let responses = self.request_within(&req, window)?;
+        Self::grep_outcome(responses)
     }
 
     /// Search the contents of the files in `paths`.
@@ -329,13 +349,38 @@ impl Client {
         paths: &[String],
         limit: usize,
     ) -> std::io::Result<GrepOutcome> {
+        self.content_within(q, paths, limit, READ_TIMEOUT)
+    }
+
+    /// The same, with the window the caller asks for.
+    ///
+    /// The window covers the **whole** answer and not each read of it: a
+    /// daemon that sends a file every second and has a hundred files would
+    /// keep a caller with a per-read window waiting a hundred times longer
+    /// than the window it asked for.
+    pub fn content_within(
+        &mut self,
+        q: &str,
+        paths: &[String],
+        limit: usize,
+        window: Duration,
+    ) -> std::io::Result<GrepOutcome> {
         let req = Request::Content {
             q: q.to_string(),
             paths: paths.to_vec(),
             limit,
             session: self.session,
         };
-        let responses = self.request(&req)?;
+        let responses = self.request_within(&req, window)?;
+        Self::grep_outcome(responses)
+    }
+
+    /// The content answer, out of the responses the daemon sent.
+    ///
+    /// One shape for the two searches: the whole tree and the scope are the
+    /// same answer with a different scope, and a caller that reads them
+    /// two ways would have two places to keep in step.
+    fn grep_outcome(responses: Vec<Response>) -> std::io::Result<GrepOutcome> {
         let mut out = GrepOutcome::default();
         for r in responses {
             match r {
@@ -1045,6 +1090,80 @@ mod tests {
         assert!(
             err.to_string().contains("did not answer in time"),
             "the reason says what happened: {err}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the client waited for the window, not forever"
+        );
+        server.join();
+    }
+
+    /// A search with the caller's own window times out with that window.
+    ///
+    /// The launcher asks the daemon from the thread that draws the
+    /// window, so the window the caller asks for is the one that decides
+    /// how long the launcher stops answering the keyboard.
+    #[test]
+    fn a_search_with_the_callers_window_times_out_with_it() {
+        let server = serve(says_nothing);
+        let mut client = Client::connect(&server.endpoint).expect("the client connects");
+        let started = Instant::now();
+        let err = client
+            .search_within("invoice", 10, SHORT)
+            .expect_err("a silent daemon has no answer");
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::TimedOut,
+            "the wait ran out: {err}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the client waited for the window, not forever"
+        );
+        server.join();
+    }
+
+    /// A content search with the caller's own window times out with that
+    /// window.
+    ///
+    /// The content layer reads files, and the launcher that waits for the
+    /// answer lives on the thread that draws the window: the window the
+    /// caller asks for is the one that decides how long the launcher stops
+    /// answering the keyboard.
+    #[test]
+    fn a_content_search_with_the_callers_window_times_out_with_it() {
+        let server = serve(says_nothing);
+        let mut client = Client::connect(&server.endpoint).expect("the client connects");
+        let started = Instant::now();
+        let err = client
+            .grep_within("total", 10, SHORT)
+            .expect_err("a silent daemon has no answer");
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::TimedOut,
+            "the wait ran out: {err}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the client waited for the window, not forever"
+        );
+        server.join();
+    }
+
+    /// The scoped content search honours the caller's window too: the
+    /// scope is what makes it cheap, not what makes it quick.
+    #[test]
+    fn a_scoped_content_search_with_the_callers_window_times_out_with_it() {
+        let server = serve(says_nothing);
+        let mut client = Client::connect(&server.endpoint).expect("the client connects");
+        let started = Instant::now();
+        let err = client
+            .content_within("total", &[String::from("/a/notes.txt")], 10, SHORT)
+            .expect_err("a silent daemon has no answer");
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::TimedOut,
+            "the wait ran out: {err}"
         );
         assert!(
             started.elapsed() < Duration::from_secs(5),

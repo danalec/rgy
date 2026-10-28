@@ -103,7 +103,7 @@ fn usage() -> String {
            --no-hook          não instala o atalho global\n  \
            --show             abre a janela logo de início\n  \
            --pick             entrega os resultados a um picker e imprime a escolha\n  \
-           --fzf-binary <p>   o picker a rodar (default: o primeiro de fzf, sk, peco, fz no PATH)\n  \
+           --fzf-binary <p>   o picker a rodar (default: fzf ou sk no PATH)\n  \
            --fzf-arg <arg>    um argumento para o picker, repetível\n  \
            -h, --help         este texto\n  \
            -V, --version      a versão\n\
@@ -113,6 +113,10 @@ fn usage() -> String {
          \n\
          Com --pick, os resultados vão para um picker e a escolha sai na\n\
          stdout, um caminho por linha — o mesmo contrato de --query.\n\
+         \n\
+         O picker por omissão é o fzf ou o sk: só eles leem a lista\n\
+         separada por NUL. Um picker nomeado que não a leia — o peco, o\n\
+         fz — recebe a lista com um caminho por linha.\n\
          \n\
          Na barra: file: folder: doc: pic: video: audio: — filtros;\n\
          >open >folder >copy >preview >menu — comandos; grep: — o conteúdo\n\
@@ -289,6 +293,11 @@ fn one_shot(mut source: DaemonSource, query: &str, limit: usize) -> Result<ExitC
 /// that breaks. The order is rgy's — the picker narrows the list, it
 /// does not re-score it, because the ranking is the product.
 ///
+/// The separator follows the picker: `fzf` and `sk` read a NUL-separated
+/// list, and a picker that does not know `--read0` — `peco`, `fz` — gets
+/// the list one path per line. The picker crate does the translating, so
+/// the records here are written once, in NUL.
+///
 /// The exit status is the picker's own, mapped the way `searchctl` maps
 /// it: 0 for a choice, 1 for no choice (the user dismissed the picker,
 /// or there was nothing to choose), and 2 for a picker that could not
@@ -344,11 +353,12 @@ fn pick(
     Ok(ExitCode::from(u8::try_from(code).unwrap_or(1)))
 }
 
-/// The records the picker reads: the paths, separated by NUL.
+/// The records rgy writes: the paths, separated by NUL.
 ///
 /// A path may carry a tab or a newline on unix, and a separator a path
 /// can carry is a separator that breaks: the NUL byte cannot appear in
-/// a path anywhere.
+/// a path anywhere. A picker that cannot read a NUL-separated list gets
+/// them one path per line, and the picker crate does the translating.
 fn records(paths: &[String]) -> Vec<u8> {
     let mut out = Vec::new();
     for path in paths {
@@ -530,5 +540,15 @@ mod tests {
         for needle in ["--pick", "--fzf-binary", "--fzf-arg"] {
             assert!(text.contains(needle), "the help needs `{needle}`: {text}");
         }
+    }
+
+    #[test]
+    fn the_help_offers_only_the_pickers_that_can_read_the_list() {
+        let text = usage();
+        // The default is the picker that reads the NUL-separated list:
+        // `peco` and `fz` do not, and offering them is offering a picker
+        // that never sees the results.
+        assert!(text.contains("default: fzf ou sk no PATH"), "{text}");
+        assert!(!text.contains("peco, fz no PATH"), "{text}");
     }
 }

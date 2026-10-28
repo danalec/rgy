@@ -182,6 +182,27 @@ impl Query {
         self.caret += 1;
     }
 
+    /// Type a whole string, the way a paste arrives.
+    ///
+    /// The text goes **at the caret** and the caret walks with it: a paste
+    /// is a hundred keystrokes that arrived at once, and a caret that
+    /// stays where it was is a caret that lies about where the text is.
+    ///
+    /// It goes in **one** piece. Typing it character by character moves
+    /// the whole text once per character, and a paste of a hundred
+    /// kilobytes is a hundred thousand moves of a hundred kilobytes: a
+    /// launcher that spends two seconds on a paste is a launcher that
+    /// looks hung, and one that spends minutes on a megabyte never comes
+    /// back.
+    pub fn insert_str(&mut self, text: &str) {
+        let at = self.byte_offset(self.caret);
+        self.text.insert_str(at, text);
+        // The caret counts **characters**: the text may be longer in bytes
+        // than in characters, and a caret that counts bytes walks into
+        // the middle of an accent.
+        self.caret += text.chars().count();
+    }
+
     /// Delete the character before the caret.
     ///
     /// False when there was nothing to delete.
@@ -334,6 +355,78 @@ mod tests {
     use alloc::format;
     use alloc::string::ToString;
     use alloc::vec;
+
+    /// A paste lands at the caret, and the caret walks with it.
+    ///
+    /// A paste is a hundred keystrokes that arrived at once: the text
+    /// goes where the caret is, and the caret ends up after it.
+    #[test]
+    fn a_paste_lands_at_the_caret() {
+        let mut q = Query::new();
+        q.insert_str("invoice");
+        assert_eq!(q.text(), "invoice");
+        assert_eq!(q.caret(), 7, "the caret walked with the text");
+        // The caret in the middle: what was there stays.
+        q.left();
+        q.left();
+        q.insert_str("X");
+        assert_eq!(q.text(), "invoiXce");
+        assert_eq!(q.caret(), 6);
+    }
+
+    /// A paste of nothing is nothing: the query does not grow a caret
+    /// that points at nothing.
+    #[test]
+    fn a_paste_of_nothing_changes_nothing() {
+        let mut q = Query::new();
+        q.insert_str("");
+        assert_eq!(q.text(), "");
+        assert_eq!(q.caret(), 0);
+    }
+
+    /// A paste of a hundred kilobytes lands whole, and the caret is at its
+    /// end.
+    ///
+    /// The paste goes in as **one** piece: typing it a character at a time
+    /// moves the whole text once per character, and a hundred thousand
+    /// moves of a hundred kilobytes is a launcher that stops answering the
+    /// keyboard for seconds. The time is not measured — a test that
+    /// measures time is a test that fails on a busy machine — so what is
+    /// checked is the result: the text is whole, and the caret is at its
+    /// end.
+    #[test]
+    fn a_large_paste_lands_whole() {
+        let mut q = Query::new();
+        let paste = "x".repeat(100_000);
+        q.insert_str(&paste);
+        assert_eq!(q.text().len(), 100_000, "the paste landed whole");
+        assert!(
+            q.text().bytes().all(|b| b == b'x'),
+            "the paste landed whole, and in order"
+        );
+        assert_eq!(q.caret(), 100_000, "the caret is at the end of it");
+    }
+
+    /// A paste of accented text lands whole, and the caret counts the
+    /// characters and not the bytes.
+    ///
+    /// The cut is in bytes and the caret is in characters: a caret that
+    /// counted the bytes would sit inside the accent, and the next
+    /// keystroke would land in the middle of it.
+    #[test]
+    fn a_paste_of_accented_text_lands_whole() {
+        let mut q = Query::new();
+        q.insert_str("faturação");
+        assert_eq!(q.text(), "faturação");
+        assert_eq!(q.caret(), 9, "nine characters, not eleven bytes");
+        // And in the middle: the text after the caret stays, and the paste
+        // lands whole.
+        q.left();
+        q.left();
+        q.insert_str("ç");
+        assert_eq!(q.text(), "faturaçção");
+        assert_eq!(q.caret(), 8, "the caret walked with the text");
+    }
 
     #[test]
     fn an_empty_query_is_empty() {

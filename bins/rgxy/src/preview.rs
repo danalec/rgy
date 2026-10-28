@@ -10,6 +10,8 @@
 //! A file that is not text says so instead of showing noise: the bytes
 //! are read, and a byte that is not text is what makes a file binary.
 
+use std::io::Read;
+
 use rgy_launcher::Preview;
 
 /// How many bytes of the file the preview reads.
@@ -24,7 +26,7 @@ const MAX_LINES: usize = 12;
 /// would look like a bug, and a sentence does not.
 pub fn of(path: &str) -> Preview {
     let title = name_of(path);
-    let bytes = match std::fs::read(path) {
+    let bytes = match read_head(path) {
         Ok(b) => b,
         Err(e) => {
             return Preview {
@@ -33,9 +35,8 @@ pub fn of(path: &str) -> Preview {
             };
         }
     };
-    let bytes = &bytes[..bytes.len().min(MAX_BYTES as usize)];
 
-    if is_binary(bytes) {
+    if is_binary(&bytes) {
         return Preview {
             title,
             lines: vec![format!(
@@ -45,7 +46,7 @@ pub fn of(path: &str) -> Preview {
         };
     }
 
-    let text = String::from_utf8_lossy(bytes);
+    let text = String::from_utf8_lossy(&bytes);
     let mut lines = Vec::new();
     for line in text.lines() {
         if lines.len() >= MAX_LINES {
@@ -58,6 +59,27 @@ pub fn of(path: &str) -> Preview {
         lines.push("(ficheiro vazio)".to_string());
     }
     Preview { title, lines }
+}
+
+/// The beginning of the file, and only the beginning.
+///
+/// The file is opened and the first [`MAX_BYTES`] are read: the preview
+/// shows a screenful, and reading a whole video to cut it afterwards is
+/// what froze the launcher and filled its memory.
+fn read_head(path: &str) -> std::io::Result<Vec<u8>> {
+    let mut file = std::fs::File::open(path)?;
+    read_at_most(&mut file, MAX_BYTES)
+}
+
+/// At most `limit` bytes, and no more.
+///
+/// The cap is the whole point of this function: the reader is stopped at
+/// the cap, and the bytes past it are never read — a file of two
+/// gigabytes is read as the screenful the preview shows.
+fn read_at_most<R: Read>(reader: &mut R, limit: u64) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    reader.take(limit).read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 /// The name of a path: the last component.
@@ -81,6 +103,29 @@ fn is_binary(bytes: &[u8]) -> bool {
 mod tests {
     use super::*;
 
+    /// A reader that never ends, and counts what it gave.
+    ///
+    /// The count is the point: a reader that gave more than the cap would
+    /// be a preview that reads whole files.
+    struct Endless {
+        given: usize,
+    }
+
+    impl Read for Endless {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            for byte in buf.iter_mut() {
+                *byte = b'a';
+            }
+            self.given += buf.len();
+            Ok(buf.len())
+        }
+    }
+
+    /// A path in the temp folder, for a test that needs a file.
+    fn temp_path(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("rgy-rgxy-preview-{tag}-{}", std::process::id()))
+    }
+
     #[test]
     fn the_name_is_the_last_component() {
         assert_eq!(name_of("/home/dana/notas.txt"), "notas.txt");
@@ -103,5 +148,66 @@ mod tests {
             "{:?}",
             preview.lines
         );
+    }
+
+    #[test]
+    fn the_preview_reads_at_most_the_cap() {
+        // The read stops at the cap: the bytes past it are never read,
+        // and a file of two gigabytes is read as the screenful the
+        // preview shows.
+        let mut reader = Endless { given: 0 };
+        let bytes = read_at_most(&mut reader, MAX_BYTES).expect("the bytes are read");
+        assert_eq!(bytes.len(), MAX_BYTES as usize);
+        assert_eq!(
+            reader.given, MAX_BYTES as usize,
+            "nothing past the cap was read"
+        );
+    }
+
+    #[test]
+    fn a_file_smaller_than_the_cap_is_read_whole() {
+        let data = b"uma linha\noutra linha\n";
+        let mut reader = std::io::Cursor::new(data);
+        let bytes = read_at_most(&mut reader, MAX_BYTES).expect("the bytes are read");
+        assert_eq!(bytes.as_slice(), data.as_slice());
+    }
+
+    #[test]
+    fn a_file_bigger_than_the_cap_is_cut() {
+        // The file on disk is bigger than the cap, and the preview reads
+        // the cap of it.
+        let path = temp_path("grande.txt");
+        let big = vec![b'x'; MAX_BYTES as usize + 1024];
+        std::fs::write(&path, &big).expect("the file is written");
+        let mut file = std::fs::File::open(&path).expect("the file is opened");
+        let bytes = read_at_most(&mut file, MAX_BYTES).expect("the bytes are read");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(bytes.len(), MAX_BYTES as usize);
+    }
+
+    #[test]
+    fn a_binary_file_says_so_and_does_not_panic() {
+        // The bytes are not text: the preview says so instead of showing
+        // noise, and it does not panic on them.
+        let path = temp_path("binario.bin");
+        let mut data = vec![b'a'; 32];
+        data.push(0);
+        std::fs::write(&path, &data).expect("the file is written");
+        let preview = of(path.to_str().expect("the path is text"));
+        let _ = std::fs::remove_file(&path);
+        assert!(preview.lines[0].contains("binário"), "{:?}", preview.lines);
+    }
+
+    #[test]
+    fn a_byte_that_is_not_text_does_not_panic_the_preview() {
+        // A byte that is not valid UTF-8 and no NUL: the preview shows
+        // what it can and does not panic on the rest.
+        let path = temp_path("latin1.txt");
+        let mut data = b"caf".to_vec();
+        data.push(0xE9);
+        std::fs::write(&path, &data).expect("the file is written");
+        let preview = of(path.to_str().expect("the path is text"));
+        let _ = std::fs::remove_file(&path);
+        assert!(!preview.lines.is_empty());
     }
 }

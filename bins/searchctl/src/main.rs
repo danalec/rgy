@@ -44,8 +44,17 @@ const REPORT_EVERY: Duration = Duration::from_millis(500);
 /// for help, 2 for the rg convention's "bad invocation". `--help` used to
 /// exit 2 like a malformed command, which a script reads as an error.
 fn usage(code: i32) -> ! {
-    rgy_engine::errln!(
-        "searchctl [options] <query>\n\n\
+    rgy_engine::errln!("{}", help());
+    std::process::exit(code);
+}
+
+/// The help text.
+///
+/// The text is a function and not a literal inside `usage` so that a test
+/// can read it: `usage` leaves the process, and a test cannot ask a
+/// process that is gone what it said.
+fn help() -> String {
+    "searchctl [options] <query>\n\n\
          options:\n  \
            --root <dir>       tree to index (default: .)\n  \
            --limit <n>        max hits (default: 50)\n  \
@@ -59,14 +68,18 @@ fn usage(code: i32) -> ! {
            --reindex          rebuild even if a usable index exists\n  \
            --max-age <dur>    rebuild an index older than this (default 30m; 0 = never reuse)\n  \
            --pick             hand the results to a picker (fzf) and print the choice\n  \
-           --fzf-binary <p>   the picker to run (default: the first of fzf, sk, peco, fz on PATH)\n  \
+           --fzf-binary <p>   the picker to run (default: the first of fzf or sk on PATH)\n  \
            --fzf-arg <arg>    one argument for the picker, repeatable\n  \
-           --daemon           ask the running searchd, not the local index\n\n\
+           --daemon           ask the running searchd, not the local index\n\
+         \n\
+         The default picker is fzf or sk: they are the two that read a list\n\
+         separated by NUL. A picker named with --fzf-binary that cannot read\n\
+         one (peco, fz) gets the list one path per line.\n\
+         \n\
          query: fsearch tokens (bare=fuzzy, 'x exact, ^x prefix, x$ suffix,\n\
          !x negate) + zen-rs filters (ext: dir: type: size: re:),\n\
          | alternates, * and ? glob the whole path."
-    );
-    std::process::exit(code);
+        .to_string()
 }
 
 /// Parse `30m` / `2h` / `7d` / `90s` / `1w` into a duration. Bare numbers are
@@ -750,4 +763,41 @@ fn now_secs() -> u32 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as u32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_help_names_the_picker_flags() {
+        let text = help();
+        for needle in ["--pick", "--fzf-binary", "--fzf-arg"] {
+            assert!(text.contains(needle), "the help needs `{needle}`: {text}");
+        }
+    }
+
+    /// The help offers only the pickers that can read the list.
+    ///
+    /// The default is the picker that reads the NUL-separated list:
+    /// `peco` and `fz` do not, and offering them is offering a picker
+    /// that never sees the results.
+    #[test]
+    fn the_help_offers_only_the_pickers_that_can_read_the_list() {
+        let text = help();
+        assert!(text.contains("the first of fzf or sk on PATH"), "{text}");
+        assert!(!text.contains("peco, fz on PATH"), "{text}");
+    }
+
+    /// The help says what a picker that cannot read the list gets.
+    ///
+    /// A picker named with `--fzf-binary` that cannot read a
+    /// NUL-separated list gets the list one path per line, and the help
+    /// has to say so: the difference is the difference between a picker
+    /// that shows the paths and one that shows nothing.
+    #[test]
+    fn the_help_says_what_a_named_picker_gets() {
+        let text = help();
+        assert!(text.contains("one path per line"), "{text}");
+    }
 }

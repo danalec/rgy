@@ -14,12 +14,10 @@
 //!
 //! # The policy
 //!
-//! * The daemon's order rules. A result with no history, and a result
-//!   whose last use is old, keep the place the daemon gave them.
-//! * A result used inside the recent window rises, and rises by **at
-//!   most three places**. Three is a nudge and not a takeover: the file
-//!   the user had yesterday comes near the top without pushing away the
-//!   match that was better.
+//! * The daemon's order is the order under the history: a result the user
+//!   used inside the recent window comes up **at most three places**, and
+//!   a result the history does not raise ends where the daemon put it or
+//!   lower.
 //! * A use counts as recent for a month. A file opened last year is not
 //!   what the user is working on now.
 //!
@@ -27,8 +25,9 @@
 //!
 //! The history is a hint, and a hint that takes over is a lie: the user
 //! asked for the best match and gets the file they opened in March. The
-//! rise is a nudge that says "this one, recently" — and the daemon's
-//! order is still the order under it.
+//! rise is a nudge that says "this one, recently" — it moves a result up
+//! three places at the most, and the daemon's order is still the order
+//! under it.
 
 use alloc::string::String;
 use alloc::string::ToString;
@@ -281,6 +280,46 @@ mod tests {
         // The last of eight, three places up: it did not reach the top,
         // because a use is a nudge and not a takeover.
         assert_eq!(at, Some(4), "three places up and no more: {order:?}");
+    }
+
+    #[test]
+    fn a_riser_comes_up_three_places_and_what_it_passes_goes_down() {
+        let mut history = History::new();
+        for _ in 0..5 {
+            history.record("e.txt", 1_000);
+        }
+        let list = paths(&["a.txt", "b.txt", "c.txt", "d.txt", "e.txt"]);
+        let order = history.order(&list, 1_000);
+        let at = |name: &str| {
+            order
+                .iter()
+                .position(|&index| list[index] == name)
+                .expect("the result is in the order")
+        };
+        // The daemon put e.txt fifth; the history put it second.
+        assert_eq!(at("e.txt"), 1, "three places up from fifth: {order:?}");
+        // The three results it passed each went down one place, and the
+        // result the daemon put first kept its place: the rise is bounded
+        // by the number of results above it.
+        assert_eq!(at("a.txt"), 0, "the daemon's first result stays: {order:?}");
+        assert_eq!(at("b.txt"), 2, "one place down: {order:?}");
+        assert_eq!(at("c.txt"), 3, "one place down: {order:?}");
+        assert_eq!(at("d.txt"), 4, "one place down: {order:?}");
+    }
+
+    #[test]
+    fn a_riser_that_reaches_the_top_pushes_the_daemons_best_match_down() {
+        let mut history = History::new();
+        for _ in 0..5 {
+            history.record("d.txt", 1_000);
+        }
+        let list = paths(&["a.txt", "b.txt", "c.txt", "d.txt"]);
+        let order = history.order(&list, 1_000);
+        let shown: Vec<&str> = order.iter().map(|&index| list[index].as_str()).collect();
+        // The daemon's best match went down one place: the history is a
+        // nudge on top of the daemon's order, and a nudge that took the
+        // first place would be a takeover.
+        assert_eq!(shown, vec!["d.txt", "a.txt", "b.txt", "c.txt"]);
     }
 
     #[test]

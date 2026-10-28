@@ -84,6 +84,8 @@ pub enum Key {
     CtrlEnter,
     /// Ctrl+C: copy the path.
     CtrlC,
+    /// Ctrl+V: paste the clipboard's text into the query.
+    CtrlV,
     /// Ctrl+P: preview.
     CtrlP,
     /// Ctrl+K: the actions menu.
@@ -120,6 +122,13 @@ pub enum Event {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct View {
     pub query: String,
+    /// Where the caret is, counted in characters from the start of the
+    /// query.
+    ///
+    /// The window used to draw the caret after the last character, always,
+    /// and a caret that is always at the end is a decoration: the model
+    /// moves it with the arrow keys, and a paste lands where it is.
+    pub caret: usize,
     pub placeholder: String,
     pub rows: Vec<Row>,
     pub selected: usize,
@@ -167,6 +176,13 @@ struct State {
     /// client area alone where there is one — and where there is not,
     /// the window has to paint its own near-black.
     backdrop: bool,
+    /// Whether the window hid itself.
+    ///
+    /// A window that hides itself makes the application inactive, and an
+    /// inactive application says goodbye again -- and answering that would
+    /// open the window the user just closed. The flag tells the two
+    /// apart: the window says goodbye, or the user says it.
+    hiding: bool,
     /// The icons, one per kind, resolved the first time they are needed.
     icons: Icons,
     /// The window's fonts, made once and deleted with the window.
@@ -210,6 +226,7 @@ impl Window {
             },
             painted: (0, 0),
             backdrop: false,
+            hiding: false,
             icons: Icons::new(),
             fonts: Fonts::new(),
         }));
@@ -228,6 +245,12 @@ impl Window {
 
         unsafe {
             let hwnd = CreateWindowExW(
+                // Not layered: the backdrop is the desktop window
+                // manager's, and it draws it in the window's own
+                // background — where the window leaves it alone. A
+                // layered window would be composited by itself, and the
+                // window that the compositor puts on the screen is the
+                // one the user is looking at.
                 WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
                 CLASS_NAME.as_ptr(),
                 title16.as_ptr(),
@@ -343,6 +366,9 @@ impl Window {
     /// afterwards, because a search box that cannot be typed into is not a
     /// search box.
     pub fn show(&mut self) {
+        // A window that is up is not hiding: the goodbye it says when it
+        // goes away belongs to this showing, not to the next one.
+        self.state_mut().hiding = false;
         unsafe {
             self.place();
             ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
@@ -354,7 +380,9 @@ impl Window {
     }
 
     /// Hide the window. The process stays.
-    pub fn hide(&self) {
+    pub fn hide(&mut self) {
+        // The window is the one that is going away, and it says so.
+        self.state_mut().hiding = true;
         unsafe {
             ShowWindow(self.hwnd, SW_HIDE);
         }
@@ -462,10 +490,20 @@ impl Window {
     /// without it the window paints its own near-black, and the only
     /// difference the user sees is that nothing moves behind it.
     ///
-    /// The answer is whether the backdrop is really there. The call is
-    /// undocumented and the platform is free to refuse it, and a window
-    /// that believes in a blur that is not there is a window that paints
-    /// nothing at all and shows whatever the screen held before.
+    /// The answer is whether the backdrop is really there, and the accent
+    /// cannot answer it: the call is undocumented, the platform is free to
+    /// accept it and still have no blur to give — and on the platform that
+    /// took the accent away the window is swallowed whole, not blurred.
+    /// The desktop window manager's own answer is about the documented
+    /// backdrop, which is a different one, so it cannot confirm the
+    /// accent either. What it can say is that there is no backdrop here.
+    ///
+    /// So the window believes the platform only when the platform says
+    /// there is something, and otherwise takes the accent back and paints
+    /// its own near-black. A window that believes in a blur that is not
+    /// there is a window that paints nothing at all and shows whatever the
+    /// screen held before — and a window that the user cannot see is not a
+    /// launcher.
     fn apply_backdrop(&self) -> bool {
         unsafe {
             // The rounded corners, when the platform rounds them itself.
@@ -481,6 +519,20 @@ impl Window {
             if user32.is_null() {
                 return false;
             }
+            // The frame is extended into the client area **before** the
+            // accent is asked for: the accent is painted into the frame,
+            // and a window whose frame stops at the client area's edge
+            // has nowhere to paint it. The window then paints nothing
+            // over its own background — that is what "letting the blur
+            // through" means — and a window with a backdrop that never
+            // arrived shows the screen it was opened on.
+            let margins = MARGINS {
+                cx_left_width: -1,
+                cy_top_height: -1,
+                cx_right_width: -1,
+                cy_bottom_height: -1,
+            };
+            DwmExtendFrameIntoClientArea(self.hwnd, &margins);
             let name = b"SetWindowCompositionAttribute\0";
             let addr = GetProcAddress(user32, name.as_ptr());
             if addr.is_null() {
@@ -506,10 +558,74 @@ impl Window {
                     size_of_data: core::mem::size_of::<AccentPolicy>(),
                 };
                 if set(self.hwnd, &mut data) != 0 {
-                    return true;
+                    // The accent was accepted. That is not the same thing
+                    // as a blur: the manager is asked what it gave.
+                    // The accent was accepted. That is not the same thing
+                    // as a blur: the manager is asked what it gave.
+                    if self.has_backdrop() {
+                        return true;
+                    }
+                    break;
                 }
             }
+            // The accent was accepted and there is no backdrop behind it.
+            // The window takes both back: an accent with nothing to show
+            // is a window whose own painting the manager throws away, and
+            // the screen it was opened on takes its place.
+            self.take_back_backdrop(set);
             false
+        }
+    }
+
+    /// Take back what the attempt at a backdrop did.
+    ///
+    /// The accent off and the frame where it was. The frame covers the
+    /// client area while the backdrop is there; without a backdrop the
+    /// frame is a frame over a window that cannot paint.
+    fn take_back_backdrop(&self, set: SetWindowCompositionAttributeFn) {
+        unsafe {
+            let margins = MARGINS {
+                cx_left_width: 0,
+                cy_top_height: 0,
+                cx_right_width: 0,
+                cy_bottom_height: 0,
+            };
+            DwmExtendFrameIntoClientArea(self.hwnd, &margins);
+            let mut accent = AccentPolicy {
+                accent_state: ACCENT_ENABLE_NONE,
+                accent_flags: 0,
+                gradient_color: 0,
+                animation_id: 0,
+            };
+            let mut data = WindowCompositionAttributeData {
+                attribute: WCA_ACCENT_POLICY,
+                data: (&mut accent as *mut AccentPolicy).cast::<c_void>(),
+                size_of_data: core::mem::size_of::<AccentPolicy>(),
+            };
+            set(self.hwnd, &mut data);
+        }
+    }
+
+    /// Whether the desktop window manager really gave this window a
+    /// backdrop to show.
+    ///
+    /// The question has an answer only on the platforms that have
+    /// backdrops at all; everywhere else it is refused, and a refused
+    /// question is a "no".
+    fn has_backdrop(&self) -> bool {
+        unsafe {
+            let mut kind: i32 = DWMSBT_AUTO;
+            let asked = DwmGetWindowAttribute(
+                self.hwnd,
+                DWMWA_SYSTEM_BACKDROP_TYPE,
+                (&mut kind as *mut i32).cast::<c_void>(),
+                core::mem::size_of::<i32>() as u32,
+            );
+            if asked != 0 {
+                // The platform does not answer: it has no backdrops.
+                return false;
+            }
+            backdrop_is_there(kind)
         }
     }
 
@@ -613,7 +729,7 @@ impl Window {
                 return on_event(Event::Toggle);
             }
             if (msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN)
-                && let Some(key) = translate_key(msg)
+                && let Some(key) = translate_key(msg, control_down())
             {
                 return on_event(Event::Key(key));
             }
@@ -621,6 +737,21 @@ impl Window {
                 && let Some(key) = translate_char(msg)
             {
                 return on_event(Event::Key(key));
+            }
+            if msg.message == WM_ACTIVATEAPP && msg.wParam == 0 {
+                // The user clicked somewhere else and the launcher gets out
+                // of the way: a window floating over the editor the user
+                // just clicked into is a window the user has to close by
+                // hand.
+                //
+                // The window hiding itself does not count: that is the
+                // launcher saying goodbye, and answering it would open the
+                // window the user just closed.
+                if self.state_mut().hiding {
+                    self.state_mut().hiding = false;
+                } else {
+                    return on_event(Event::Toggle);
+                }
             }
             if msg.message == WM_SIZE {
                 return on_event(Event::Resize);
@@ -636,6 +767,23 @@ impl Window {
         }
         Control::None
     }
+}
+
+/// Whether the backdrop the desktop window manager named is one a
+/// window can leave its background empty for.
+///
+/// `AUTO` is the system deciding, and "the system deciding" is not the
+/// same thing as a blur; `NONE` is nothing at all. The other three are
+/// the backdrops that are really there.
+fn backdrop_is_there(kind: i32) -> bool {
+    if kind == DWMSBT_NONE {
+        // The manager said there is nothing behind the window.
+        return false;
+    }
+    matches!(
+        kind,
+        DWMSBT_MAIN_WINDOW | DWMSBT_TRANSIENT_WINDOW | DWMSBT_TABBED_WINDOW
+    )
 }
 
 /// How far down the work area the window sits, as a fraction of it.
@@ -868,9 +1016,17 @@ fn register_class() -> Result<u16, String> {
     Ok(CLASS_ATOM.load(Ordering::Acquire))
 }
 
+/// Whether a Control key is down.
+fn control_down() -> bool {
+    unsafe { GetKeyState(VK_CONTROL as i32) < 0 }
+}
+
 /// The control keys, from the system's own view of the keyboard.
-fn translate_key(msg: &MSG) -> Option<Key> {
-    let ctrl = unsafe { GetKeyState(VK_CONTROL as i32) < 0 };
+///
+/// The Control state comes from the caller: the keyboard is read once,
+/// here, and a translation that asked it again would be asking a
+/// question whose answer can change between the two reads.
+fn translate_key(msg: &MSG, ctrl: bool) -> Option<Key> {
     let vk = msg.wParam as u32;
     Some(match vk {
         VK_BACK => Key::Backspace,
@@ -893,6 +1049,7 @@ fn translate_key(msg: &MSG) -> Option<Key> {
         VK_PRIOR => Key::PageUp,
         VK_NEXT => Key::PageDown,
         _ if ctrl && vk == b'C' as u32 => Key::CtrlC,
+        _ if ctrl && vk == b'V' as u32 => Key::CtrlV,
         _ if ctrl && vk == b'P' as u32 => Key::CtrlP,
         _ if ctrl && vk == b'K' as u32 => Key::CtrlK,
         _ if ctrl && vk == b'W' as u32 => Key::CtrlW,
@@ -911,8 +1068,10 @@ fn translate_char(msg: &MSG) -> Option<Key> {
         return None;
     }
     // The control characters the system sends for the keys it already
-    // reported as a key event: they would be typed twice.
-    if c < 0x20 && c != 0x09 {
+    // reported as a key event: they would be typed twice. The tab is one
+    // of them -- the key is already a key, and a tab inside a search box
+    // is a character nobody typed.
+    if c < 0x20 {
         return None;
     }
     char::from_u32(c as u32).map(Key::Char)
@@ -931,6 +1090,81 @@ unsafe extern "system" {
 
 #[cfg(test)]
 mod tests {
+
+    /// A message with one key in it.
+    fn key_message(vk: u32) -> MSG {
+        MSG {
+            hwnd: core::ptr::null_mut(),
+            message: WM_KEYDOWN,
+            wParam: vk as WPARAM,
+            lParam: 0,
+            time: 0,
+            pt: POINT { x: 0, y: 0 },
+        }
+    }
+
+    /// Ctrl+V is the paste, and only with the Control: the letter on its
+    /// own is a letter, and a launcher that pasted the clipboard every
+    /// time the user typed a "v" would be a launcher nobody could type
+    /// in.
+    #[test]
+    fn the_paste_needs_the_control() {
+        let msg = key_message(b'V' as u32);
+        assert_eq!(translate_key(&msg, true), Some(Key::CtrlV));
+        assert_eq!(translate_key(&msg, false), None);
+    }
+
+    /// Ctrl+C is the copy, and it is the same shape: the Control decides.
+    #[test]
+    fn the_copy_needs_the_control() {
+        let msg = key_message(b'C' as u32);
+        assert_eq!(translate_key(&msg, true), Some(Key::CtrlC));
+        assert_eq!(translate_key(&msg, false), None);
+    }
+
+    /// The tab is a key, not a character.
+    ///
+    /// The key event already carries it, and the control character that
+    /// comes with it would put a tab inside the query -- and Ctrl+I, which
+    /// is the same control character, would do the same.
+    #[test]
+    fn the_tab_is_not_a_character() {
+        let mut msg = MSG {
+            hwnd: core::ptr::null_mut(),
+            message: WM_CHAR,
+            wParam: 0x09,
+            lParam: 0,
+            time: 0,
+            pt: POINT { x: 0, y: 0 },
+        };
+        assert_eq!(translate_char(&msg), None);
+        // A letter is still a letter.
+        msg.wParam = 'a' as usize;
+        assert_eq!(translate_char(&msg), Some(Key::Char('a')));
+    }
+
+    /// So the window believes in a blur, the platform has to say there is
+    /// one: the accent's own answer is not that answer.
+    #[test]
+    fn only_a_real_backdrop_is_a_backdrop() {
+        assert!(
+            !backdrop_is_there(DWMSBT_AUTO),
+            "the system deciding is not a blur"
+        );
+        assert!(
+            !backdrop_is_there(DWMSBT_NONE),
+            "nothing behind the window is not a blur"
+        );
+        assert!(backdrop_is_there(DWMSBT_MAIN_WINDOW), "Mica is a backdrop");
+        assert!(
+            backdrop_is_there(DWMSBT_TRANSIENT_WINDOW),
+            "Acrylic is a backdrop"
+        );
+        assert!(
+            backdrop_is_there(DWMSBT_TABBED_WINDOW),
+            "the tab's Mica is a backdrop"
+        );
+    }
     use super::*;
 
     /// A 1920 by 1080 screen with a 40-pixel taskbar at the bottom.

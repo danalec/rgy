@@ -103,21 +103,36 @@ pub fn parse(text: &str) -> History {
 }
 
 /// Write the history.
+///
+/// The write goes through a temporary file and a rename: a launcher that
+/// is killed in the middle of a write leaves the old store, and not half
+/// a new one.
+///
+/// The rename **replaces** the store, on every platform. On Windows
+/// `std::fs::rename` is `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`:
+/// the two files are swapped and the destination is never absent, so the
+/// store on the disk is the old one or the new one and never nothing.
+/// The code used to remove the store first — "Windows will not rename a
+/// file over a file that is there" — and that is what made the promise
+/// false: a launcher killed between the removal and the rename left **no**
+/// store at all, and with it the history of every file the user ever
+/// opened.
 pub fn save(path: &Path, history: &History) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let temp = path.with_extension("tsv.tmp");
+    let temp = temp_path(path);
     std::fs::write(&temp, render(history))?;
-    // The write goes through a temporary file and a rename: a launcher
-    // that is killed in the middle of a write leaves the old store, and
-    // not half a new one.
-    #[cfg(windows)]
-    {
-        // Windows will not rename a file over a file that is there.
-        let _ = std::fs::remove_file(path);
-    }
     std::fs::rename(&temp, path)
+}
+
+/// The file the store is written to before it replaces the store.
+///
+/// Beside the store and not in the temporary folder of the machine: the
+/// move that replaces a file has to be a move **inside one volume**, and
+/// the temporary folder is another one on most machines.
+fn temp_path(path: &Path) -> PathBuf {
+    path.with_extension("tsv.tmp")
 }
 
 /// The text of the store.
@@ -204,5 +219,120 @@ mod tests {
         let text = render(&history);
         assert!(text.contains("/a/notas.txt"), "{text}");
         assert!(text.contains("1\t1000\t"), "{text}");
+    }
+
+    /// The second write is the whole of the store.
+    ///
+    /// The file holds what the last write said and nothing else: a store
+    /// that kept the entries of the write before would be a store of
+    /// every file the user ever opened, and the ranking would follow the
+    /// oldest of them.
+    #[test]
+    fn a_second_write_replaces_the_store() {
+        let dir = scratch("mru-replace");
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("usage.tsv");
+
+        let mut first = History::new();
+        first.record("C:/Users/dana/notas.txt", 1_000);
+        save(&path, &first).expect("the store is written");
+
+        let mut second = History::new();
+        second.record("C:/Users/dana/outro.txt", 2_000);
+        save(&path, &second).expect("the store is written again");
+
+        let read = load(&path);
+        assert!(
+            read.get("C:/Users/dana/notas.txt").is_none(),
+            "{:?}",
+            read.entries()
+        );
+        assert!(
+            read.get("C:/Users/dana/outro.txt").is_some(),
+            "{:?}",
+            read.entries()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A write that cannot go through leaves the old store.
+    ///
+    /// The property the comment of [`save`] promises: what is on the
+    /// disk is the old store or the new one, and a write that fails is
+    /// the old one. The temporary path is taken by a directory here, so
+    /// the write has nowhere to go.
+    #[test]
+    fn a_write_that_cannot_be_written_leaves_the_old_store() {
+        let dir = scratch("mru-unwritable");
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("usage.tsv");
+
+        let mut history = History::new();
+        history.record("C:/Users/dana/notas.txt", 1_000);
+        save(&path, &history).expect("the store is written");
+        let before = std::fs::read(&path).expect("the store is there");
+
+        std::fs::create_dir_all(temp_path(&path)).expect("the temporary path is taken");
+
+        let mut other = History::new();
+        other.record("C:/Users/dana/outro.txt", 2_000);
+        assert!(save(&path, &other).is_err(), "the write cannot finish");
+
+        assert_eq!(
+            std::fs::read(&path).expect("the old store is there"),
+            before,
+            "the old store survived the failed write"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A write that cannot replace the store leaves the old store.
+    ///
+    /// The temporary file is held open without `FILE_SHARE_DELETE`: the
+    /// platform refuses to move it over the store, and the store that was
+    /// there has to be there afterwards. The code used to remove the
+    /// store *before* the move, so a launcher killed between the two left
+    /// **no** store at all — and this is what that looked like.
+    #[cfg(windows)]
+    #[test]
+    fn a_write_that_cannot_replace_leaves_the_old_store() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        // The platform's own share flags: the file is shared for reading
+        // and for writing, and not for deleting — and the move of a file
+        // that is open without `FILE_SHARE_DELETE` is refused.
+        const FILE_SHARE_READ: u32 = 0x0000_0001;
+        const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+
+        let dir = scratch("mru-locked");
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("usage.tsv");
+
+        let mut history = History::new();
+        history.record("C:/Users/dana/notas.txt", 1_000);
+        save(&path, &history).expect("the store is written");
+        let before = std::fs::read(&path).expect("the store is there");
+
+        // The temporary file, there and held: the write goes into it, and
+        // the move does not happen.
+        let temp = temp_path(&path);
+        std::fs::write(&temp, b"half a store").expect("the temporary file is there");
+        let held = std::fs::OpenOptions::new()
+            .write(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(&temp)
+            .expect("the temporary file is held");
+
+        let mut other = History::new();
+        other.record("C:/Users/dana/outro.txt", 2_000);
+        assert!(save(&path, &other).is_err(), "the store cannot be replaced");
+
+        assert_eq!(
+            std::fs::read(&path).expect("the old store is there"),
+            before,
+            "the old store survived the failed write"
+        );
+        drop(held);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -134,7 +134,6 @@ pub struct MONITORINFO {
 pub const WS_POPUP: u32 = 0x8000_0000;
 pub const WS_EX_TOOLWINDOW: u32 = 0x0000_0080;
 pub const WS_EX_TOPMOST: u32 = 0x0000_0008;
-
 pub const CS_VREDRAW: u32 = 0x0001;
 pub const CS_HREDRAW: u32 = 0x0002;
 pub const CS_DROPSHADOW: u32 = 0x0002_0000;
@@ -153,6 +152,8 @@ pub const WM_KEYUP: UINT = 0x0101;
 pub const WM_CHAR: UINT = 0x0102;
 pub const WM_SYSKEYDOWN: UINT = 0x0104;
 pub const WM_SYSKEYUP: UINT = 0x0105;
+/// The application stopped being the active one.
+pub const WM_ACTIVATEAPP: UINT = 0x001C;
 pub const WM_APP: UINT = 0x8000;
 
 pub const VK_BACK: u32 = 0x08;
@@ -187,6 +188,7 @@ pub const GWL_USERDATA: i32 = -21;
 
 pub const TRANSPARENT: i32 = 1;
 pub const CLEARTYPE_QUALITY: u8 = 5;
+
 pub const DEFAULT_CHARSET: u8 = 1;
 pub const OUT_DEFAULT_PRECIS: u8 = 0;
 pub const CLIP_DEFAULT_PRECIS: u8 = 0;
@@ -223,6 +225,24 @@ pub const DI_NORMAL: u32 = 0x0000;
 
 /// The window's corner radius, in pixels, as DWM wants it.
 pub const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
+
+/// The backdrop the desktop window manager gives the window, asked for as
+/// a number: this is the question that has an answer.
+pub const DWMWA_SYSTEM_BACKDROP_TYPE: u32 = 38;
+
+/// The backdrops that are really there.
+///
+/// `AUTO` is the system deciding, and "the system deciding" is not the
+/// same thing as a blur: the window has to know which one it is before
+/// it leaves its own background empty.
+pub const DWMSBT_AUTO: i32 = 0;
+pub const DWMSBT_NONE: i32 = 1;
+/// Mica: the tinted, barely blurred backdrop of a main window.
+pub const DWMSBT_MAIN_WINDOW: i32 = 2;
+/// Acrylic: the blurred backdrop of a transient window.
+pub const DWMSBT_TRANSIENT_WINDOW: i32 = 3;
+/// Mica, the variant that tabs use.
+pub const DWMSBT_TABBED_WINDOW: i32 = 4;
 /// Round the corners the way Win11 does.
 pub const DWMWCP_ROUND: i32 = 2;
 
@@ -235,6 +255,8 @@ pub struct AccentPolicy {
     pub animation_id: u32,
 }
 
+/// No backdrop at all: the accent is off.
+pub const ACCENT_ENABLE_NONE: u32 = 0;
 /// The blurred backdrop: Win11's host backdrop, and the Win10 blur.
 pub const ACCENT_ENABLE_BLURBEHIND: u32 = 3;
 pub const ACCENT_ENABLE_HOSTBACKDROP: u32 = 5;
@@ -401,12 +423,41 @@ pub const ERROR_SUCCESS: DWORD = 0;
 
 #[link(name = "dwmapi")]
 unsafe extern "system" {
+    /// Ask the desktop window manager what a window is.
+    ///
+    /// The answer is the attribute's own: an `HRESULT` of zero and the
+    /// value written where the caller asked for it.
+    pub fn DwmGetWindowAttribute(
+        hwnd: HWND,
+        dwAttribute: u32,
+        pvAttribute: *mut c_void,
+        cbAttribute: u32,
+    ) -> i32;
     pub fn DwmSetWindowAttribute(
         hwnd: HWND,
         dwAttribute: u32,
         pvAttribute: *const c_void,
         cbAttribute: u32,
     ) -> i32;
+    /// Extend the window's frame into its client area.
+    ///
+    /// The margins of `-1` on every side are the whole trick: the frame
+    /// covers the client area, and the desktop window manager composes
+    /// the backdrop into it. Without this the backdrop has no surface to
+    /// be drawn on, the window's own background is what shows, and a
+    /// window that painted nothing over it is a window that shows the
+    /// screen it was opened on.
+    pub fn DwmExtendFrameIntoClientArea(hwnd: HWND, pMargrins: *const MARGINS) -> i32;
+}
+
+/// The margins the frame is extended by, in pixels.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct MARGINS {
+    pub cx_left_width: i32,
+    pub cy_top_height: i32,
+    pub cx_right_width: i32,
+    pub cy_bottom_height: i32,
 }
 
 #[link(name = "shell32")]
