@@ -929,6 +929,33 @@ mod tests {
                 Peer::Pipe(f) => f.write_all(bytes),
             }
         }
+
+        /// Read the client's request, one line of it.
+        ///
+        /// A daemon reads the request before it answers it. A daemon that
+        /// answers first and closes the connection can close it under the
+        /// client's own write, and the client then fails on the write —
+        /// with a broken pipe — instead of on the answer it was reading.
+        fn read_request(&mut self) -> std::io::Result<()> {
+            let mut byte = [0u8; 1];
+            loop {
+                let read = match self {
+                    #[cfg(unix)]
+                    Peer::Socket(s) => s.read(&mut byte)?,
+                    #[cfg(windows)]
+                    Peer::Pipe(f) => f.read(&mut byte)?,
+                };
+                if read == 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "the client closed the connection before the request",
+                    ));
+                }
+                if byte[0] == b'\n' {
+                    return Ok(());
+                }
+            }
+        }
     }
 
     /// A daemon of the test's own, on an endpoint of the test's own.
@@ -1036,6 +1063,11 @@ mod tests {
     /// A daemon that dies in the middle of the answer.
     fn says_half(peer: Peer) {
         let mut peer = peer;
+        // The request is read first: a daemon that answers without reading
+        // can close the connection under the client's own write, and the
+        // client then fails on the write and never sees the answer that
+        // was cut.
+        let _ = peer.read_request();
         let _ = peer.send(br#"{"op":"hits","hits":[{"path":"a""#);
         // The peer is dropped here: the connection closes with the line
         // unfinished.
