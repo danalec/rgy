@@ -138,14 +138,17 @@ pub struct Console<W> {
 
 #[cfg(feature = "std")]
 impl<W> Console<W> {
-    fn new(inner: W, mode: Mode, handle: sys::Handle) -> Self {
-        #[cfg(not(windows))]
-        let _ = handle;
+    fn new(inner: W, mode: Mode, _handle: sys::Handle) -> Self {
         Console {
             inner,
             mode,
+            // The handle is the platform's own: a raw handle on Windows and
+            // nothing at all everywhere else. The name carries the
+            // underscore because the platform without a handle has no
+            // binding to keep -- and a binding of a unit is a lint, not a
+            // promise.
             #[cfg(windows)]
-            handle,
+            handle: _handle,
         }
     }
 }

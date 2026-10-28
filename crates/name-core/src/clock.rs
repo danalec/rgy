@@ -30,8 +30,7 @@ pub fn unix_millis() -> u64 {
         // CLOCK_REALTIME = 0 on every unix that has a clock_gettime.
         let ok = unsafe { clock_gettime(0, &mut ts) } == 0;
         if ok {
-            let secs = ts.tv_sec as i64;
-            let nanos = ts.tv_nsec as i64;
+            let (secs, nanos) = ts.parts();
             if secs >= 0 {
                 return (secs as u64) * 1000 + (nanos as u64) / 1_000_000;
             }
@@ -78,6 +77,25 @@ struct Timespec {
 struct Timespec {
     tv_sec: i32,
     tv_nsec: i32,
+}
+
+/// The seconds and the nanoseconds, widened to what the callers read.
+///
+/// The shape of the timespec is declared per pointer width above, so the
+/// widening belongs with the shape that needs it: the 32-bit one widens,
+/// the 64-bit one has nothing to widen.
+#[cfg(all(unix, target_pointer_width = "64"))]
+impl Timespec {
+    fn parts(&self) -> (i64, i64) {
+        (self.tv_sec, self.tv_nsec)
+    }
+}
+
+#[cfg(all(unix, target_pointer_width = "32"))]
+impl Timespec {
+    fn parts(&self) -> (i64, i64) {
+        (self.tv_sec as i64, self.tv_nsec as i64)
+    }
 }
 
 #[cfg(unix)]

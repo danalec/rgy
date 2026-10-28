@@ -220,6 +220,18 @@ mod imp {
         Some(stat_of(&st))
     }
 
+    /// The time of what the platform described, in seconds.
+    ///
+    /// The `time_t` is 64 bits on the targets this tree is verified against
+    /// and 32 bits on some of the others, so the value is widened by hand.
+    /// On a target where it is already 64 bits the cast changes nothing and
+    /// the lint that says so is allowed here: the cast is not decoration,
+    /// it is what makes the 32-bit targets work.
+    #[allow(clippy::unnecessary_cast)]
+    fn mtime_of(st: &libc::stat) -> i64 {
+        st.st_mtime as i64
+    }
+
     /// The kind, the length and the time of what the platform described.
     fn stat_of(st: &libc::stat) -> Stat {
         let mode = st.st_mode & libc::S_IFMT;
@@ -238,7 +250,7 @@ mod imp {
             // has no such bit to give.
             flags: 0,
             size: st.st_size as u64,
-            mtime: super::seconds(st.st_mtime as i64),
+            mtime: super::seconds(mtime_of(st)),
         }
     }
 

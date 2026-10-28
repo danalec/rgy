@@ -117,7 +117,7 @@ mod linux {
         }
         SET_UP.with(|s| s.set(true));
         let cpus = SCAN_CPUS.get_or_init(scan_cpus);
-        pin(&cpus);
+        pin(cpus);
         apply_nice();
     }
 
