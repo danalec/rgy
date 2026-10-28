@@ -178,7 +178,25 @@ done
 if [ -z "$profile" ]; then
     profile="$HOME/.profile"
 fi
-if ! grep -qF "$install_dir" "$profile" 2>/dev/null; then
+# The directory is looked for in the spellings a user might have written
+# it: the expanded path, and the $HOME form of the same directory. A
+# check that knows only the first one appends a second line on every
+# run, and a PATH with the same directory in it twice is a PATH nobody
+# reads.
+already_on_path() {
+    if grep -qF "$install_dir" "$profile" 2>/dev/null; then
+        return 0
+    fi
+    case "$install_dir" in
+        "$HOME"/*)
+            grep -qF "\$HOME/${install_dir#"$HOME"/}" "$profile" 2>/dev/null
+            return $?
+            ;;
+    esac
+    return 1
+}
+
+if ! already_on_path; then
     printf '\n# rgy\nexport PATH="%s:$PATH"\n' "$install_dir" >> "$profile"
     echo "Added $install_dir to the PATH (open a new terminal to pick it up)."
 else
