@@ -1,6 +1,6 @@
 # Build outputs.
 /target/
-/.dist
+/.dist/
 /.cache/
 
 # Generated corpora, downloaded tool bundles, reference checkouts, pack stores.
@@ -20,7 +20,39 @@
 *.log
 *.bak
 *.ugi
+.vscode/
+.idea/
+
+# Agent harnesses: their own directories, their own instruction files, their
+# own scratch. They are tools, not the project.
+.claude/
+.codex/
+.qwen/
 .zcode/
+.kimi/
+.cursor/
+.gemini/
+.serena/
+.cline/
+.agent/
+.agents/
+.memory/
+.opencode/
+.openclaw/
+.antigravity/
+.aider/
+.aider.conf.yml
+.aiderignore
+.continue/
+.clinerules
+.roo/
+.roorules
+.windsurf/
+.windsurfrules
+CLAUDE.md
+GEMINI.md
+.mcp.json
+mcp.json
 
 # Python bytecode.
 __pycache__/
@@ -38,7 +70,6 @@ EGM.md
 # on the machine, out of the tree and out of every upload.
 /AGENTS.md
 
-# Prototypal release scripts: a PGO build is two cargo runs and a profile
-# merge. The capability the matrix records is the build, not the file.
+# Prototypal release scripts: a PGO build is two cargo runs and a profile merge.
 pgo.sh
 pgo.ps1
