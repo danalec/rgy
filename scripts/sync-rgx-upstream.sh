@@ -22,6 +22,9 @@
 #   * Files rgy has and upstream does not are reported as STALE. `--prune`
 #     removes them; without it they are only listed, because a file rgy
 #     wrote itself (see KEEP below) is not stale but ours.
+#   * The paths in EXCLUDE are not copied at all, and are removed from the
+#     tree on every sync. They are upstream's own measurement and fuzzing
+#     harnesses, which rgy does not run and does not carry.
 #   * The copy is byte-for-byte: no SPDX stripping, no path rewriting, no
 #     `alloc::` -> `std::`. Upstream and rgy are both `no_std` + `alloc`
 #     now, and the copy-time transforms that used to live in
@@ -87,6 +90,46 @@ rgx-adapters-office rgx-adapters-pdf rgx-adapters-tabular rgx-adapters-threed"
 # where rgy's own code belongs -- a vendored tree carries upstream's
 # licence and nothing else.
 KEEP=""
+
+# Files upstream has that this tree does not carry. Each entry is a
+# repo-relative path prefix, and the copy skips it.
+#
+# These are rgx's own measurement and fuzzing harnesses: the example
+# programs that produce its benchmark tables, and the cargo-fuzz crate
+# that fuzzes its parsers. rgy has its own benches --
+# crates/name-core/examples and crates/engine/examples -- and its own gate,
+# and nothing in rgy runs any of these. They are upstream's tools, in
+# upstream's repository, and carrying them here would be carrying a tool
+# nobody in this repository can reach.
+#
+# The tree is therefore upstream's, minus what rgy does not carry. The
+# manifest says so on the rows of the crates this touches, and a sync
+# removes the paths, so they cannot come back by accident.
+EXCLUDE="
+crates/rgx-core/examples/
+crates/rgx-core/fuzz/
+crates/rgx-adapters-archive/examples/
+crates/rar-codec/examples/"
+
+# The excluded paths as one pattern, for the filter that takes them out
+# of the file list. The prefixes hold no regular-expression characters,
+# so they are the pattern as they are.
+exclude_pattern=""
+for prefix in $EXCLUDE; do
+    [ -n "$exclude_pattern" ] && exclude_pattern="$exclude_pattern|"
+    exclude_pattern="$exclude_pattern^$prefix"
+done
+
+# Is this repo-relative path under one of the excluded prefixes?
+is_excluded() {
+    local rel="$1" prefix
+    for prefix in $EXCLUDE; do
+        case "$rel" in
+            "$prefix"*) return 0 ;;
+        esac
+    done
+    return 1
+}
 
 # Local patches, applied after the copy, one file per patch under
 # scripts/rgx-local-patches/<repo-relative-path>.patch.
@@ -200,6 +243,14 @@ for crate in $CRATES; do
         > "$upstream_pairs"
     cut -f2 "$upstream_pairs" > "$upstream_paths"
 
+    # The paths this tree does not carry are not paths of this tree: they
+    # are not copied, and they are not counted as unchanged.
+    if [ -n "$exclude_pattern" ]; then
+        grep -v -E "$exclude_pattern" "$upstream_paths" > "$upstream_paths.kept" \
+            || true
+        mv "$upstream_paths.kept" "$upstream_paths"
+    fi
+
     # The local hashes, for the paths that exist here. A path that does not
     # exist is an addition, and `hash-object` would fail on it.
     while IFS= read -r rel; do
@@ -258,6 +309,7 @@ for crate in $CRATES; do
     while IFS= read -r rel; do
         [ -n "$rel" ] || continue
         is_kept "$rel" && continue
+        is_excluded "$rel" && continue
         grep -Fxq "$rel" "$upstream_paths" && continue
         stale_list="$stale_list$rel"$'\n'
     done < <(find "$dst_dir" -type f \
@@ -280,6 +332,22 @@ for crate in $CRATES; do
     done < <(git -C "$UPSTREAM" diff --name-only "$upstream_commit" -- "crates/$crate" 2>/dev/null)
 
     rm -f "$upstream_paths" "$upstream_pairs" "$local_paths" "$local_pairs" "$to_copy"
+done
+
+# The excluded paths are not part of this tree. A sync removes them, so
+# a file that is not carried cannot come back by accident: what the tree
+# holds is what the copy says it holds.
+excluded_count=0
+for prefix in $EXCLUDE; do
+    target="$repo_root/$prefix"
+    [ -e "$target" ] || continue
+    excluded_count=$((excluded_count + 1))
+    if [ "$DRY_RUN" = 1 ]; then
+        echo "  excluded $prefix (not carried)"
+    else
+        rm -rf "$target"
+        echo "  excluded $prefix (removed)"
+    fi
 done
 
 stale_count=0
@@ -326,7 +394,7 @@ if [ "$stale_count" -gt 0 ]; then
 fi
 
 echo ""
-echo "added $added, updated $copied, unchanged $unchanged, stale $stale_count, patched $patched, ahead $ahead"
+echo "added $added, updated $copied, unchanged $unchanged, stale $stale_count, patched $patched, ahead $ahead, excluded $excluded_count"
 
 # --- the manifest ---------------------------------------------------------
 #
@@ -369,15 +437,27 @@ if [ "$DRY_RUN" = 0 ]; then
         echo "# specification provenance of those files is upstream's own manifest"
         echo "# (scripts/vendored-sources.tsv in the rgx checkout), and the"
         echo "# third-party notices are in NOTICE and the licence files at the root."
+        echo "#"
+        echo "# A row whose note says the copy excludes paths is a tree that is"
+        echo "# upstream's minus what rgy does not carry: upstream's benchmark"
+        echo "# harnesses and its fuzzing crate, which rgy does not run. The"
+        echo "# exclusion is in the sync script, so the paths cannot come back."
         echo ""
         echo "# The upstream commit the copy was taken from: $upstream_commit"
         echo ""
     } > "$tmp_manifest"
 
     for crate in $CRATES; do
+        note="upstream rgx's crate, transported verbatim"
+        for prefix in $EXCLUDE; do
+            case "$prefix" in
+                "crates/$crate/"*)
+                    note="upstream rgx's crate, transported verbatim except the paths the copy excludes"
+                    ;;
+            esac
+        done
         printf 'crates/%s\tcrates/%s\t%s\ttree\t%s\n' \
-            "$crate" "$crate" "$upstream_commit" \
-            "upstream rgx's crate, transported verbatim" >> "$tmp_manifest"
+            "$crate" "$crate" "$upstream_commit" "$note" >> "$tmp_manifest"
     done
 
     if [ -d "$PATCH_DIR" ]; then

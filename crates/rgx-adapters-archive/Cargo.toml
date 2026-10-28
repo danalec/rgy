@@ -110,12 +110,7 @@ rgx-core = { path = "../rgx-core", version = "0.1.1", default-features = false, 
 rar-codec = { path = "../rar-codec", version = "0.1.1", optional = true }
 zstd = { version = "0.14", optional = true }
 
-# The benches reach into the codecs the adapter registry does not expose, so
-# they are named with the features that carry them.
-[[example]]
-name = "crc32_bench_7z"
-required-features = ["sevenz"]
-
-[[example]]
-name = "decomp_bench"
-required-features = ["decompress", "sevenz"]
+# The benches are not declared here: they are rgx's own measurement tools,
+# and the copy does not carry them (scripts/sync-rgx-upstream.sh, EXCLUDE).
+# The manifest that declares them is upstream's; the patch beside this
+# file is the divergence, and the next sync re-applies it.
