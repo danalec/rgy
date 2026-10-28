@@ -10,10 +10,29 @@
 //! the same line the tool hands to `schtasks`.
 
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use std::path::Path;
 
 use crate::display_path;
+
+/// The directory the daemon indexes, read out of the arguments.
+///
+/// The arguments carry the root (`--root <dir>`), and the artefact says
+/// the same directory twice: once as the tree to walk, once as the place
+/// to walk it from. One source of truth — the arguments — so the two can
+/// never disagree.
+pub fn working_directory(args: &[String]) -> Option<String> {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--root" {
+            return iter.next().cloned();
+        }
+        if let Some(root) = arg.strip_prefix("--root=") {
+            return Some(root.to_string());
+        }
+    }
+    None
+}
 
 /// The systemd user unit that starts the daemon at login.
 ///
@@ -23,6 +42,10 @@ use crate::display_path;
 ///     starts with the session and not with the machine's boot.
 ///   * `Restart=on-failure` — the daemon comes back when it dies, which is
 ///     the other half of "the daemon is there when the user needs it".
+///   * `WorkingDirectory=` — the directory the daemon indexes. It is
+///     written out because the default is not it: a user unit starts in
+///     the home directory, and the daemon has to be told the tree it walks
+///     rather than the one it happens to inherit.
 ///
 /// The unit is a *user* unit: it needs no root, it follows the user, and
 /// it stops with the session.
@@ -32,6 +55,19 @@ pub fn systemd_unit(binary: &Path, args: &[String], unit_name: &str) -> String {
         exec.push(' ');
         exec.push_str(&quote_systemd(arg));
     }
+
+    // The working directory is the tree the daemon indexes, read out of
+    // the arguments. A unit with no root in its arguments says nothing
+    // about where it runs, and the platform's default is not a promise.
+    //
+    // The path is written bare: systemd's `WorkingDirectory=` is a path,
+    // not a word list, and it takes the quotes as part of the path. A
+    // path with a space in it is fine -- the whole rest of the line is
+    // the path.
+    let workdir = match working_directory(args) {
+        Some(dir) => format!("WorkingDirectory={dir}\n"),
+        None => String::new(),
+    };
 
     format!(
         r#"# SPDX-License-Identifier: Apache-2.0
@@ -51,7 +87,7 @@ After=default.target
 [Service]
 Type=simple
 {exec}
-Restart=on-failure
+{workdir}Restart=on-failure
 RestartSec=5s
 
 [Install]
@@ -59,6 +95,7 @@ WantedBy=default.target
 "#,
         unit = unit_name,
         exec = exec,
+        workdir = workdir,
     )
 }
 
@@ -75,6 +112,18 @@ pub fn launchd_plist(binary: &Path, args: &[String], label: &str) -> String {
     for arg in args {
         program.push_str(&format!("        <string>{}</string>\n", xml_escape(arg)));
     }
+
+    // The working directory is the tree the daemon indexes, read out of
+    // the arguments. launchd starts a job in `/`, and a daemon that
+    // inherits `/` walks the whole disk from the top -- every permission
+    // error on the way.
+    let workdir = match working_directory(args) {
+        Some(dir) => format!(
+            "    <key>WorkingDirectory</key>\n    <string>{}</string>\n",
+            xml_escape(&dir)
+        ),
+        None => String::new(),
+    };
 
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -93,7 +142,7 @@ pub fn launchd_plist(binary: &Path, args: &[String], label: &str) -> String {
     <key>ProgramArguments</key>
     <array>
 {program}    </array>
-    <key>RunAtLoad</key>
+{workdir}    <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
@@ -104,6 +153,7 @@ pub fn launchd_plist(binary: &Path, args: &[String], label: &str) -> String {
 "#,
         label = xml_escape(label),
         program = program,
+        workdir = workdir,
     )
 }
 
@@ -112,13 +162,27 @@ pub fn launchd_plist(binary: &Path, args: &[String], label: &str) -> String {
 /// The task scheduler has no file form, so this line *is* the artifact:
 /// it is printed for the user to read, and it is what the tool hands to
 /// `schtasks`.
+///
+/// The arguments are quoted when they have to be. The root the daemon
+/// indexes is the user's home directory, and a home directory can be
+/// `C:\Users\Ana Maria` — an unquoted path with a space in it is two
+/// arguments, and the daemon would walk `C:\Users\Ana` instead.
 pub fn windows_task_command(binary: &Path, args: &[String]) -> String {
     let mut line = format!("\"{}\"", display_path(binary));
     for arg in args {
         line.push(' ');
-        line.push_str(arg);
+        line.push_str(&quote_windows(arg));
     }
     line
+}
+
+/// A command-line word, quoted when it has to be.
+fn quote_windows(word: &str) -> String {
+    if word.contains(' ') || word.contains('"') {
+        format!("\"{}\"", word.replace('"', "\\\""))
+    } else {
+        word.to_string()
+    }
 }
 
 /// The `schtasks` line, as it is typed in `cmd.exe`.
@@ -304,5 +368,64 @@ mod tests {
         let line = reg_add_command_line(&PathBuf::from(r"C:\rgy\searchd.exe"), &[], "rgy-searchd");
         assert!(line.contains("HKCU"), "{line}");
         assert!(!line.contains("HKLM"), "{line}");
+    }
+
+    #[test]
+    fn the_working_directory_is_the_tree_the_daemon_indexes() {
+        assert_eq!(
+            working_directory(&args(&["--root", "/home/u"])),
+            Some("/home/u".to_string())
+        );
+        assert_eq!(
+            working_directory(&args(&["--root=/data"])),
+            Some("/data".to_string())
+        );
+        assert_eq!(working_directory(&args(&["--json"])), None);
+    }
+
+    #[test]
+    fn the_unit_says_where_the_daemon_runs() {
+        let unit = systemd_unit(
+            &PathBuf::from("/opt/rgy/bin/searchd"),
+            &args(&["--root", "/home/u"]),
+            "rgy-searchd.service",
+        );
+        // The path is bare: systemd's WorkingDirectory= takes the quotes
+        // as part of the path, and a quoted path is "not absolute".
+        assert!(unit.contains("WorkingDirectory=/home/u"), "{unit}");
+        assert!(!unit.contains("WorkingDirectory=\""), "{unit}");
+    }
+
+    #[test]
+    fn a_unit_without_a_root_says_nothing_about_where_it_runs() {
+        let unit = systemd_unit(
+            &PathBuf::from("/opt/rgy/bin/searchd"),
+            &[],
+            "rgy-searchd.service",
+        );
+        assert!(!unit.contains("WorkingDirectory"), "{unit}");
+    }
+
+    #[test]
+    fn the_plist_says_where_the_daemon_runs() {
+        let plist = launchd_plist(
+            &PathBuf::from("/opt/rgy/bin/searchd"),
+            &args(&["--root", "/Users/u"]),
+            "com.rgy.searchd",
+        );
+        assert!(plist.contains("<key>WorkingDirectory</key>"), "{plist}");
+        assert!(plist.contains("<string>/Users/u</string>"), "{plist}");
+    }
+
+    #[test]
+    fn a_root_with_a_space_is_quoted_in_the_task_command() {
+        let command = windows_task_command(
+            &PathBuf::from(r"C:\rgy\searchd.exe"),
+            &args(&["--root", r"C:\Users\Ana Maria"]),
+        );
+        assert_eq!(
+            command,
+            r#""C:\rgy\searchd.exe" --root "C:\Users\Ana Maria""#
+        );
     }
 }

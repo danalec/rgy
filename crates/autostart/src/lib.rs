@@ -41,6 +41,7 @@ extern crate std;
 
 use alloc::format;
 use alloc::string::{String, ToString};
+use alloc::vec;
 use alloc::vec::Vec;
 
 /// Which platform, which mechanism — decided before anything is touched.
@@ -64,6 +65,227 @@ pub mod macos;
 pub mod windows;
 
 pub use plan::{Mechanism, Platform, choose_mechanism, default_name, detect_platform};
+
+/// The daemon's file name on this platform.
+///
+/// The release ships the daemon next to this tool, so the name looked for
+/// is the name the release ships it under: `searchd.exe` on Windows,
+/// `searchd` everywhere else.
+pub const DAEMON_NAME: &str = if cfg!(windows) {
+    "searchd.exe"
+} else {
+    "searchd"
+};
+
+/// The arguments the daemon is registered with, when the user names none.
+///
+/// The root is **always** explicit, and that is the whole point of it.
+/// The daemon starts with `--root .`, and the directory a login entry
+/// starts in is not the user's home: it is `C:\Windows\System32` on
+/// Windows and `/` on macOS. A daemon that inherits the platform's login
+/// directory indexes the wrong tree — the System32, or the root of the
+/// disk — and says nothing about it.
+///
+/// The transport is named too, and for the same reason: the daemon's own
+/// default is stdio, and stdio ends. A login entry has no standard input
+/// to read from, so the daemon reads one EOF and exits — registered,
+/// started, and gone. See [`crate::plan::Transport`].
+pub fn default_args(root: &str, listen: &str) -> Vec<String> {
+    vec![
+        "--root".to_string(),
+        root.to_string(),
+        "--listen".to_string(),
+        listen.to_string(),
+    ]
+}
+
+/// The arguments actually registered: the user's, with the root and the
+/// transport in front of them unless the user named one of their own.
+///
+/// A user who says `--args "--root /data"` gets exactly that root; a user
+/// who says `--args "--listen uds:/tmp/x.sock"` gets exactly that
+/// transport. The root and the transport are the tool's business when the
+/// user stays quiet about them, and the user's when they do not.
+pub fn effective_args(user: &[String], root: &str, listen: &str) -> Vec<String> {
+    let names_a_root = user
+        .iter()
+        .any(|arg| arg == "--root" || arg.starts_with("--root="));
+    let names_a_listen = user
+        .iter()
+        .any(|arg| arg == "--listen" || arg.starts_with("--listen="));
+
+    let mut args = Vec::new();
+    if !names_a_root && !root.is_empty() {
+        args.push("--root".to_string());
+        args.push(root.to_string());
+    }
+    if !names_a_listen && !listen.is_empty() {
+        args.push("--listen".to_string());
+        args.push(listen.to_string());
+    }
+    args.extend_from_slice(user);
+    args
+}
+
+/// The words of a command line, with the double quotes honoured.
+///
+/// The registered command is read back from the platform's own artefact —
+/// a unit file, a plist, a scheduled task — and the user may have edited
+/// it. A path with a space in it is one word, and a tokenizer that splits
+/// on whitespace alone would turn it into two.
+pub fn command_words(command: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    let mut started = false;
+    for ch in command.chars() {
+        match ch {
+            '"' => {
+                quoted = !quoted;
+                started = true;
+            }
+            c if c.is_whitespace() && !quoted => {
+                if started {
+                    words.push(core::mem::take(&mut current));
+                    started = false;
+                }
+            }
+            c => {
+                current.push(c);
+                started = true;
+            }
+        }
+    }
+    if started {
+        words.push(current);
+    }
+    words
+}
+
+/// The root a registered command indexes, if it names one.
+///
+/// Both spellings are read: `--root /data` and `--root=/data`. The
+/// answer is the tree the daemon will walk, and the doctor prints it so
+/// the user can see what their daemon is looking at.
+pub fn root_of(command: &str) -> Option<String> {
+    let words = command_words(command);
+    let mut iter = words.iter();
+    while let Some(word) = iter.next() {
+        if word == "--root" {
+            return iter.next().cloned();
+        }
+        if let Some(root) = word.strip_prefix("--root=") {
+            return Some(root.to_string());
+        }
+    }
+    None
+}
+
+/// The transport a registered command listens on, if it names one.
+///
+/// Both spellings are read: `--listen uds:/path` and `--listen=uds:/path`.
+/// The answer is where the daemon takes its clients, and the doctor prints
+/// it: a client that does not know where the daemon is cannot reach it.
+pub fn listen_of(command: &str) -> Option<String> {
+    let words = command_words(command);
+    let mut iter = words.iter();
+    while let Some(word) = iter.next() {
+        if word == "--listen" {
+            return iter.next().cloned();
+        }
+        if let Some(value) = word.strip_prefix("--listen=") {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+/// The directory the platform keeps its cache in, given the environment.
+///
+/// The same shape the daemon's own index uses (`name-core`'s
+/// `persist::cache_dir_from`): `XDG_CACHE_HOME` when it is set, else
+/// `~/.cache` on Linux and `~/Library/Caches` on macOS; Windows keeps
+/// `%LOCALAPPDATA%`, and `%USERPROFILE%\AppData\Local` when that is unset.
+///
+/// The socket goes in the same place, so the daemon's index and the
+/// socket the clients reach it through are in one directory.
+///
+/// Split from the path logic so the test does not have to mutate the
+/// process environment: a test that sets `HOME` races every other test in
+/// the process.
+#[cfg(feature = "std")]
+pub fn cache_dir_from(
+    xdg: Option<&std::ffi::OsStr>,
+    home: Option<&std::ffi::OsStr>,
+    local: Option<&std::ffi::OsStr>,
+) -> Option<std::path::PathBuf> {
+    let some =
+        |v: Option<&std::ffi::OsStr>| v.filter(|s| !s.is_empty()).map(std::path::PathBuf::from);
+    if cfg!(windows) {
+        return some(local).or_else(|| some(home).map(|h| h.join("AppData").join("Local")));
+    }
+    if cfg!(target_os = "macos") {
+        return some(xdg).or_else(|| some(home).map(|h| h.join("Library").join("Caches")));
+    }
+    some(xdg).or_else(|| some(home).map(|h| h.join(".cache")))
+}
+
+/// The platform's cache directory.
+///
+/// `None` when the platform has no home to speak of: a machine with
+/// neither `XDG_CACHE_HOME` nor `HOME` has nowhere to keep a socket, and
+/// the install says so rather than inventing a path in a shared
+/// directory.
+#[cfg(feature = "std")]
+pub fn cache_dir() -> Option<std::path::PathBuf> {
+    cache_dir_from(
+        std::env::var_os("XDG_CACHE_HOME").as_deref(),
+        std::env::var_os(home_key()).as_deref(),
+        std::env::var_os("LOCALAPPDATA").as_deref(),
+    )
+}
+
+/// The socket the registered daemon listens on, under a cache directory.
+///
+/// It lives in the `rgy` directory the daemon already keeps its index in:
+/// one directory for this root's files, in the place the platform owns.
+#[cfg(feature = "std")]
+pub fn socket_path_in(cache_dir: &std::path::Path) -> std::path::PathBuf {
+    cache_dir.join("rgy").join("searchd.sock")
+}
+
+/// The name of the named pipe the registered daemon listens on, for a user.
+///
+/// The pipe namespace belongs to the machine and not to the user, so the
+/// user's own name is part of the name: two people logged into the same
+/// Windows have two daemons, and each one answers on its own pipe.
+///
+/// The name is spelled with the characters a pipe name can carry, and
+/// anything else becomes an underscore — a name the platform will refuse
+/// is a service that does not start.
+pub fn pipe_name_for(user: &str) -> String {
+    let clean: String = user
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if clean.is_empty() {
+        "rgy-searchd".to_string()
+    } else {
+        format!("rgy-searchd-{clean}")
+    }
+}
+
+/// The named pipe the registered daemon listens on.
+#[cfg(feature = "std")]
+pub fn pipe_name() -> String {
+    pipe_name_for(&std::env::var("USERNAME").unwrap_or_default())
+}
 
 /// The mechanism's name, with the fallback's caveat.
 ///
@@ -126,14 +348,15 @@ pub struct Removal {
 /// platform's own variable, so a user who overrides it gets the override.
 #[cfg(feature = "std")]
 pub fn home_dir() -> std::path::PathBuf {
-    #[cfg(windows)]
-    let key = "USERPROFILE";
-    #[cfg(not(windows))]
-    let key = "HOME";
-
-    std::env::var_os(key)
+    std::env::var_os(home_key())
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
+/// The environment variable that holds the user's home directory.
+#[cfg(feature = "std")]
+fn home_key() -> &'static str {
+    if cfg!(windows) { "USERPROFILE" } else { "HOME" }
 }
 
 /// The path as the user should read it.
@@ -173,6 +396,80 @@ pub fn resolve_binary(path: &std::path::Path) -> Result<std::path::PathBuf, Stri
         return Err(format!("{} is not a file", path.display()));
     }
     std::fs::canonicalize(path).map_err(|e| format!("cannot resolve {}: {e}", path.display()))
+}
+
+/// The daemon this tool registers.
+///
+/// Two places are looked at, in this order: the directory this tool is in
+/// — the release installs the two side by side — and the PATH. The error
+/// names both, because "there is no daemon" without saying where it
+/// looked is a sentence the user cannot act on.
+#[cfg(feature = "std")]
+pub fn find_daemon() -> Result<std::path::PathBuf, String> {
+    let sibling = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.to_path_buf()));
+    find_daemon_in(sibling.as_deref(), std::env::var_os("PATH").as_deref())
+}
+
+/// The daemon, looked for in two places.
+///
+/// The two places are a parameter and not the environment, so the search
+/// can be tested without a machine: a test that looks for the daemon on
+/// the machine running it finds the one the build put next to the test
+/// binary, and registers it.
+#[cfg(feature = "std")]
+pub fn find_daemon_in(
+    sibling_dir: Option<&std::path::Path>,
+    path_var: Option<&std::ffi::OsStr>,
+) -> Result<std::path::PathBuf, String> {
+    let mut looked = Vec::new();
+
+    if let Some(dir) = sibling_dir {
+        let candidate = dir.join(DAEMON_NAME);
+        looked.push(candidate.display().to_string());
+        if candidate.is_file() && is_executable(&candidate) {
+            return resolve_binary(&candidate);
+        }
+    }
+
+    if let Some(path) = path_var {
+        for dir in std::env::split_paths(path) {
+            let candidate = dir.join(DAEMON_NAME);
+            if candidate.is_file() && is_executable(&candidate) {
+                return resolve_binary(&candidate);
+            }
+        }
+        looked.push(format!("the PATH ({})", path.to_string_lossy()));
+    }
+
+    Err(format!(
+        "there is no {DAEMON_NAME} next to this tool and none on the PATH.\n  \
+         looked in: {}\n  \
+         give the daemon's path with: --binary <path>",
+        if looked.is_empty() {
+            "nowhere: this tool has no directory and the PATH is empty".to_string()
+        } else {
+            looked.join(", ")
+        }
+    ))
+}
+
+/// Whether the file can be run.
+///
+/// On unix the bit is the answer; on Windows a file that is there is a
+/// file that can be run.
+#[cfg(all(feature = "std", unix))]
+pub fn is_executable(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|meta| meta.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(all(feature = "std", not(unix)))]
+pub fn is_executable(path: &std::path::Path) -> bool {
+    path.is_file()
 }
 
 /// Split a daemon argument string into arguments.
@@ -220,5 +517,250 @@ mod tests {
             ]
         );
         assert!(split_args("   ").is_empty());
+    }
+
+    #[test]
+    fn the_root_is_always_named() {
+        assert_eq!(
+            default_args("/home/u", "uds:/home/u/.cache/rgy/searchd.sock"),
+            vec![
+                "--root".to_string(),
+                "/home/u".to_string(),
+                "--listen".to_string(),
+                "uds:/home/u/.cache/rgy/searchd.sock".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn the_users_arguments_go_after_the_root_and_the_transport() {
+        let user = vec!["--json".to_string()];
+        assert_eq!(
+            effective_args(&user, "/home/u", "uds:/home/u/.cache/rgy/searchd.sock"),
+            vec![
+                "--root".to_string(),
+                "/home/u".to_string(),
+                "--listen".to_string(),
+                "uds:/home/u/.cache/rgy/searchd.sock".to_string(),
+                "--json".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn a_root_the_user_named_wins() {
+        let user = vec!["--root".to_string(), "/data".to_string()];
+        let args = effective_args(&user, "/home/u", "uds:/x");
+        assert!(
+            args.windows(2).any(|pair| pair == ["--root", "/data"]),
+            "{args:?}"
+        );
+        assert!(
+            !args.windows(2).any(|pair| pair == ["--root", "/home/u"]),
+            "the user's root is the one that counts: {args:?}"
+        );
+
+        // The inline spelling is a root too.
+        let inline = vec!["--root=/data".to_string()];
+        let args = effective_args(&inline, "/home/u", "uds:/x");
+        assert!(
+            args.iter().any(|arg| arg == "--root=/data"),
+            "the user's root is kept as it was written: {args:?}"
+        );
+        assert!(
+            !args.iter().any(|arg| arg == "/home/u"),
+            "the tool's root must not be there as well: {args:?}"
+        );
+    }
+
+    #[test]
+    fn a_transport_the_user_named_wins() {
+        let user = vec!["--listen".to_string(), "uds:/tmp/x.sock".to_string()];
+        let args = effective_args(&user, "/home/u", "uds:/home/u/.cache/rgy/searchd.sock");
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--listen", "uds:/tmp/x.sock"]),
+            "{args:?}"
+        );
+        assert!(
+            !args
+                .windows(2)
+                .any(|pair| pair[0] == "--listen" && pair[1].contains(".cache")),
+            "the user's transport is the one that counts: {args:?}"
+        );
+    }
+
+    #[test]
+    fn the_transport_is_read_out_of_a_registered_command() {
+        assert_eq!(
+            listen_of("/opt/rgy/searchd --root /home/u --listen uds:/tmp/x.sock"),
+            Some("uds:/tmp/x.sock".to_string())
+        );
+        assert_eq!(
+            listen_of("/opt/rgy/searchd --listen=pipe:rgy-searchd-ana"),
+            Some("pipe:rgy-searchd-ana".to_string())
+        );
+        assert_eq!(listen_of("/opt/rgy/searchd"), None);
+    }
+
+    #[test]
+    fn the_pipe_name_carries_the_user() {
+        assert_eq!(pipe_name_for("ana"), "rgy-searchd-ana");
+        assert_eq!(pipe_name_for("Ana Maria"), "rgy-searchd-Ana_Maria");
+        assert_eq!(pipe_name_for(""), "rgy-searchd");
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn the_cache_directory_is_the_platforms_own() {
+        if cfg!(windows) {
+            // Windows keeps its local app data, and falls back to the
+            // profile when that is unset.
+            assert_eq!(
+                cache_dir_from(
+                    None,
+                    Some(std::ffi::OsStr::new(r"C:\Users\u")),
+                    Some(std::ffi::OsStr::new(r"C:\Users\u\AppData\Local"))
+                ),
+                Some(std::path::PathBuf::from(r"C:\Users\u\AppData\Local"))
+            );
+            assert_eq!(
+                cache_dir_from(None, Some(std::ffi::OsStr::new(r"C:\Users\u")), None),
+                Some(std::path::PathBuf::from(r"C:\Users\u\AppData\Local"))
+            );
+            return;
+        }
+        assert_eq!(
+            cache_dir_from(None, Some(std::ffi::OsStr::new("/home/u")), None),
+            Some(if cfg!(target_os = "macos") {
+                std::path::PathBuf::from("/home/u/Library/Caches")
+            } else {
+                std::path::PathBuf::from("/home/u/.cache")
+            })
+        );
+        // The XDG variable wins when it is set.
+        assert_eq!(
+            cache_dir_from(
+                Some(std::ffi::OsStr::new("/var/cache/u")),
+                Some(std::ffi::OsStr::new("/home/u")),
+                None
+            ),
+            Some(std::path::PathBuf::from("/var/cache/u"))
+        );
+        assert_eq!(cache_dir_from(None, None, None), None);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn the_socket_lives_where_the_index_lives() {
+        assert_eq!(
+            socket_path_in(std::path::Path::new("/home/u/.cache")),
+            std::path::PathBuf::from("/home/u/.cache/rgy/searchd.sock")
+        );
+    }
+
+    #[test]
+    fn a_quoted_path_is_one_word() {
+        let words = command_words(r#""C:\Program Files\rgy\searchd.exe" --root "C:\Users\a b""#);
+        assert_eq!(
+            words,
+            vec![
+                "C:\\Program Files\\rgy\\searchd.exe".to_string(),
+                "--root".to_string(),
+                "C:\\Users\\a b".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn the_root_is_read_out_of_a_registered_command() {
+        assert_eq!(
+            root_of(r#""C:\rgy\searchd.exe" --root "C:\Users\a b""#),
+            Some("C:\\Users\\a b".to_string())
+        );
+        assert_eq!(
+            root_of("/opt/rgy/searchd --root=/data"),
+            Some("/data".to_string())
+        );
+        assert_eq!(root_of("/opt/rgy/searchd"), None);
+    }
+
+    #[cfg(feature = "std")]
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("rgy-autostart-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a temporary directory");
+        dir
+    }
+
+    /// A file the platform would run.
+    ///
+    /// On unix the bit is the answer, and a file without it is not a
+    /// daemon however much it looks like one.
+    #[cfg(feature = "std")]
+    fn make_runnable(path: &std::path::Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+                .expect("the file is runnable");
+        }
+        #[cfg(not(unix))]
+        let _ = path;
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn the_daemon_next_to_the_tool_is_found() {
+        let dir = temp_dir("find-sibling");
+        let daemon = dir.join(DAEMON_NAME);
+        std::fs::write(&daemon, b"not really a daemon").expect("the file is there");
+        make_runnable(&daemon);
+
+        let found = find_daemon_in(Some(&dir), None).expect("the daemon is found");
+        assert_eq!(found.file_name(), Some(DAEMON_NAME.as_ref()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn the_daemon_on_the_path_is_found() {
+        let dir = temp_dir("find-path");
+        let daemon = dir.join(DAEMON_NAME);
+        std::fs::write(&daemon, b"not really a daemon").expect("the file is there");
+        make_runnable(&daemon);
+
+        let path = std::env::join_paths([&dir]).expect("the PATH is one entry");
+        let found = find_daemon_in(None, Some(path.as_os_str())).expect("the daemon is found");
+        assert_eq!(found.file_name(), Some(DAEMON_NAME.as_ref()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(feature = "std")]
+    #[cfg(unix)]
+    #[test]
+    fn a_file_that_cannot_be_run_is_not_a_daemon() {
+        let dir = temp_dir("find-not-runnable");
+        let daemon = dir.join(DAEMON_NAME);
+        std::fs::write(&daemon, b"not really a daemon").expect("the file is there");
+
+        let err = find_daemon_in(Some(&dir), None).unwrap_err();
+        assert!(err.contains("none on the PATH"), "{err}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn a_daemon_that_is_nowhere_says_where_it_looked() {
+        let dir = temp_dir("find-nothing");
+        let err = find_daemon_in(Some(&dir), None).unwrap_err();
+        assert!(err.contains("next to this tool"), "{err}");
+        assert!(err.contains("none on the PATH"), "{err}");
+        assert!(err.contains("--binary"), "{err}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

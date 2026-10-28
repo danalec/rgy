@@ -1,8 +1,7 @@
 # rgy
 
-Whole-filesystem name search and content search in one stack: fsearch's name
-engine and query ergonomics, zen-rs's Windows discovery, rgx's content engine,
-adapters and pack store. Windows, Linux and macOS.
+Whole-filesystem name search and content search in one stack, rgx's content engine,
+adapters and pack store.
 
 **Which file?** — asked over the whole filesystem, then **what is inside
 it?** in the same query.
@@ -12,13 +11,201 @@ searchctl --root ~ "invoice ext:pdf"      # which file
 searchctl --root ~ "invoice grep:tesla"   # and what is inside it
 ```
 
-## The docs
+## Install
 
-| file | what it is |
+**From crates.io, today:**
+
+```sh
+cargo install rgy-searchctl     # gives you `searchctl`
+```
+
+That is the whole install for the tool you actually type. It needs **Rust
+1.85 or newer** and a **C compiler** (the allocator is C), and it drops the
+`searchctl` binary into `~/.cargo/bin` — already on your PATH if Rust was
+installed the usual way.
+
+The other two binaries are separate crates, because most people only want
+the first one:
+
+```sh
+cargo install rgy-searchd       # the daemon: searchd
+cargo install rgy-autostart     # the login item: rgy-autostart
+```
+
+The **packages** — the winget manifest and the Homebrew formula — are called
+**rgy-search**, and not `rgy`, because `rgy` is taken on crates.io (a GameBoy
+emulator library from 2019). The crates are `rgy-searchctl`, `rgy-searchd`
+and `rgy-autostart`, and the binaries keep the names they have everywhere
+else. The project itself is still rgy.
+
+### The packages that are not out yet
+
+The packaging is in place — the winget manifest, the Homebrew formula, the
+release script, the one-line installers at the top of the repository — but
+the first release has not been pushed, so these install nothing today:
+
+| platform | package | command |
+|---|---|---|
+| Windows | winget | `winget install danalec.rgy-search` |
+| Windows | one-line installer | `irm https://raw.githubusercontent.com/danalec/rgy/main/install.ps1 \| iex` |
+| macOS | Homebrew | `brew tap danalec/rgy https://github.com/danalec/rgy` then `brew install danalec/rgy/rgy-search` |
+| macOS | one-line installer | `curl -fsSL https://raw.githubusercontent.com/danalec/rgy/main/install.sh \| bash` |
+| Linux | one-line installer | `curl -fsSL https://raw.githubusercontent.com/danalec/rgy/main/install.sh \| bash` |
+
+The installers download the release archive, **check its SHA256**, unpack the
+three binaries into `~/.local/bin` (Linux and macOS) or
+`%LOCALAPPDATA%\Programs\rgy` (Windows), add that directory to your PATH,
+and register the daemon to start at login. The archive that matches the
+machine is the one that gets installed: the operating system and the
+architecture decide it. The digest is pinned inside the installer, so a
+substituted download is refused before anything is unpacked.
+
+**When they land, prefer them**: they carry the same three binaries and the
+documents, and they need neither Rust nor a compiler on the machine. Until
+then, `cargo install` is the way in.
+
+### Requirements
+
+Rust **1.85** or newer, and a C compiler. Nothing else — no runtime, no
+service, nothing to configure. The parts that differ per operating system
+(the Windows MFT walk, the Linux change feed, the macOS FSEvents feed) are
+compiled in and chosen by `cfg` at build time, so one package carries
+everything it needs.
+
+## Your first five minutes
+
+Point it at a folder and give it a query in quotes:
+
+```sh
+searchctl --root ~ "invoice"
+```
+
+The first run walks the tree and builds an index of the names; every run
+after it reuses that index. The two progress lines go to **stderr**, so they
+never pollute the output you pipe:
+
+```
+searchctl: rebuilding — no index on disk
+searchctl: indexed 3 entries → C:\Users\danalec\AppData\Local\rgy\caf45dc303365b6b.idx
+C:\Users\danalec\Documents\invoice_2024.pdf
+```
+
+The index lives in the platform's cache folder — `%LOCALAPPDATA%\rgy` on
+Windows, `$XDG_CACHE_HOME/rgy` on Linux, `~/Library/Caches/rgy` on macOS.
+`RGY_INDEX_DIR` puts it somewhere else.
+
+### The query
+
+A query is a list of words, and **every word narrows the answer** — a file
+has to satisfy all of them.
+
+| you write | rgy looks for |
 |---|---|
-| [MANUAL.md](MANUAL.md) | how to use it: the query language, the flags, the daemon, the pack store |
-| [FORMATS.md](FORMATS.md) | what it reads inside a file, format by format |
-| [benchmark/](benchmark/) | the measured tables and the write-ups behind them |
+| `invoice` | anything close to "invoice" — a typo still hits |
+| `'invoice` | a name that *contains* "invoice" |
+| `^invoice` | a name that *starts* with "invoice" |
+| `invoice$` | a name that *ends* with "invoice" |
+| `=invoice` | a name with "invoice" as a whole *word* |
+| `"invoice pdf"` | a name that *contains* "invoice pdf", the space and all |
+| `!invoice` | anything that is **not** close to "invoice" |
+
+Those are the name matchers. These narrow by a property of the file:
+
+| filter | means | example |
+|---|---|---|
+| `ext:` | the file extension | `ext:pdf` |
+| `type:` | what kind of thing it is | `type:dir`, `type:link`, `type:image` |
+| `size:` | how big it is | `size:+10m` (bigger than 10 MB), `size:-1k` |
+| `dir:` | the folder it is in | `dir:documents` |
+| `in:` | where it is | `in:downloads` |
+| `mtime:` | when it changed | `mtime:-7d`, `mtime:today`, `mtime:2024-01-01` |
+| `re:` | the path as a regular expression | `re:\.rs$` |
+| `limit:` | how many hits | `limit:20` |
+| `sort:` | the order of the answers | `sort:score` (the default), `sort:name`, `sort:mtime` |
+
+And three operators look **inside** the file, with `path:line:text` for the
+output — the shape `rg` prints:
+
+| operator | means |
+|---|---|
+| `grep:` | the literal text |
+| `regex:` | a regular expression |
+| `sym:` | the symbols in the file, for code |
+
+Two more things the query understands: `report|invoice` means "report" **or**
+"invoice", and `*.pdf` / `scan?` glob the name.
+
+An unknown `type:` fails closed: a warning on stderr, zero matches, exit 1.
+It never falls back to "search everything".
+
+Three ways to take the answer away:
+
+```sh
+searchctl --root ~ "invoice" --count        # how many hits
+searchctl --root ~ "invoice" --json         # one JSON object per hit
+searchctl --root ~ "invoice" --limit 100    # more than the 50 default
+```
+
+Exit codes: **0** found something, **1** nothing matched, **2** the run
+failed.
+
+## The three binaries
+
+| binary | what it does |
+|---|---|
+| `searchctl` | the command-line tool — the one you type |
+| `searchd` | the daemon: it holds the index warm between queries |
+| `rgy-autostart` | puts the daemon in place at login, and takes it out again |
+
+`rgy` is another name for `searchctl` — the same binary.
+
+`searchctl` on its own is enough for everything you type by hand: it walks
+the tree, so it finds the files that were created while the machine was
+off. The daemon is for scripts, and for a machine you search again and
+again — it holds the index warm between queries.
+
+```sh
+searchd --root ~                                        # one JSON request per line on stdin
+echo '{"op":"search","q":"invoice"}' | searchd --root ~
+
+rgy-autostart install      # the daemon beside the tool, indexing your home
+rgy-autostart status       # what is registered
+rgy-autostart doctor       # what is registered, whether it is up, and what to do
+rgy-autostart uninstall    # take it out
+```
+
+`install` needs nothing: the daemon is the `searchd` beside the tool, and
+the tree it indexes is your home directory. The tree is always written into
+the entry, because the directory a login entry starts in is not your home —
+it is `C:\Windows\System32` on Windows and `/` on macOS, and a daemon that
+inherited that would walk the wrong tree. To index another tree:
+`rgy-autostart install --args "--root /data"`.
+
+Nothing is registered in the administrator's account: it goes into your own
+session — a Task Scheduler task or an `HKCU` run value on Windows, a systemd
+**user** unit on Linux, a launchd agent on macOS. Running the command *is*
+the consent; no dialog, no elevation.
+
+The entry names where the daemon listens: a socket on Linux and macOS, a
+named pipe on Windows. The daemon reads requests from standard input by
+default, and a login entry has no standard input — a daemon registered
+that way would start, walk the tree, and exit. `doctor` prints the line.
+
+## When it goes wrong
+
+- **No results, and a warning on stderr** — an unknown `type:`, or a filter
+  that does not apply. It fails closed, on purpose.
+- **No results, no warning** — the name is not close to what you typed. Drop
+  the quotes to go fuzzy, and check the filter: `ext:pdf`, not `ext:.pdf`.
+- **The first run is slow** — it is walking the tree. Every run after it is
+  fast.
+- **A PDF search finds nothing** — expected today. `grep:` reads the file's
+  own bytes, and a PDF's text is compressed. The adapters that read inside
+  PDFs are not wired into the search path yet; that is what
+  [rgx](https://github.com/danalec/rgx) is for.
+
+The [manual](MANUAL.md) has the whole query language, every flag, the daemon
+protocol and the pack store.
 
 ## rgy or rgx?
 
@@ -59,21 +246,15 @@ underneath and nothing to configure.
 > [`benchmark/`](https://github.com/danalec/rgx/tree/main/benchmark); quote
 > them with their run date and host.
 
-## Requirements
+## Build and try it from the source
 
 Rust **1.85** or newer. The workspace mixes editions on purpose: the `rgy`
 crates and binaries are edition 2024, the vendored `rgx` crates stay on 2021
 so they keep diffing cleanly against upstream.
 
-Nothing to install beyond the OS. Everything else — the allocator, the
-terminal layer, the SIMD — is compiled in; the platform code is chosen by
-`cfg` at build time.
-
-There are packages for all three operating systems — winget, Homebrew and
-the tarball — but none of them has been published yet. The
-[manual](MANUAL.md#2-install-it) has the commands and the state.
-
-## Try it
+```sh
+cargo build --release            # the whole workspace
+```
 
 ```sh
 # name: fuzzy words, filters narrow, hits ranked
@@ -92,9 +273,6 @@ echo '["-e","Listing"]' | cargo run --release -p rgy-searchd -- --root crates --
 `type:` names kinds (`file`/`dir`/`link`, media kinds like `image`); a bare
 extension goes in `ext:`. An unknown `type:` fails closed — warning on
 stderr, zero matches, exit 1.
-
-The [manual](MANUAL.md) has the rest: the query language, the flags, the
-daemon, and the pack store.
 
 ## Status
 

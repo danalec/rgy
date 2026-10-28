@@ -322,11 +322,15 @@ else
 fi
 
 # --- 7. the installer pins ----------------------------------------------------
-# Both installers carry the digest of the artifact they are allowed to
-# install. The pins are release data: they are rewritten here, from the
-# artifacts this release carries, and a pin that does not end up naming
-# the release's own artifact is a failure -- a hand-maintained pin is a pin
-# that is wrong on the day after the release.
+# Both installers carry one digest per architecture they may install, and
+# the digests are release data: they are rewritten here, from the assets
+# this release carries, and a pin that does not end up naming the release's
+# own artifact is a failure -- a hand-maintained pin is a pin that is wrong
+# on the day after the release.
+#
+# An asset this release does not carry leaves its pin at the placeholder.
+# The installer then says that there is no release for that platform yet,
+# which is true -- and better than a digest of an archive that is not there.
 set_pin() {
     file="$1"; sha="$2"; pattern="$3"
     if [ ! -f "$file" ]; then
@@ -349,9 +353,12 @@ set_pin() {
 }
 
 digest_of() {
-    # The name, not a suffix: the release carries a portable archive and
-    # two tuned ones, and the installer is allowed to install the portable
-    # one only.
+    # The archive itself, when it is here.
+    if [ -f ".dist/$1" ]; then
+        sha256sum ".dist/$1" | cut -d' ' -f1 | tr 'a-f' 'A-F'
+        return 0
+    fi
+    # The digest file, which is what the other platforms wrote.
     [ -f .dist/SHA256SUMS ] || return 1
     awk -v n="$1" '$2 == n { print toupper($1); exit }' .dist/SHA256SUMS
 }
@@ -359,18 +366,32 @@ digest_of() {
 if [ "$dry_run" -eq 1 ]; then
     echo "[dry-run] installer pins -> version $tag"
 else
-    win_sha=$(digest_of "rgy-v$version-x86_64-windows.zip")
-    lin_sha=$(digest_of "rgy-v$version-x86_64-linux.tar.gz")
-    if [ -n "$lin_sha" ]; then
-        set_pin install.sh "$lin_sha" '^(expected=")[0-9A-Fa-f]{64}(")$'
-    else
-        echo "install.sh pin: not touched (no Linux archive in .dist/)"
-    fi
-    if [ -n "$win_sha" ]; then
-        set_pin install.ps1 "$win_sha" "^(\\\$expected = ')[0-9A-Fa-f]{64}(')$"
-    else
-        echo "install.ps1 pin: not touched (no Windows archive in .dist/)"
-    fi
+    placeholder="0000000000000000000000000000000000000000000000000000000000000000"
+    # The pins, and the line each one lives on: the file, the asset, and
+    # the pattern that keeps the name and the quotes and replaces only the
+    # digest between them. The name, not a suffix: the release carries a
+    # portable archive and two tuned ones, and the installer is allowed to
+    # install the portable one only.
+    pins=(
+        "install.ps1|x86_64-windows.zip|^([[:space:]]*'x86_64-windows\.zip'[[:space:]]*=[[:space:]]*')[0-9A-Fa-f]{64}(')$"
+        "install.ps1|aarch64-windows.zip|^([[:space:]]*'aarch64-windows\.zip'[[:space:]]*=[[:space:]]*')[0-9A-Fa-f]{64}(')$"
+        "install.sh|x86_64-linux.tar.gz|^(expected_linux_x86_64=\")[0-9A-Fa-f]{64}(\")$"
+        "install.sh|aarch64-linux.tar.gz|^(expected_linux_aarch64=\")[0-9A-Fa-f]{64}(\")$"
+        "install.sh|x86_64-apple-darwin.tar.gz|^(expected_macos_x86_64=\")[0-9A-Fa-f]{64}(\")$"
+        "install.sh|aarch64-apple-darwin.tar.gz|^(expected_macos_aarch64=\")[0-9A-Fa-f]{64}(\")$"
+    )
+    for pin in "${pins[@]}"; do
+        file="${pin%%|*}"
+        rest="${pin#*|}"
+        asset="${rest%%|*}"
+        pattern="${rest#*|}"
+        digest=$(digest_of "rgy-v$version-$asset")
+        if [ -z "$digest" ]; then
+            echo "installer pin: rgy-v$version-$asset is not in this release; the pin stays a placeholder"
+            digest="$placeholder"
+        fi
+        set_pin "$file" "$digest" "$pattern"
+    done
 fi
 
 # --- 8. winget -------------------------------------------------------------

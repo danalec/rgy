@@ -60,21 +60,28 @@ What the packages will be:
 | Windows | one-line installer | `irm https://raw.githubusercontent.com/danalec/rgy/main/install.ps1 \| iex` |
 | macOS | Homebrew | `brew tap danalec/rgy https://github.com/danalec/rgy` then `brew install danalec/rgy/rgy-search` |
 | macOS | Homebrew core, once the pull request is merged | `brew install rgy-search` |
+| macOS | one-line installer | `curl -fsSL https://raw.githubusercontent.com/danalec/rgy/main/install.sh \| bash` |
 | Linux | one-line installer | `curl -fsSL https://raw.githubusercontent.com/danalec/rgy/main/install.sh \| bash` |
+
+The one-line installer picks the archive that matches the machine: the
+operating system and the architecture decide it, and an aarch64 machine
+never gets the x86_64 binary.
 
 The package is called **rgy-search** because `rgy` is taken on crates.io
 (a GameBoy emulator library from 2019). The binaries inside keep the names
 they have everywhere else, and the project itself is still rgy.
 
 The one-line installers download the release archive, check its digest, put
-the three binaries in `~/.local/bin` (Linux) or `%LOCALAPPDATA%\Programs\rgy`
-(Windows) and add that directory to your PATH. The digest is **pinned in
-the installer**: the installer carries the digest of the one artifact it is
+the three binaries in `~/.local/bin` (Linux and macOS) or
+`%LOCALAPPDATA%\Programs\rgy` (Windows), add that directory to your PATH,
+and register the daemon to start at login. The digest is **pinned in the
+installer**: the installer carries the digest of the one artifact it is
 allowed to install, so a substituted download is refused before anything is
 unpacked. The pins are release data — the release flow rewrites them from
 the archive it has just built.
 
-Each package carries three binaries and the documents:
+Each package carries three binaries, the documents, and the command the
+project is named after:
 
 | binary | what it does |
 |---|---|
@@ -82,22 +89,60 @@ Each package carries three binaries and the documents:
 | `searchd` | the daemon: it holds the index warm between queries |
 | `rgy-autostart` | puts the daemon in place at login, and takes it out again |
 
+| command | what it is |
+|---|---|
+| `rgy` | another name for `searchctl` — the same binary |
+
 ### Starting the daemon at login
 
-The daemon is what makes a search find the files that were created while the
-machine was off. `rgy-autostart` registers it, and running the command *is*
-the consent: the tool never asks for elevation and never opens a dialog.
+`searchctl` walks the tree it is given, so it answers on its own: the
+daemon is what keeps an index warm between queries, and it is the daemon
+that has to be there at login for that to happen.
+
+`rgy-autostart` registers it, and running the command *is* the consent:
+the tool never asks for elevation and never opens a dialog.
 
 ```sh
-rgy-autostart install --binary /usr/local/bin/searchd   # the daemon's path
-rgy-autostart status                                    # what is registered
-rgy-autostart uninstall                                 # take it out
+rgy-autostart install      # the daemon beside the tool, indexing your home
+rgy-autostart status       # what is registered
+rgy-autostart doctor       # what is registered, whether it is up, and what to do
+rgy-autostart uninstall    # take it out
 ```
+
+`install` needs nothing: the daemon is the `searchd` beside the tool, and
+the tree it indexes is your home directory. The one-line installers do this
+for you; the winget package cannot, so run `rgy-autostart install` once
+after it.
 
 What gets registered depends on the operating system: a Task Scheduler task
 (or the `HKCU` run value) on Windows, a systemd **user** unit on Linux, a
 launchd agent on macOS. The tool prints what it wrote, and what it wrote is
 a plain text file you can read and edit.
+
+The tree the daemon indexes is written into the entry, because the
+directory a login entry starts in is not your home: it is
+`C:\Windows\System32` on Windows and `/` on macOS. A daemon that inherited
+that would walk the wrong tree, and would say nothing about it. To index
+another tree, say so:
+
+```sh
+rgy-autostart install --args "--root /data"
+```
+
+The entry also names where the daemon listens, and that is not decoration.
+The daemon's own default reads its requests from standard input, and a
+login entry has no standard input: the daemon would start, walk the tree,
+and exit — registered, and gone. So the registered daemon listens on a
+socket (`~/.cache/rgy/searchd.sock` on Linux and macOS) or on a named pipe
+(`\\.\pipe\rgy-searchd-<you>` on Windows). `doctor` prints the line, so a
+client knows where to reach the daemon:
+
+```
+registered: yes (systemd user unit)
+running:    yes
+root:       /home/you
+listens:    uds:/home/you/.cache/rgy/searchd.sock
+```
 
 ## 3. Build it
 

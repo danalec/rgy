@@ -149,6 +149,32 @@ pub fn remove_run_value(value_name: &str) -> Result<bool, String> {
 /// would write: the user may have changed the task, and the changed task
 /// is the one that runs.
 pub fn task_command(task_name: &str) -> Option<String> {
+    let text = task_query(task_name)?;
+    task_field(
+        &text,
+        &["Task To Run", "Para Executar", "Tarea para ejecutar"],
+    )
+}
+
+/// The task's status, in the language this Windows speaks.
+///
+/// "Running" on an English one, "Em execução" on a Portuguese one. The
+/// doctor asks whether the daemon is up, and a status that comes back
+/// empty because the field was called something else is a status that
+/// says nothing about anything.
+pub fn task_status(task_name: &str) -> Option<String> {
+    let text = task_query(task_name)?;
+    task_field(&text, &["Status", "Estado"])
+}
+
+/// Whether a status says the task is running now.
+pub fn status_is_running(status: &str) -> bool {
+    let text = status.to_lowercase();
+    text.contains("running") || text.contains("execução") || text.contains("ejecución")
+}
+
+/// The task scheduler's own answer about a task.
+fn task_query(task_name: &str) -> Option<String> {
     let output = std::process::Command::new("schtasks")
         .arg("/Query")
         .arg("/TN")
@@ -161,17 +187,29 @@ pub fn task_command(task_name: &str) -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    let text = String::from_utf8_lossy(&output.stdout).to_string();
-    text.lines()
-        .find_map(|line| {
-            let (key, value) = line.split_once(':')?;
-            if key.trim().eq_ignore_ascii_case("Task To Run") {
-                Some(value.trim().to_string())
-            } else {
-                None
+    Some(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// The value of a field in the task's listing.
+///
+/// The field names are the ones the scheduler prints, and it prints them
+/// in the system's language. A field this function does not know is a
+/// field whose value is not there, and the caller says so rather than
+/// guessing.
+fn task_field(text: &str, names: &[&str]) -> Option<String> {
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let key = key.trim();
+        if names.iter().any(|name| key.eq_ignore_ascii_case(name)) {
+            let value = value.trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
             }
-        })
-        .filter(|value| !value.is_empty())
+        }
+    }
+    None
 }
 
 /// The `Run` value's data, if the value is there.
@@ -277,5 +315,43 @@ mod tests {
     fn the_state_knows_when_nothing_is_registered() {
         let state = State::default();
         assert!(!state.registered());
+    }
+
+    #[test]
+    fn a_field_is_read_out_of_the_task_listing() {
+        let listing = "Folder: \\\nTaskName:                         \\rgy-searchd\nStatus:                               Running\nTask To Run:                          C:\\rgy\\searchd.exe --root C:\\Users\\u\n";
+        assert_eq!(
+            task_field(listing, &["Task To Run", "Para Executar"]),
+            Some("C:\\rgy\\searchd.exe --root C:\\Users\\u".to_string())
+        );
+        assert_eq!(
+            task_field(listing, &["Status", "Estado"]),
+            Some("Running".to_string())
+        );
+        assert_eq!(task_field(listing, &["Nothing Like This"]), None);
+    }
+
+    #[test]
+    fn the_task_listing_is_read_in_the_language_the_windows_speaks() {
+        // A Portuguese Windows says "Para Executar" where an English one
+        // says "Task To Run". The command line is the same either way.
+        let listing = "Nome da Tarefa:                     \\rgy-searchd\nStatus:                               Em execução\nPara Executar:                       C:\\rgy\\searchd.exe\n";
+        assert_eq!(
+            task_field(listing, &["Task To Run", "Para Executar"]),
+            Some("C:\\rgy\\searchd.exe".to_string())
+        );
+        assert_eq!(
+            task_field(listing, &["Status", "Estado"]),
+            Some("Em execução".to_string())
+        );
+    }
+
+    #[test]
+    fn a_running_task_says_so_in_any_of_its_languages() {
+        assert!(status_is_running("Running"));
+        assert!(status_is_running("Em execução"));
+        assert!(status_is_running("En ejecución"));
+        assert!(!status_is_running("Ready"));
+        assert!(!status_is_running("Disabled"));
     }
 }

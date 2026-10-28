@@ -254,13 +254,20 @@ mkdir -p "$stage"
 cp "$exe_dir/searchctl" "$stage/"
 cp "$exe_dir/searchd" "$stage/"
 cp "$exe_dir/rgy-autostart" "$stage/"
+# The command the project is named after: a link to the one searchctl.
+#
+# It travels with the release, so every path that unpacks the archive --
+# the one-line installer, a package manager, a tarball by hand -- gives
+# the user the name the project has. A copy of the binary would be a
+# second binary to keep in step with the first.
+ln -sf searchctl "$stage/rgy"
 for doc in README.md MANUAL.md FORMATS.md COPYING NOTICE LICENSE-APACHE LICENSE-MIT LICENSE-MIT-FSEARCH; do
     [ -f "$repo/$doc" ] && cp "$repo/$doc" "$stage/"
 done
 
 archive_name="rgy-v$version-$asset.tar.gz"
 archive="$out/$archive_name"
-tar -czf "$archive" -C "$stage" searchctl searchd rgy-autostart README.md MANUAL.md FORMATS.md COPYING NOTICE LICENSE-APACHE LICENSE-MIT LICENSE-MIT-FSEARCH
+tar -czf "$archive" -C "$stage" searchctl searchd rgy-autostart rgy README.md MANUAL.md FORMATS.md COPYING NOTICE LICENSE-APACHE LICENSE-MIT LICENSE-MIT-FSEARCH
 echo "packed: .dist/$archive_name"
 
 # --- 7. the digest ----------------------------------------------------------

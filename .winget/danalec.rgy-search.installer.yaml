@@ -15,6 +15,9 @@ NestedInstallerFiles:
     PortableCommandAlias: searchd
   - RelativeFilePath: rgy-autostart.exe
     PortableCommandAlias: rgy-autostart
+  # The command the project is named after: the same binary, another name.
+  - RelativeFilePath: rgy.exe
+    PortableCommandAlias: rgy
 InstallModes:
   - silent
   - interactive

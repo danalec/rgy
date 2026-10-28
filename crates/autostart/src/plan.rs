@@ -7,6 +7,9 @@
 //! do the weaker thing, and a pure function is testable from any operating
 //! system: the rule is written down once and every platform obeys it.
 
+use alloc::format;
+use alloc::string::String;
+
 /// The operating systems this tool knows how to arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Platform {
@@ -117,6 +120,49 @@ pub fn choose_mechanism(platform: Platform, startup_task_tool: bool) -> Option<M
     }
 }
 
+/// The transport the registered daemon listens on.
+///
+/// The daemon's own default is stdio, and stdio has an end: a daemon
+/// started at login has its standard input closed, so it reads one EOF and
+/// exits. The entry is registered, the daemon starts, it walks the tree,
+/// and then it is gone — and `Restart=on-failure` does not bring it back,
+/// because an exit with a zero status is not a failure. The service looks
+/// armed, and it is dead.
+///
+/// A registered daemon listens on a transport that has no end instead: a
+/// unix socket on the unix platforms, a named pipe on Windows. Both wait
+/// for a client, and neither one ever sees an end of file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transport {
+    /// A unix socket, at a path.
+    UnixSocket,
+    /// A Windows named pipe — `\\.\pipe\<name>`.
+    NamedPipe,
+}
+
+/// The transport this platform's registered daemon listens on.
+///
+/// `None` for a platform this tool does not arm at all.
+pub fn transport(platform: Platform) -> Option<Transport> {
+    match platform {
+        Platform::Windows => Some(Transport::NamedPipe),
+        Platform::Linux | Platform::MacOs => Some(Transport::UnixSocket),
+        Platform::Unsupported => None,
+    }
+}
+
+/// The `--listen` argument that names the transport.
+///
+/// The daemon's own spelling: `uds:<path>` for a unix socket, and
+/// `pipe:<name>` for a named pipe — the daemon puts the `\\.\pipe\`
+/// prefix on the name itself, so the argument carries the name alone.
+pub fn listen_arg(transport: Transport, endpoint: &str) -> String {
+    match transport {
+        Transport::UnixSocket => format!("uds:{endpoint}"),
+        Transport::NamedPipe => format!("pipe:{endpoint}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,5 +225,29 @@ mod tests {
         assert_eq!(default_name(Platform::MacOs), "com.rgy.searchd");
         assert_eq!(default_name(Platform::Linux), "rgy-searchd");
         assert_eq!(default_name(Platform::Windows), "rgy-searchd");
+    }
+
+    #[test]
+    fn the_unix_platforms_listen_on_a_socket_and_windows_on_a_pipe() {
+        assert_eq!(
+            transport(Platform::Linux),
+            Some(Transport::UnixSocket),
+            "a unix socket has no end of file"
+        );
+        assert_eq!(transport(Platform::MacOs), Some(Transport::UnixSocket));
+        assert_eq!(transport(Platform::Windows), Some(Transport::NamedPipe));
+        assert_eq!(transport(Platform::Unsupported), None);
+    }
+
+    #[test]
+    fn the_listen_argument_is_the_daemons_own_spelling() {
+        assert_eq!(
+            listen_arg(Transport::UnixSocket, "/home/u/.cache/rgy/searchd.sock"),
+            "uds:/home/u/.cache/rgy/searchd.sock"
+        );
+        assert_eq!(
+            listen_arg(Transport::NamedPipe, "rgy-searchd-ana"),
+            "pipe:rgy-searchd-ana"
+        );
     }
 }

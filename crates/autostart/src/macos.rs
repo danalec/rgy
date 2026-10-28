@@ -165,6 +165,40 @@ pub fn is_loaded(label: &str) -> Option<bool> {
     Some(output.status.success())
 }
 
+/// The agent's state, as `launchctl print` says it.
+///
+/// The line is `state = running`, in launchd's own word for it: the agent
+/// is loaded, and the daemon behind it is up. The doctor asks, because
+/// "registered" and "running" are two different questions and only one of
+/// them is answered by the file being there.
+pub fn agent_state(label: &str) -> Option<String> {
+    let uid = uid().ok()?;
+    let output = std::process::Command::new("launchctl")
+        .arg("print")
+        .arg(format!("gui/{uid}/{label}"))
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    state_from(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// The state line out of what `launchctl print` said.
+fn state_from(text: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let line = line.trim();
+        line.strip_prefix("state = ")
+            .map(|state| state.trim().to_string())
+            .filter(|state| !state.is_empty())
+    })
+}
+
+/// Whether a launchd state says the agent is running.
+pub fn state_is_running(state: &str) -> bool {
+    state.trim().eq_ignore_ascii_case("running")
+}
+
 /// The macOS side, right now.
 #[derive(Debug, Clone, Default)]
 pub struct State {
@@ -279,5 +313,24 @@ mod tests {
         let command = registered_command(&home, label).expect("the command is there");
         assert_eq!(command, "/opt/rgy/bin/searchd --json");
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn the_state_is_read_out_of_what_launchctl_printed() {
+        let printed = "com.rgy.searchd = {\n\tactive count = 1\n\tstate = running\n\tpath = /opt/rgy/bin/searchd\n}";
+        assert_eq!(
+            state_from(printed),
+            Some("running".to_string()),
+            "the state line is the one that says whether the daemon is up"
+        );
+        assert_eq!(state_from("com.rgy.searchd = {\n\tpath = /x\n}"), None);
+    }
+
+    #[test]
+    fn a_running_agent_says_so() {
+        assert!(state_is_running("running"));
+        assert!(state_is_running("Running"));
+        assert!(!state_is_running("exited"));
+        assert!(!state_is_running("waiting"));
     }
 }

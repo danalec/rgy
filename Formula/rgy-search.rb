@@ -30,6 +30,9 @@ class RgySearch < Formula
 
   def install
     bin.install "searchctl", "searchd", "rgy-autostart"
+    # The command the project is named after: another name for the one
+    # searchctl, and a link rather than a copy.
+    bin.install_symlink "rgy" => "searchctl"
   end
 
   test do

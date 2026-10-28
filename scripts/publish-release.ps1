@@ -337,11 +337,15 @@ if (-not $zip) {
 }
 
 # --- 7. the installer pins ----------------------------------------------------
-# Both installers carry the digest of the artifact they are allowed to
-# install. The pins are release data: they are rewritten here, from the
-# artifacts this release carries, and a pin that does not end up naming
-# the release's own artifact is a failure -- a hand-maintained pin is a pin
-# that is wrong on the day after the release.
+# Both installers carry one digest per architecture they may install, and
+# the digests are release data: they are rewritten here, from the artifacts
+# this release carries, and a pin that does not end up naming the release's
+# own artifact is a failure -- a hand-maintained pin is a pin that is wrong
+# on the day after the release.
+#
+# An asset this release does not carry leaves its pin at the placeholder.
+# The installer then says that there is no release for that platform yet,
+# which is true -- and better than a digest of an archive that is not there.
 function Set-InstallerPin([string]$file, [string]$version, [string]$sha, [string]$pattern) {
     if (-not (Test-Path $file)) {
         Write-Host "installer pin: $file not found, skipped"
@@ -365,31 +369,49 @@ function Set-InstallerPin([string]$file, [string]$version, [string]$sha, [string
     Write-Host "pin updated: $file -> $version $sha"
 }
 
-$linuxSha = $null
-$sumsFile = ".dist\SHA256SUMS"
-if (Test-Path $sumsFile) {
-    foreach ($line in (Get-Content $sumsFile)) {
-        # The portable Linux archive, by its exact name: the release also
-        # carries the AVX2 and the Zen 4 tarballs, and the installer is
-        # allowed to install the portable one only.
-        if ($line -match '^([0-9a-fA-F]{64})\s+(rgy-v' + [regex]::Escape($Version) + '-x86_64-linux\.tar\.gz)$') {
-            $linuxSha = $Matches[1].ToUpper()
+# The digest of an asset this release carries.
+#
+# The archive itself when it is here, and the digest file when it is not:
+# the file is what the other platforms wrote into the same directory.
+function Get-AssetDigest([string]$name) {
+    $path = Join-Path ".dist" $name
+    if (Test-Path $path) {
+        return (Get-FileHash $path -Algorithm SHA256).Hash.ToUpper()
+    }
+    $sumsFile = ".dist\SHA256SUMS"
+    if (Test-Path $sumsFile) {
+        foreach ($line in (Get-Content $sumsFile)) {
+            if ($line -match '^([0-9a-fA-F]{64})\s+(.+)$' -and $Matches[2] -eq $name) {
+                return $Matches[1].ToUpper()
+            }
         }
     }
+    return $null
 }
+
+$placeholder = '0' * 64
+# The pins, and the line each one lives on. The patterns keep the name and
+# the quotes and replace only the digest between them.
+$pins = @(
+    @{ File = "install.ps1"; Asset = "rgy-v$Version-x86_64-windows.zip"; Pattern = "('x86_64-windows\.zip'\s*=\s*')[0-9A-Fa-f]{64}(')" }
+    @{ File = "install.ps1"; Asset = "rgy-v$Version-aarch64-windows.zip"; Pattern = "('aarch64-windows\.zip'\s*=\s*')[0-9A-Fa-f]{64}(')" }
+    @{ File = "install.sh"; Asset = "rgy-v$Version-x86_64-linux.tar.gz"; Pattern = '(?m)^(expected_linux_x86_64=")[0-9A-Fa-f]{64}(")$' }
+    @{ File = "install.sh"; Asset = "rgy-v$Version-aarch64-linux.tar.gz"; Pattern = '(?m)^(expected_linux_aarch64=")[0-9A-Fa-f]{64}(")$' }
+    @{ File = "install.sh"; Asset = "rgy-v$Version-x86_64-apple-darwin.tar.gz"; Pattern = '(?m)^(expected_macos_x86_64=")[0-9A-Fa-f]{64}(")$' }
+    @{ File = "install.sh"; Asset = "rgy-v$Version-aarch64-apple-darwin.tar.gz"; Pattern = '(?m)^(expected_macos_aarch64=")[0-9A-Fa-f]{64}(")$' }
+)
 
 if ($DryRun) {
     Write-Host "[dry-run] installer pins -> version $tag"
-} elseif ($zip) {
-    $zipSha = (Get-FileHash $zip -Algorithm SHA256).Hash.ToUpper()
-    Set-InstallerPin (Join-Path $root "install.ps1") $tag $zipSha "(\`$expected = ')[0-9A-Fa-f]{64}(')"
-    if ($linuxSha) {
-        Set-InstallerPin (Join-Path $root "install.sh") $tag $linuxSha '(?m)^(expected=")[0-9A-Fa-f]{64}(")$'
-    } else {
-        Write-Host "install.sh pin: not touched (no Linux archive in .dist/)"
-    }
 } else {
-    Write-Host "installer pins: not touched (no Windows archive in .dist/)"
+    foreach ($pin in $pins) {
+        $digest = Get-AssetDigest $pin.Asset
+        if (-not $digest) {
+            $digest = $placeholder
+            Write-Host "installer pin: $($pin.Asset) is not in this release; the pin stays a placeholder"
+        }
+        Set-InstallerPin (Join-Path $root $pin.File) $tag $digest $pin.Pattern
+    }
 }
 
 # --- 8. winget validate -----------------------------------------------------

@@ -268,6 +268,16 @@ New-Item -ItemType Directory -Force -Path $stage | Out-Null
 Copy-Item (Join-Path $exeDir "searchctl.exe") $stage
 Copy-Item (Join-Path $exeDir "searchd.exe") $stage
 Copy-Item (Join-Path $exeDir "rgy-autostart.exe") $stage
+# The command the project is named after: the same binary under another
+# name.
+#
+# It travels with the release, so every path that unpacks the archive --
+# the one-line installer, winget, a zip by hand -- gives the user the name
+# the project has. On unix the archive carries a link; on Windows a link is
+# something only an administrator can make, and the archive carries the
+# binary itself. It is a copy, and the copy is the price of the name:
+# winget only aliases an executable.
+Copy-Item (Join-Path $exeDir "searchctl.exe") (Join-Path $stage "rgy.exe")
 foreach ($doc in @("README.md", "MANUAL.md", "FORMATS.md", "COPYING", "NOTICE",
         "LICENSE-APACHE", "LICENSE-MIT", "LICENSE-MIT-FSEARCH")) {
     if (Test-Path (Join-Path $root $doc)) { Copy-Item (Join-Path $root $doc) $stage }

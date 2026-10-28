@@ -40,16 +40,37 @@ fn a_daemon_that_is_not_there_is_refused() {
     );
 }
 
-#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+/// The daemon is found without being told where it is.
+///
+/// The tool looks for it next to itself and on the PATH, and the help
+/// says so: a user who has to type the path of a binary that is sitting
+/// next to the tool is a user who types it wrong.
+///
+/// The install itself is not exercised here. It would register a startup
+/// entry on the machine running the tests — and the daemon it would find
+/// is the one the build put next to the test binary.
 #[test]
-fn install_without_a_path_says_what_is_missing() {
-    let output = tool().arg("install").output().expect("the tool runs");
-    assert_eq!(output.status.code(), Some(1));
-    let stderr = String::from_utf8_lossy(&output.stderr);
+fn the_daemon_next_to_the_tool_is_the_default() {
+    let output = tool().arg("--help").output().expect("the tool runs");
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stderr.contains("--binary"),
-        "the reason has to name the option: {stderr}"
+        stdout.contains("next to this tool"),
+        "the default has to be in the help: {stdout}"
     );
+}
+
+/// The tree the daemon indexes is named, always.
+///
+/// The daemon's own default is `.`, and a login entry does not start in
+/// the user's home: it starts in `C:\Windows\System32` on Windows and in
+/// `/` on macOS. The root is therefore part of the help, and the doctor
+/// prints the root that was registered.
+#[test]
+fn the_tree_the_daemon_indexes_is_named() {
+    let output = tool().arg("--help").output().expect("the tool runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--root"), "{stdout}");
 }
 
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
@@ -60,6 +81,49 @@ fn status_reports_without_registering_anything() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("platform:"), "{stdout}");
     assert!(stdout.contains("mechanism:"), "{stdout}");
+}
+
+/// The doctor answers without touching the machine.
+///
+/// It is the command a user runs when something is not working, so it
+/// must not change anything to find out what is wrong.
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+#[test]
+fn the_doctor_reports_without_changing_anything() {
+    let output = tool().arg("doctor").output().expect("the tool runs");
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in [
+        "platform:",
+        "daemon:",
+        "registered:",
+        "running:",
+        "root:",
+        "listens:",
+        "path:",
+    ] {
+        assert!(stdout.contains(line), "the report needs `{line}`: {stdout}");
+    }
+}
+
+/// The daemon is registered listening on a transport that has no end.
+///
+/// The daemon's own default reads from standard input, and a login entry
+/// has no standard input: the daemon would start, walk the tree, and exit
+/// -- registered, and gone. So the transport is part of what the tool
+/// promises, in the help the user reads before running it.
+#[test]
+fn the_daemon_listens_where_it_can_be_reached() {
+    let output = tool().arg("--help").output().expect("the tool runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("--listen"),
+        "the transport has to be in the help: {stdout}"
+    );
+    assert!(
+        stdout.contains("socket") && stdout.contains("pipe"),
+        "both transports have to be named: {stdout}"
+    );
 }
 
 /// On a platform with no autostart mechanism, the tool says so and

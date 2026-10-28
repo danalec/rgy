@@ -293,6 +293,13 @@ jobs:
               exit 1
             fi
           done
+          # The command the project is named after travels with the
+          # release: a link to the one searchctl, and a link is what the
+          # unix archive carries.
+          if ! tar -tvf "$archive" | grep -q 'rgy -> searchctl'; then
+            echo "the archive does not carry the rgy link to searchctl"
+            exit 1
+          fi
           # The digest file is what the release publishes beside the
           # archives: an asset without its digest is an asset nobody can
           # check.
@@ -318,7 +325,7 @@ jobs:
             $zip.Dispose()
           }
           $names | ForEach-Object { Write-Host $_ }
-          foreach ($f in @('searchctl', 'searchd', 'rgy-autostart', 'README.md', 'MANUAL.md', 'FORMATS.md', 'COPYING', 'NOTICE', 'LICENSE-APACHE')) {
+          foreach ($f in @('searchctl', 'searchd', 'rgy-autostart', 'rgy.exe', 'README.md', 'MANUAL.md', 'FORMATS.md', 'COPYING', 'NOTICE', 'LICENSE-APACHE')) {
             if (-not ($names | Where-Object { $_ -like "*$f*" })) {
               Write-Host "the archive does not carry $f"
               exit 1

@@ -11,9 +11,18 @@
 //! explicit thing the user does — running this command *is* the consent —
 //! and every failure is a sentence on stderr, never a dialog.
 //!
-//!     rgy-autostart install --binary /usr/local/bin/searchd
+//!     rgy-autostart install
 //!     rgy-autostart status
+//!     rgy-autostart doctor
 //!     rgy-autostart uninstall
+//!
+//! `install` needs nothing: the daemon is the one beside this tool, and
+//! the tree it indexes is the user's home directory. Both defaults exist
+//! because the alternative is a user typing a path he has to guess: the
+//! release installs the two binaries side by side, and a login entry
+//! starts in `C:\Windows\System32` on Windows and in `/` on macOS — so a
+//! daemon that inherits the platform's login directory walks the wrong
+//! tree, and says nothing about it.
 //!
 //! What gets registered depends on the platform:
 //!
@@ -36,10 +45,16 @@ use std::process::ExitCode;
 
 use rgy_autostart::linux;
 use rgy_autostart::macos;
-use rgy_autostart::plan::{Mechanism, Platform, choose_mechanism, default_name, detect_platform};
+use rgy_autostart::plan::{
+    Mechanism, Platform, Transport, choose_mechanism, default_name, detect_platform, listen_arg,
+    transport,
+};
 use rgy_autostart::render::{reg_add_command_line, schtasks_command_line, windows_task_command};
 use rgy_autostart::windows;
-use rgy_autostart::{Removal, Report, mechanism_label, resolve_binary};
+use rgy_autostart::{
+    DAEMON_NAME, Removal, Report, cache_dir, display_path, effective_args, find_daemon, home_dir,
+    listen_of, mechanism_label, pipe_name, resolve_binary, root_of, socket_path_in,
+};
 
 /// The console's output code page.
 ///
@@ -82,21 +97,33 @@ fn usage() -> String {
         "rgy-autostart {version} — register the rgy search daemon to start at login.\n\
          \n\
          usage:\n  \
-           rgy-autostart install --binary <path> [--args \"<args>\"] [--name <name>]\n  \
+           rgy-autostart install [--binary <path>] [--args \"<args>\"] [--name <name>]\n  \
            rgy-autostart uninstall [--name <name>]\n  \
-           rgy-autostart status [--name <name>]\n\
+           rgy-autostart status [--name <name>]\n  \
+           rgy-autostart doctor [--name <name>]\n\
          \n\
          options:\n  \
-           --binary <path>   the daemon to start (required to install)\n  \
-           --args \"<args>\"    arguments handed to the daemon\n  \
+           --binary <path>   the daemon to start (default: the {daemon} next to this tool)\n  \
+           --args \"<args>\"    arguments handed to the daemon (default: --root <your home> --listen <transport>)\n  \
            --name <name>     the name of the entry (default: {default})\n  \
            -h, --help        this text\n  \
            -V, --version     the version\n\
          \n\
          The daemon is registered into your own session: no administrator,\n\
-         no prompt, no dialog. Uninstalling removes what was installed.",
+         no prompt, no dialog. Uninstalling removes what was installed.\n\
+         \n\
+         `install` needs nothing: the daemon is the one beside this tool,\n\
+         and the tree it indexes is your home directory. `doctor` says what\n\
+         is registered, whether the daemon is up, and what to do about it.\n\
+         \n\
+         The daemon is registered listening on a transport that has no end:\n\
+         a socket on Linux and macOS, a named pipe on Windows. The daemon's\n\
+         own default reads from standard input, and a login entry has no\n\
+         standard input to read from: the daemon would start, index the\n\
+         tree, and exit -- registered, and gone.",
         version = env!("CARGO_PKG_VERSION"),
         default = default_name(detect_platform()),
+        daemon = DAEMON_NAME,
     )
 }
 
@@ -147,6 +174,7 @@ fn run(argv: &[String]) -> Result<ExitCode, String> {
         "install" => install(&options),
         "uninstall" => uninstall(&options),
         "status" => status(&options),
+        "doctor" => doctor(&options),
         other => Err(format!("unknown command `{other}`\n\n{}", usage())),
     }
 }
@@ -194,19 +222,77 @@ fn install(options: &Options) -> Result<ExitCode, String> {
         return Err("autostart is not implemented on this operating system".to_string());
     }
 
-    let Some(binary) = options.binary.as_ref() else {
-        return Err(format!("install needs the daemon's path:\n\n{}", usage()));
+    // The daemon is the one next to this tool, or the one on the PATH.
+    // The release installs the two side by side, and a user who has to
+    // type the path is a user who gets it wrong — or who types the path
+    // of a daemon that is not there.
+    let binary = match options.binary.as_ref() {
+        Some(path) => resolve_binary(path)?,
+        None => find_daemon()?,
     };
-    let binary = resolve_binary(binary)?;
     let name = entry_name(options, platform);
-    let args = options.args.clone();
 
-    let report = match platform {
+    // The tree the daemon indexes is always named. The daemon's own
+    // default is `.`, and the directory a login entry starts in is not
+    // the user's home: it is `C:\Windows\System32` on Windows and `/` on
+    // macOS. A daemon that inherits that walks the wrong tree.
+    let root = display_path(&home_dir());
+
+    // The transport is named too, and it has to be one with no end. The
+    // daemon's own default is stdio, and a login entry has no standard
+    // input to read from: the daemon reads one EOF and exits, and the
+    // service is registered, started, and gone. `Restart=on-failure` does
+    // not bring it back, because an exit with a zero status is not a
+    // failure. A socket (unix) or a named pipe (Windows) waits for a
+    // client and never sees an end of file.
+    let transport = transport(platform)
+        .ok_or("this operating system has no transport to register the daemon on")?;
+    let endpoint = match transport {
+        Transport::UnixSocket => {
+            let cache = cache_dir().ok_or(
+                "cannot work out where the platform keeps its cache directory: neither \
+                 XDG_CACHE_HOME nor HOME is set",
+            )?;
+            let socket = socket_path_in(&cache);
+            // The directory has to be there before the daemon binds the
+            // socket in it, and the daemon does not create it: a bind on a
+            // missing directory is a daemon that exits and is restarted
+            // for ever.
+            if let Some(dir) = socket.parent() {
+                std::fs::create_dir_all(dir)
+                    .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+            }
+            let text = display_path(&socket);
+            // A unix socket path is short by the platform's own rules: the
+            // address is 104 bytes on macOS and 108 on Linux, and a path
+            // that does not fit is a daemon that cannot bind.
+            if text.len() > 100 {
+                return Err(format!(
+                    "the socket path is too long for a unix socket ({} bytes): {text}\n  \
+                     pick a shorter one with: --args \"--listen uds:<path>\"",
+                    text.len()
+                ));
+            }
+            text
+        }
+        Transport::NamedPipe => pipe_name(),
+    };
+    let listen = listen_arg(transport, &endpoint);
+
+    let args = effective_args(&options.args, &root, &listen);
+
+    let mut report = match platform {
         Platform::Windows => install_windows(&name, &binary, &args)?,
         Platform::Linux => install_linux(&name, &binary, &args)?,
         Platform::MacOs => install_macos(&name, &binary, &args)?,
         Platform::Unsupported => return Err("autostart is not implemented here".to_string()),
     };
+    report.notes.push(match transport {
+        Transport::UnixSocket => format!("the daemon listens on the socket {endpoint}"),
+        Transport::NamedPipe => {
+            format!("the daemon listens on the named pipe \\\\.\\pipe\\{endpoint}")
+        }
+    });
 
     print_report(&report);
     // 2 says what happened without dressing it up: the entry is written,
@@ -633,6 +719,238 @@ fn status_macos(name: &str) {
     );
 }
 
+/// What the doctor found, in the shape every platform answers in.
+///
+/// The shape is the same on the three operating systems on purpose: a
+/// user who learns one of them has learned the other two, and a report
+/// that changes its lines per platform is a report nobody can read at a
+/// glance.
+struct Diagnosis {
+    /// The daemon, and where it was found.
+    daemon: Option<String>,
+    /// Where the daemon was found.
+    daemon_where: &'static str,
+    /// Whether the entry is registered.
+    registered: bool,
+    /// The mechanism that holds it.
+    mechanism: Mechanism,
+    /// The entry's own name or path.
+    entry: Option<String>,
+    /// Whether the daemon is running now.
+    running: Option<bool>,
+    /// The tree the registered command indexes.
+    root: Option<String>,
+    /// The transport the registered command listens on.
+    listen: Option<String>,
+    /// The directory this tool is in.
+    tool_dir: Option<String>,
+    /// Whether that directory is on the PATH.
+    on_path: Option<bool>,
+    /// The command that starts the daemon, when it is registered and idle.
+    fix_run: Option<String>,
+}
+
+/// Say what is where: the daemon, the entry, whether the daemon is up,
+/// the tree it indexes, and the PATH.
+///
+/// The doctor registers nothing and changes nothing. It is the command a
+/// user runs when something is not working, and a diagnostic that
+/// changes the machine is not a diagnostic.
+fn doctor(options: &Options) -> Result<ExitCode, String> {
+    let platform = detect_platform();
+    if platform == Platform::Unsupported {
+        return Err("autostart is not implemented on this operating system".to_string());
+    }
+    let name = entry_name(options, platform);
+
+    let diagnosis = match platform {
+        Platform::Windows => diagnose_windows(&name),
+        Platform::Linux => diagnose_linux(&name),
+        Platform::MacOs => diagnose_macos(&name),
+        Platform::Unsupported => return Err("autostart is not implemented here".to_string()),
+    };
+    print_diagnosis(&diagnosis);
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The Windows side.
+fn diagnose_windows(name: &str) -> Diagnosis {
+    let state = windows::status(name, name);
+    let command = state.task.clone().or_else(|| state.run_value.clone());
+    // The registry value has no state to ask about: there is no "is it
+    // running" in a string, and the tool says "unknown" rather than
+    // guessing.
+    let running = match &state.task {
+        Some(_) => windows::task_status(name).map(|status| windows::status_is_running(&status)),
+        None => None,
+    };
+    let (daemon, daemon_where) = daemon_and_where();
+    let dir = tool_dir();
+    Diagnosis {
+        daemon,
+        daemon_where,
+        registered: state.registered(),
+        mechanism: if state.task.is_some() {
+            Mechanism::StartupTask
+        } else {
+            Mechanism::RegistryRun
+        },
+        entry: Some(name.to_string()),
+        running,
+        root: command.as_deref().and_then(root_of),
+        listen: command.as_deref().and_then(listen_of),
+        on_path: dir.as_deref().and_then(on_path),
+        tool_dir: dir,
+        fix_run: Some(format!("schtasks /Run /TN \"{name}\"")),
+    }
+}
+
+/// The Linux side.
+fn diagnose_linux(name: &str) -> Diagnosis {
+    let unit = unit_name(name);
+    let home = linux::config_home();
+    let state = linux::status(&home, &unit);
+    let command = linux::registered_command(&home, &unit);
+    let (daemon, daemon_where) = daemon_and_where();
+    let dir = tool_dir();
+    Diagnosis {
+        daemon,
+        daemon_where,
+        registered: state.file,
+        mechanism: Mechanism::SystemdUserUnit,
+        entry: Some(linux::unit_path_in(&home, &unit).display().to_string()),
+        running: state.active.as_deref().map(|active| active == "active"),
+        root: command.as_deref().and_then(root_of),
+        listen: command.as_deref().and_then(listen_of),
+        on_path: dir.as_deref().and_then(on_path),
+        tool_dir: dir,
+        fix_run: Some(format!("systemctl --user enable --now {unit}")),
+    }
+}
+
+/// The macOS side.
+fn diagnose_macos(name: &str) -> Diagnosis {
+    let home = home_dir();
+    let state = macos::status(&home, name);
+    let command = macos::registered_command(&home, name);
+    let (daemon, daemon_where) = daemon_and_where();
+    let dir = tool_dir();
+    Diagnosis {
+        daemon,
+        daemon_where,
+        registered: state.file,
+        mechanism: Mechanism::LaunchdAgent,
+        entry: Some(macos::plist_path(name).display().to_string()),
+        running: macos::agent_state(name)
+            .as_deref()
+            .map(macos::state_is_running),
+        root: command.as_deref().and_then(root_of),
+        listen: command.as_deref().and_then(listen_of),
+        on_path: dir.as_deref().and_then(on_path),
+        tool_dir: dir,
+        fix_run: Some(format!(
+            "launchctl bootstrap gui/$(id -u) {}",
+            macos::plist_path(name).display()
+        )),
+    }
+}
+
+/// Print what the doctor found.
+fn print_diagnosis(d: &Diagnosis) {
+    println!("platform:   {}", detect_platform().name());
+    match &d.daemon {
+        Some(path) => println!("daemon:     {path} ({})", d.daemon_where),
+        None => println!("daemon:     not found ({})", d.daemon_where),
+    }
+    if d.registered {
+        println!("registered: yes ({})", d.mechanism.name());
+        if let Some(entry) = &d.entry {
+            println!("entry:      {entry}");
+        }
+    } else {
+        println!("registered: no");
+    }
+    println!(
+        "running:    {}",
+        match d.running {
+            Some(true) => "yes",
+            Some(false) => "no",
+            None => "unknown",
+        }
+    );
+    match &d.root {
+        Some(root) => println!("root:       {root}"),
+        None => println!("root:       unknown"),
+    }
+    match &d.listen {
+        Some(listen) => println!("listens:    {listen}"),
+        None => println!("listens:    unknown"),
+    }
+    match (&d.tool_dir, d.on_path) {
+        (Some(dir), Some(true)) => println!("path:       {dir} is on the PATH"),
+        (Some(dir), Some(false)) => println!("path:       {dir} is not on the PATH"),
+        (Some(dir), None) => println!("path:       {dir} (the PATH could not be read)"),
+        (None, _) => println!("path:       unknown"),
+    }
+
+    if !d.registered {
+        println!("fix:        rgy-autostart install");
+    } else if d.running == Some(false)
+        && let Some(command) = &d.fix_run
+    {
+        println!("fix:        {command}");
+    }
+    if d.on_path == Some(false) {
+        println!(
+            "fix:        open a new terminal: the PATH of this session is older than the install"
+        );
+    }
+}
+
+/// The daemon, and where it was found.
+///
+/// The two places are looked at in the order the install looks at them,
+/// so the answer says the same thing the install would do.
+fn daemon_and_where() -> (Option<String>, &'static str) {
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let candidate = dir.join(DAEMON_NAME);
+        if candidate.is_file() && rgy_autostart::is_executable(&candidate) {
+            return (Some(display_path(&candidate)), "next to this tool");
+        }
+    }
+    match find_daemon() {
+        Ok(path) => (Some(display_path(&path)), "on the PATH"),
+        Err(_) => (None, "neither next to this tool nor on the PATH"),
+    }
+}
+
+/// The directory this tool is in.
+fn tool_dir() -> Option<String> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(display_path))
+}
+
+/// Whether the directory is on the PATH of this session.
+fn on_path(dir: &str) -> Option<bool> {
+    let path = std::env::var_os("PATH")?;
+    Some(std::env::split_paths(&path).any(|entry| same_path(&display_path(&entry), dir)))
+}
+
+/// Whether two paths are the same one.
+fn same_path(a: &str, b: &str) -> bool {
+    #[cfg(windows)]
+    {
+        a.eq_ignore_ascii_case(b)
+    }
+    #[cfg(not(windows))]
+    {
+        a == b
+    }
+}
+
 /// Print what an install did.
 fn print_report(report: &Report) {
     println!("installed: {}", mechanism_label(report.mechanism));
@@ -640,6 +958,11 @@ fn print_report(report: &Report) {
         println!("  file:    {}", artifact.display());
     }
     println!("  command: {}", report.command);
+    // The tree the daemon indexes, read out of the command that was
+    // registered: one source of truth, so the two cannot disagree.
+    if let Some(root) = root_of(&report.command) {
+        println!("  root:    {root}");
+    }
     println!("  armed:   {}", if report.armed { "yes" } else { "no" });
     for note in &report.notes {
         println!("  {note}");
