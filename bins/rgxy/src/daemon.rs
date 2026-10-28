@@ -28,6 +28,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use rgy_launcher::{Answer, Query, Source, Split};
 use rgy_proto::client::Client;
@@ -50,7 +51,7 @@ const SCOPE_LIMIT: usize = 64;
 /// index (which is microseconds) and for a cold one to be worth waiting
 /// for, and short enough that the launcher is still a launcher when the
 /// daemon is slow or stuck.
-const LAUNCHER_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
+pub const LAUNCHER_WINDOW: Duration = Duration::from_secs(2);
 
 /// What the launcher shows about the last answer.
 ///
@@ -69,10 +70,49 @@ pub struct Status {
     pub backend: String,
     /// Whether the daemon is there.
     pub connected: bool,
+    /// Whether the daemon has been asked at all.
+    ///
+    /// The line says "sem ligação ao daemon" about a daemon that is not
+    /// there, and not about a daemon nobody has asked about yet.
+    pub asked: bool,
     /// Whether the daemon has a pack store (`--tv-dir`).
     pub tv: bool,
     /// How many results there are.
     pub matches: usize,
+}
+
+/// Why there is no answer.
+///
+/// The sentence is what the user reads, and the flag says what the
+/// failure is: a daemon that did not answer in the window is up and
+/// slow, and a daemon that is not there is not there. The line that
+/// says "sem ligação ao daemon" under a daemon that is up is a lie.
+struct Failure {
+    /// The sentence for the user.
+    reason: String,
+    /// Whether the daemon was slow rather than gone.
+    slow: bool,
+}
+
+impl Failure {
+    /// The question the daemon did not answer.
+    ///
+    /// The daemon's own sentence is kept: it says what happened, in the
+    /// daemon's words.
+    fn of(reason: &str, e: &std::io::Error) -> Failure {
+        Failure {
+            reason: format!("{reason}: {e}"),
+            slow: e.kind() == std::io::ErrorKind::TimedOut,
+        }
+    }
+
+    /// The daemon is not there.
+    fn gone(reason: String) -> Failure {
+        Failure {
+            reason,
+            slow: false,
+        }
+    }
 }
 
 /// The answers, from the daemon.
@@ -98,11 +138,33 @@ pub struct DaemonSource {
     /// same adapters, and when the daemon is not there the binary is
     /// what is left.
     rgx: Option<String>,
+    /// The window the caller gives the daemon to answer in.
+    ///
+    /// The window is the **caller's** and not the source's: the window
+    /// that lives on the thread that draws it cannot wait the client's
+    /// thirty seconds, and the command line — which waits in the
+    /// background — can.
+    window: Duration,
 }
 
 impl DaemonSource {
     /// A source that asks the daemon at `endpoint`.
+    ///
+    /// The window is the **launcher's**: two seconds, which is what a
+    /// search box — the window or the terminal interface — can afford to
+    /// wait. The command line asks for the client's own window with
+    /// [`DaemonSource::with_window`].
     pub fn new(endpoint: Endpoint, rgx: Option<String>) -> DaemonSource {
+        DaemonSource::with_window(endpoint, rgx, LAUNCHER_WINDOW)
+    }
+
+    /// The same, with the window the caller asks for.
+    ///
+    /// The window belongs to the caller: the launcher gives the daemon
+    /// two seconds and the command line gives it the client's thirty,
+    /// because a program that waits in the background can afford to and
+    /// a search box cannot.
+    pub fn with_window(endpoint: Endpoint, rgx: Option<String>, window: Duration) -> DaemonSource {
         DaemonSource {
             client: None,
             endpoint,
@@ -111,7 +173,17 @@ impl DaemonSource {
             last_scope: Vec::new(),
             status: Rc::new(RefCell::new(Status::default())),
             rgx,
+            window,
         }
+    }
+
+    /// The window this source gives the daemon to answer in.
+    ///
+    /// The window is a property of the caller, and the caller that sets
+    /// it is the one that reads it: this is here for the tests.
+    #[cfg(test)]
+    pub fn window(&self) -> Duration {
+        self.window
     }
 
     /// What the window shows about the last answer.
@@ -166,11 +238,20 @@ impl DaemonSource {
     /// The status is what tells the window whether there is a pack store:
     /// the content layer answers differently with one, and the user is
     /// told which.
+    ///
+    /// The window is the **caller's**: the launcher asks from the thread
+    /// that draws the window, and a daemon that takes the connection and
+    /// then says nothing must not hold the window off the screen.
+    ///
+    /// `false` when the daemon is not there at all — the connection
+    /// failed. A daemon that is there and slow is not a daemon that is
+    /// gone, and the answer says so.
     pub fn connect(&mut self) -> bool {
         let client = match Client::connect(&self.endpoint) {
             Ok(c) => c,
             Err(e) => {
                 let mut st = self.status.borrow_mut();
+                st.asked = true;
                 st.connected = false;
                 st.warnings = vec![format!("{}: {e}", rgy_launcher::tools::NO_DAEMON)];
                 return false;
@@ -182,14 +263,47 @@ impl DaemonSource {
         }
         // The status is a separate question: a daemon that answers it is
         // a daemon that is up.
-        if let Some(client) = self.client.as_mut()
-            && let Ok(status) = client.status()
-        {
-            let mut st = self.status.borrow_mut();
-            st.connected = true;
-            st.tv = status.tv;
+        let status = match self.client.as_mut() {
+            Some(client) => client.status_within(self.window),
+            None => return false,
+        };
+        match status {
+            Ok(status) => {
+                let mut st = self.status.borrow_mut();
+                st.asked = true;
+                st.connected = true;
+                st.tv = status.tv;
+            }
+            Err(e) => {
+                // The daemon took the connection and did not answer in
+                // the window: it is up and slow, and the line says that
+                // — a daemon that is slow is not a daemon that is gone.
+                //
+                // The connection is dropped: the answer may still be on
+                // its way, and a late answer would be read as the answer
+                // to the next question.
+                self.client = None;
+                let mut st = self.status.borrow_mut();
+                st.asked = true;
+                st.connected = true;
+                st.warnings = vec![format!("o daemon não respondeu a tempo: {e}")];
+            }
         }
         true
+    }
+
+    /// Ask the daemon who it is, and say what it said.
+    ///
+    /// The sentences are the ones the caller shows the user: the
+    /// daemon's own when it is not there, and what the daemon said when
+    /// it is there but slow. Nothing when the daemon is there and
+    /// answering.
+    pub fn ask_the_daemon(&mut self) -> Vec<String> {
+        if self.connect() {
+            self.status.borrow().warnings.clone()
+        } else {
+            vec![self.no_daemon_message()]
+        }
     }
 
     /// The connection, made on demand.
@@ -202,6 +316,7 @@ impl DaemonSource {
                 Ok(client) => client,
                 Err(e) => {
                     let mut st = self.status.borrow_mut();
+                    st.asked = true;
                     st.connected = false;
                     st.warnings = vec![format!("{}: {e}", rgy_launcher::tools::NO_DAEMON)];
                     return None;
@@ -211,18 +326,28 @@ impl DaemonSource {
             if let Some(client) = self.client.as_mut() {
                 client.set_session(self.session);
             }
-            self.status.borrow_mut().connected = true;
+            let mut st = self.status.borrow_mut();
+            st.asked = true;
+            st.connected = true;
         }
         self.client.as_mut()
     }
 
     /// The answer failed: the connection is dropped, and the sentence is
     /// kept for the window.
-    fn fail(&mut self, reason: &str) {
+    ///
+    /// A daemon that did not answer in the window is **up and slow**, not
+    /// gone: the line that says "sem ligação ao daemon" under a daemon
+    /// that is up is a lie, and the count, the layer and the time of the
+    /// last answer still belong to the line.
+    fn fail(&mut self, failure: &Failure) {
         self.client = None;
         let mut st = self.status.borrow_mut();
-        st.connected = false;
-        st.warnings = vec![reason.to_string()];
+        st.asked = true;
+        if !failure.slow {
+            st.connected = false;
+        }
+        st.warnings = vec![failure.reason.clone()];
     }
 
     /// The names the content layer reads.
@@ -237,29 +362,33 @@ impl DaemonSource {
     /// `doc:` comes back empty and the content layer answers "nothing
     /// found" for a file that is on the disk.
     ///
-    /// The window is the **launcher's**: the scope is asked on the thread
+    /// The window is the **caller's**: the scope is asked on the thread
     /// that draws the window, and a scope that takes thirty seconds is a
     /// window that stopped answering the keyboard.
     ///
     /// `Err` is the daemon's reason. A daemon that stopped answering is
     /// not a daemon that chose nothing, and the caller has to say which
     /// one it was.
-    fn scope_paths(&mut self, engine_query: &str) -> Result<Vec<String>, String> {
+    fn scope_paths(
+        &mut self,
+        engine_query: &str,
+        window: Duration,
+    ) -> Result<Vec<String>, Failure> {
         let saved = self.session;
         if let Some(client) = self.client.as_mut() {
             client.set_session(None);
         }
         let answer = match self.client.as_mut() {
             Some(client) => client
-                .search_within(engine_query, SCOPE_LIMIT, LAUNCHER_WINDOW)
+                .search_within(engine_query, SCOPE_LIMIT, window)
                 .map(|out| {
                     out.hits
                         .into_iter()
                         .map(|h| h.path)
                         .collect::<Vec<String>>()
                 })
-                .map_err(|e| format!("a busca de nomes falhou: {e}")),
-            None => Err(String::from(rgy_launcher::tools::NO_DAEMON)),
+                .map_err(|e| Failure::of("a busca de nomes falhou", &e)),
+            None => Err(Failure::gone(String::from(rgy_launcher::tools::NO_DAEMON))),
         };
         if let Some(client) = self.client.as_mut() {
             client.set_session(saved);
@@ -269,10 +398,11 @@ impl DaemonSource {
 
     /// The names, from the daemon.
     fn search_names(&mut self, query: &str, limit: usize) -> Answer {
+        let window = self.window;
         let Some(client) = self.client_mut() else {
             return Answer::empty();
         };
-        match client.search_within(query, limit, LAUNCHER_WINDOW) {
+        match client.search_within(query, limit, window) {
             Ok(outcome) => {
                 let answer = Answer {
                     paths: outcome.hits.iter().map(|h| h.path.clone()).collect(),
@@ -297,7 +427,7 @@ impl DaemonSource {
                 answer
             }
             Err(e) => {
-                self.fail(&format!("a busca de nomes falhou: {e}"));
+                self.fail(&Failure::of("a busca de nomes falhou", &e));
                 Answer::empty()
             }
         }
@@ -315,6 +445,10 @@ impl DaemonSource {
     ///
     /// `content` is the content part as the user typed it. It is rebuilt
     /// here, in the engine's words, before anything goes on the wire.
+    ///
+    /// The window is the budget of the **whole** answer: the scope, the
+    /// files and the fallback share it, so the window never stops
+    /// answering for longer than the window it was given.
     fn search_content(&mut self, names: &str, content: &str, limit: usize) -> Answer {
         // The daemon is asked in the **engine's** words: the canonical
         // prefix and the pattern as one unit. The engine's filter names
@@ -326,6 +460,11 @@ impl DaemonSource {
         // The fallback reads the same string, so the byte grep and the
         // daemon answer the same question.
         let content = rgy_launcher::layer::engine_content(content);
+        // The window is the budget of the whole answer: the scope, the
+        // files and the fallback share it. A window that answered the
+        // scope in two seconds and then waited two more for the files
+        // is a window that stopped answering for four.
+        let deadline = Instant::now() + self.window;
         // The daemon first, connected on demand: the launcher is resident
         // and the daemon may have come up since the last keystroke.
         let connected = self.client_mut().is_some();
@@ -339,10 +478,10 @@ impl DaemonSource {
         // The failure, when there is one, is the reason the content layer
         // has no answer: a daemon that stopped answering is not a daemon
         // that chose nothing.
-        let mut failure: Option<String> = None;
+        let mut failure: Option<Failure> = None;
         let mut scope = Vec::new();
         if connected && !names.is_empty() {
-            match self.scope_paths(&rgy_launcher::layer::scope_query(names)) {
+            match self.scope_paths(&rgy_launcher::layer::scope_query(names), left(deadline)) {
                 Ok(paths) => scope = paths,
                 Err(reason) => {
                     self.fail(&reason);
@@ -353,7 +492,7 @@ impl DaemonSource {
         if connected {
             if names.is_empty() {
                 // The whole tree: the daemon's own content engine.
-                match self.whole_tree_content(&content, limit) {
+                match self.whole_tree_content(&content, limit, left(deadline)) {
                     Ok(answer) => return answer,
                     Err(reason) => {
                         self.fail(&reason);
@@ -361,7 +500,7 @@ impl DaemonSource {
                     }
                 }
             } else if !scope.is_empty() {
-                match self.daemon_content(&content, &scope, limit) {
+                match self.daemon_content(&content, &scope, limit, left(deadline)) {
                     Ok(answer) => return answer,
                     Err(reason) => {
                         // The daemon answered with a failure: the fallback
@@ -393,7 +532,17 @@ impl DaemonSource {
         if !scope.is_empty()
             && let Some(binary) = self.rgx.clone()
         {
-            return self.rgx_content(&binary, &content, &scope, limit);
+            let window = left(deadline);
+            if window.is_zero() {
+                // The window is the budget of the whole answer and it is
+                // gone: the fallback would be a process started with no
+                // time to answer, and the sentence says what happened.
+                let reason = Failure::gone("não sobrou tempo para o rgx".to_string());
+                self.fail(&reason);
+                failure = Some(reason);
+            } else {
+                return self.rgx_content(&binary, &content, &scope, limit, window);
+            }
         }
         // Nothing answered, and the status says why. The reason is one of
         // three, and they are three different facts about the machine: the
@@ -402,8 +551,9 @@ impl DaemonSource {
         let daemon_up = self.status.borrow().connected;
         let (connected, warning) = match failure {
             // The daemon's own sentence is the reason: it failed, and this
-            // function did not.
-            Some(reason) => (false, reason),
+            // function did not. A daemon that is slow is not a daemon that
+            // is gone, and the line says which one it was.
+            Some(reason) => (!reason.slow, reason.reason),
             // The daemon is up and answering: the name part chose nothing,
             // so there was nothing to read. Saying the daemon is down here
             // would be a lie — it is answering.
@@ -437,19 +587,24 @@ impl DaemonSource {
     /// the daemon was started with one, and the trigram index when it was
     /// not. It is the answer to "which files say this", with no scope.
     ///
-    /// The window is the **launcher's**: the answer reads the tree, and a
+    /// The window is the **caller's**: the answer reads the tree, and a
     /// window that waits thirty seconds for it is a window that stopped
     /// answering the keyboard.
     ///
     /// `Err` is the daemon's reason: the caller drops the connection and
     /// says it.
-    fn whole_tree_content(&mut self, content: &str, limit: usize) -> Result<Answer, String> {
+    fn whole_tree_content(
+        &mut self,
+        content: &str,
+        limit: usize,
+        window: Duration,
+    ) -> Result<Answer, Failure> {
         let Some(client) = self.client_mut() else {
-            return Err(String::from(rgy_launcher::tools::NO_DAEMON));
+            return Err(Failure::gone(String::from(rgy_launcher::tools::NO_DAEMON)));
         };
         let outcome = client
-            .grep_within(content, limit, LAUNCHER_WINDOW)
-            .map_err(|e| format!("a busca de conteúdo falhou: {e}"))?;
+            .grep_within(content, limit, window)
+            .map_err(|e| Failure::of("a busca de conteúdo falhou", &e))?;
         let mut paths = Vec::new();
         let mut spans = Vec::new();
         let mut contexts = Vec::new();
@@ -466,7 +621,7 @@ impl DaemonSource {
             // files, and a folder has no lines to show.
             folders: Vec::new(),
         };
-        let backend = self.backend_label();
+        let backend = backend_label(rgy_launcher::ContentBackend::Daemon);
         {
             let mut st = self.status.borrow_mut();
             st.connected = true;
@@ -493,13 +648,14 @@ impl DaemonSource {
         content: &str,
         scope: &[String],
         limit: usize,
-    ) -> Result<Answer, String> {
+        window: Duration,
+    ) -> Result<Answer, Failure> {
         let Some(client) = self.client_mut() else {
-            return Err(String::from(rgy_launcher::tools::NO_DAEMON));
+            return Err(Failure::gone(String::from(rgy_launcher::tools::NO_DAEMON)));
         };
         let outcome = client
-            .content_within(content, scope, limit, LAUNCHER_WINDOW)
-            .map_err(|e| format!("a busca de conteúdo falhou: {e}"))?;
+            .content_within(content, scope, limit, window)
+            .map_err(|e| Failure::of("a busca de conteúdo falhou", &e))?;
         let mut paths = Vec::new();
         let mut spans = Vec::new();
         let mut contexts = Vec::new();
@@ -516,9 +672,7 @@ impl DaemonSource {
             // files, and a folder has no lines to show.
             folders: Vec::new(),
         };
-        // The label is read before the status is written: the status is
-        // one cell, and a cell that is borrowed twice at once is a panic.
-        let backend = self.backend_label();
+        let backend = backend_label(rgy_launcher::ContentBackend::Daemon);
         {
             let mut st = self.status.borrow_mut();
             st.connected = true;
@@ -543,8 +697,9 @@ impl DaemonSource {
         content: &str,
         scope: &[String],
         limit: usize,
+        window: Duration,
     ) -> Answer {
-        match crate::rgx::grep(binary, content, scope) {
+        match crate::rgx::grep(binary, content, scope, window) {
             Ok(files) => {
                 let mut paths = Vec::new();
                 let mut spans = Vec::new();
@@ -562,10 +717,13 @@ impl DaemonSource {
                     // reads files, and a folder has no lines to show.
                     folders: Vec::new(),
                 };
-                let backend = self.backend_label();
+                let backend = backend_label(rgy_launcher::ContentBackend::Rgx);
                 {
                     let mut st = self.status.borrow_mut();
                     st.warnings = Vec::new();
+                    // The fallback does not say how long it took, and the
+                    // time of the last answer is not its time.
+                    st.took_us = 0;
                     st.layer = "conteúdo";
                     st.backend = backend;
                     st.matches = answer.len();
@@ -579,13 +737,26 @@ impl DaemonSource {
             }
         }
     }
+}
 
-    /// The word the status line shows for the content layer's backend.
-    fn backend_label(&self) -> String {
-        let daemon_up = self.status.borrow().connected;
-        let backend = rgy_launcher::content_backend(daemon_up, self.rgx.is_some());
-        backend.label().to_string()
-    }
+/// The word the status line shows for the content layer's backend.
+///
+/// The label belongs to the **answer**: the daemon's answers are the
+/// adapters' answers and the fallback's are the binary's. Deciding it
+/// from "is the daemon up" would say "adaptadores" for an answer the
+/// `rgx` binary produced while the daemon was away.
+fn backend_label(backend: rgy_launcher::ContentBackend) -> String {
+    backend.label().to_string()
+}
+
+/// What is left of the window.
+///
+/// The window is the budget of the whole answer, and every step of it
+/// gets what is left: a window that answered the scope in two seconds
+/// and then waited two more for the files is a window that stopped
+/// answering for four.
+fn left(deadline: Instant) -> Duration {
+    deadline.saturating_duration_since(Instant::now())
 }
 
 /// The line under the name of a content result.
@@ -821,6 +992,20 @@ mod tests {
         }
     }
 
+    /// A daemon that takes the connection and says nothing.
+    ///
+    /// The client is there and the daemon is silent: the case the
+    /// launcher's window is about. The daemon reads what it is asked and
+    /// answers none of it, and it stays until the client goes.
+    fn says_nothing(peer: Peer) {
+        let mut peer = peer;
+        while let Ok(request) = peer.read_line() {
+            if request.is_empty() {
+                break;
+            }
+        }
+    }
+
     /// A daemon that takes one client and does what the test says.
     #[cfg(unix)]
     fn serve(script: fn(Peer)) -> Daemon {
@@ -927,6 +1112,68 @@ mod tests {
             "the status says the names chose nothing: {warnings:?}"
         );
         // The daemon waits for the client to go.
+        drop(source);
+        daemon.join();
+    }
+
+    /// A daemon that takes the connection and says nothing does not hold
+    /// the launcher.
+    ///
+    /// The window is the **launcher's**: the client waits thirty seconds,
+    /// and a window that waits thirty seconds is a window that stopped
+    /// answering the keyboard.
+    #[test]
+    fn a_daemon_that_says_nothing_does_not_hold_the_launcher() {
+        let daemon = serve(says_nothing);
+        let mut source = DaemonSource::new(daemon.endpoint.clone(), None);
+        let started = std::time::Instant::now();
+        let _ = source.connect();
+        let waited = started.elapsed();
+        assert!(
+            waited < std::time::Duration::from_secs(5),
+            "the launcher waited for the client's window: {waited:?}"
+        );
+        // The daemon took the connection and said nothing: it is up and
+        // slow, and the status says that.
+        let st = source.status();
+        assert!(st.borrow().connected, "the daemon is there");
+        let warnings = st.borrow().warnings.clone();
+        assert!(
+            warnings.iter().any(|w| w.contains("não respondeu a tempo")),
+            "the status says the daemon did not answer in time: {warnings:?}"
+        );
+        drop(source);
+        daemon.join();
+    }
+
+    /// A daemon that is too slow is not a daemon that is down.
+    ///
+    /// The daemon took the connection and did not answer in the window:
+    /// it is up and slow. The line that says "sem ligação ao daemon"
+    /// under a daemon that is up is a lie, and the count, the layer and
+    /// the time of the last answer still belong to the line.
+    #[test]
+    fn a_daemon_that_is_too_slow_is_not_a_daemon_that_is_down() {
+        let daemon = serve(says_nothing);
+        let mut source = DaemonSource::new(daemon.endpoint.clone(), None);
+        let answer = source.search("invoice", 10);
+        assert!(answer.is_empty(), "there was no answer");
+        let st = source.status();
+        assert!(
+            st.borrow().connected,
+            "the daemon took the connection: it is up and slow"
+        );
+        let warnings = st.borrow().warnings.clone();
+        assert!(
+            !warnings.iter().any(|w| w.contains("sem ligação ao daemon")),
+            "the daemon is not down: {warnings:?}"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("did not answer in time")),
+            "the status says the daemon did not answer in time: {warnings:?}"
+        );
         drop(source);
         daemon.join();
     }

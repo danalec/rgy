@@ -172,18 +172,30 @@ fn run(argv: &[String]) -> Result<ExitCode, String> {
             "não se sabe onde o daemon escuta: nem XDG_CACHE_HOME nem HOME estão definidos",
         )?,
     };
-    let source = DaemonSource::new(endpoint, tools::rgx());
+    let rgx = tools::rgx();
 
     if let Some(query) = &options.query {
+        // The command line waits as long as the client always did.
+        let source = command_source(endpoint, rgx);
         if options.pick {
             return pick(source, query, options.limit, &options);
         }
         return one_shot(source, query, options.limit);
     }
     if options.tui {
-        return run_tui(source, None);
+        return run_tui(DaemonSource::new(endpoint, rgx), None);
     }
-    run_window(source, &options)
+    run_window(endpoint, rgx, &options)
+}
+
+/// The source for the command line.
+///
+/// The window is the launcher's and the command line is the client's:
+/// a search box that stops answering the keyboard is broken, while a
+/// command line waiting for a cold daemon may wait as long as the
+/// client always did.
+fn command_source(endpoint: Endpoint, rgx: Option<String>) -> DaemonSource {
+    DaemonSource::with_window(endpoint, rgx, rgy_proto::client::read_timeout())
 }
 
 /// Read the options.
@@ -416,30 +428,61 @@ fn wait_for_daemon(source: &mut DaemonSource, query: &str, limit: usize) -> Answ
 /// chosen: the terminal is the fallback, and the fallback says what it
 /// is standing in for.
 fn run_tui(mut source: DaemonSource, reason: Option<&str>) -> Result<ExitCode, String> {
-    if !std::io::stdout().is_terminal() {
+    let terminal = std::io::stdout().is_terminal();
+    for notice in notices(&mut source, reason, terminal) {
+        eprintln!("rgxy: {notice}");
+    }
+    if !terminal {
         return Ok(ExitCode::SUCCESS);
     }
-    if let Some(reason) = reason {
-        eprintln!("rgxy: {reason}");
-    }
-    // The daemon is asked who it is: the answer says whether there is a
-    // pack store, and the interface shows it.
-    source.connect();
     let root = home_dir();
     rgy_search_ui::run_with_source(Box::new(source), root).map(|_| ExitCode::SUCCESS)
 }
 
+/// The sentences the terminal prints before the interface takes the screen.
+///
+/// The terminal interface is the same interface over the same source,
+/// and it must not be the one that keeps quiet: the sentence the window
+/// shows under the field is the sentence the terminal prints — where the
+/// daemon is not there, and what the daemon said about itself when it
+/// is there but slow.
+///
+/// A launcher with no terminal has nowhere to draw: a login entry on a
+/// machine with no session, a pipe, a service. There is nothing to say
+/// and nowhere to say it, so it says nothing — and it says it by
+/// leaving, not by failing, because a login entry that fails on every
+/// login is a login entry the user learns to ignore.
+fn notices(source: &mut DaemonSource, reason: Option<&str>, terminal: bool) -> Vec<String> {
+    if !terminal {
+        return Vec::new();
+    }
+    let mut notices = Vec::new();
+    if let Some(reason) = reason {
+        notices.push(reason.to_string());
+    }
+    // The daemon is asked who it is: the answer says whether there is a
+    // pack store, and the interface shows it.
+    notices.extend(source.ask_the_daemon());
+    notices
+}
+
 /// The window, where there is a desktop to put it on.
 #[cfg(windows)]
-fn run_window(source: DaemonSource, options: &Options) -> Result<ExitCode, String> {
+fn run_window(
+    endpoint: Endpoint,
+    rgx: Option<String>,
+    options: &Options,
+) -> Result<ExitCode, String> {
     if !rgy_launcher_windows::session_available() {
         // No desktop: the terminal is the fallback, and it says so.
         return run_tui(
-            source,
+            DaemonSource::new(endpoint, rgx),
             Some("sem ecrã gráfico; a interface de terminal é a alternativa"),
         );
     }
-    gui::run(source, options).map(|_| ExitCode::SUCCESS)
+    // The launcher's own window: the window lives on the thread that
+    // draws it, and it cannot wait the client's thirty seconds.
+    gui::run(DaemonSource::new(endpoint, rgx), options).map(|_| ExitCode::SUCCESS)
 }
 
 /// The window, where there is a desktop to put it on.
@@ -449,9 +492,13 @@ fn run_window(source: DaemonSource, options: &Options) -> Result<ExitCode, Strin
 /// is the Windows one. Everywhere else the terminal interface is the
 /// launcher, and it is the same interface over the same source.
 #[cfg(not(windows))]
-fn run_window(source: DaemonSource, _options: &Options) -> Result<ExitCode, String> {
+fn run_window(
+    endpoint: Endpoint,
+    rgx: Option<String>,
+    _options: &Options,
+) -> Result<ExitCode, String> {
     run_tui(
-        source,
+        DaemonSource::new(endpoint, rgx),
         Some(
             "a janela flutuante é só no Windows por agora; a interface de terminal é a alternativa",
         ),
@@ -540,6 +587,74 @@ mod tests {
         for needle in ["--pick", "--fzf-binary", "--fzf-arg"] {
             assert!(text.contains(needle), "the help needs `{needle}`: {text}");
         }
+    }
+
+    /// The command line waits as long as the client always did.
+    ///
+    /// The two-second window belongs to the window: a search box that
+    /// stops answering the keyboard is broken, while a command line
+    /// waiting for a cold daemon may wait as long as the client always
+    /// did.
+    #[test]
+    fn the_command_line_waits_as_long_as_the_client() {
+        let source = command_source(
+            Endpoint::Socket(std::path::PathBuf::from("/tmp/rgy-rgxy-nope.sock")),
+            None,
+        );
+        assert_eq!(source.window(), rgy_proto::client::read_timeout());
+        assert!(
+            source.window() > daemon::LAUNCHER_WINDOW,
+            "the command line waits longer than the window"
+        );
+    }
+
+    /// The window waits the launcher's window.
+    ///
+    /// The window and the terminal interface are search boxes: they live
+    /// on the thread that draws them, and they cannot wait the client's
+    /// thirty seconds.
+    #[test]
+    fn the_window_waits_the_launchers_window() {
+        let source = DaemonSource::new(
+            Endpoint::Socket(std::path::PathBuf::from("/tmp/rgy-rgxy-nope.sock")),
+            None,
+        );
+        assert_eq!(source.window(), daemon::LAUNCHER_WINDOW);
+    }
+
+    /// The terminal says the same sentence the window says.
+    ///
+    /// The terminal interface is the same interface over the same
+    /// source, and it must not be the one that keeps quiet: the
+    /// sentence the window shows under the field is the sentence the
+    /// terminal prints.
+    #[test]
+    fn the_terminal_says_the_same_sentence_the_window_says() {
+        let mut source = DaemonSource::new(
+            Endpoint::Socket(std::path::PathBuf::from("/tmp/rgy-rgxy-nope.sock")),
+            None,
+        );
+        let notices = notices(&mut source, None, true);
+        assert_eq!(notices.len(), 1, "the daemon is not there: {notices:?}");
+        assert_eq!(notices[0], source.no_daemon_message());
+        assert!(notices[0].contains("sem daemon"), "{:?}", notices[0]);
+    }
+
+    /// A launcher with no terminal says nothing.
+    ///
+    /// A login entry on a machine with no session must not fail and must
+    /// not print: there is nowhere to say it.
+    #[test]
+    fn a_launcher_with_no_terminal_says_nothing() {
+        let mut source = DaemonSource::new(
+            Endpoint::Socket(std::path::PathBuf::from("/tmp/rgy-rgxy-nope.sock")),
+            None,
+        );
+        let notices = notices(&mut source, Some("sem ecrã gráfico"), false);
+        assert!(
+            notices.is_empty(),
+            "there is nowhere to say it: {notices:?}"
+        );
     }
 
     #[test]

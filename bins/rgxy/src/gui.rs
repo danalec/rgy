@@ -72,6 +72,13 @@ trait WindowSource: Source {
 
     /// The session the daemon knows this window by.
     fn set_session(&mut self, id: u64);
+
+    /// Ask the daemon who it is, and say what it said.
+    ///
+    /// The sentences are the ones the window shows under the field: the
+    /// daemon's own when it is not there, and what the daemon said when
+    /// it is there but slow.
+    fn ask_the_daemon(&mut self) -> Vec<String>;
 }
 
 impl WindowSource for DaemonSource {
@@ -81,6 +88,10 @@ impl WindowSource for DaemonSource {
 
     fn set_session(&mut self, id: u64) {
         DaemonSource::set_session(self, id);
+    }
+
+    fn ask_the_daemon(&mut self) -> Vec<String> {
+        DaemonSource::ask_the_daemon(self)
     }
 }
 
@@ -121,6 +132,12 @@ struct State {
     reveal: Opener,
     /// What the launcher is waiting for.
     waiting: Waiting,
+    /// Whether the daemon has to be asked who it is.
+    ///
+    /// The question is asked on the clock, and the clock only ticks while
+    /// the window is up: the window is up before the daemon is asked, and
+    /// the answer lands in the window that is already there.
+    ask_daemon: bool,
     /// What the user used, and when.
     ///
     /// The launcher's own memory: the daemon ranks by relevance, and what
@@ -160,11 +177,20 @@ impl State {
     /// down so that the next run of the launcher knows it too.
     fn record_use(&mut self, path: &str) {
         self.history.record(path, mru::now());
-        if let Some(file) = &self.usage_path {
-            // A memory that cannot be written is not a launcher that
-            // stops working: the use is remembered for this session, and
-            // the file is written the next time.
-            let _ = mru::save(file, &self.history);
+        // The write is tried and its answer is kept: a memory that
+        // cannot be written is not a launcher that stops working — the
+        // use is remembered for this session, and the write is tried
+        // again on the next use. The user is told anyway: a memory that
+        // is silently not written is a memory the user believes in and
+        // the machine does not have.
+        let written = match &self.usage_path {
+            Some(file) => mru::save(file, &self.history),
+            None => return,
+        };
+        if let Err(reason) = written {
+            let message = format!("o histórico não foi gravado: {reason}");
+            eprintln!("rgxy: {message}");
+            self.note = Some(message);
         }
     }
 }
@@ -201,20 +227,6 @@ pub fn run(source: DaemonSource, options: &Options) -> Result<(), String> {
         None => History::new(),
     };
 
-    // The daemon is asked who it is before anything else: the answer says
-    // whether there is a pack store, and the answer says whether there is
-    // a daemon at all.
-    let mut source = source;
-    let mut missing = None;
-    if !source.connect() {
-        // The sentence is the daemon's own: it knows where it was
-        // looked for, and it knows what the content layer can do
-        // without it.
-        let message = source.no_daemon_message();
-        eprintln!("rgxy: {message}");
-        missing = Some(message);
-    }
-
     let mut state = State {
         app: App::new(),
         source: Box::new(source),
@@ -222,16 +234,11 @@ pub fn run(source: DaemonSource, options: &Options) -> Result<(), String> {
         open: Box::new(actions::open),
         reveal: Box::new(actions::reveal),
         waiting: Waiting::Idle,
+        ask_daemon: true,
         history,
         usage_path,
         note: refused,
     };
-
-    // Whatever the user has to be told, the window tells it: the stderr
-    // of a program started from a shortcut is nowhere.
-    if let Some(message) = missing {
-        state.app.set_warnings(vec![message]);
-    }
 
     // The rows the screen has room for: the window is sized from them, and
     // a window whose bottom half is under the bottom of the screen is a
@@ -259,6 +266,14 @@ pub fn run(source: DaemonSource, options: &Options) -> Result<(), String> {
         window.show();
     }
 
+    // The daemon is asked on the clock, and the clock only ticks while
+    // the window is up: the window is up before the daemon is asked, and
+    // the answer lands in the window that is already there. A daemon that
+    // takes the connection and then says nothing does not keep the window
+    // off the screen, and it does not keep the hotkey from working
+    // either — the launcher that waits for the daemon before it waits for
+    // the user is a launcher that is late for both.
+
     window.pump(|event| handle(&mut state, event))
 }
 
@@ -277,6 +292,9 @@ fn handle(state: &mut State, event: Event) -> Control {
                 // looks broken: the answer arrives into the window that
                 // is already on the screen.
                 state.waiting = state.waiting_for();
+                // The daemon's own question is asked on the clock, which
+                // only ticks while the window is up.
+                state.ask_daemon = true;
                 show(state)
             } else {
                 // The window goes down and nothing is waited for: the
@@ -391,9 +409,9 @@ fn on_key(state: &mut State, key: Key) -> Control {
 /// move. The line under the field says the launcher is looking, and the
 /// answer lands in a window that is already up.
 fn changed(state: &mut State) -> Control {
-    // A command line is not a search, and the engine does not know `>` —
-    // it fails closed on one, so the launcher takes it before the engine
-    // sees it.
+    // A command line is not a search: the engine would look for the
+    // literal text ">folder" and answer nothing, while the line is a
+    // command — so the launcher takes it before the engine sees it.
     if state.app.is_command() {
         // A command is not a question for the daemon either: the answer
         // the window was waiting for is not this one.
@@ -474,6 +492,19 @@ fn menu_key(state: &mut State, key: Key) -> Control {
             if let Some(action) = action {
                 return run_action(state, action);
             }
+        }
+        Key::CtrlV => {
+            // A paste is the field's, and the menu is the keyboard's:
+            // the menu closes and the text lands in the query, with the
+            // field's own words for a clipboard that cannot be pasted.
+            // A key that does nothing and says nothing is a launcher
+            // the user cannot tell from a frozen one.
+            let clipboard = (state.clipboard)();
+            state.app.menu_closed();
+            if paste(state, clipboard) {
+                return changed(state);
+            }
+            return paint(state);
         }
         Key::Esc | Key::CtrlK => state.app.menu_closed(),
         _ => {}
@@ -593,21 +624,42 @@ fn ask(state: &mut State) {
 /// that window.
 fn tick(state: &mut State) -> Control {
     match state.waiting {
-        Waiting::Idle => Control::None,
+        Waiting::Idle => {}
         Waiting::Names => {
             // The window is up; now the daemon is asked.
             state.waiting = Waiting::Idle;
             ask(state);
-            paint(state)
+            return paint(state);
         }
         Waiting::Content => {
             state.waiting = Waiting::Idle;
             let text = state.app.query().text().to_string();
             let answer = state.source.search(&text, LIMIT);
             apply(state, answer);
-            paint(state)
+            return paint(state);
         }
     }
+    // The daemon's own question — whether it is there, and whether it has
+    // a pack store — is asked on the clock too, and it waits for a tick
+    // with nothing else to do: the question the user typed comes first.
+    //
+    // The question is asked in the launcher's own window — two seconds,
+    // and not the client's thirty — because the launcher lives on the
+    // thread that draws the window.
+    if state.ask_daemon {
+        state.ask_daemon = false;
+        let messages = state.source.ask_the_daemon();
+        for message in &messages {
+            eprintln!("rgxy: {message}");
+        }
+        if !messages.is_empty() {
+            // Whatever the user has to be told, the window tells it: the
+            // stderr of a program started from a shortcut is nowhere.
+            state.app.set_warnings(messages);
+        }
+        return paint(state);
+    }
+    Control::None
 }
 
 /// The answer, on the screen.
@@ -698,25 +750,33 @@ fn status_line(state: &State) -> String {
         // is quiet while it waits is a launcher that looks stuck.
         parts.push("procurando…".to_string());
     }
-    if !status.connected {
+    if status.asked && !status.connected {
+        // The daemon was asked and it is not there. The line does not
+        // say that about a daemon nobody has asked about yet.
         parts.push("sem ligação ao daemon".to_string());
-    } else {
-        parts.push(format!("{} resultados", status.matches));
+    }
+    // The count, the layer, the backend and the time belong to the
+    // **answer**: they are shown whether the daemon is up or not. The
+    // `rgx` fallback answers while the daemon is away, and a line that
+    // hides the answer because the daemon is not there hides the one
+    // thing the user asked for.
+    parts.push(format!("{} resultados", status.matches));
+    if !status.layer.is_empty() {
         parts.push(status.layer.to_string());
-        if status.layer == "conteúdo" {
-            if !status.backend.is_empty() {
-                parts.push(status.backend.clone());
-            }
-            if status.tv {
-                parts.push("TV".to_string());
-            }
+    }
+    if status.layer == "conteúdo" {
+        if !status.backend.is_empty() {
+            parts.push(status.backend.clone());
         }
-        if status.took_us > 0 {
-            if status.took_us < 1000 {
-                parts.push("<1 ms".to_string());
-            } else {
-                parts.push(format!("{} ms", status.took_us / 1000));
-            }
+        if status.tv {
+            parts.push("TV".to_string());
+        }
+    }
+    if status.took_us > 0 {
+        if status.took_us < 1000 {
+            parts.push("<1 ms".to_string());
+        } else {
+            parts.push(format!("{} ms", status.took_us / 1000));
         }
     }
     if let Some(note) = &state.note {
@@ -750,6 +810,7 @@ mod tests {
             open: Box::new(|_| Err("um teste não abre ficheiros".to_string())),
             reveal: Box::new(|_| Err("um teste não abre pastas".to_string())),
             waiting: Waiting::Idle,
+            ask_daemon: false,
             history: History::new(),
             usage_path: None,
             note: None,
@@ -788,6 +849,14 @@ mod tests {
         }
 
         fn set_session(&mut self, _id: u64) {}
+
+        fn ask_the_daemon(&mut self) -> Vec<String> {
+            // A test has no daemon: the question is asked and nothing
+            // answers it. The status knows that it was asked, so a test
+            // can see when the launcher spoke to it.
+            self.status.borrow_mut().asked = true;
+            Vec::new()
+        }
     }
 
     /// A state whose source is a double, and the questions it was asked.
@@ -800,6 +869,7 @@ mod tests {
             open: Box::new(|_| Err("um teste não abre ficheiros".to_string())),
             reveal: Box::new(|_| Err("um teste não abre pastas".to_string())),
             waiting: Waiting::Idle,
+            ask_daemon: false,
             history: History::new(),
             usage_path: None,
             note: None,
@@ -1116,6 +1186,123 @@ mod tests {
         let line = status_line(&state);
         assert!(line.contains("nenhum resultado"), "{line}");
         assert_ne!(state.app.mode(), Mode::Menu, "there is no menu to open");
+    }
+
+    /// The daemon is asked on the clock, and not before the window.
+    ///
+    /// The window goes up before the daemon is asked: a daemon that takes
+    /// the connection and then says nothing must not keep the window off
+    /// the screen, and it must not keep the hotkey from working either.
+    #[test]
+    fn the_daemon_is_asked_on_the_clock_and_not_before_the_window() {
+        let (mut state, _) = recording();
+        // The launcher starts: the daemon has to be asked who it is, and
+        // the question is not asked yet.
+        state.ask_daemon = true;
+        assert!(
+            !state.source.status().borrow().asked,
+            "the daemon was not asked yet"
+        );
+
+        // The window goes up.
+        let _ = handle(&mut state, Event::Toggle);
+        assert!(
+            !state.source.status().borrow().asked,
+            "the window goes up before the daemon is asked"
+        );
+
+        // And the clock asks.
+        let _ = handle(&mut state, Event::Tick);
+        assert!(
+            state.source.status().borrow().asked,
+            "the clock asks the daemon, and the clock only ticks while the
+            window is up"
+        );
+    }
+
+    /// The line shows the answer, even when the daemon is not there.
+    ///
+    /// The count, the layer, the backend and the time belong to the
+    /// **answer**: the `rgx` fallback answers while the daemon is away,
+    /// and a line that says "sem daemon" and hides the answer hides the
+    /// one thing the user asked for.
+    #[test]
+    fn the_line_shows_the_answer_even_when_the_daemon_is_not_there() {
+        let (state, _) = recording();
+        {
+            let status = state.source.status();
+            let mut st = status.borrow_mut();
+            st.connected = false;
+            st.matches = 3;
+            st.layer = "conteúdo";
+            st.backend = "rgx".to_string();
+            st.took_us = 1500;
+        }
+        let line = status_line(&state);
+        assert!(line.contains("3 resultados"), "{line}");
+        assert!(line.contains("conteúdo"), "{line}");
+        assert!(line.contains("rgx"), "{line}");
+        assert!(line.contains("1 ms"), "{line}");
+    }
+
+    /// The line does not say the daemon is not there before it was asked.
+    ///
+    /// The daemon was not asked yet: the line that says "sem ligação ao
+    /// daemon" about a daemon nobody has spoken to is a line that says
+    /// something it does not know.
+    #[test]
+    fn the_line_does_not_say_the_daemon_is_not_there_before_asking() {
+        let (state, _) = recording();
+        let line = status_line(&state);
+        assert!(!line.contains("sem ligação ao daemon"), "{line}");
+    }
+
+    /// A paste inside the menu is not a silent no-op.
+    ///
+    /// The menu had the keyboard and swallowed the key: the user pressed
+    /// Ctrl+V and the launcher said nothing, and the silence looks like
+    /// a launcher that is broken. A paste is the field's, so the menu
+    /// closes and the text lands in the query.
+    #[test]
+    fn a_paste_inside_the_menu_is_not_a_silent_no_op() {
+        let (mut state, asked) = recording_with("invoice");
+        state
+            .app
+            .set_results(vec![Row::new("C:/a/notas.txt".to_string(), 0)]);
+        let _ = on_key(&mut state, Key::CtrlK);
+        assert_eq!(state.app.mode(), Mode::Menu, "the menu is open");
+
+        let _ = on_key(&mut state, Key::CtrlV);
+
+        assert_eq!(state.app.query().text(), "invoice", "the text landed");
+        assert_ne!(state.app.mode(), Mode::Menu, "the menu is closed");
+        assert_eq!(state.waiting, Waiting::Names, "the answer is on its way");
+        assert!(asked.borrow().is_empty(), "the daemon is asked later");
+    }
+
+    /// The history that could not be written is said out loud.
+    ///
+    /// The use is remembered for this session and the write is tried
+    /// again on the next use, but the user is told: a memory that is
+    /// silently not written is a memory the user believes in and the
+    /// machine does not have. The note reaches the line under the field,
+    /// the same way the note about the hotkey does.
+    #[test]
+    fn the_history_that_could_not_be_written_is_said_out_loud() {
+        let mut state = empty();
+        // The parent of the store is a **file**: the write cannot be
+        // made, and the launcher has to say so.
+        let blocker = std::env::temp_dir().join(format!("rgy-rgxy-history-{}", std::process::id()));
+        std::fs::write(&blocker, b"this is a file, not a folder").unwrap();
+        state.usage_path = Some(blocker.join("history.json"));
+        state
+            .app
+            .set_results(vec![Row::new("C:/a/notas.txt".to_string(), 0)]);
+        state.open = Box::new(|_| Ok(()));
+        let _ = run_action(&mut state, Action::Open);
+        let line = status_line(&state);
+        assert!(line.contains("histórico"), "{line}");
+        let _ = std::fs::remove_file(&blocker);
     }
 
     /// The menu key with a result opens the actions of that result.

@@ -518,19 +518,33 @@ That split is the whole performance story of the second layer: a content
 search over the tree reads the tree, and a content search over the
 sixty-four files a name search chose reads sixty-four files.
 
-The name layer answers on every keystroke: it is a re-rank of a warm
-index. The content layer **reads files**, so it waits for the window's
-clock (120 ms) and answers once for a burst of typing.
+Both layers are asked on the **window's clock** (120 ms): a keystroke
+sets the question and the clock asks it, so a burst of typing is one
+question and not one question per letter. The name layer is a re-rank of
+a warm index and the content layer **reads files** — the clock is the
+same for both, and the difference is in how long the answer takes, not
+in when it is asked.
 
-The window is up **before** the daemon is asked. The field is there, the
-line under it says `procurando…`, and the answer lands in a window
-that is already on the screen. No single wait is longer than **two
-seconds**: the client's own window is thirty, which is right for a
+The window is up **before** the daemon is asked. The daemon is asked on
+the window's clock, and the clock only ticks while the window is up: a
+daemon that takes the connection and then says nothing does not keep the
+window off the screen, and it does not keep the hotkey from working
+either. The field is there, the line under it says `procurando…` while
+the question is on its way, and the answer lands in a window that is
+already on the screen. No single wait of the **window** is longer than
+**two seconds**: the client's own window is thirty, which is right for a
 program that waits in the background and wrong for a search box — thirty
 seconds of silence is a window that stopped answering the keyboard. The
-same window covers the content layer, the scope it reads and the files
-themselves; a content query waits for the scope before it reads a byte.
-A daemon that is slow says so and the launcher carries on.
+two seconds are the budget of the whole answer: the scope, the files and
+the fallback share it, so the window never stops answering for longer
+than it was given. A content query waits for the scope before it reads a
+byte. A daemon that is slow says so and the launcher carries on — a
+daemon that is slow is not a daemon that is gone, and the line under the
+field still shows what the last answer said.
+
+The **command line** is another thing: `rgxy --query "invoice"` waits as
+long as the client always did — thirty seconds — because a program that
+waits in the background can afford to and a search box cannot.
 
 ### The short filters
 
@@ -585,9 +599,15 @@ The chosen path goes to stdout, one per line — the same contract as
 `--query`.
 
 The default is `fzf` or `sk`: they are the ones that read a list separated
-by NUL, and a path with a newline in it would break the other kind. A
-picker you name yourself and that cannot read one — `peco`, `fz` — gets
-the list one path per line.
+by NUL, and a path with a newline in it is no trouble to them. A picker
+you name yourself and that cannot read one — `peco`, `fz` — gets the list
+one path per line.
+
+A path that carries the separator the picker reads cannot be carried: it
+is offered to the picker **whole**, or not at all, and never split in
+half — half of a path is a path that does not exist. The launcher says on
+stderr how many were left out, so a result that is missing from the list
+is a result you were told about.
 
 ### The commands
 
@@ -617,6 +637,11 @@ Some things are not searches. A line that starts with `>` is a command:
 | `Control+W` | deletes the word |
 | `Control+U` | empties the field |
 
+A paste inside the **actions** menu is the field's: the menu closes and
+the text lands in the field, with the field's own words for a clipboard
+that cannot be pasted. A key that does nothing and says nothing is a
+launcher the user cannot tell from a frozen one.
+
 The window gets out of the way when you click somewhere else. A launcher
 floating over the editor you just clicked into is a launcher you have to
 close by hand.
@@ -625,7 +650,10 @@ close by hand.
 
 The window needs a desktop. A machine without one gets the terminal
 interface instead, over the same daemon: the same query, the same list,
-the same answers — in a terminal.
+the same answers — in a terminal. The terminal says the same sentence the
+window says when the daemon is not there: the two are the same interface
+over the same source, and the one that keeps quiet is the one the user
+cannot trust.
 
 The window itself is a Windows thing for now. The double-`Control`
 hotkey is a low-level keyboard hook, and the hook this repository has is

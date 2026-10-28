@@ -286,7 +286,17 @@ impl Client {
     /// id it has caught up to, and whether it caught up by replaying the
     /// journal or by relisting the tree.
     pub fn status(&mut self) -> std::io::Result<DaemonStatus> {
-        let responses = self.request(&Request::Status)?;
+        self.status_within(READ_TIMEOUT)
+    }
+
+    /// The same, with the window the caller asks for.
+    ///
+    /// The launcher asks who the daemon is from the thread that draws the
+    /// window, and a daemon that takes the connection and then says
+    /// nothing must not keep the window off the screen: the status is
+    /// asked in the caller's window, like every other question.
+    pub fn status_within(&mut self, window: Duration) -> std::io::Result<DaemonStatus> {
+        let responses = self.request_within(&Request::Status, window)?;
         for r in responses {
             if let Response::Status {
                 docs,
@@ -1192,6 +1202,32 @@ mod tests {
         let err = client
             .content_within("total", &[String::from("/a/notes.txt")], 10, SHORT)
             .expect_err("a silent daemon has no answer");
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::TimedOut,
+            "the wait ran out: {err}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the client waited for the window, not forever"
+        );
+        server.join();
+    }
+
+    /// The status, with the caller's own window, times out with it.
+    ///
+    /// The launcher asks who the daemon is from the thread that draws the
+    /// window: a daemon that takes the connection and then says nothing
+    /// must not hold the window off the screen, and the window it was
+    /// given is the one that decides how long the launcher waits.
+    #[test]
+    fn a_status_with_the_callers_window_times_out_with_it() {
+        let server = serve(says_nothing);
+        let mut client = Client::connect(&server.endpoint).expect("the client connects");
+        let started = Instant::now();
+        let err = client
+            .status_within(SHORT)
+            .expect_err("a silent daemon has no status");
         assert_eq!(
             err.kind(),
             std::io::ErrorKind::TimedOut,

@@ -42,19 +42,23 @@ use std::time::Duration;
 use rgy_launcher::layer::{ContentMode, content_mode, engine_pattern};
 use rgy_proto::GrepFile;
 
-/// How long the fallback may take before it is given up on.
-///
-/// The daemon answers in milliseconds; the fallback answers in seconds, at
-/// worst. Ten seconds is generous for a process reading sixty-four files,
-/// and past that the process is not slow — it is stuck.
-const TIMEOUT: Duration = Duration::from_secs(10);
-
 /// The content answer, from `rgx` itself.
 ///
 /// `paths` is the scope: the files the name layer chose. An empty scope
 /// is an empty answer — there is nothing to read, and walking the tree
 /// instead would be a different question.
-pub fn grep(binary: &str, query: &str, paths: &[String]) -> Result<Vec<GrepFile>, String> {
+///
+/// The window is the **caller's**: the launcher lives on the thread that
+/// draws the window, and a fallback with a private deadline of its own
+/// is a window that stopped answering the keyboard for as long as that
+/// deadline is. The command line, which waits in the background, asks
+/// for the client's window instead.
+pub fn grep(
+    binary: &str,
+    query: &str,
+    paths: &[String],
+    window: Duration,
+) -> Result<Vec<GrepFile>, String> {
     let scope = only_files(paths);
     if scope.is_empty() {
         return Ok(Vec::new());
@@ -111,18 +115,14 @@ pub fn grep(binary: &str, query: &str, paths: &[String]) -> Result<Vec<GrepFile>
         let _ = tx.send(files);
     });
 
-    let files = match rx.recv_timeout(TIMEOUT) {
+    let files = match within(&rx, window) {
         Ok(files) => files,
-        Err(mpsc::RecvTimeoutError::Timeout) => {
+        Err(reason) => {
             // The binary is still reading: it is not going to answer, and
             // the window is waiting for an answer that will not come.
             let _ = child.kill();
             let _ = child.wait();
-            return Err(format!("o rgx não respondeu em {} s", TIMEOUT.as_secs()));
-        }
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
-            let _ = child.wait();
-            return Err("o rgx terminou sem responder".to_string());
+            return Err(reason);
         }
     };
 
@@ -136,6 +136,29 @@ pub fn grep(binary: &str, query: &str, paths: &[String]) -> Result<Vec<GrepFile>
         return Err(format!("o rgx falhou ({status})"));
     }
     Ok(files)
+}
+
+/// The answer, within the window the caller asked for.
+///
+/// The window covers the whole answer and not the reading of it: the
+/// process is started, it reads the scope and it writes the matches, and
+/// a deadline that counted each line of output would be a deadline that
+/// ran out while the answer was still on its way.
+fn within(rx: &mpsc::Receiver<Vec<GrepFile>>, window: Duration) -> Result<Vec<GrepFile>, String> {
+    match rx.recv_timeout(window) {
+        Ok(files) => Ok(files),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            let said = if window.as_secs() == 0 {
+                format!("{} ms", window.as_millis())
+            } else {
+                format!("{} s", window.as_secs())
+            };
+            Err(format!("o rgx não respondeu em {said}"))
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            Err("o rgx terminou sem responder".to_string())
+        }
+    }
 }
 
 /// The scope, with the folders taken out.
@@ -324,14 +347,14 @@ mod tests {
         std::fs::write(&file, "zebra\n").unwrap();
         let scope = vec![file.to_string_lossy().into_owned()];
 
-        let answer = grep("rgx", "sym:total", &scope);
+        let answer = grep("rgx", "sym:total", &scope, Duration::from_secs(5));
         assert!(answer.is_err(), "a symbol is not a byte grep: {answer:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn an_empty_scope_is_an_empty_answer() {
-        let answer = grep("rgx", "invoice", &[]);
+        let answer = grep("rgx", "invoice", &[], Duration::from_secs(5));
         assert!(answer.expect("the answer").is_empty());
     }
 
@@ -376,13 +399,34 @@ mod tests {
         std::fs::write(&file, "draft with zebra marker\n").unwrap();
         let scope = vec![file.to_string_lossy().into_owned()];
 
-        let files = grep(&binary, "grep:zebra", &scope).expect("the fallback answers");
+        let files = grep(&binary, "grep:zebra", &scope, Duration::from_secs(5))
+            .expect("the fallback answers");
         assert_eq!(files.len(), 1, "the fallback found the file");
         assert_eq!(files[0].lines.len(), 1);
         assert!(
             files[0].lines[0].1.contains("zebra"),
             "the line that matched is in the answer: {:?}",
             files[0].lines
+        );
+    }
+
+    /// The fallback gives up in the window it was given.
+    ///
+    /// The window belongs to the caller: the launcher lives on the thread
+    /// that draws the window, and a fallback with a private deadline of
+    /// ten seconds is a window that stopped answering the keyboard for
+    /// ten seconds.
+    #[test]
+    fn the_fallback_gives_up_in_the_window_it_is_given() {
+        // The sender is kept: a channel with nobody on the other end is
+        // a channel that is closed, and the case under test is the wait.
+        let (_tx, rx) = mpsc::channel();
+        let started = std::time::Instant::now();
+        let err = within(&rx, Duration::from_millis(200)).expect_err("no answer is coming");
+        assert!(err.contains("não respondeu"), "{err}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the fallback waited for its window, not for a private one"
         );
     }
 
@@ -398,7 +442,8 @@ mod tests {
         std::fs::write(&file, "draft with zebra marker\n").unwrap();
         let scope = vec![file.to_string_lossy().into_owned()];
 
-        let files = grep(&binary, "grep:quimera", &scope).expect("no match is not a failure");
+        let files = grep(&binary, "grep:quimera", &scope, Duration::from_secs(5))
+            .expect("no match is not a failure");
         assert!(
             files.is_empty(),
             "nothing matched, and the launcher says so"
@@ -439,10 +484,12 @@ mod tests {
         std::fs::write(&file, "draft with Zebra marker\n").unwrap();
         let scope = vec![file.to_string_lossy().into_owned()];
 
-        let folded = grep(&binary, "grep:zebra", &scope).expect("the fallback answers");
+        let folded = grep(&binary, "grep:zebra", &scope, Duration::from_secs(5))
+            .expect("the fallback answers");
         assert_eq!(folded.len(), 1, "the pattern has no uppercase, so it folds");
 
-        let exact = grep(&binary, "grep:ZEBRA", &scope).expect("the fallback answers");
+        let exact = grep(&binary, "grep:ZEBRA", &scope, Duration::from_secs(5))
+            .expect("the fallback answers");
         assert!(
             exact.is_empty(),
             "the pattern has an uppercase, so the match is exact: {exact:?}"
