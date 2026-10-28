@@ -17,17 +17,34 @@
 //! `rgx --json` answers in rg's own JSON shape — `begin`, `match`, `end`,
 //! `summary` — and this reads it with the protocol crate's reader, because
 //! a second JSON parser for one wire is a second thing to keep right.
+//!
+//! # The three rules of a fallback
+//!
+//! A fallback answers **the question that was asked**, and not a bigger
+//! one. So:
+//!
+//! * the scope is the files the name layer chose, and a folder in it is
+//!   dropped — handing a folder to `rgx` is a walk, and the walk is the
+//!   whole-tree search the fallback exists to avoid;
+//! * the answer has a **deadline**, because a launcher that waits for a
+//!   process that will never answer is a launcher that hangs;
+//! * the exit code is part of the answer: `rg` exits 1 when nothing
+//!   matched, and that is an answer, not a failure.
 
 use std::io::BufRead;
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::time::Duration;
 
+use rgy_launcher::layer::{ContentMode, content_mode};
 use rgy_proto::GrepFile;
 
-/// The prefix that asks for a regular expression.
-const REGEX_PREFIX: &str = "regex:";
-
-/// The prefix that asks for a literal.
-const LITERAL_PREFIX: &str = "grep:";
+/// How long the fallback may take before it is given up on.
+///
+/// The daemon answers in milliseconds; the fallback answers in seconds, at
+/// worst. Ten seconds is generous for a process reading sixty-four files,
+/// and past that the process is not slow — it is stuck.
+const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The content answer, from `rgx` itself.
 ///
@@ -35,10 +52,21 @@ const LITERAL_PREFIX: &str = "grep:";
 /// is an empty answer — there is nothing to read, and walking the tree
 /// instead would be a different question.
 pub fn grep(binary: &str, query: &str, paths: &[String]) -> Result<Vec<GrepFile>, String> {
-    if paths.is_empty() {
+    let scope = only_files(paths);
+    if scope.is_empty() {
         return Ok(Vec::new());
     }
-    let (pattern, fixed) = split_pattern(query);
+    let (mode, pattern) = split_pattern(query);
+    let fixed = match mode {
+        ContentMode::Literal => true,
+        ContentMode::Regex => false,
+        // The byte grep reads bytes: it has no notion of a symbol, and
+        // grepping for the word `sym:` would answer a question nobody
+        // asked. The fallback says it cannot answer this one.
+        ContentMode::Symbol => {
+            return Err("o rgx não responde a símbolos".to_string());
+        }
+    };
 
     let mut command = Command::new(binary);
     if fixed {
@@ -48,38 +76,93 @@ pub fn grep(binary: &str, query: &str, paths: &[String]) -> Result<Vec<GrepFile>
     command.arg("--json");
     command.arg("--");
     command.arg(pattern);
-    for path in paths {
+    for path in &scope {
         command.arg(path);
     }
     command.stdout(Stdio::piped());
+    // The error is not read: a pipe nobody drains is a deadlock waiting to
+    // happen, and the exit code says what went wrong well enough.
     command.stderr(Stdio::null());
 
     let mut child = command
         .spawn()
         .map_err(|e| format!("o rgx não pôde ser executado: {e}"))?;
     let stdout = child.stdout.take().ok_or("o rgx não devolveu nada")?;
-    let files = read_matches(std::io::BufReader::new(stdout).lines().map_while(Result::ok));
-    let _ = child.wait();
+
+    // The reading happens on its own thread so that the wait has a
+    // deadline: a launcher that is blocked on a process is a launcher that
+    // does not come back.
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let files = read_matches(
+            std::io::BufReader::new(stdout)
+                .lines()
+                .map_while(Result::ok),
+        );
+        let _ = tx.send(files);
+    });
+
+    let files = match rx.recv_timeout(TIMEOUT) {
+        Ok(files) => files,
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            // The binary is still reading: it is not going to answer, and
+            // the window is waiting for an answer that will not come.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("o rgx não respondeu em {} s", TIMEOUT.as_secs()));
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            let _ = child.wait();
+            return Err("o rgx terminou sem responder".to_string());
+        }
+    };
+
+    // The exit code is the answer's other half. `rg` — and `rgx` with it
+    // — exits 1 when nothing matched, and that is an answer and not a
+    // failure; anything else is the binary saying it could not do it.
+    let status = child
+        .wait()
+        .map_err(|e| format!("o rgx terminou mal: {e}"))?;
+    if !status.success() && status.code() != Some(1) {
+        return Err(format!("o rgx falhou ({status})"));
+    }
     Ok(files)
 }
 
-/// The pattern, and whether it is a literal.
+/// The scope, with the folders taken out.
 ///
-/// The daemon's own rule, which is the engine's: `grep:` is a literal,
-/// `regex:` asks for the engine, and a bare word is a literal too. The
-/// two have to agree, or the same question would be answered two
-/// different ways depending on which half of the launcher answered it.
-pub fn split_pattern(query: &str) -> (&str, bool) {
-    if let Some(rest) = query.strip_prefix(REGEX_PREFIX) {
-        return (rest, false);
+/// The name layer answers with files **and** folders, and a folder handed
+/// to `rgx` is a walk: the binary reads everything under it, which is the
+/// whole-tree search the fallback exists to avoid. Only the files are
+/// kept — a folder in the scope is a result the user can open, and the
+/// content layer reads files, not the trees under them.
+///
+/// A path that is not there any more is dropped for the same reason: the
+/// file it named is gone, and reading it would fail.
+fn only_files(paths: &[String]) -> Vec<String> {
+    paths
+        .iter()
+        .filter(|path| std::fs::metadata(path).is_ok_and(|meta| meta.is_file()))
+        .cloned()
+        .collect()
+}
+
+/// The pattern, and what it asks for.
+///
+/// The vocabulary is the **model's**: one table, one answer. The daemon
+/// parses the content part with the engine's own parser, and this reads
+/// the same table — a prefix that only one half knows is a prefix the user
+/// gets two different answers for.
+///
+/// The prefix is read the way a person types it — `Grep:` is `grep:` — and
+/// it is a whole word: `grepx:total` is a word the engine does not know.
+///
+/// A bare word is a literal, the same way the daemon reads it.
+pub fn split_pattern(query: &str) -> (ContentMode, &str) {
+    match content_mode(query) {
+        Some((mode, pattern)) => (mode, pattern),
+        None => (ContentMode::Literal, query.trim()),
     }
-    if let Some(rest) = query.strip_prefix(LITERAL_PREFIX) {
-        return (rest, true);
-    }
-    if let Some(rest) = query.strip_prefix("content:") {
-        return (rest, true);
-    }
-    (query, true)
 }
 
 /// Read the matches out of rgx's JSON stream.
@@ -175,16 +258,72 @@ mod tests {
 
     #[test]
     fn the_pattern_is_a_literal_unless_it_asks_for_the_engine() {
-        assert_eq!(split_pattern("invoice"), ("invoice", true));
-        assert_eq!(split_pattern("grep:invoice"), ("invoice", true));
-        assert_eq!(split_pattern("content:invoice"), ("invoice", true));
-        assert_eq!(split_pattern("regex:^inv"), ("^inv", false));
+        assert_eq!(split_pattern("invoice"), (ContentMode::Literal, "invoice"));
+        assert_eq!(
+            split_pattern("grep:invoice"),
+            (ContentMode::Literal, "invoice")
+        );
+        assert_eq!(
+            split_pattern("content:invoice"),
+            (ContentMode::Literal, "invoice")
+        );
+        assert_eq!(split_pattern("regex:^inv"), (ContentMode::Regex, "^inv"));
+    }
+
+    #[test]
+    fn the_prefix_is_read_the_way_a_person_types_it() {
+        // `Grep:` is `grep:`: the case of the prefix is the launcher's
+        // business, and the case of the pattern is the user's.
+        assert_eq!(
+            split_pattern("Grep:Invoice"),
+            (ContentMode::Literal, "Invoice")
+        );
+        assert_eq!(split_pattern("REGEX:^inv"), (ContentMode::Regex, "^inv"));
+    }
+
+    #[test]
+    fn a_symbol_is_a_mode_of_its_own() {
+        // The byte grep cannot answer it, and it has to be able to say so.
+        assert_eq!(split_pattern("sym:total"), (ContentMode::Symbol, "total"));
+    }
+
+    #[test]
+    fn the_fallback_refuses_a_symbol() {
+        // Grepping for the word `sym:` would answer a question nobody
+        // asked, so the fallback says it cannot answer this one.
+        let dir = std::env::temp_dir().join(format!("rgy-rgxy-sym-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("notes.txt");
+        std::fs::write(&file, "zebra\n").unwrap();
+        let scope = vec![file.to_string_lossy().into_owned()];
+
+        let answer = grep("rgx", "sym:total", &scope);
+        assert!(answer.is_err(), "a symbol is not a byte grep: {answer:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn an_empty_scope_is_an_empty_answer() {
         let answer = grep("rgx", "invoice", &[]);
         assert!(answer.expect("the answer").is_empty());
+    }
+
+    #[test]
+    fn a_folder_in_the_scope_is_not_read() {
+        // A folder handed to `rgx` is a walk, and the walk is the
+        // whole-tree search the fallback exists to avoid.
+        let dir = std::env::temp_dir().join(format!("rgy-rgxy-scope-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("notes.txt");
+        std::fs::write(&file, "zebra\n").unwrap();
+        let scope = vec![
+            dir.to_string_lossy().into_owned(),
+            file.to_string_lossy().into_owned(),
+        ];
+        let kept = only_files(&scope);
+        assert_eq!(kept.len(), 1, "only the file is kept: {kept:?}");
+        assert!(kept[0].ends_with("notes.txt"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The fallback, end to end, on a machine that has the binary.
@@ -218,5 +357,25 @@ mod tests {
             "the line that matched is in the answer: {:?}",
             files[0].lines
         );
+    }
+
+    #[test]
+    fn nothing_to_match_is_not_a_failure() {
+        // `rg` exits 1 when nothing matched, and that is an answer.
+        let Some(binary) = crate::tools::rgx() else {
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("rgy-rgxy-nomatch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("notes.txt");
+        std::fs::write(&file, "draft with zebra marker\n").unwrap();
+        let scope = vec![file.to_string_lossy().into_owned()];
+
+        let files = grep(&binary, "grep:quimera", &scope).expect("no match is not a failure");
+        assert!(
+            files.is_empty(),
+            "nothing matched, and the launcher says so"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

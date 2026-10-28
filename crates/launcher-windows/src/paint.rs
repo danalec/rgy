@@ -18,6 +18,7 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
+use rgy_launcher::results::IconKind;
 use rgy_launcher::{Layout, Mode, Preview, Row};
 
 use crate::window::View;
@@ -50,24 +51,47 @@ const DT_SINGLELINE: u32 = 0x0000_0020;
 const DT_NOPREFIX: u32 = 0x0000_0800;
 const DT_END_ELLIPSIS: u32 = 0x0000_8000;
 
+/// The icon's size, in pixels: the shell's small icon.
+const ICON_SIZE: i32 = 16;
+
+/// The space the icon takes at the left of a row, the gap included.
+///
+/// The gutter belongs to the window and not to the model's geometry: the
+/// icon is the window's own decoration, and the model's layout is the
+/// same with an icon as without one.
+const GUTTER: i32 = ICON_SIZE + 8;
+
 /// The fonts the launcher draws with.
+///
+/// The fonts belong to the window and not to the paint: GDI refuses to
+/// delete a font that is selected into a context, so a font made per
+/// paint and deleted at the end of it is a font that is never deleted —
+/// three handles per paint, on a launcher that paints on every
+/// keystroke.
 ///
 /// Segoe UI Variable Text is Win11's own; "Segoe UI" is the one every
 /// Windows has, and it is the fallback when the variable face is not
 /// there. The folder is a size smaller, and in the dimmer colour.
-struct Fonts {
+pub struct Fonts {
     field: HFONT,
     row: HFONT,
     folder: HFONT,
 }
 
 impl Fonts {
-    fn new() -> Fonts {
+    /// The window's fonts, made once.
+    pub fn new() -> Fonts {
         Fonts {
             field: font(17, FW_SEMIBOLD, "Segoe UI Variable Text"),
             row: font(15, FW_NORMAL, "Segoe UI Variable Text"),
             folder: font(13, FW_NORMAL, "Segoe UI Variable Text"),
         }
+    }
+}
+
+impl Default for Fonts {
+    fn default() -> Fonts {
+        Fonts::new()
     }
 }
 
@@ -105,6 +129,130 @@ fn font(height: i32, weight: i32, face: &str) -> HFONT {
     }
 }
 
+/// The icons, one per kind, resolved once.
+///
+/// The shell answers with a copy of the icon and the copy is the
+/// caller's to destroy, so they are kept here and given back when the
+/// window goes away. One icon per kind and not one per row: every
+/// `.docx` on the disk has the same icon, and asking the shell is not
+/// free.
+pub struct Icons {
+    icons: Vec<Option<HICON>>,
+}
+
+impl Icons {
+    /// An empty cache: no icon has been asked for yet.
+    pub fn new() -> Icons {
+        Icons { icons: Vec::new() }
+    }
+
+    /// The icon of a kind, asked of the shell the first time and kept
+    /// after that.
+    pub fn get(&mut self, kind: IconKind) -> Option<HICON> {
+        let slot = slot_of(kind);
+        if self.icons.len() <= slot {
+            self.icons.resize(slot + 1, None);
+        }
+        if let Some(icon) = self.icons[slot] {
+            return Some(icon);
+        }
+        let icon = shell_icon(kind);
+        self.icons[slot] = icon;
+        icon
+    }
+}
+
+impl Default for Icons {
+    fn default() -> Icons {
+        Icons::new()
+    }
+}
+
+impl Drop for Icons {
+    fn drop(&mut self) {
+        for icon in self.icons.iter().flatten() {
+            unsafe {
+                DestroyIcon(*icon);
+            }
+        }
+    }
+}
+
+/// Where a kind's icon is kept.
+fn slot_of(kind: IconKind) -> usize {
+    match kind {
+        IconKind::Folder => 0,
+        IconKind::Document => 1,
+        IconKind::Image => 2,
+        IconKind::Video => 3,
+        IconKind::Audio => 4,
+        IconKind::Application => 5,
+        IconKind::File => 6,
+    }
+}
+
+/// The shell's icon for a kind of file.
+///
+/// The path is a spelling and not a file: `SHGFI_USEFILEATTRIBUTES` makes
+/// the shell answer from the spelling and the attributes alone, so
+/// nothing here touches the disk.
+///
+/// The folder is the one that needs the attributes: the shell only
+/// answers with the folder's icon when the file is said to be a folder,
+/// and a drive's root is answered with the drive's icon whatever the
+/// attributes say — so the folder's spelling is a plain name and not
+/// `C:\`.
+fn shell_icon(kind: IconKind) -> Option<HICON> {
+    let (path, attributes): (&str, u32) = match kind {
+        IconKind::Folder => ("folder", FILE_ATTRIBUTE_DIRECTORY),
+        IconKind::Document => ("document.docx", FILE_ATTRIBUTE_NORMAL),
+        IconKind::Image => ("image.png", FILE_ATTRIBUTE_NORMAL),
+        IconKind::Video => ("video.mp4", FILE_ATTRIBUTE_NORMAL),
+        IconKind::Audio => ("audio.mp3", FILE_ATTRIBUTE_NORMAL),
+        IconKind::Application => ("application.exe", FILE_ATTRIBUTE_NORMAL),
+        IconKind::File => ("file", FILE_ATTRIBUTE_NORMAL),
+    };
+    let wide: Vec<u16> = path.encode_utf16().chain(core::iter::once(0)).collect();
+    let mut info = SHFILEINFOW {
+        hIcon: core::ptr::null_mut(),
+        iIcon: 0,
+        dwAttributes: 0,
+        szDisplayName: [0; 260],
+        szTypeName: [0; 80],
+    };
+    let got = unsafe {
+        SHGetFileInfoW(
+            wide.as_ptr(),
+            attributes,
+            &mut info,
+            core::mem::size_of::<SHFILEINFOW>() as u32,
+            SHGFI_ICON | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES,
+        )
+    };
+    if got == 0 || info.hIcon.is_null() {
+        None
+    } else {
+        Some(info.hIcon)
+    }
+}
+
+/// Draw an icon, at its own size.
+fn draw_icon(hdc: HDC, icon: HICON, x: i32, y: i32) {
+    unsafe {
+        DrawIconEx(
+            hdc,
+            icon,
+            x,
+            y,
+            ICON_SIZE,
+            ICON_SIZE,
+            0,
+            core::ptr::null_mut(),
+            DI_NORMAL,
+        );
+    }
+}
+
 /// Draw the window.
 ///
 /// The device context is a raw pointer: the caller has to have one, and
@@ -113,8 +261,14 @@ fn font(height: i32, weight: i32, face: &str) -> HFONT {
 /// # Safety
 ///
 /// `hdc` must be a device context the thread may draw on.
-pub unsafe fn paint(hdc: HDC, view: &View, painted: &mut (i32, i32)) {
-    let fonts = Fonts::new();
+pub unsafe fn paint(
+    hdc: HDC,
+    view: &View,
+    painted: &mut (i32, i32),
+    backdrop: bool,
+    icons: &mut Icons,
+    fonts: &Fonts,
+) {
     let mut layout = Layout::with_rows(view.rows.len() as u32);
     // The preview panel is a layer over the results, and it is as tall as
     // it needs to be: the host sized the window with the same geometry,
@@ -128,9 +282,17 @@ pub unsafe fn paint(hdc: HDC, view: &View, painted: &mut (i32, i32)) {
 
     unsafe {
         SetBkMode(hdc, TRANSPARENT);
+        // The font the context had goes back when the paint is done: a
+        // font that is still selected cannot be deleted, and the
+        // window's fonts are deleted when the window dies.
+        let stock = GetCurrentObject(hdc, OBJ_FONT);
         // The background: the system's backdrop is behind this window, and
-        // painting over it would throw the blur away.
-        fill(hdc, 0, 0, width, height, colour::BACKDROP);
+        // painting over it would throw the blur away. Without a backdrop
+        // there is nothing behind it, and the window paints its own
+        // near-black.
+        if !backdrop {
+            fill(hdc, 0, 0, width, height, colour::BACKDROP);
+        }
 
         // The border: a hairline around the whole window.
         frame(hdc, 0, 0, width, height, colour::BORDER);
@@ -148,13 +310,26 @@ pub unsafe fn paint(hdc: HDC, view: &View, painted: &mut (i32, i32)) {
         } else {
             let w = draw_run(hdc, &view.query, left, field_top + 14, colour::TEXT);
             // The caret: two pixels after the last character.
-            fill(hdc, left + w + 2, field_top + 12, 2, field_h - 26, colour::TEXT);
+            fill(
+                hdc,
+                left + w + 2,
+                field_top + 12,
+                2,
+                field_h - 26,
+                colour::TEXT,
+            );
         }
 
         // The status line, under the field.
         if !view.status.is_empty() {
             select(hdc, fonts.folder);
-            draw_run(hdc, &view.status, left, field_top + field_h - 6, colour::DIM);
+            draw_run(
+                hdc,
+                &view.status,
+                left,
+                field_top + field_h - 6,
+                colour::DIM,
+            );
         }
 
         // The rows.
@@ -167,19 +342,22 @@ pub unsafe fn paint(hdc: HDC, view: &View, painted: &mut (i32, i32)) {
                 // The accent bar on the left: the selection's own edge.
                 fill(hdc, 0, top, 3, row_h, colour::ACCENT);
             }
-            draw_row(hdc, &fonts, row, left, top, row_h, content);
+            draw_row(hdc, fonts, row, left, top, row_h, content, icons);
         }
 
         // The actions menu, over the rows.
         if view.mode == Mode::Menu {
-            draw_menu(hdc, &fonts, view, width, height);
+            draw_menu(hdc, fonts, view, width, height);
         }
 
         // The preview panel, over everything the rows were.
         if let Some(preview) = &view.preview {
             let top = layout.list_top() as i32;
-            draw_preview(hdc, &fonts, preview, left, top, width, height - top);
+            draw_preview(hdc, fonts, preview, left, top, width, height - top);
         }
+
+        // The context is left as it was found.
+        select(hdc, stock);
     }
 }
 
@@ -216,9 +394,10 @@ fn draw_preview(
     }
 }
 
-/// One row: the name, with its match picked out, and the folder under it.
+/// One row: the icon, the name with its match picked out, and the folder
+/// under it.
 ///
-/// The geometry is four numbers and two words, and a struct would be a
+/// The geometry is four numbers and three words, and a struct would be a
 /// struct that only this function and its caller ever see.
 #[allow(clippy::too_many_arguments)]
 fn draw_row(
@@ -229,15 +408,24 @@ fn draw_row(
     top: i32,
     row_h: i32,
     content: i32,
+    icons: &mut Icons,
 ) {
+    // The icon, in the gutter at the left of the row: what the row is,
+    // asked of the shell and kept for the next row of the same kind.
+    if let Some(icon) = icons.get(row.icon()) {
+        draw_icon(hdc, icon, left, top + 5);
+    }
+    // The text, after the gutter.
+    let text_left = left + GUTTER;
+    let text_width = content.saturating_sub(GUTTER);
     {
         select(hdc, fonts.row);
         let name = row.name();
-        let mut x = left;
+        let mut x = text_left;
         for (text, matched) in runs(name, row.matched()) {
             let colour = if matched { colour::MATCH } else { colour::TEXT };
             x += draw_run(hdc, &text, x, top + 5, colour);
-            if x - left > content {
+            if x - text_left > text_width {
                 break;
             }
         }
@@ -247,7 +435,7 @@ fn draw_row(
         if !context.is_empty() {
             select(hdc, fonts.folder);
             let text = shorten(context, 90);
-            draw_run(hdc, &text, left, top + row_h - 17, colour::DIM);
+            draw_run(hdc, &text, text_left, top + row_h - 17, colour::DIM);
         }
     }
 }
@@ -331,6 +519,10 @@ fn draw_run(hdc: HDC, text: &str, x: i32, y: i32, colour: u32) -> i32 {
 }
 
 /// Fill a rectangle.
+///
+/// The brush lives and dies here: `FillRect` takes it as an argument
+/// and never selects it into the context, so nothing holds it after the
+/// call and the delete is legal.
 fn fill(hdc: HDC, x: i32, y: i32, w: i32, h: i32, colour: u32) {
     unsafe {
         let brush = CreateSolidBrush(colour);
@@ -346,6 +538,9 @@ fn fill(hdc: HDC, x: i32, y: i32, w: i32, h: i32, colour: u32) {
 }
 
 /// Draw a hairline around a rectangle.
+///
+/// The brush is the rectangle's own and is given back with it, for the
+/// same reason the fill's brush is.
 fn frame(hdc: HDC, x: i32, y: i32, w: i32, h: i32, colour: u32) {
     unsafe {
         let brush = CreateSolidBrush(colour);
@@ -360,11 +555,13 @@ fn frame(hdc: HDC, x: i32, y: i32, w: i32, h: i32, colour: u32) {
     }
 }
 
-/// Put a font in the context.
-fn select(hdc: HDC, font: HFONT) {
-    unsafe {
-        SelectObject(hdc, font.cast());
-    }
+/// Put a font in the context, and say what was there.
+///
+/// The old object is the caller's to keep: a font that is still selected
+/// cannot be deleted, and the window's fonts are deleted when the window
+/// dies.
+fn select(hdc: HDC, font: HFONT) -> HANDLE {
+    unsafe { SelectObject(hdc, font.cast()) }
 }
 
 /// Shorten a path for the line it is drawn on.

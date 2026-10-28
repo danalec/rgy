@@ -365,7 +365,10 @@ fn run_pick(opts: &Opts, query: &str) -> Result<i32, String> {
             Ok(c) => Some(c),
             Err(e) => {
                 if opts.daemon {
-                    return Err(format!("the daemon at {} did not answer: {e}", ep.describe()));
+                    return Err(format!(
+                        "the daemon at {} did not answer: {e}",
+                        ep.describe()
+                    ));
                 }
                 rgy_engine::errln!(
                     "searchctl: no daemon at {} ({e}); using the local index",
@@ -391,9 +394,8 @@ fn run_pick(opts: &Opts, query: &str) -> Result<i32, String> {
                 let outcome = c.search(&q, limit).map_err(|e| e.to_string())?;
                 let mut any = false;
                 for hit in &outcome.hits {
-                    out.write_all(hit.path.as_bytes()).map_err(|e| {
-                        format!("the results could not reach the picker: {e}")
-                    })?;
+                    out.write_all(hit.path.as_bytes())
+                        .map_err(|e| format!("the results could not reach the picker: {e}"))?;
                     out.write_all(&[0])
                         .map_err(|e| format!("the results could not reach the picker: {e}"))?;
                     any = true;

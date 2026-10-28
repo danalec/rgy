@@ -15,6 +15,9 @@ NestedInstallerFiles:
     PortableCommandAlias: searchd
   - RelativeFilePath: rgy-autostart.exe
     PortableCommandAlias: rgy-autostart
+  # The window: the floating launcher over the daemon.
+  - RelativeFilePath: rgxy.exe
+    PortableCommandAlias: rgxy
   # The command the project is named after: the same binary, another name.
   - RelativeFilePath: rgy.exe
     PortableCommandAlias: rgy

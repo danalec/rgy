@@ -18,14 +18,16 @@
 //! (120 ms) before it asks. A burst of typing is one search, and a search
 //! that reads two hundred files is not something to do six times a second.
 
+use rgy_launcher::usage::History;
 use rgy_launcher::{Action, Answer, App, Mode, Row, Source, Split, commands};
 use rgy_launcher_windows::actions;
 use rgy_launcher_windows::hook::Hook;
 use rgy_launcher_windows::window::{Control, Event, Key, View, Window};
 
-use crate::daemon::DaemonSource;
-use crate::preview;
 use crate::Options;
+use crate::daemon::DaemonSource;
+use crate::mru;
+use crate::preview;
 
 /// How many results the window asks for.
 const LIMIT: usize = 50;
@@ -41,6 +43,27 @@ struct State {
     source: DaemonSource,
     /// Whether the content layer is waiting for the clock.
     content_dirty: bool,
+    /// What the user used, and when.
+    ///
+    /// The launcher's own memory: the daemon ranks by relevance, and what
+    /// the user opened yesterday is the one thing it cannot know.
+    history: History,
+    /// Where the memory is kept.
+    usage_path: Option<std::path::PathBuf>,
+}
+
+impl State {
+    /// The user opened a result: the launcher remembers it, and writes it
+    /// down so that the next run of the launcher knows it too.
+    fn record_use(&mut self, path: &str) {
+        self.history.record(path, mru::now());
+        if let Some(file) = &self.usage_path {
+            // A memory that cannot be written is not a launcher that
+            // stops working: the use is remembered for this session, and
+            // the file is written the next time.
+            let _ = mru::save(file, &self.history);
+        }
+    }
 }
 
 /// Run the launcher, until the window is closed.
@@ -60,10 +83,19 @@ pub fn run(source: DaemonSource, options: &Options) -> Result<(), String> {
         None
     };
 
+    // The memory is read once, when the launcher starts: the launcher is
+    // resident, and the file is the memory of the last time it ran.
+    let usage_path = mru::store_path();
+    let history = match &usage_path {
+        Some(path) => mru::load(path),
+        None => History::new(),
+    };
     let mut state = State {
         app: App::new(),
         source,
         content_dirty: false,
+        history,
+        usage_path,
     };
 
     // The daemon is asked who it is before anything else: the answer says
@@ -78,10 +110,24 @@ pub fn run(source: DaemonSource, options: &Options) -> Result<(), String> {
         }
     }
 
+    // The rows the screen has room for: the window is sized from them, and
+    // a window whose bottom half is under the bottom of the screen is a
+    // window the user cannot use.
+    state
+        .app
+        .set_visible_rows(rgy_launcher::app::rows_that_fit(window.work_area_height()));
+
     if options.show {
         state.app.show();
         state.source.set_session(state.app.session());
         ask(&mut state);
+        // The window goes up **now**: the launcher was asked to show
+        // itself, and a window that waits for the first message is a
+        // window waiting for a keystroke that cannot reach it.
+        let layout = state.app.layout();
+        window.set_view(view(&state));
+        window.resize(layout.width as i32, layout.height() as i32);
+        window.show();
     }
 
     window.pump(|event| handle(&mut state, event))
@@ -97,7 +143,7 @@ fn handle(state: &mut State, event: Event) -> Control {
                 // result set is not the answer to a new question.
                 state.source.set_session(state.app.session());
                 ask(state);
-                paint(state)
+                show(state)
             } else {
                 Control::Hide
             }
@@ -188,7 +234,9 @@ fn on_key(state: &mut State, key: Key) -> Control {
     // before the engine sees it.
     if state.app.is_command() {
         if state.app.command().is_none() {
-            state.app.set_warnings(vec![commands::unknown(state.app.query().text())]);
+            state
+                .app
+                .set_warnings(vec![commands::unknown(state.app.query().text())]);
         } else {
             state.app.set_warnings(Vec::new());
         }
@@ -222,7 +270,9 @@ fn command(state: &mut State) -> Control {
     match state.app.command() {
         Some(action) => run_action(state, action),
         None => {
-            state.app.set_warnings(vec![commands::unknown(state.app.query().text())]);
+            state
+                .app
+                .set_warnings(vec![commands::unknown(state.app.query().text())]);
             paint(state)
         }
     }
@@ -231,18 +281,44 @@ fn command(state: &mut State) -> Control {
 /// Do what the user asked of the selected result.
 fn run_action(state: &mut State, action: Action) -> Control {
     let Some(row) = state.app.current().cloned() else {
+        // There is nothing to act on. Saying nothing is what makes the
+        // user think the launcher is broken, so the line under the field
+        // says what happened.
+        state
+            .app
+            .set_warnings(vec!["nenhum resultado selecionado".to_string()]);
         return paint(state);
     };
     match action {
         Action::Open => {
-            let _ = actions::open(&row.path);
-            state.app.hide();
-            Control::Hide
+            state.record_use(&row.path);
+            match actions::open(&row.path) {
+                Ok(()) => {
+                    state.app.hide();
+                    Control::Hide
+                }
+                Err(reason) => {
+                    // The window stays: the user asked for something and
+                    // the machine could not do it. A launcher that closes
+                    // and says nothing is a launcher that swallowed the
+                    // failure.
+                    state.app.set_warnings(vec![reason]);
+                    paint(state)
+                }
+            }
         }
         Action::OpenFolder => {
-            let _ = actions::reveal(&row.path);
-            state.app.hide();
-            Control::Hide
+            state.record_use(&row.path);
+            match actions::reveal(&row.path) {
+                Ok(()) => {
+                    state.app.hide();
+                    Control::Hide
+                }
+                Err(reason) => {
+                    state.app.set_warnings(vec![reason]);
+                    paint(state)
+                }
+            }
         }
         Action::CopyPath => {
             // The window stays: the user is copying a path, not leaving.
@@ -299,6 +375,10 @@ fn tick(state: &mut State) -> Control {
 
 /// The answer, on the screen.
 fn apply(state: &mut State, answer: Answer) {
+    // The daemon's order is the relevance order, and it rules. The
+    // history is a nudge on top of it: a file the user opened recently
+    // comes up a few places, and no further.
+    let answer = state.history.reorder(answer, mru::now());
     let rows: Vec<Row> = answer
         .paths
         .iter()
@@ -306,6 +386,9 @@ fn apply(state: &mut State, answer: Answer) {
         .map(|(i, path)| {
             let mut row = Row::new(path.clone(), 0);
             row.span = answer.span(i).to_vec();
+            // Whether the result is a folder: the daemon says, and the
+            // icon beside the name is the icon of the thing.
+            row.is_folder = answer.folder(i);
             let context = answer.context(i);
             if !context.is_empty() {
                 row = row.with_context(context.to_string());
@@ -349,11 +432,19 @@ fn view(state: &State) -> View {
 /// Repaint, at the size the model asks for.
 fn paint(state: &State) -> Control {
     let layout = state.app.layout();
-    Control::Paint(
-        view(state),
-        layout.width as i32,
-        layout.height() as i32,
-    )
+    Control::Paint(view(state), layout.width as i32, layout.height() as i32)
+}
+
+/// The window, up, at the size the model asks for.
+///
+/// The first time the window appears it has to be **shown**: the window is
+/// born hidden, and a window that is only painted is a window nobody sees.
+/// The clock starts with it, and the clock is what the content layer waits
+/// for — so a window that is never shown is also a content layer that never
+/// runs.
+fn show(state: &State) -> Control {
+    let layout = state.app.layout();
+    Control::Show(view(state), layout.width as i32, layout.height() as i32)
 }
 
 /// The one line under the field.
@@ -392,24 +483,80 @@ fn status_line(state: &State) -> String {
 mod tests {
     use super::*;
 
+    /// A state with no daemon and no results.
+    fn empty() -> State {
+        let mut source = DaemonSource::new(
+            rgy_proto::endpoint::Endpoint::Socket(std::path::PathBuf::from(
+                "/tmp/rgy-rgxy-nope.sock",
+            )),
+            None,
+        );
+        let _ = source.search("invoice", LIMIT);
+        State {
+            app: App::new(),
+            source,
+            content_dirty: false,
+            history: History::new(),
+            usage_path: None,
+        }
+    }
+
+    #[test]
+    fn the_window_is_shown_when_the_launcher_opens() {
+        // The window is born hidden, and nothing used to show it: the
+        // launcher was invisible and the clock the content layer waits for
+        // never started — so the whole content layer was code that could
+        // not run.
+        let mut state = empty();
+        let control = handle(&mut state, Event::Toggle);
+        assert!(
+            matches!(control, Control::Show(..)),
+            "the window goes up: {control:?}"
+        );
+    }
+
+    #[test]
+    fn the_window_is_hidden_when_the_launcher_closes() {
+        let mut state = empty();
+        let _ = handle(&mut state, Event::Toggle);
+        let control = handle(&mut state, Event::Toggle);
+        assert!(
+            matches!(control, Control::Hide),
+            "the window goes down: {control:?}"
+        );
+    }
+
     #[test]
     fn the_status_line_says_the_daemon_is_not_there() {
         // The source without a daemon: the line says so, and says nothing
         // else that could be mistaken for an answer.
-        let mut source = DaemonSource::new(
-            rgy_proto::endpoint::Endpoint::Socket(
-                std::path::PathBuf::from("/tmp/rgy-rgxy-nope.sock"),
-            ),
-            None,
-        );
-        let answer = source.search("invoice", LIMIT);
-        assert!(answer.is_empty());
-        let state = State {
-            app: App::new(),
-            source,
-            content_dirty: false,
-        };
+        let state = empty();
         let line = status_line(&state);
         assert!(line.contains("sem ligação"), "{line}");
+    }
+
+    #[test]
+    fn a_command_with_nothing_to_act_on_says_so() {
+        // `>copy` in an empty window used to do nothing at all, and the
+        // silence looked like a broken launcher.
+        let mut state = empty();
+        let _ = run_action(&mut state, Action::CopyPath);
+        let line = status_line(&state);
+        assert!(line.contains("nenhum resultado"), "{line}");
+    }
+
+    #[test]
+    fn the_line_is_quiet_when_there_is_something_to_act_on() {
+        // The message is for the empty window: with a result selected, the
+        // action runs and the line says nothing about a missing result.
+        // The preview is the action here because it touches nothing but
+        // the file — a test has no business taking the clipboard.
+        let mut state = empty();
+        state
+            .app
+            .set_results(vec![Row::new("C:/a/notas.txt".to_string(), 0)]);
+        let _ = run_action(&mut state, Action::Preview);
+        let line = status_line(&state);
+        assert!(!line.contains("nenhum resultado"), "{line}");
     }
 }

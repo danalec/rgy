@@ -98,8 +98,8 @@ fn usage() -> String {
         "rgy-autostart {version} — register the rgy search daemon to start at login.\n\
          \n\
          usage:\n  \
-           rgy-autostart install [--binary <path>] [--args \"<args>\"] [--name <name>]\n  \
-           rgy-autostart uninstall [--name <name>]\n  \
+           rgy-autostart install [--binary <path>] [--args \"<args>\"] [--name <name>] [--launcher]\n  \
+           rgy-autostart uninstall [--name <name>] [--launcher]\n  \
            rgy-autostart status [--name <name>]\n  \
            rgy-autostart doctor [--name <name>]\n\
          \n\
@@ -107,12 +107,14 @@ fn usage() -> String {
            --binary <path>   the daemon to start (default: the {daemon} next to this tool)\n  \
            --args \"<args>\"    arguments handed to the daemon (default: --root <your home> --listen <transport>)\n  \
            --name <name>     the name of the entry (default: {default})\n  \
-           --launcher        also register the launcher (rgxy), under its own name\n  \
+           --launcher        on install: register the launcher (rgxy) too, under its own name\n\
+                            on uninstall: take the launcher's entry out alone\n\
            -h, --help        this text\n  \
            -V, --version     the version\n\
          \n\
          The daemon is registered into your own session: no administrator,\n\
-         no prompt, no dialog. Uninstalling removes what was installed.\n\
+         no prompt, no dialog. Uninstalling removes what was installed --\n\
+         the daemon's entry and the launcher's, when both are there.\n\
          \n\
          `install` needs nothing: the daemon is the one beside this tool,\n\
          and the tree it indexes is your home directory. `doctor` says what\n\
@@ -313,37 +315,57 @@ fn install(options: &Options) -> Result<ExitCode, String> {
     // root is: a login entry does not inherit the environment of the
     // session that installed it.
     let mut armed = report.armed;
+    let mut launcher = rgy_autostart::Launcher::Missing;
     if options.launcher {
-        let launcher_binary = find_launcher()?;
-        let launcher_name = launcher_default_name(platform);
-        let launcher_args = vec!["--endpoint".to_string(), listen.clone()];
-        let launcher_report = match platform {
-            Platform::Windows => {
-                install_windows(launcher_name, &launcher_binary, &launcher_args)?
+        match find_launcher() {
+            Ok(launcher_binary) => {
+                let launcher_name = launcher_default_name(platform);
+                let launcher_args = vec!["--endpoint".to_string(), listen.clone()];
+                let launcher_report = match platform {
+                    Platform::Windows => {
+                        install_windows(launcher_name, &launcher_binary, &launcher_args)?
+                    }
+                    Platform::Linux => {
+                        install_linux(launcher_name, &launcher_binary, &launcher_args)?
+                    }
+                    Platform::MacOs => {
+                        install_macos(launcher_name, &launcher_binary, &launcher_args)?
+                    }
+                    Platform::Unsupported => {
+                        return Err("autostart is not implemented here".to_string());
+                    }
+                };
+                launcher = if launcher_report.armed {
+                    rgy_autostart::Launcher::Armed
+                } else {
+                    rgy_autostart::Launcher::NotArmed
+                };
+                armed = armed && launcher_report.armed;
+                println!();
+                println!("the launcher:");
+                print_report(&launcher_report);
             }
-            Platform::Linux => {
-                install_linux(launcher_name, &launcher_binary, &launcher_args)?
+            Err(reason) => {
+                // The daemon is registered already, and it is armed. A
+                // launcher that is not on the machine is not a failure of
+                // the daemon -- the daemon works without it, and the
+                // launcher is the optional half.
+                //
+                // The exit status has to say what happened: one that says
+                // "nothing was done" when the daemon was done is an exit
+                // status that lies, and a script that reads it would take
+                // the daemon back out.
+                eprintln!("rgy-autostart: {reason}");
+                eprintln!("  the daemon was registered; the launcher was not");
             }
-            Platform::MacOs => {
-                install_macos(launcher_name, &launcher_binary, &launcher_args)?
-            }
-            Platform::Unsupported => {
-                return Err("autostart is not implemented here".to_string());
-            }
-        };
-        armed = armed && launcher_report.armed;
-        println!();
-        println!("the launcher:");
-        print_report(&launcher_report);
+        }
     }
 
     // 2 says what happened without dressing it up: the entry is written,
     // the platform could not arm it, and the note says how.
-    Ok(if armed {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::from(2)
-    })
+    Ok(ExitCode::from(rgy_autostart::install_status(
+        armed, launcher,
+    )))
 }
 
 /// The Windows side: the task scheduler, or the registry as a fallback.
@@ -533,25 +555,39 @@ fn uninstall(options: &Options) -> Result<ExitCode, String> {
     if platform == Platform::Unsupported {
         return Err("autostart is not implemented on this operating system".to_string());
     }
-    let name = entry_name(options, platform);
 
-    let removal = match platform {
-        Platform::Windows => uninstall_windows(&name)?,
-        Platform::Linux => uninstall_linux(&name)?,
-        Platform::MacOs => uninstall_macos(&name)?,
-        Platform::Unsupported => return Err("autostart is not implemented here".to_string()),
-    };
+    // What goes: the entry the caller named, the launcher's entry, or
+    // both of the entries an install writes.
+    //
+    // An install that registered the launcher registered two things, and
+    // an uninstall that removes one of them leaves the other starting at
+    // every login -- which is the way a user finds out that a tool they
+    // removed is still running.
+    let names =
+        rgy_autostart::uninstall_targets(options.name.as_deref(), options.launcher, platform);
 
-    println!(
-        "removed: {}",
-        if removal.removed {
-            removal.mechanism.name()
-        } else {
-            "nothing"
+    for (index, name) in names.iter().enumerate() {
+        let removal = match platform {
+            Platform::Windows => uninstall_windows(name)?,
+            Platform::Linux => uninstall_linux(name)?,
+            Platform::MacOs => uninstall_macos(name)?,
+            Platform::Unsupported => return Err("autostart is not implemented here".to_string()),
+        };
+
+        if index > 0 {
+            println!();
         }
-    );
-    for note in &removal.notes {
-        println!("  {note}");
+        println!(
+            "removed: {}",
+            if removal.removed {
+                removal.mechanism.name()
+            } else {
+                "nothing"
+            }
+        );
+        for note in &removal.notes {
+            println!("  {note}");
+        }
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -683,7 +719,33 @@ fn status(options: &Options) -> Result<ExitCode, String> {
         Platform::MacOs => status_macos(&name),
         Platform::Unsupported => return Err("autostart is not implemented here".to_string()),
     }
+
+    // The launcher is a second entry, and "is the window going to open
+    // when I log in" is a question about it. The report answers both, or
+    // the user is left with a window that never opens and a status that
+    // says everything is fine.
+    if options.name.is_none() {
+        let launcher = launcher_default_name(platform);
+        println!();
+        println!("launcher:  {launcher}");
+        match platform {
+            Platform::Windows => status_windows(launcher),
+            Platform::Linux => status_linux(launcher),
+            Platform::MacOs => status_macos(launcher),
+            Platform::Unsupported => return Err("autostart is not implemented here".to_string()),
+        }
+    }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Whether the launcher's entry is registered, on this platform.
+fn launcher_registered(platform: Platform, name: &str) -> bool {
+    match platform {
+        Platform::Windows => windows::status(name, name).registered(),
+        Platform::Linux => linux::status(&linux::config_home(), &unit_name(name)).file,
+        Platform::MacOs => macos::status(&rgy_autostart::home_dir(), name).file,
+        Platform::Unsupported => false,
+    }
 }
 
 /// The Windows side.
@@ -812,6 +874,21 @@ fn doctor(options: &Options) -> Result<ExitCode, String> {
         Platform::Unsupported => return Err("autostart is not implemented here".to_string()),
     };
     print_diagnosis(&diagnosis);
+
+    // The launcher is a second entry, and the question it answers is
+    // "why did the window not open at login". The doctor answers it.
+    if options.name.is_none() {
+        let launcher = launcher_default_name(platform);
+        let registered = launcher_registered(platform, launcher);
+        println!();
+        println!("launcher:  {launcher}");
+        if registered {
+            println!("  state:   registered");
+        } else {
+            println!("  state:   not registered");
+            println!("  to register it: rgy-autostart install --launcher");
+        }
+    }
     Ok(ExitCode::SUCCESS)
 }
 

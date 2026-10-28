@@ -17,6 +17,12 @@
 //! check. So the short words are the launcher's, and the launcher is the
 //! only thing that has to know them.
 //!
+//! The launcher's `folder:` therefore means **a directory**: it is a type
+//! filter, and it becomes the engine's `type:dir`. The engine's own
+//! `folder:` axis — "the folder the file is in matches" — is a different
+//! question, and it is not reachable from the launcher: the word is
+//! rewritten before the engine sees the query.
+//!
 //! The rewrite is a whole-word substitution, and it only fires on the bare
 //! word: `pic:` is the filter, and `pic:png` is not — that is an unknown
 //! prefix, and the engine fails it closed rather than guessing.
@@ -37,6 +43,15 @@ pub enum ShortFilter {
     /// `file:` — files, and not folders.
     File,
     /// `folder:` — folders, and not files.
+    ///
+    /// In the launcher `folder:` is a **type filter**: it means "a
+    /// directory", and it is rewritten into the engine's `type:dir`
+    /// before the engine ever sees the query. The engine has a `folder:`
+    /// of its own, and there it is an **axis** — "the folder the file is
+    /// in matches" — which is a different question. The launcher's word
+    /// wins here, and the engine's axis is not reachable from the
+    /// launcher: a query that meant it would have to keep the word
+    /// whole, and the launcher rewrites it.
     Folder,
     /// `doc:` — the document extension set.
     Doc,
@@ -187,6 +202,12 @@ impl Query {
     }
 
     /// Delete the word before the caret.
+    ///
+    /// The caret stays where the deletion happened: the word's start, which
+    /// is where the text before it ends now. A caret that jumps to the end
+    /// of the text is a caret that answers a question the user did not
+    /// ask — they are editing in the middle of the line, and the line
+    /// keeps going after the caret.
     pub fn delete_word(&mut self) -> bool {
         let head_len = self.byte_offset(self.caret);
         let head = &self.text[..head_len];
@@ -198,7 +219,9 @@ impl Query {
         // The word goes, and the text **after** the caret stays: the caret
         // is in the middle of the text and the user is editing there.
         self.text.replace_range(cut..head_len, "");
-        self.caret = self.text.chars().count();
+        // The cut is a boundary in the text that is left: the deletion was
+        // after it, and the part in front of it did not move.
+        self.caret = self.text[..cut].chars().count();
         true
     }
 
@@ -387,11 +410,57 @@ mod tests {
         q.set_text("one two three".to_string());
         assert!(q.delete_word());
         assert_eq!(q.text(), "one two ");
+        assert_eq!(q.caret(), 8, "the caret is where the word was");
         assert!(q.delete_word());
         assert_eq!(q.text(), "one ");
+        assert_eq!(q.caret(), 4, "the caret is where the word was");
         assert!(q.delete_word());
         assert_eq!(q.text(), "");
+        assert_eq!(q.caret(), 0);
         assert!(!q.delete_word());
+    }
+
+    #[test]
+    fn the_caret_stays_where_the_deleted_word_was() {
+        let mut q = Query::new();
+        q.set_text("one two three".to_string());
+        // The caret goes after "two ", in the middle of the text.
+        for _ in 0..5 {
+            q.left();
+        }
+        assert_eq!(q.caret(), 8);
+        assert!(q.delete_word());
+        assert_eq!(q.text(), "one three");
+        assert_eq!(
+            q.caret(),
+            4,
+            "the caret is at the start of the word that went"
+        );
+        // And the text after the caret did not move: the user is editing
+        // in the middle of the line, and the line keeps going.
+        assert_eq!(
+            q.text()
+                .chars()
+                .skip(q.caret())
+                .collect::<alloc::string::String>(),
+            "three"
+        );
+    }
+
+    #[test]
+    fn the_launchers_folder_is_a_directory_and_not_the_engines_axis() {
+        // The launcher owns its word: `folder:` is a type filter and
+        // becomes `type:dir`. The engine's own `folder:` axis — the folder
+        // the file is in — is a different question, and it does not come
+        // through here.
+        let mut q = Query::new();
+        q.set_text("folder:2024".to_string());
+        assert_eq!(q.engine_text(), "type:dir 2024");
+        assert_eq!(q.filters(), vec![ShortFilter::Folder]);
+        assert!(
+            !q.engine_text().contains("folder:"),
+            "the engine's axis is not reachable from the launcher"
+        );
     }
 
     #[test]

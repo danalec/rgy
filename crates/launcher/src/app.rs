@@ -26,7 +26,6 @@
 //! then closes the window.
 
 use alloc::string::String;
-use alloc::string::ToString;
 use alloc::vec::Vec;
 
 use crate::actions::Action;
@@ -35,6 +34,38 @@ use crate::hotkey::DoubleCtrl;
 use crate::layout::Layout;
 use crate::query::Query;
 use crate::results::{Results, Row};
+
+/// How many rows the window shows when the host has not said otherwise.
+///
+/// The window's height is computed from the rows, so a list of fifty
+/// rows on a 1080p screen puts half of it under the bottom of the
+/// screen — the row the user is navigating with the arrow keys included.
+/// Twelve rows are 408 pixels of list and 76 of chrome: 484 pixels,
+/// which fits on the smallest laptop screen there is with room to
+/// spare, and which is less than half of a 1080p one.
+///
+/// The host knows the screen and the model does not, so the host can say
+/// another number with [`App::set_visible_rows`].
+pub const DEFAULT_VISIBLE_ROWS: usize = 12;
+
+/// How many rows of the launcher's geometry fit on a screen.
+///
+/// The window's chrome — the field, the padding and the border — is what
+/// is left over, and the rest is rows. The host knows the height of the
+/// screen and the model knows the height of a row, and this is where the
+/// two meet.
+///
+/// A screen too short for the window still gets a row: a window that
+/// shows nothing cannot show the selection either.
+pub fn rows_that_fit(screen_height: u32) -> usize {
+    let layout = Layout::default();
+    let room = screen_height.saturating_sub(layout.height());
+    // The default is the ceiling: a launcher that shows every result the
+    // daemon has is a launcher that fills the screen, and the list scrolls
+    // with the arrow keys anyway. The screen decides how many rows there
+    // is room for; it does not decide how many the launcher wants.
+    (room / layout.row_height).clamp(1, DEFAULT_VISIBLE_ROWS as u32) as usize
+}
 
 /// What the launcher is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -90,10 +121,16 @@ impl Default for App {
 impl App {
     /// A launcher that is hidden, with an empty query.
     pub fn new() -> App {
+        let mut results = Results::new();
+        // The window is sized for the rows it shows, so the model has to
+        // know how many it shows. Without this the window is sized for
+        // every result, and half the list ends up under the bottom of the
+        // screen.
+        results.set_visible(DEFAULT_VISIBLE_ROWS);
         App {
             mode: Mode::Hidden,
             query: Query::new(),
-            results: Results::new(),
+            results,
             hotkey: DoubleCtrl::new(),
             session: 0,
             warnings: Vec::new(),
@@ -163,10 +200,10 @@ impl App {
     /// ranks — the content part is the second layer's, and the engine never
     /// sees it.
     pub fn engine_query(&self) -> String {
-        let split = self.query.split();
-        let mut q = Query::new();
-        q.set_text(split.names.to_string());
-        q.engine_text()
+        // The same string is the scope of a content search: the files the
+        // content layer reads are the files the engine chose, and the
+        // engine is asked for them in the engine's own words.
+        crate::layer::scope_query(self.query.split().names)
     }
 
     /// The content pattern, when the query carries the prefix.
@@ -261,6 +298,11 @@ impl App {
     }
 
     /// The rows the window shows.
+    ///
+    /// This is the host's way of saying how many rows fit on the screen:
+    /// the window is sized from them, and the list scrolls when there are
+    /// more of them than that. A host that says nothing gets the
+    /// default.
     pub fn set_visible_rows(&mut self, rows: usize) {
         self.results.set_visible(rows);
     }
@@ -286,7 +328,12 @@ impl App {
         self.pending
     }
 
-    /// The geometry, for the rows there are.
+    /// The geometry, for the rows the window shows.
+    ///
+    /// The rows are the ones the window shows and not the ones there are:
+    /// the height is computed from them, and a window sized for a list
+    /// that does not fit on the screen is a window with its bottom half
+    /// under the bottom of the screen.
     pub fn layout(&self) -> Layout {
         let (_, rows) = self.results.window();
         let mut layout = Layout::with_rows(rows as u32);
@@ -503,7 +550,10 @@ mod tests {
         app.set_results(vec![row(0), row(1), row(2)]);
         let l = app.layout();
         assert_eq!(l.rows, 3);
-        assert!(l.height() > l.input_height, "the window grew for the results");
+        assert!(
+            l.height() > l.input_height,
+            "the window grew for the results"
+        );
     }
 
     #[test]
@@ -554,6 +604,127 @@ mod tests {
         assert_eq!(app.results().selected(), Some(3));
         app.select_page(false);
         assert_eq!(app.results().selected(), Some(0));
+    }
+
+    #[test]
+    fn the_window_is_sized_for_the_rows_it_shows_and_not_for_all_of_them() {
+        let mut app = App::new();
+        app.show();
+        app.set_results((0..50).map(row).collect());
+        assert_eq!(
+            app.results().window(),
+            (0, DEFAULT_VISIBLE_ROWS),
+            "the window shows a screenful and not the whole answer"
+        );
+        assert_eq!(
+            app.layout().rows as usize,
+            DEFAULT_VISIBLE_ROWS,
+            "the window is sized for what it shows"
+        );
+    }
+
+    #[test]
+    fn the_host_can_narrow_the_window() {
+        let mut app = App::new();
+        app.show();
+        app.set_results((0..50).map(row).collect());
+        app.set_visible_rows(5);
+        assert_eq!(app.results().window(), (0, 5));
+        assert_eq!(app.layout().rows, 5);
+    }
+
+    #[test]
+    fn the_list_scrolls_when_it_is_longer_than_the_window() {
+        let mut app = App::new();
+        app.show();
+        app.set_visible_rows(3);
+        app.set_results((0..10).map(row).collect());
+        assert_eq!(app.results().window(), (0, 3));
+        // The selection walks down and the window follows it.
+        for _ in 0..3 {
+            app.select_next();
+        }
+        assert_eq!(app.results().selected(), Some(3));
+        assert_eq!(app.results().window(), (1, 3), "the window moved down");
+        // And it comes back up.
+        for _ in 0..3 {
+            app.select_previous();
+        }
+        assert_eq!(app.results().selected(), Some(0));
+        assert_eq!(app.results().window(), (0, 3), "the window went back");
+    }
+
+    #[test]
+    fn the_selection_stays_in_the_window_when_the_answer_is_long() {
+        // The window is the default's, and the answer is longer than it:
+        // the row the user is on is a row the user can see.
+        let mut app = App::new();
+        app.show();
+        app.set_results((0..50).map(row).collect());
+        for _ in 0..DEFAULT_VISIBLE_ROWS {
+            app.select_next();
+        }
+        let (top, count) = app.results().window();
+        let selected = app.results().selected().unwrap_or(0);
+        assert!(selected >= top, "the selection is not above the window");
+        assert!(
+            selected < top + count,
+            "the selection is not below the window: {selected} in {top}..{top}"
+        );
+    }
+
+    #[test]
+    fn the_rows_that_fit_are_the_ones_the_geometry_holds() {
+        // The chrome is the field, the padding and the border; the rest of
+        // the screen is rows.
+        let layout = Layout::default();
+        let room = |screen: u32| (screen - layout.height()) / layout.row_height;
+        // A screen that holds fewer rows than the launcher wants gets the
+        // rows it holds: the geometry is the first rule.
+        assert!(
+            room(480) < DEFAULT_VISIBLE_ROWS as u32,
+            "the screen is the small one"
+        );
+        assert_eq!(rows_that_fit(480), room(480) as usize);
+        // A screen that holds more gets the default and not the room: a
+        // box that covers the display is a box the user cannot see past.
+        assert!(
+            room(1080) > DEFAULT_VISIBLE_ROWS as u32,
+            "the screen is the big one"
+        );
+        assert_eq!(rows_that_fit(1080), DEFAULT_VISIBLE_ROWS);
+        // And a screen too short for the window still gets a row.
+        assert_eq!(rows_that_fit(10), 1);
+    }
+
+    #[test]
+    fn the_default_window_fits_on_the_smallest_screen_there_is() {
+        let layout = Layout::with_rows(DEFAULT_VISIBLE_ROWS as u32);
+        assert!(
+            layout.height() <= 768,
+            "the default window is {} pixels tall",
+            layout.height()
+        );
+    }
+
+    #[test]
+    fn the_engine_query_and_the_scope_are_the_same_string() {
+        // The names the content layer reads are the names the engine
+        // ranks, and the engine is asked for both in its own words: the
+        // launcher has a `pic:` and the engine has a `type:image`.
+        let mut app = App::new();
+        app.show();
+        for ch in "pic: grep:total".chars() {
+            app.insert(ch);
+        }
+        let split = app.query().split();
+        assert_eq!(split.names, "pic:");
+        assert_eq!(app.engine_query(), "type:image");
+        assert_eq!(
+            app.engine_query(),
+            crate::layer::scope_query(split.names),
+            "the scope and the query are one string"
+        );
     }
 
     #[test]

@@ -203,12 +203,20 @@ mod tests {
             );
             assert_eq!(
                 cache_dir_from(xdg, home, None),
-                Some(std::path::PathBuf::from("/home/dana").join("AppData").join("Local"))
+                Some(
+                    std::path::PathBuf::from("/home/dana")
+                        .join("AppData")
+                        .join("Local")
+                )
             );
         } else if cfg!(target_os = "macos") {
             assert_eq!(
                 cache_dir_from(xdg, home, None),
-                Some(std::path::PathBuf::from("/home/dana").join("Library").join("Caches"))
+                Some(
+                    std::path::PathBuf::from("/home/dana")
+                        .join("Library")
+                        .join("Caches")
+                )
             );
         } else {
             assert_eq!(
@@ -226,9 +234,6 @@ mod tests {
     #[test]
     fn the_socket_sits_beside_the_index() {
         let base = std::path::Path::new("/cache");
-        assert_eq!(
-            socket_path_in(base),
-            base.join("rgy").join("searchd.sock")
-        );
+        assert_eq!(socket_path_in(base), base.join("rgy").join("searchd.sock"));
     }
 }

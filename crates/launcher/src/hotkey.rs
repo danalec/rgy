@@ -127,7 +127,10 @@ mod tests {
         let mut d = DoubleCtrl::new();
         d.press(1000);
         d.interrupt();
-        assert!(!d.press(1100), "a letter in between is not a double Control");
+        assert!(
+            !d.press(1100),
+            "a letter in between is not a double Control"
+        );
     }
 
     #[test]

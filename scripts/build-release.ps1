@@ -88,12 +88,13 @@ function Get-ManifestVersion([string]$path) {
 #
 # The workspace root is virtual: it has no version of its own. The crates
 # that carry a version have to agree -- and `rgy-autostart` is one of them,
-# because the release ships it: the archive carries searchctl, searchd and
-# rgy-autostart, so a version drift in the autostart crate is a release
-# carrying three binaries that do not agree about which release they are.
+# because the release ships it: the archive carries searchctl, searchd,
+# rgy-autostart and rgxy, so a version drift in one of those crates is a
+# release carrying binaries that do not agree about which release they are.
 $manifests = @(
     "bins/searchctl/Cargo.toml", "bins/searchd/Cargo.toml",
     "bins/search-ui/Cargo.toml", "bins/zen-rs/Cargo.toml",
+    "bins/rgxy/Cargo.toml",
     "crates/autostart/Cargo.toml"
 )
 if (-not $Version) { $Version = Get-ManifestVersion "bins/searchctl/Cargo.toml" }
@@ -268,6 +269,10 @@ New-Item -ItemType Directory -Force -Path $stage | Out-Null
 Copy-Item (Join-Path $exeDir "searchctl.exe") $stage
 Copy-Item (Join-Path $exeDir "searchd.exe") $stage
 Copy-Item (Join-Path $exeDir "rgy-autostart.exe") $stage
+# The launcher: the window the user opens with two Control presses. It
+# travels with the release because a launcher that is not installed is a
+# feature nobody can use.
+Copy-Item (Join-Path $exeDir "rgxy.exe") $stage
 # The command the project is named after: the same binary under another
 # name.
 #

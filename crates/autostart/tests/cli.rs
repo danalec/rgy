@@ -189,7 +189,10 @@ fn the_launcher_is_registered_too() {
 fn the_launcher_has_an_entry_of_its_own() {
     let output = tool().arg("--help").output().expect("the tool runs");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("rgxy"), "the launcher's name has to be in the help: {stdout}");
+    assert!(
+        stdout.contains("rgxy"),
+        "the launcher's name has to be in the help: {stdout}"
+    );
 }
 
 /// The launcher's entry points at the daemon.

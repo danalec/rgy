@@ -182,6 +182,15 @@ pub struct Hit {
     pub score: i32,
     /// The byte offsets of the matched characters in the name, in order.
     pub span: Vec<u32>,
+    /// Whether the hit is a folder.
+    ///
+    /// The index knows and the path does not say: a folder's path is
+    /// spelled like a file's, and an interface that shows a folder with a
+    /// file's icon is showing the wrong picture of the thing the user is
+    /// about to open.
+    ///
+    /// It is additive on the wire: a hit without the field is a file.
+    pub folder: bool,
 }
 
 impl Hit {
@@ -191,7 +200,14 @@ impl Hit {
             path,
             score,
             span: Vec::new(),
+            folder: false,
         }
+    }
+
+    /// The same hit, and whether it is a folder.
+    pub fn with_folder(mut self, folder: bool) -> Hit {
+        self.folder = folder;
+        self
     }
 }
 
@@ -206,7 +222,7 @@ pub struct GrepFile {
 impl Request {
     /// Parse one JSON line. Returns `None` on anything malformed.
     pub fn from_json(line: &str) -> Option<Request> {
-        let v = parse_json(line)?;
+        let v = parse_json(line).ok()?;
         let obj = v.as_object()?;
         let op = obj.get("op")?.as_str()?;
         let limit = obj
@@ -315,6 +331,33 @@ impl Request {
     }
 }
 
+/// The deepest document the reader accepts.
+///
+/// The protocol's own answers nest three or four levels deep, and the cap
+/// is far above that. It is there because the reader recurses once per
+/// level: a document that nests deeper would overflow the stack, and a
+/// stack overflow is an abort, not a panic — and this crate runs inside a
+/// resident process, where an abort is the end of the program.
+const MAX_DEPTH: usize = 64;
+
+/// Why a line is not what the reader was looking for.
+///
+/// The reason is part of the answer. A line that is not JSON, a line that
+/// is JSON but not an answer, and a line that nests deeper than the
+/// reader allows are three different failures, and a reader that says
+/// "nothing" about all three is a reader that turns a broken daemon into
+/// an empty one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LineError {
+    /// The line is not JSON: the reader refused it.
+    NotJson,
+    /// The line is JSON but it is not an answer: it has no `op`, or an
+    /// `op` this reader does not know.
+    NotAnAnswer,
+    /// The line nests deeper than the reader allows.
+    TooDeep,
+}
+
 impl Response {
     pub fn to_json(&self) -> String {
         match self {
@@ -322,21 +365,22 @@ impl Response {
                 let items: Vec<String> = hits
                     .iter()
                     .map(|h| {
-                        if h.span.is_empty() {
-                            format!(
-                                r#"{{"path":"{}","score":{}}}"#,
-                                escape_json_string(&h.path),
-                                h.score
-                            )
-                        } else {
+                        // The fields in the order a person reads them, and
+                        // the optional ones only when they say something:
+                        // the common hit — a file, with a span — is two
+                        // fields shorter than it could be.
+                        let mut fields = alloc::vec![
+                            format!(r#""path":"{}""#, escape_json_string(&h.path)),
+                            format!(r#""score":{}"#, h.score),
+                        ];
+                        if !h.span.is_empty() {
                             let span: Vec<String> = h.span.iter().map(|c| c.to_string()).collect();
-                            format!(
-                                r#"{{"path":"{}","score":{},"span":[{}]}}"#,
-                                escape_json_string(&h.path),
-                                h.score,
-                                span.join(",")
-                            )
+                            fields.push(format!(r#""span":[{}]"#, span.join(",")));
                         }
+                        if h.folder {
+                            fields.push(alloc::string::String::from(r#""folder":true"#));
+                        }
+                        format!("{{{}}}", fields.join(","))
                     })
                     .collect();
                 format!(
@@ -406,7 +450,7 @@ impl Response {
         }
     }
 
-    /// Parse one JSON line. Returns `None` on anything malformed.
+    /// Read one answer line, saying why it is not one.
     ///
     /// The mirror of [`Response::to_json`], and the reason the protocol can
     /// have a client at all: a daemon answers in exactly the shape it
@@ -417,31 +461,49 @@ impl Response {
     /// without a `span` reads back as a hit without one, and a `status` line
     /// without a `catch_up` reads back as `relisted` — the conservative
     /// answer, the one that says the tree was walked again.
-    pub fn from_json(line: &str) -> Option<Response> {
+    ///
+    /// The reason is part of the answer: a client that cannot read the line
+    /// and a client that read a line it does not know are two different
+    /// failures, and a caller that shows one of them as "no results" is
+    /// showing a lie.
+    pub fn from_json_checked(line: &str) -> Result<Response, LineError> {
         let v = parse_json(line)?;
-        let obj = v.as_object()?;
-        let op = obj.get("op")?.as_str()?;
-        Some(match op {
+        let obj = v.as_object().ok_or(LineError::NotAnAnswer)?;
+        let op = obj
+            .get("op")
+            .and_then(|o| o.as_str())
+            .ok_or(LineError::NotAnAnswer)?;
+        Ok(match op {
             "hits" => {
                 let hits = obj
-                    .get("hits")?
-                    .as_array()?
+                    .get("hits")
+                    .and_then(|h| h.as_array())
+                    .ok_or(LineError::NotAnAnswer)?
                     .iter()
-                        .filter_map(|it| {
-                            let o = it.as_object()?;
-                            let path = o.get("path")?.as_str()?.to_string();
-                            let score = o.get("score").and_then(|n| n.as_num()).unwrap_or(0.0) as i32;
-                            let span = match o.get("span").and_then(|s| s.as_array()) {
-                                Some(items) => items
-                                    .iter()
-                                    .filter_map(|n| n.as_num())
-                                    .map(|n| n as u32)
-                                    .collect(),
-                                None => Vec::new(),
-                            };
-                            Some(Hit { path, score, span })
+                    .filter_map(|it| {
+                        let o = it.as_object()?;
+                        let path = o.get("path")?.as_str()?.to_string();
+                        let score = o.get("score").and_then(|n| n.as_num()).unwrap_or(0.0) as i32;
+                        let span = match o.get("span").and_then(|s| s.as_array()) {
+                            Some(items) => items
+                                .iter()
+                                .filter_map(|n| n.as_num())
+                                .map(|n| n as u32)
+                                .collect(),
+                            None => Vec::new(),
+                        };
+                        // The folder flag is additive: an older daemon's
+                        // hit has no field, and a hit with no field is a
+                        // file.
+                        let folder = o.get("folder").and_then(|f| f.as_bool()).unwrap_or(false);
+                        Some(Hit {
+                            path,
+                            score,
+                            span,
+                            folder,
                         })
-                        .collect();
+                    })
+                    .collect();
                 let took_us = obj.get("took_us").and_then(|n| n.as_num()).unwrap_or(0.0) as u64;
                 Response::Hits { hits, took_us }
             }
@@ -472,32 +534,37 @@ impl Response {
             }
             "grep-files" => {
                 let files = obj
-                    .get("files")?
-                    .as_array()?
+                    .get("files")
+                    .and_then(|f| f.as_array())
+                    .ok_or(LineError::NotAnAnswer)?
                     .iter()
-                        .filter_map(|it| {
-                            let o = it.as_object()?;
-                            let path = o.get("path")?.as_str()?.to_string();
-                            let lines = match o.get("lines").and_then(|l| l.as_array()) {
-                                Some(ls) => ls
-                                    .iter()
-                                    .filter_map(|l| {
-                                        let pair = l.as_array()?;
-                                        let n = pair.first()?.as_num()? as usize;
-                                        let t = pair.get(1)?.as_str()?.to_string();
-                                        Some((n, t))
-                                    })
-                                    .collect(),
-                                None => Vec::new(),
-                            };
-                            Some(GrepFile { path, lines })
-                        })
-                        .collect();
+                    .filter_map(|it| {
+                        let o = it.as_object()?;
+                        let path = o.get("path")?.as_str()?.to_string();
+                        let lines = match o.get("lines").and_then(|l| l.as_array()) {
+                            Some(ls) => ls
+                                .iter()
+                                .filter_map(|l| {
+                                    let pair = l.as_array()?;
+                                    let n = pair.first()?.as_num()? as usize;
+                                    let t = pair.get(1)?.as_str()?.to_string();
+                                    Some((n, t))
+                                })
+                                .collect(),
+                            None => Vec::new(),
+                        };
+                        Some(GrepFile { path, lines })
+                    })
+                    .collect();
                 let took_us = obj.get("took_us").and_then(|n| n.as_num()).unwrap_or(0.0) as u64;
                 Response::GrepFiles { files, took_us }
             }
             "resolved" => {
-                let path = obj.get("path")?.as_str()?.to_string();
+                let path = obj
+                    .get("path")
+                    .and_then(|p| p.as_str())
+                    .ok_or(LineError::NotAnAnswer)?
+                    .to_string();
                 let folder = match obj.get("folder") {
                     Some(Json::Bool(b)) => *b,
                     _ => false,
@@ -510,13 +577,26 @@ impl Response {
                 }
             }
             "error" => Response::Error {
-                message: obj.get("message")?.as_str()?.to_string(),
+                message: obj
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .ok_or(LineError::NotAnAnswer)?
+                    .to_string(),
             },
             "warning" => Response::Warning {
-                message: obj.get("message")?.as_str()?.to_string(),
+                message: obj
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .ok_or(LineError::NotAnAnswer)?
+                    .to_string(),
             },
-            _ => return None,
+            _ => return Err(LineError::NotAnAnswer),
         })
+    }
+
+    /// Parse one JSON line. Returns `None` on anything malformed.
+    pub fn from_json(line: &str) -> Option<Response> {
+        Self::from_json_checked(line).ok()
     }
 }
 
@@ -605,6 +685,14 @@ impl Json {
         }
     }
 
+    /// The truth this value is, when it is one.
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            Json::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+
     /// The object this value is, when it is one.
     pub fn as_object(&self) -> Option<&Vec<(String, Json)>> {
         match self {
@@ -642,7 +730,7 @@ impl Json {
 /// that had to bring a second JSON parser for it would carry two
 /// parsers for one wire.
 pub fn read_json(line: &str) -> Option<Json> {
-    parse_json(line)
+    parse_json(line).ok()
 }
 
 trait ObjGet {
@@ -654,44 +742,50 @@ impl ObjGet for Vec<(String, Json)> {
     }
 }
 
-fn parse_json(s: &str) -> Option<Json> {
+fn parse_json(s: &str) -> Result<Json, LineError> {
     let b: Vec<char> = s.chars().collect();
-    let (v, i) = value(&b, 0)?;
+    let (v, i) = value(&b, 0, 0)?;
     // Trailing whitespace only.
     if b[i..].iter().any(|c| !c.is_whitespace()) {
-        return None;
+        return Err(LineError::NotJson);
     }
-    Some(v)
+    Ok(v)
 }
 
-fn value(b: &[char], i: usize) -> Option<(Json, usize)> {
+fn value(b: &[char], i: usize, depth: usize) -> Result<(Json, usize), LineError> {
+    // The depth is the nesting the reader is already inside: a document
+    // that asks for more than the reader allows is refused, and refusing
+    // it is the whole point — the alternative is the stack.
+    if depth > MAX_DEPTH {
+        return Err(LineError::TooDeep);
+    }
     let mut i = skip_ws(b, i);
-    match b.get(i)? {
+    match b.get(i).ok_or(LineError::NotJson)? {
         '"' => {
             let (s, j) = string(b, i)?;
-            Some((Json::Str(s), j))
+            Ok((Json::Str(s), j))
         }
         '{' => {
             i += 1;
             let mut out = Vec::new();
             i = skip_ws(b, i);
             if b.get(i) == Some(&'}') {
-                return Some((Json::Obj(out), i + 1));
+                return Ok((Json::Obj(out), i + 1));
             }
             loop {
                 i = skip_ws(b, i);
                 let (k, j) = string(b, i)?;
                 i = skip_ws(b, j);
                 if b.get(i) != Some(&':') {
-                    return None;
+                    return Err(LineError::NotJson);
                 }
-                let (v, j) = value(b, i + 1)?;
+                let (v, j) = value(b, i + 1, depth + 1)?;
                 out.push((k, v));
                 i = skip_ws(b, j);
-                match b.get(i)? {
+                match b.get(i).ok_or(LineError::NotJson)? {
                     ',' => i += 1,
-                    '}' => return Some((Json::Obj(out), i + 1)),
-                    _ => return None,
+                    '}' => return Ok((Json::Obj(out), i + 1)),
+                    _ => return Err(LineError::NotJson),
                 }
             }
         }
@@ -700,37 +794,37 @@ fn value(b: &[char], i: usize) -> Option<(Json, usize)> {
             let mut out = Vec::new();
             i = skip_ws(b, i);
             if b.get(i) == Some(&']') {
-                return Some((Json::Arr(out), i + 1));
+                return Ok((Json::Arr(out), i + 1));
             }
             loop {
-                let (v, j) = value(b, i)?;
+                let (v, j) = value(b, i, depth + 1)?;
                 out.push(v);
                 i = skip_ws(b, j);
-                match b.get(i)? {
+                match b.get(i).ok_or(LineError::NotJson)? {
                     ',' => i += 1,
-                    ']' => return Some((Json::Arr(out), i + 1)),
-                    _ => return None,
+                    ']' => return Ok((Json::Arr(out), i + 1)),
+                    _ => return Err(LineError::NotJson),
                 }
             }
         }
-        't' if b[i..].starts_with(&['t', 'r', 'u', 'e']) => Some((Json::Bool(true), i + 4)),
-        'f' if b[i..].starts_with(&['f', 'a', 'l', 's', 'e']) => Some((Json::Bool(false), i + 5)),
-        'n' if b[i..].starts_with(&['n', 'u', 'l', 'l']) => Some((Json::Null, i + 4)),
+        't' if b[i..].starts_with(&['t', 'r', 'u', 'e']) => Ok((Json::Bool(true), i + 4)),
+        'f' if b[i..].starts_with(&['f', 'a', 'l', 's', 'e']) => Ok((Json::Bool(false), i + 5)),
+        'n' if b[i..].starts_with(&['n', 'u', 'l', 'l']) => Ok((Json::Null, i + 4)),
         _ => num(b, i),
     }
 }
 
-fn string(b: &[char], i: usize) -> Option<(String, usize)> {
+fn string(b: &[char], i: usize) -> Result<(String, usize), LineError> {
     if b.get(i) != Some(&'"') {
-        return None;
+        return Err(LineError::NotJson);
     }
     let mut s = String::new();
     let mut i = i + 1;
     while let Some(&c) = b.get(i) {
         match c {
-            '"' => return Some((s, i + 1)),
+            '"' => return Ok((s, i + 1)),
             '\\' => {
-                let e = *b.get(i + 1)?;
+                let e = *b.get(i + 1).ok_or(LineError::NotJson)?;
                 i += 2;
                 match e {
                     '"' => s.push('"'),
@@ -742,26 +836,26 @@ fn string(b: &[char], i: usize) -> Option<(String, usize)> {
                     'r' => s.push('\r'),
                     't' => s.push('\t'),
                     'u' => {
-                        let (cp, j) = unicode_escape(b, i)?;
-                        s.push(char::from_u32(cp)?);
+                        let (cp, j) = unicode_escape(b, i).ok_or(LineError::NotJson)?;
+                        s.push(char::from_u32(cp).ok_or(LineError::NotJson)?);
                         i = j;
                     }
                     // An escape RFC 8259 does not define is not JSON. The
                     // reader does not guess what was meant.
-                    _ => return None,
+                    _ => return Err(LineError::NotJson),
                 }
             }
             // A control character that arrived raw is not JSON either
             // (RFC 8259 §7): the writer never emits one, and a line that
             // carries one did not come from a JSON writer.
-            c if (c as u32) < 0x20 => return None,
+            c if (c as u32) < 0x20 => return Err(LineError::NotJson),
             other => {
                 s.push(other);
                 i += 1;
             }
         }
     }
-    None
+    Err(LineError::NotJson)
 }
 
 /// One `\uXXXX` escape, and the surrogate pair that may follow it.
@@ -802,7 +896,7 @@ fn hex4(b: &[char], i: usize) -> Option<u32> {
     Some(v)
 }
 
-fn num(b: &[char], i: usize) -> Option<(Json, usize)> {
+fn num(b: &[char], i: usize) -> Result<(Json, usize), LineError> {
     let start = i;
     let mut i = i;
     while matches!(b.get(i), Some(c) if c.is_ascii_digit() || matches!(c, '-' | '+' | '.' | 'e' | 'E'))
@@ -810,10 +904,10 @@ fn num(b: &[char], i: usize) -> Option<(Json, usize)> {
         i += 1;
     }
     if i == start {
-        return None;
+        return Err(LineError::NotJson);
     }
     let s: String = b[start..i].iter().collect();
-    Some((Json::Num(num_value(&s)?), i))
+    Ok((Json::Num(num_value(&s).ok_or(LineError::NotJson)?), i))
 }
 
 /// The number in the text, as the protocol's `f64`.
@@ -978,6 +1072,7 @@ mod tests {
                     path: "p".into(),
                     score: 5,
                     span: Vec::new(),
+                    folder: false,
                 }],
                 took_us: 6,
             }
@@ -1069,6 +1164,7 @@ mod tests {
                 path: "C:\\a\"b.txt".into(),
                 score: 12,
                 span: Vec::new(),
+                folder: false,
             }],
             took_us: 40,
         };
@@ -1212,13 +1308,17 @@ mod tests {
             path: "C:/notes/relatorio.txt".into(),
             score: 9,
             span: vec![8, 9, 10],
+            folder: false,
         };
         let line = Response::Hits {
             hits: vec![h.clone()],
             took_us: 3,
         }
         .to_json();
-        assert!(line.contains(r#""span":[8,9,10]"#), "span on the wire: {line}");
+        assert!(
+            line.contains(r#""span":[8,9,10]"#),
+            "span on the wire: {line}"
+        );
         // And it reads back the same.
         let back = Response::from_json(&line).expect("the line reads back");
         assert_eq!(
@@ -1234,13 +1334,58 @@ mod tests {
     fn a_hit_without_a_span_still_reads() {
         // The span is additive: an older daemon's line has no span, and a
         // client that meets one must not fall over on it.
-        let back = Response::from_json(r#"{"op":"hits","hits":[{"path":"p","score":5}],"took_us":6}"#)
-            .expect("the line reads back");
+        let back =
+            Response::from_json(r#"{"op":"hits","hits":[{"path":"p","score":5}],"took_us":6}"#)
+                .expect("the line reads back");
         assert_eq!(
             back,
             Response::Hits {
                 hits: vec![Hit::new("p".into(), 5)],
                 took_us: 6
+            }
+        );
+    }
+
+    /// A folder says it is a folder, and a file does not have to say it.
+    ///
+    /// The flag is additive: a hit without the field is a file, and an
+    /// older daemon's line reads without falling over.
+    #[test]
+    fn a_folder_says_it_is_a_folder() {
+        let folder = Hit::new("C:/docs".into(), 7).with_folder(true);
+        let line = Response::Hits {
+            hits: vec![folder.clone()],
+            took_us: 1,
+        }
+        .to_json();
+        assert!(
+            line.contains(r#""folder":true"#),
+            "the flag on the wire: {line}"
+        );
+        let back = Response::from_json(&line).expect("the line reads back");
+        assert_eq!(
+            back,
+            Response::Hits {
+                hits: vec![folder],
+                took_us: 1
+            }
+        );
+
+        // A file does not carry the field at all: the common hit is the
+        // short one.
+        let file = Hit::new("C:/a/notes.txt".into(), 2);
+        let line = Response::Hits {
+            hits: vec![file.clone()],
+            took_us: 1,
+        }
+        .to_json();
+        assert!(!line.contains("folder"), "a file says nothing: {line}");
+        let back = Response::from_json(&line).expect("the line reads back");
+        assert_eq!(
+            back,
+            Response::Hits {
+                hits: vec![file],
+                took_us: 1
             }
         );
     }
@@ -1345,5 +1490,23 @@ mod tests {
                 limit: 1
             })
         );
+    }
+
+    /// A document that nests deeper than the reader allows is refused.
+    ///
+    /// The reader recurses once per level, and a stack overflow is an
+    /// abort, not a panic: the document has to be refused, not read. The
+    /// depth the protocol's own answers nest in is nothing at all.
+    #[test]
+    fn a_document_that_nests_too_deep_is_refused() {
+        let deep = format!("{}{}", "[".repeat(200), "]".repeat(200));
+        assert_eq!(read_json(&deep), None, "the reader refuses it");
+        assert_eq!(
+            Response::from_json_checked(&deep),
+            Err(LineError::TooDeep),
+            "and it says why"
+        );
+        let shallow = format!("{}{}", "[".repeat(8), "]".repeat(8));
+        assert!(read_json(&shallow).is_some(), "eight levels are nothing");
     }
 }

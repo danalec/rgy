@@ -25,6 +25,14 @@ use crate::win::*;
 /// The window the hook posts to. Zero until the hook is installed.
 static WINDOW: AtomicIsize = AtomicIsize::new(0);
 
+/// Whether Control is already down.
+///
+/// The keyboard repeats a key that is held down, and the repeats are
+/// the same key going down again: the hook sees them all, one after the
+/// other. A gesture that counts them counts a key held for a second a
+/// dozen times, and the launcher opens and closes on its own.
+static CONTROL_DOWN: AtomicBool = AtomicBool::new(false);
+
 /// The press counter, and the clock the model needs.
 static PRESSES: Spin<Option<DoubleCtrl>> = Spin::new(None);
 
@@ -135,32 +143,59 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
     if code == HC_ACTION && lparam != 0 {
         let ks = unsafe { &*(lparam as *const KBDLLHOOKSTRUCT) };
         let down = wparam as u32 == WM_KEYDOWN || wparam as u32 == WM_SYSKEYDOWN;
-        if down {
-            if ks.vkCode == VK_CONTROL {
-                let now = unsafe { GetTickCount64() };
-                let fired = {
-                    let mut guard = PRESSES.lock();
-                    let machine = guard.get().get_or_insert_with(DoubleCtrl::new);
-                    machine.press(now)
-                };
-                if fired {
-                    let hwnd = WINDOW.load(Ordering::SeqCst) as HWND;
-                    if !hwnd.is_null() {
-                        unsafe {
-                            PostMessageW(hwnd, crate::window::WM_TOGGLE, 0, 0);
+        let up = wparam as u32 == WM_KEYUP || wparam as u32 == WM_SYSKEYUP;
+        if is_control(ks.vkCode) {
+            if down {
+                // The edge and not the event: the key that was already
+                // down is a repeat, and a repeat is not a press.
+                let already = CONTROL_DOWN.swap(true, Ordering::SeqCst);
+                if is_press(down, already) {
+                    let now = unsafe { GetTickCount64() };
+                    let fired = {
+                        let mut guard = PRESSES.lock();
+                        let machine = guard.get().get_or_insert_with(DoubleCtrl::new);
+                        machine.press(now)
+                    };
+                    if fired {
+                        let hwnd = WINDOW.load(Ordering::SeqCst) as HWND;
+                        if !hwnd.is_null() {
+                            unsafe {
+                                PostMessageW(hwnd, crate::window::WM_TOGGLE, 0, 0);
+                            }
                         }
                     }
                 }
-            } else {
-                // Another key: the pair is broken.
-                let mut guard = PRESSES.lock();
-                if let Some(machine) = guard.get().as_mut() {
-                    machine.interrupt();
-                }
+            } else if up {
+                // The key is up: the next one down is a new press.
+                CONTROL_DOWN.store(false, Ordering::SeqCst);
+            }
+        } else if down {
+            // Another key: the pair is broken.
+            let mut guard = PRESSES.lock();
+            if let Some(machine) = guard.get().as_mut() {
+                machine.interrupt();
             }
         }
     }
     unsafe { CallNextHookEx(core::ptr::null_mut(), code, wparam, lparam) }
+}
+
+/// Whether the key is one of the Controls.
+///
+/// The hook tells the two apart and never says the generic Control: the
+/// key that was pressed is the one on the keyboard, and the keyboard has
+/// two of them.
+fn is_control(vk_code: u32) -> bool {
+    vk_code == VK_CONTROL || vk_code == VK_LCONTROL || vk_code == VK_RCONTROL
+}
+
+/// Whether a key event is a press, and not a repeat.
+///
+/// `already_down` is whether the key was down when the event arrived.
+/// The decision is a function of that and of nothing else, so it can be
+/// told apart from a repeat without a keyboard.
+fn is_press(down: bool, already_down: bool) -> bool {
+    down && !already_down
 }
 
 #[cfg(test)]
@@ -173,5 +208,29 @@ mod tests {
         // and a test that installs one would swallow the keyboard of the
         // machine it runs on.
         assert_eq!(WINDOW.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_key_that_goes_down_is_a_press() {
+        assert!(is_press(true, false));
+    }
+
+    #[test]
+    fn a_key_that_is_held_down_is_not_pressed_again() {
+        assert!(!is_press(true, true), "the repeat is not a press");
+    }
+
+    #[test]
+    fn a_key_that_comes_up_is_not_a_press() {
+        assert!(!is_press(false, true));
+        assert!(!is_press(false, false));
+    }
+
+    #[test]
+    fn the_hook_hears_both_of_the_control_keys() {
+        assert!(is_control(VK_CONTROL));
+        assert!(is_control(VK_LCONTROL));
+        assert!(is_control(VK_RCONTROL));
+        assert!(!is_control(VK_ESCAPE), "a key that is not Control");
     }
 }

@@ -121,12 +121,7 @@ fn ask(fixture: &Fixture, query: &str) -> (i32, String, String) {
     loop {
         let (code, stdout, stderr) = run(
             &launcher,
-            &[
-                "--endpoint",
-                &fixture.endpoint,
-                "--query",
-                query,
-            ],
+            &["--endpoint", &fixture.endpoint, "--query", query],
         );
         if code != 1 || Instant::now() >= deadline {
             return (code, stdout, stderr);
@@ -150,7 +145,10 @@ fn the_name_layer_answers_with_the_files() {
     let (code, stdout, stderr) = ask(&fixture, "hello");
     assert_eq!(code, 0, "a match exits 0: {stderr}");
     assert!(stdout.contains("hello.txt"), "{stdout}");
-    assert!(!stdout.contains("alpha.md"), "the rank is the answer: {stdout}");
+    assert!(
+        !stdout.contains("alpha.md"),
+        "the rank is the answer: {stdout}"
+    );
 }
 
 /// The name layer does not read the content.
@@ -211,7 +209,38 @@ fn the_content_layer_reads_the_files_the_names_chose() {
     let (code, stdout, stderr) = ask(&fixture, "readme grep:zebra");
     assert_eq!(code, 0, "{stderr}");
     assert!(stdout.contains("readme.txt"), "{stdout}");
-    assert!(!stdout.contains("notes.md"), "the scope is the scope: {stdout}");
+    assert!(
+        !stdout.contains("notes.md"),
+        "the scope is the scope: {stdout}"
+    );
+}
+
+/// The launcher's own filter narrows the content layer's scope.
+///
+/// The scope is a name query, and a name query reaches the engine in the
+/// engine's words: `doc:` is the launcher's word and `type:doc` is the
+/// engine's. Without the rewrite the engine is asked for a filter it has
+/// never heard of — and it fails closed on it, which is the right answer
+/// for a word it does not know — so the scope comes back empty and a
+/// content search that had an answer answers nothing.
+#[test]
+fn the_short_filter_narrows_the_scope_of_the_content_layer() {
+    let root = fixture_dir("rgxy-scope-filter");
+    text_tree(&root);
+    // A file that says the word and is **not** a document: the filter is
+    // the filter, and the code file is out of the scope.
+    std::fs::write(root.join("src/notes.rs"), "let zebra = 1;\n").unwrap();
+    let fixture = start(&root);
+
+    // The documents that say `zebra`: notes.md and docs/readme.txt.
+    let (code, stdout, stderr) = ask(&fixture, "doc: grep:zebra");
+    assert_eq!(code, 0, "the filter narrows the scope: {stderr}");
+    assert!(stdout.contains("notes.md"), "{stdout}");
+    assert!(stdout.contains("readme.txt"), "{stdout}");
+    assert!(
+        !stdout.contains("notes.rs"),
+        "the scope is the scope: {stdout}"
+    );
 }
 
 /// The launcher's own filters reach the engine in the engine's words.
@@ -229,7 +258,10 @@ fn the_short_filters_reach_the_engine() {
     let (code, stdout, stderr) = ask(&fixture, "doc:notes");
     assert_eq!(code, 0, "{stderr}");
     assert!(stdout.contains("notes.md"), "{stdout}");
-    assert!(!stdout.contains("main.rs"), "the filter is the filter: {stdout}");
+    assert!(
+        !stdout.contains("main.rs"),
+        "the filter is the filter: {stdout}"
+    );
 }
 
 /// A question with no answer is not a failure of the launcher.
@@ -246,7 +278,10 @@ fn no_results_is_a_non_zero_exit_and_not_a_crash() {
     let (code, stdout, stderr) = ask(&fixture, "there-is-no-such-name");
     assert_eq!(code, 1, "{stderr}");
     assert!(stdout.trim().is_empty(), "{stdout}");
-    assert!(!stderr.contains("panicked"), "a miss is not a crash: {stderr}");
+    assert!(
+        !stderr.contains("panicked"),
+        "a miss is not a crash: {stderr}"
+    );
 }
 
 /// A launcher without a daemon says so.
@@ -328,10 +363,16 @@ fn the_help_names_the_filters_and_the_commands() {
     let (code, stdout, _) = output;
     assert_eq!(code, 0);
     for needle in ["file:", "folder:", "doc:", "pic:", "video:", "audio:"] {
-        assert!(stdout.contains(needle), "the help needs `{needle}`: {stdout}");
+        assert!(
+            stdout.contains(needle),
+            "the help needs `{needle}`: {stdout}"
+        );
     }
     for needle in [">open", ">folder", ">copy", ">preview", ">menu"] {
-        assert!(stdout.contains(needle), "the help needs `{needle}`: {stdout}");
+        assert!(
+            stdout.contains(needle),
+            "the help needs `{needle}`: {stdout}"
+        );
     }
     assert!(
         stdout.contains("grep:"),

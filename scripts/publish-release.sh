@@ -173,9 +173,10 @@ body="Whole-filesystem name search and content search in one stack.
     searchctl --root ~ \"invoice ext:pdf\"
     searchctl --root ~ \"invoice grep:tesla\"
 
-The release carries three binaries: \`searchctl\` (the command-line tool),
-\`searchd\` (the daemon: JSON lines over stdio, a pipe or a unix socket) and
-\`rgy-autostart\` (put the daemon in place at login).
+The release carries four binaries: \`searchctl\` (the command-line tool),
+\`searchd\` (the daemon: JSON lines over stdio, a pipe or a unix socket),
+\`rgy-autostart\` (put the daemon in place at login) and \`rgxy\` (the
+floating window over the daemon).
 
 **Assets**
 $(for a in $assets; do printf -- "- \`%s\`\n" "$(basename "$a")"; done)

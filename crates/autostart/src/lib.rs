@@ -94,11 +94,74 @@ pub fn launcher_default_name(platform: Platform) -> &'static str {
 /// milliseconds because the **daemon** has the index warm, not because
 /// the launcher built one. So it needs its own login entry, under its
 /// own name, and the release ships it next to the daemon.
-pub const LAUNCHER_NAME: &str = if cfg!(windows) {
-    "rgxy.exe"
-} else {
-    "rgxy"
-};
+pub const LAUNCHER_NAME: &str = if cfg!(windows) { "rgxy.exe" } else { "rgxy" };
+
+/// The entries an uninstall takes out.
+///
+/// An install that registered the launcher registered **two** things, and
+/// an uninstall that removes one of them leaves the other starting at
+/// every login — which is how a user finds out that a tool they removed
+/// is still running.
+///
+/// A name the user gave is the one entry they meant, and the launcher's
+/// name on its own is the launcher's entry alone.
+pub fn uninstall_targets(
+    named: Option<&str>,
+    launcher_only: bool,
+    platform: Platform,
+) -> Vec<String> {
+    if let Some(name) = named {
+        return vec![name.to_string()];
+    }
+    if launcher_only {
+        return vec![launcher_default_name(platform).to_string()];
+    }
+    vec![
+        default_name(platform).to_string(),
+        launcher_default_name(platform).to_string(),
+    ]
+}
+
+/// What happened to the launcher when the install went looking for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Launcher {
+    /// Registered, and armed.
+    Armed,
+    /// Written, but the platform could not arm it.
+    NotArmed,
+    /// Not on the machine.
+    Missing,
+}
+
+/// The exit status of an install.
+///
+/// The daemon's own state decides it, and the launcher only makes it
+/// worse when the launcher was **written and could not be armed**: a
+/// launcher that is not on the machine is not a failure of the daemon,
+/// because the daemon carries the index and works without it.
+///
+/// The status has to keep saying what happened to the daemon. A status
+/// that says "nothing was done" when the daemon was done is a status that
+/// lies, and a script that reads it would take the daemon back out.
+pub fn install_status(daemon_armed: bool, launcher: Launcher) -> u8 {
+    match launcher {
+        Launcher::Armed => {
+            if daemon_armed {
+                0
+            } else {
+                2
+            }
+        }
+        Launcher::NotArmed => 2,
+        Launcher::Missing => {
+            if daemon_armed {
+                0
+            } else {
+                2
+            }
+        }
+    }
+}
 
 /// The arguments the daemon is registered with, when the user names none.
 ///
@@ -545,6 +608,60 @@ mod tests {
     use super::*;
     use alloc::string::ToString;
     use alloc::vec;
+
+    /// An uninstall takes the launcher out with the daemon.
+    ///
+    /// An install that registered the launcher registered two things, and
+    /// an uninstall that removes one of them leaves the other starting at
+    /// every login.
+    #[test]
+    fn an_uninstall_takes_the_launcher_out_with_the_daemon() {
+        let targets = uninstall_targets(None, false, Platform::Linux);
+        assert_eq!(targets.len(), 2, "the daemon and the launcher: {targets:?}");
+        assert!(targets.contains(&default_name(Platform::Linux).to_string()));
+        assert!(targets.contains(&launcher_default_name(Platform::Linux).to_string()));
+    }
+
+    /// The macOS label is the launchd one, and the uninstall asks for it.
+    #[test]
+    fn the_launchers_name_is_the_platforms_own() {
+        let targets = uninstall_targets(None, false, Platform::MacOs);
+        assert!(targets.contains(&"com.rgy.rgxy".to_string()), "{targets:?}");
+        let targets = uninstall_targets(None, false, Platform::Windows);
+        assert!(targets.contains(&"rgy-rgxy".to_string()), "{targets:?}");
+    }
+
+    /// A name the user gave is the one entry they meant.
+    #[test]
+    fn a_named_uninstall_removes_that_one() {
+        let targets = uninstall_targets(Some("my-entry"), false, Platform::Linux);
+        assert_eq!(targets, vec!["my-entry".to_string()]);
+    }
+
+    /// The launcher alone is the launcher's entry alone.
+    #[test]
+    fn the_launcher_alone_is_its_own_entry() {
+        let targets = uninstall_targets(None, true, Platform::Linux);
+        assert_eq!(targets, vec!["rgy-rgxy".to_string()]);
+    }
+
+    /// A launcher that is not on the machine does not undo the daemon.
+    ///
+    /// The status says what happened to the daemon, because a status that
+    /// says "nothing was done" when the daemon was done is a status that
+    /// lies.
+    #[test]
+    fn a_missing_launcher_does_not_undo_the_daemon() {
+        assert_eq!(install_status(true, Launcher::Missing), 0);
+        assert_eq!(install_status(false, Launcher::Missing), 2);
+    }
+
+    /// A launcher that was written and could not be armed is said so.
+    #[test]
+    fn a_launcher_that_could_not_be_armed_is_said_so() {
+        assert_eq!(install_status(true, Launcher::NotArmed), 2);
+        assert_eq!(install_status(true, Launcher::Armed), 0);
+    }
 
     #[cfg(feature = "std")]
     #[test]

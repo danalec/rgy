@@ -79,6 +79,9 @@ mod tests {
         // claimed a `.txt` would be an adapter replacing ripgrep for
         // nothing.
         let reg = registry();
-        assert!(!reg.may_claim_for_path("a.txt"), "plain text is not claimed");
+        assert!(
+            !reg.may_claim_for_path("a.txt"),
+            "plain text is not claimed"
+        );
     }
 }

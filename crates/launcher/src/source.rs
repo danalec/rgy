@@ -37,6 +37,12 @@ pub struct Answer {
     /// matched line for the content layer, which is the thing the user is
     /// actually asking about.
     pub contexts: Vec<String>,
+    /// For each path, whether it is a folder.
+    ///
+    /// The source knows and the path does not say: a folder's path is
+    /// spelled like a file's. A row that shows a folder with a file's icon
+    /// shows the wrong picture of the thing the user is about to open.
+    pub folders: Vec<bool>,
 }
 
 impl Answer {
@@ -63,6 +69,13 @@ impl Answer {
     /// The line under the name of the result at `i`.
     pub fn context(&self, i: usize) -> &str {
         self.contexts.get(i).map(|s| s.as_str()).unwrap_or("")
+    }
+
+    /// Whether the result at `i` is a folder.
+    ///
+    /// A source that does not say is a source with no folders in it.
+    pub fn folder(&self, i: usize) -> bool {
+        self.folders.get(i).copied().unwrap_or(false)
     }
 }
 

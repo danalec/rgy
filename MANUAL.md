@@ -73,21 +73,22 @@ The package is called **rgy-search** because `rgy` is taken on crates.io
 they have everywhere else, and the project itself is still rgy.
 
 The one-line installers download the release archive, check its digest, put
-the three binaries in `~/.local/bin` (Linux and macOS) or
+the four binaries in `~/.local/bin` (Linux and macOS) or
 `%LOCALAPPDATA%\Programs\rgy` (Windows), add that directory to your PATH,
-and register the daemon to start at login. The digest is **pinned in the
-installer**: the installer carries the digest of the one artifact it is
-allowed to install, so a substituted download is refused before anything is
-unpacked. The pins are release data — the release flow rewrites them from
-the archive it has just built.
+and register the daemon — and the launcher — to start at login. The digest
+is **pinned in the installer**: the installer carries the digest of the one
+artifact it is allowed to install, so a substituted download is refused
+before anything is unpacked. The pins are release data — the release flow
+rewrites them from the archive it has just built.
 
-Each package carries three binaries, the documents, and the command the
+Each package carries four binaries, the documents, and the command the
 project is named after:
 
 | binary | what it does |
 |---|---|
 | `searchctl` | the command-line tool — the one you type |
 | `searchd` | the daemon: it holds the index warm between queries |
+| `rgxy` | the window: a floating launcher over the daemon |
 | `rgy-autostart` | puts the daemon in place at login, and takes it out again |
 
 | command | what it is |
@@ -525,6 +526,34 @@ The short word is a **prefix**: `doc:invoice` is the filter *and* a name
 — "the documents called invoice" — and the engine reads the two as
 separate words.
 
+### The order of the results
+
+The daemon's order is the relevance order, and it rules. On top of it the
+launcher keeps what **you** used: a result you opened in the last thirty
+days comes up a few places — one for a single use, two for a few, three for
+many — and never more than three, so a better match is never overtaken by an
+old habit.
+
+The memory is a file of its own, read when the launcher starts and written
+when a result is opened. The machine-readable form (`rgxy --query`) does
+not use it: a script's output should not change because you opened a file
+yesterday.
+
+### The picker
+
+The launcher can hand its results to **your own** picker, the same way
+`searchctl` does:
+
+| flag | what it does |
+|---|---|
+| `--pick` | opens the picker over the results and prints the chosen path |
+| `--fzf-binary <path>` | the picker to run — `fzf`, `sk`, `peco` or `fz` |
+| `--fzf-arg <arg>` | one argument for the picker, repeatable |
+
+`--pick` needs `--query`: the picker chooses among the results of a search.
+The chosen path goes to stdout, one per line — the same contract as
+`--query`.
+
 ### The commands
 
 Some things are not searches. A line that starts with `>` is a command:
@@ -564,6 +593,10 @@ the Windows one; the rest of the launcher is the same everywhere.
 
 ### At login
 
+The installers already do this: `install.ps1` and `install.sh` register the
+daemon *and* the launcher, so the window is there after the next login. The
+command, when you install by hand:
+
 ```sh
 rgy-autostart install --launcher
 ```
@@ -572,6 +605,11 @@ The launcher is a program of its own, and it needs its own login entry:
 the window is there in a few milliseconds because the *daemon* has the
 index warm, not because the launcher built one. A launcher that started
 at login would pay for the startup on every opening.
+
+On a machine with no desktop and no terminal — a service, a login entry
+with no session — the launcher has nowhere to draw and says nothing. It
+leaves, and it leaves well: an entry that fails on every login is an
+entry the user learns to ignore.
 
 ## 9. The pack store
 

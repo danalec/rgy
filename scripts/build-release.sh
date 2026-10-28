@@ -92,14 +92,14 @@ command -v cargo > /dev/null 2>&1 || {
 #
 # The workspace root is virtual: it has no version of its own. The crates
 # that carry a version have to agree -- and `rgy-autostart` is one of them,
-# because the release ships it: the archive carries searchctl, searchd and
-# rgy-autostart, so a version drift in the autostart crate is a release
-# carrying three binaries that do not agree about which release they are.
+# because the release ships it: the archive carries searchctl, searchd,
+# rgy-autostart and rgxy, so a version drift in one of those crates is a
+# release carrying binaries that do not agree about which release they are.
 read_manifest_version() {
     sed -n 's/^version = "\(.*\)"/\1/p' "$1" | head -1
 }
 
-manifests="bins/searchctl/Cargo.toml bins/searchd/Cargo.toml bins/search-ui/Cargo.toml bins/zen-rs/Cargo.toml crates/autostart/Cargo.toml"
+manifests="bins/searchctl/Cargo.toml bins/searchd/Cargo.toml bins/search-ui/Cargo.toml bins/zen-rs/Cargo.toml bins/rgxy/Cargo.toml crates/autostart/Cargo.toml"
 if [ -z "$version" ]; then
     version=$(read_manifest_version bins/searchctl/Cargo.toml)
 fi
@@ -254,6 +254,10 @@ mkdir -p "$stage"
 cp "$exe_dir/searchctl" "$stage/"
 cp "$exe_dir/searchd" "$stage/"
 cp "$exe_dir/rgy-autostart" "$stage/"
+# The launcher: the window the user opens with two Control presses. It
+# travels with the release because a launcher that is not installed is a
+# feature nobody can use.
+cp "$exe_dir/rgxy" "$stage/"
 # The command the project is named after: a link to the one searchctl.
 #
 # It travels with the release, so every path that unpacks the archive --
@@ -267,7 +271,7 @@ done
 
 archive_name="rgy-v$version-$asset.tar.gz"
 archive="$out/$archive_name"
-tar -czf "$archive" -C "$stage" searchctl searchd rgy-autostart rgy README.md MANUAL.md FORMATS.md COPYING NOTICE LICENSE-APACHE LICENSE-MIT LICENSE-MIT-FSEARCH
+tar -czf "$archive" -C "$stage" searchctl searchd rgy-autostart rgxy rgy README.md MANUAL.md FORMATS.md COPYING NOTICE LICENSE-APACHE LICENSE-MIT LICENSE-MIT-FSEARCH
 echo "packed: .dist/$archive_name"
 
 # --- 7. the digest ----------------------------------------------------------

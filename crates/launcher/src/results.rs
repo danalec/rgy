@@ -25,6 +25,12 @@ pub struct Row {
     /// the content layer it is the line that matched — the thing the user
     /// is actually looking for — and the folder is what it replaces.
     pub context: Option<String>,
+    /// Whether the result is a folder.
+    ///
+    /// The source knows and the path does not say: a folder's path is
+    /// spelled like a file's. The row carries the answer so that the icon
+    /// beside the name is the icon of the thing.
+    pub is_folder: bool,
 }
 
 impl Row {
@@ -35,7 +41,27 @@ impl Row {
             score,
             span: Vec::new(),
             context: None,
+            is_folder: false,
         }
+    }
+
+    /// A row that knows it is a folder.
+    pub fn with_folder(mut self, is_folder: bool) -> Row {
+        self.is_folder = is_folder;
+        self
+    }
+
+    /// The kind of thing the row is, for the icon beside it.
+    ///
+    /// The flag comes first: the source said, and the source looked at
+    /// the index. The spelling is the fallback for a row whose source did
+    /// not say — a path that ends in a separator is a folder the way the
+    /// platform spells one.
+    pub fn icon(&self) -> IconKind {
+        if self.is_folder {
+            return IconKind::Folder;
+        }
+        IconKind::of(&self.path)
     }
 
     /// The name: the last component of the path.
@@ -85,6 +111,102 @@ impl Row {
         &self.span
     }
 }
+
+/// The kind of thing a result is, for the icon beside it.
+///
+/// The launcher draws one icon per result, and the icon is the system's
+/// own — so the model only has to say *what kind of thing* the result
+/// is, and the platform crate asks the shell for the icon that goes
+/// with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IconKind {
+    /// A folder.
+    Folder,
+    /// A document: a text, a PDF, an office file.
+    Document,
+    /// An image.
+    Image,
+    /// A video.
+    Video,
+    /// A sound file.
+    Audio,
+    /// Something the machine runs.
+    Application,
+    /// A file of no kind of its own.
+    File,
+}
+
+impl IconKind {
+    /// The kind of a path, from the way it is spelled.
+    ///
+    /// This is the fallback for a row whose source did not say: the row
+    /// knows whether the result is a folder (see [`Row::icon`]), and a
+    /// path that ends in a separator is a directory the way the platform
+    /// spells one. Everything else is told apart by its extension.
+    ///
+    /// The extension is compared without regard to case, because
+    /// `README.MD` and `readme.md` are the same file to a person, and
+    /// the shell would answer with the same icon for both.
+    pub fn of(path: &str) -> IconKind {
+        let trimmed = path.trim_end_matches(['/', '\\']);
+        if trimmed.len() != path.len() {
+            return IconKind::Folder;
+        }
+        let name = match trimmed.rfind(['/', '\\']) {
+            Some(i) => &trimmed[i + 1..],
+            None => trimmed,
+        };
+        // A dot at the start of the name is part of the name
+        // (`.gitignore`), and a dot at the end is nothing at all.
+        match name.rfind('.') {
+            Some(i) if i > 0 && i + 1 < name.len() => IconKind::of_extension(&name[i + 1..]),
+            _ => IconKind::File,
+        }
+    }
+
+    /// The kind an extension names.
+    fn of_extension(ext: &str) -> IconKind {
+        if DOCUMENT_EXTENSIONS
+            .iter()
+            .any(|e| ext.eq_ignore_ascii_case(e))
+        {
+            IconKind::Document
+        } else if IMAGE_EXTENSIONS.iter().any(|e| ext.eq_ignore_ascii_case(e)) {
+            IconKind::Image
+        } else if VIDEO_EXTENSIONS.iter().any(|e| ext.eq_ignore_ascii_case(e)) {
+            IconKind::Video
+        } else if AUDIO_EXTENSIONS.iter().any(|e| ext.eq_ignore_ascii_case(e)) {
+            IconKind::Audio
+        } else if APPLICATION_EXTENSIONS
+            .iter()
+            .any(|e| ext.eq_ignore_ascii_case(e))
+        {
+            IconKind::Application
+        } else {
+            IconKind::File
+        }
+    }
+}
+
+/// The extensions that make a document.
+const DOCUMENT_EXTENSIONS: &[&str] = &[
+    "csv", "doc", "docx", "epub", "md", "markdown", "odt", "pdf", "ppt", "pptx", "rtf", "tex",
+    "txt", "xls", "xlsx",
+];
+
+/// The extensions that make an image.
+const IMAGE_EXTENSIONS: &[&str] = &[
+    "bmp", "gif", "ico", "jpeg", "jpg", "png", "svg", "tif", "tiff", "webp",
+];
+
+/// The extensions that make a video.
+const VIDEO_EXTENSIONS: &[&str] = &["avi", "flv", "m4v", "mkv", "mov", "mp4", "webm", "wmv"];
+
+/// The extensions that make a sound file.
+const AUDIO_EXTENSIONS: &[&str] = &["aac", "flac", "m4a", "mp3", "ogg", "opus", "wav", "wma"];
+
+/// The extensions that make something the machine runs.
+const APPLICATION_EXTENSIONS: &[&str] = &["bat", "cmd", "com", "exe", "lnk", "ps1", "scr"];
 
 /// The list of results and the selection in it.
 #[derive(Debug, Clone, Default)]
@@ -234,7 +356,9 @@ mod tests {
     use alloc::string::ToString;
 
     fn rows(n: usize) -> Vec<Row> {
-        (0..n).map(|i| Row::new(alloc::format!("/a/file{i}.txt"), i as i32)).collect()
+        (0..n)
+            .map(|i| Row::new(alloc::format!("/a/file{i}.txt"), i as i32))
+            .collect()
     }
 
     #[test]
@@ -334,5 +458,60 @@ mod tests {
             .with_context("linha 42: o total do invoice".to_string());
         assert_eq!(r.context(), "linha 42: o total do invoice");
         assert_eq!(r.name(), "relatorio.pdf", "the name is still the name");
+    }
+
+    #[test]
+    fn a_path_that_ends_in_a_separator_is_a_folder() {
+        assert_eq!(IconKind::of("C:\\Users\\dana\\Docs\\"), IconKind::Folder);
+        assert_eq!(IconKind::of("/home/dana/docs/"), IconKind::Folder);
+    }
+
+    /// A folder with a file's spelling is still a folder.
+    ///
+    /// The path of a folder is spelled like the path of a file, and the
+    /// index is what says which is which: a row that was told is a folder
+    /// shows the folder's icon, and a row that was not told falls back to
+    /// the spelling.
+    #[test]
+    fn the_flag_says_what_the_spelling_cannot() {
+        let folder = Row::new("C:\\Users\\dana\\Docs".to_string(), 1).with_folder(true);
+        assert_eq!(folder.icon(), IconKind::Folder);
+        // Without the flag the same spelling is a file with no extension.
+        let file = Row::new("C:\\Users\\dana\\Docs".to_string(), 1);
+        assert_eq!(file.icon(), IconKind::File);
+        // And the extension still says what the file is.
+        let doc = Row::new("C:\\a\\relatorio.docx".to_string(), 1);
+        assert_eq!(doc.icon(), IconKind::Document);
+    }
+
+    #[test]
+    fn the_extension_says_what_the_file_is() {
+        assert_eq!(IconKind::of("/a/relatorio.docx"), IconKind::Document);
+        assert_eq!(IconKind::of("/a/foto.png"), IconKind::Image);
+        assert_eq!(IconKind::of("/a/filme.mp4"), IconKind::Video);
+        assert_eq!(IconKind::of("/a/musica.mp3"), IconKind::Audio);
+        assert_eq!(IconKind::of("/a/programa.exe"), IconKind::Application);
+    }
+
+    #[test]
+    fn the_extension_is_not_case_sensitive() {
+        assert_eq!(IconKind::of("/a/FOTO.PNG"), IconKind::Image);
+        assert_eq!(IconKind::of("C:\\a\\Relatorio.PDF"), IconKind::Document);
+    }
+
+    #[test]
+    fn a_name_without_an_extension_is_a_plain_file() {
+        assert_eq!(IconKind::of("/a/README"), IconKind::File);
+        assert_eq!(IconKind::of("/a/notas."), IconKind::File);
+    }
+
+    #[test]
+    fn a_dot_at_the_start_of_the_name_is_not_an_extension() {
+        assert_eq!(IconKind::of("/a/.gitignore"), IconKind::File);
+    }
+
+    #[test]
+    fn an_extension_nobody_knows_is_a_plain_file() {
+        assert_eq!(IconKind::of("/a/coisa.qqq"), IconKind::File);
     }
 }

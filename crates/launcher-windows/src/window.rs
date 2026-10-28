@@ -28,17 +28,28 @@ use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::ffi::c_void;
+use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU16, Ordering};
 
 use rgy_launcher::{Action, Layout, Mode, Preview, Row};
 
-use crate::paint;
+use crate::paint::{self, Fonts, Icons};
 use crate::win::*;
 
 /// The window's class name. One window, one class, one registration.
 const CLASS_NAME: &[u16] = &[
-    b'r' as u16, b'g' as u16, b'y' as u16, b'x' as u16, b'y' as u16, b'W' as u16, b'i' as u16,
-    b'n' as u16, b'd' as u16, b'o' as u16, b'w' as u16, 0,
+    b'r' as u16,
+    b'g' as u16,
+    b'y' as u16,
+    b'x' as u16,
+    b'y' as u16,
+    b'W' as u16,
+    b'i' as u16,
+    b'n' as u16,
+    b'd' as u16,
+    b'o' as u16,
+    b'w' as u16,
+    0,
 ];
 
 /// The message the hotkey posts, so the window wakes up and shows itself.
@@ -150,12 +161,30 @@ struct State {
     view: View,
     /// The geometry the last paint used, so a resize knows what changed.
     painted: (i32, i32),
+    /// Whether the platform really gave the window its blur.
+    ///
+    /// The blur is behind the window, so the painting has to leave the
+    /// client area alone where there is one — and where there is not,
+    /// the window has to paint its own near-black.
+    backdrop: bool,
+    /// The icons, one per kind, resolved the first time they are needed.
+    icons: Icons,
+    /// The window's fonts, made once and deleted with the window.
+    fonts: Fonts,
 }
 
 /// The window.
 pub struct Window {
     hwnd: HWND,
-    state: Box<State>,
+    /// The state, as a pointer and not as a box.
+    ///
+    /// The window procedure reaches the state through the window's own
+    /// user data, and this is the same pointer: one path to the object,
+    /// one provenance, and no borrow that outlives the call that made
+    /// it. A box here would be a second path, and two live `&mut` to the
+    /// same object are what the compiler is free to assume cannot
+    /// happen.
+    state: NonNull<State>,
     width: i32,
     height: i32,
 }
@@ -170,14 +199,32 @@ impl Window {
         let mut title16: Vec<u16> = title.encode_utf16().collect();
         title16.push(0);
 
-        let state = Box::new(State {
+        // The state is a heap allocation and the window's user data
+        // holds the pointer to it: the window procedure reaches the
+        // state there, and the window reaches it through the same
+        // pointer.
+        let raw: *mut State = Box::into_raw(Box::new(State {
             view: View {
                 placeholder: "Buscar arquivos, apps ou comandos…".to_string(),
                 ..View::default()
             },
             painted: (0, 0),
-        });
-        let state_ptr: *mut State = Box::into_raw(state);
+            backdrop: false,
+            icons: Icons::new(),
+            fonts: Fonts::new(),
+        }));
+        let state = match NonNull::new(raw) {
+            Some(state) => state,
+            None => {
+                // The allocation is ours and nobody else has it.
+                // SAFETY: the pointer came from `Box::into_raw` and was
+                // never given to anyone else.
+                unsafe {
+                    drop(Box::from_raw(raw));
+                }
+                return Err("the window's state could not be allocated".to_string());
+            }
+        };
 
         unsafe {
             let hwnd = CreateWindowExW(
@@ -192,24 +239,47 @@ impl Window {
                 core::ptr::null_mut(),
                 core::ptr::null_mut(),
                 GetModuleHandleW(core::ptr::null()),
-                state_ptr.cast::<c_void>(),
+                state.as_ptr().cast::<c_void>(),
             );
             if hwnd.is_null() {
                 // The state was ours and nobody else has it now.
-                drop(Box::from_raw(state_ptr));
+                drop(Box::from_raw(state.as_ptr()));
                 return Err("the window could not be created".to_string());
             }
-            SetWindowLongPtrW(hwnd, GWL_USERDATA, state_ptr as isize);
-            let w = Window {
+            SetWindowLongPtrW(hwnd, GWL_USERDATA, state.as_ptr() as isize);
+            let mut w = Window {
                 hwnd,
-                state: Box::from_raw(state_ptr),
+                state,
                 width: 600,
                 height: 80,
             };
-            w.apply_backdrop();
+            // The backdrop says what the painting has to do: with one, the
+            // client area is left alone for the blur to show through.
+            let backdrop = w.apply_backdrop();
+            w.state_mut().backdrop = backdrop;
             w.apply_region();
             Ok(w)
         }
+    }
+
+    /// The state, read.
+    ///
+    /// The pointer is the window's own: it is the one the window put in
+    /// its user data, and the allocation lives as long as the window
+    /// does.
+    fn state(&self) -> &State {
+        // SAFETY: the pointer is the one this window put in its own user
+        // data, and the allocation is alive for as long as the window is.
+        unsafe { &*self.state.as_ptr() }
+    }
+
+    /// The state, written.
+    fn state_mut(&mut self) -> &mut State {
+        // SAFETY: the pointer is the one this window put in its own user
+        // data, and the allocation is alive for as long as the window is;
+        // `&mut self` says that the caller is the only one who can reach
+        // the window, and so the only one who can reach the state.
+        unsafe { &mut *self.state.as_ptr() }
     }
 
     /// Start the clock.
@@ -234,14 +304,35 @@ impl Window {
         self.hwnd
     }
 
+    /// How tall the work area is, in pixels.
+    ///
+    /// The host needs it to know how many rows the window can show: the
+    /// model sizes the window from the rows, and the rows have to fit
+    /// between the top of the work area and the bottom of the screen.
+    /// The work area and not the screen, because the taskbar is not room
+    /// for rows.
+    ///
+    /// The answer is never zero: a host that read zero would show a
+    /// single row.
+    pub fn work_area_height(&self) -> u32 {
+        let work = self.target_work_area();
+        let height = work.bottom - work.top;
+        if height > 0 {
+            return height as u32;
+        }
+        // The platform would not say, and the screen is the answer that
+        // is always there.
+        unsafe { GetSystemMetrics(SM_CYSCREEN).max(0) as u32 }
+    }
+
     /// What the window draws.
     pub fn view(&self) -> &View {
-        &self.state.view
+        &self.state().view
     }
 
     /// What the window draws, changed.
     pub fn set_view(&mut self, view: View) {
-        self.state.view = view;
+        self.state_mut().view = view;
     }
 
     /// Show the window, over everything, without raising what is under it.
@@ -294,19 +385,23 @@ impl Window {
         }
     }
 
-    /// Put the window where it belongs: centred, and in the upper third.
-    fn place(&self) {
+    /// Put the window where the user is looking.
+    ///
+    /// The monitor the cursor is on is the monitor the user is looking
+    /// at, and the window is centred on that monitor's work area and
+    /// sits in the upper third of it.
+    fn place(&mut self) {
+        let spot = spot_on(self.target_work_area(), self.width, self.height);
+        // The spot may have cut the window, and the region is the
+        // window's shape: it has to follow.
+        self.height = spot.height;
+        self.apply_region();
         unsafe {
-            let screen_w = GetSystemMetrics(SM_CXSCREEN);
-            let x = (screen_w - self.width) / 2;
-            // The upper third: the eye is there, and the middle of the
-            // screen is where the user's hands are.
-            let y = (GetSystemMetrics(SM_CYSCREEN) as f32 * 0.18) as i32;
             SetWindowPos(
                 self.hwnd,
                 HWND_TOPMOST,
-                x,
-                y,
+                spot.x,
+                spot.y,
                 self.width,
                 self.height,
                 SWP_NOACTIVATE,
@@ -314,24 +409,47 @@ impl Window {
         }
     }
 
+    /// The work area the window lives in.
+    ///
+    /// While the window is hidden it is the work area of the monitor the
+    /// cursor is on: the launcher opens where the user is looking, and
+    /// the user is where the pointer is. Once the window is up it is the
+    /// work area of the monitor the window is on, because a window that
+    /// moved to another screen while the user is typing in it would be a
+    /// window the user cannot reach.
+    fn target_work_area(&self) -> RECT {
+        if self.is_visible() {
+            own_work_area(self.hwnd)
+        } else {
+            work_area()
+        }
+    }
+
     /// Resize the window to fit what it has to show.
     pub fn resize(&mut self, width: i32, height: i32) {
-        if width == self.width && height == self.height {
+        // The window is never taller than the room the work area has: the
+        // model sizes it from the rows, and the rows have to fit between
+        // the top of the area and the bottom of the screen.
+        let spot = spot_on(self.target_work_area(), width, height);
+        if width == self.width && spot.height == self.height {
             return;
         }
         self.width = width;
-        self.height = height;
+        self.height = spot.height;
         self.apply_region();
         unsafe {
-            self.place();
+            // The window stays where it is: it opened on the monitor the
+            // user was looking at, and a window that moved to another
+            // screen while the user is typing in it would be a window the
+            // user cannot reach.
             SetWindowPos(
                 self.hwnd,
                 HWND_TOPMOST,
                 0,
                 0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                self.width,
+                self.height,
+                SWP_NOMOVE | SWP_NOACTIVATE,
             );
         }
     }
@@ -343,7 +461,12 @@ impl Window {
     /// what "almost black, slightly transparent" is made of. On a platform
     /// without it the window paints its own near-black, and the only
     /// difference the user sees is that nothing moves behind it.
-    fn apply_backdrop(&self) {
+    ///
+    /// The answer is whether the backdrop is really there. The call is
+    /// undocumented and the platform is free to refuse it, and a window
+    /// that believes in a blur that is not there is a window that paints
+    /// nothing at all and shows whatever the screen held before.
+    fn apply_backdrop(&self) -> bool {
         unsafe {
             // The rounded corners, when the platform rounds them itself.
             let pref: i32 = DWMWCP_ROUND;
@@ -356,19 +479,20 @@ impl Window {
 
             let user32 = GetModuleHandleW(wide("user32.dll").as_ptr());
             if user32.is_null() {
-                return;
+                return false;
             }
             let name = b"SetWindowCompositionAttribute\0";
             let addr = GetProcAddress(user32, name.as_ptr());
             if addr.is_null() {
-                return;
+                return false;
             }
             let set: SetWindowCompositionAttributeFn =
                 core::mem::transmute::<*mut c_void, SetWindowCompositionAttributeFn>(addr);
             // 0x99000000 is ABGR: 60% alpha, black. The tint over the blur.
             // The host backdrop is the Win11 one; the blur behind is the
             // Win10 one. The tint is 60% black either way, which is what
-            // "almost black, slightly transparent" is made of.
+            // "almost black, slightly transparent" is made of. The first
+            // policy the platform takes is the one it has.
             for state in [ACCENT_ENABLE_HOSTBACKDROP, ACCENT_ENABLE_BLURBEHIND] {
                 let mut accent = AccentPolicy {
                     accent_state: state,
@@ -382,9 +506,10 @@ impl Window {
                     size_of_data: core::mem::size_of::<AccentPolicy>(),
                 };
                 if set(self.hwnd, &mut data) != 0 {
-                    return;
+                    return true;
                 }
             }
+            false
         }
     }
 
@@ -405,7 +530,25 @@ impl Window {
                 radius * 2,
             );
             if !region.is_null() {
-                SetWindowRgn(self.hwnd, region, 1);
+                // The rule is the opposite of the usual GDI one: when the
+                // call succeeds the system takes the region and it must
+                // not be deleted, and when the call fails the region is
+                // still ours and has to be given back.
+                //
+                // The answer is the *previous* region, so a first call
+                // that succeeds answers zero as well — there was no
+                // previous region. The last error is what tells the two
+                // apart, and it is cleared before the call so that what
+                // is read after it is this call's and not an older one.
+                //
+                // A resize makes a new region, and the old one is
+                // already gone: the system took it.
+                SetLastError(ERROR_SUCCESS);
+                let previous = SetWindowRgn(self.hwnd, region, 1);
+                if previous == 0 && GetLastError() != ERROR_SUCCESS {
+                    // The call failed: the region is still ours.
+                    DeleteObject(region);
+                }
             }
         }
     }
@@ -440,13 +583,13 @@ impl Window {
                 match control {
                     Control::None => {}
                     Control::Show(view, width, height) => {
-                        self.state.view = view;
+                        self.state_mut().view = view;
                         self.resize(width, height);
                         self.show();
                     }
                     Control::Hide => self.hide(),
                     Control::Paint(view, width, height) => {
-                        self.state.view = view;
+                        self.state_mut().view = view;
                         self.resize(width, height);
                         self.repaint();
                     }
@@ -464,11 +607,7 @@ impl Window {
     /// handle at all goes straight there. The keys are the exception: a
     /// key the host did not want is translated and dispatched, because
     /// that is what turns a key press into the character it types.
-    fn dispatch(
-        &mut self,
-        msg: &MSG,
-        on_event: &mut impl FnMut(Event) -> Control,
-    ) -> Control {
+    fn dispatch(&mut self, msg: &MSG, on_event: &mut impl FnMut(Event) -> Control) -> Control {
         unsafe {
             if msg.message == WM_TOGGLE {
                 return on_event(Event::Toggle);
@@ -499,10 +638,125 @@ impl Window {
     }
 }
 
+/// How far down the work area the window sits, as a fraction of it.
+///
+/// The upper third: the eye is there, and the middle of the screen is
+/// where the user's hands are.
+const VERTICAL_FRACTION: f32 = 0.18;
+
+/// The window's place on a work area.
+struct Spot {
+    /// The left edge.
+    x: i32,
+    /// The top edge.
+    y: i32,
+    /// The height the window may have: it is never taller than the room
+    /// it has.
+    height: i32,
+}
+
+/// Where the window goes on a work area.
+///
+/// The window is centred on the area and sits in the upper third of it,
+/// measured from the area's own top: the taskbar is not part of the
+/// area, and neither is whatever is above it.
+///
+/// The window never falls outside the area. One that is taller than the
+/// area is pinned to the top and cut to the area's height, and one that
+/// is taller than the room below the offset is cut to that room.
+fn spot_on(work: RECT, width: i32, height: i32) -> Spot {
+    let area_w = work.right - work.left;
+    let area_h = work.bottom - work.top;
+    // A window wider than the area starts at its left edge: centred, it
+    // would hang over the edge of the screen.
+    let x = work.left + (area_w - width).max(0) / 2;
+    // The offset is where the window starts, and the room below it is
+    // what the window has to fit in.
+    let offset = (area_h as f32 * VERTICAL_FRACTION) as i32;
+    if height >= area_h {
+        // Taller than the area: the window starts at the top and is cut.
+        return Spot {
+            x,
+            y: work.top,
+            height: area_h,
+        };
+    }
+    let room = (area_h - offset).max(0);
+    Spot {
+        x,
+        y: work.top + offset,
+        height: height.min(room),
+    }
+}
+
+/// The work area of the monitor the cursor is on.
+///
+/// The area is the part of the monitor the taskbar and the other bars
+/// did not take, and a window that lives outside it is a window under
+/// the taskbar.
+///
+/// The cursor is the monitor the user is looking at: the launcher opens
+/// where the user is, and the user is where the pointer is. A launcher
+/// that opens on the wrong screen is worse than no launcher.
+fn work_area() -> RECT {
+    unsafe {
+        let mut point = POINT { x: 0, y: 0 };
+        if GetCursorPos(&mut point) == 0 {
+            return whole_screen();
+        }
+        work_area_of(MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST))
+    }
+}
+
+/// The work area of the monitor the window is on.
+fn own_work_area(hwnd: HWND) -> RECT {
+    unsafe { work_area_of(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)) }
+}
+
+/// The work area of a monitor.
+fn work_area_of(monitor: HMONITOR) -> RECT {
+    unsafe {
+        if monitor.is_null() {
+            return whole_screen();
+        }
+        let mut info = MONITORINFO {
+            cbSize: core::mem::size_of::<MONITORINFO>() as u32,
+            rcMonitor: RECT::default(),
+            rcWork: RECT::default(),
+            dwFlags: 0,
+        };
+        if GetMonitorInfoW(monitor, &mut info) == 0 {
+            return whole_screen();
+        }
+        info.rcWork
+    }
+}
+
+/// The whole screen, when the platform will not say where the work is.
+///
+/// The screen is bigger than the work area, and a window that is a
+/// little too tall is pinned to the top and cut, while an area of zero
+/// would put the window in the corner and make the host show a single
+/// row.
+fn whole_screen() -> RECT {
+    unsafe {
+        RECT {
+            left: 0,
+            top: 0,
+            right: GetSystemMetrics(SM_CXSCREEN),
+            bottom: GetSystemMetrics(SM_CYSCREEN),
+        }
+    }
+}
+
 impl Drop for Window {
     fn drop(&mut self) {
         unsafe {
             DestroyWindow(self.hwnd);
+            // The window is gone and nothing points at the state any
+            // more: the user data went with the window. The allocation
+            // is ours to give back.
+            drop(Box::from_raw(self.state.as_ptr()));
         }
     }
 }
@@ -526,8 +780,22 @@ unsafe extern "system" fn wnd_proc(
                     rgbReserved: [0; 32],
                 };
                 let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
+                // SAFETY: the state lives in the window's own thread, the
+                // window procedure runs on that thread, and no other
+                // thread ever holds a pointer to it — the hotkey posts a
+                // message and nothing more. The pointer is the one the
+                // window put in its own user data, and the allocation
+                // lives as long as the window does.
                 unsafe {
-                    paint::paint(hdc, &state.view, &mut state.painted);
+                    let state = &mut *state;
+                    paint::paint(
+                        hdc,
+                        &state.view,
+                        &mut state.painted,
+                        state.backdrop,
+                        &mut state.icons,
+                        &state.fonts,
+                    );
                 }
                 unsafe { EndPaint(hwnd, &ps) };
             }
@@ -545,13 +813,15 @@ unsafe extern "system" fn wnd_proc(
 }
 
 /// The window's state, from the window's own user data.
-unsafe fn state_of(hwnd: HWND) -> Option<&'static mut State> {
+///
+/// The pointer is the only path to the state: the window holds the same
+/// pointer, and both reach the object through it. The borrow is not
+/// handed out here — a borrow that outlives the call that made it would
+/// be a second way into the object — so what comes back is the pointer,
+/// and the caller decides what to do with it.
+unsafe fn state_of(hwnd: HWND) -> Option<*mut State> {
     let ptr = unsafe { GetWindowLongPtrW(hwnd, GWL_USERDATA) } as *mut State;
-    if ptr.is_null() {
-        None
-    } else {
-        Some(unsafe { &mut *ptr })
-    }
+    if ptr.is_null() { None } else { Some(ptr) }
 }
 
 /// The registered window class, once.
@@ -657,4 +927,81 @@ unsafe extern "system" {
     fn GetKeyState(vKey: i32) -> i16;
     fn IsWindowVisible(hWnd: HWND) -> BOOL;
     fn InvalidateRect(hWnd: HWND, lpRect: *const RECT, bErase: BOOL) -> BOOL;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 1920 by 1080 screen with a 40-pixel taskbar at the bottom.
+    fn area() -> RECT {
+        RECT {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1040,
+        }
+    }
+
+    #[test]
+    fn the_window_is_centred_on_the_work_area() {
+        let spot = spot_on(area(), 640, 484);
+        assert_eq!(spot.x, 640, "the window is in the middle of the area");
+    }
+
+    #[test]
+    fn the_window_sits_in_the_upper_third_of_the_work_area() {
+        let spot = spot_on(area(), 640, 484);
+        assert_eq!(spot.y, 187, "eighteen per cent down the area");
+        assert_eq!(spot.height, 484, "the window keeps the height it asked for");
+    }
+
+    #[test]
+    fn the_window_never_falls_outside_the_work_area() {
+        let work = area();
+        for height in [0, 100, 484, 1000, 1040, 2000] {
+            let spot = spot_on(work, 640, height);
+            assert!(spot.y >= work.top, "the window starts inside the area");
+            assert!(
+                spot.y + spot.height <= work.bottom,
+                "the window ends inside the area"
+            );
+        }
+    }
+
+    #[test]
+    fn a_window_taller_than_the_work_area_is_pinned_to_its_top() {
+        let work = area();
+        let spot = spot_on(work, 640, 2000);
+        assert_eq!(spot.y, work.top, "the window starts at the top of the area");
+        assert_eq!(
+            spot.height,
+            work.bottom - work.top,
+            "and is cut to the height of the area"
+        );
+    }
+
+    #[test]
+    fn a_monitor_to_the_left_of_the_first_one_has_negative_coordinates() {
+        // A monitor to the left of the primary one is at negative
+        // coordinates, and the window has to be placed on that monitor
+        // and not on the one the primary is.
+        let work = RECT {
+            left: -1920,
+            top: 0,
+            right: 0,
+            bottom: 1040,
+        };
+        let spot = spot_on(work, 640, 484);
+        assert_eq!(spot.x, -1280, "the window is centred on that monitor");
+        assert_eq!(spot.y, 187);
+    }
+
+    #[test]
+    fn a_window_wider_than_the_work_area_starts_at_its_left_edge() {
+        // Centred, it would hang over the edge of the screen.
+        let work = area();
+        let spot = spot_on(work, 2400, 484);
+        assert_eq!(spot.x, work.left);
+    }
 }

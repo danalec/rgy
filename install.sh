@@ -7,9 +7,9 @@
 #   bash install.sh --install-dir /usr/local/bin
 #   bash install.sh --version rgy-v0.1.0
 #
-# Downloads the rgy release tarball, verifies its SHA256, unpacks the three
+# Downloads the rgy release tarball, verifies its SHA256, unpacks the four
 # binaries into the install directory, prepends it to the user's PATH and
-# registers the daemon to start at login.
+# registers the daemon -- and the launcher -- to start at login.
 #
 # The digest is PINNED HERE, exactly as install.ps1 pins the Windows zip.
 # That is the whole point of a pin: the installer carries the digest of the
@@ -36,6 +36,7 @@ install_dir="$HOME/.local/bin"
 base_url="https://github.com/danalec/rgy/releases/download"
 skip_checksum=0
 autostart=1
+launcher=1
 
 # The digests of the archives this installer is allowed to install.
 #
@@ -57,6 +58,7 @@ while [ $# -gt 0 ]; do
         --version) version=${2:-}; shift 2 ;;
         --skip-checksum) skip_checksum=1; shift ;;
         --no-autostart) autostart=0; shift ;;
+        --no-launcher) launcher=0; shift ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
 done
@@ -142,7 +144,7 @@ mkdir -p "$stage"
 tar -xzf "$tmp/$asset" -C "$stage"
 # The tarball holds the binaries at its root; a build that put them in a
 # subdirectory would otherwise install nothing and say nothing.
-for exe in searchctl searchd rgy-autostart; do
+for exe in searchctl searchd rgy-autostart rgxy; do
     if [ ! -f "$stage/$exe" ]; then
         found=$(find "$stage" -name "$exe" -type f | head -1)
         [ -n "$found" ] || { echo "no $exe in $asset" >&2; exit 1; }
@@ -152,7 +154,7 @@ for exe in searchctl searchd rgy-autostart; do
 done
 
 mkdir -p "$install_dir"
-for exe in searchctl searchd rgy-autostart; do
+for exe in searchctl searchd rgy-autostart rgxy; do
     [ -f "$stage/$exe" ] || { echo "no $exe in $asset" >&2; exit 1; }
     cp "$stage/$exe" "$install_dir/$exe"
     chmod +x "$install_dir/$exe"
@@ -219,16 +221,30 @@ fi
 # copied into the same directory -- and registers it with the tree it
 # indexes. The entry goes into the user's own session: no root, no prompt,
 # no dialog.
+#
+# The launcher is registered with it, under its own name: the window is
+# there in a few milliseconds because the *daemon* has the index warm, not
+# because the launcher built one.
 if [ "$autostart" -eq 1 ]; then
-    "$install_dir/rgy-autostart" install
+    # The launcher is registered with the daemon, under its own name, and
+    # only when it is actually on the machine: an entry that points at a
+    # binary that is not there is an entry that fails at every login.
+    args="install"
+    if [ "$launcher" -eq 1 ] && [ -x "$install_dir/rgxy" ]; then
+        args="$args --launcher"
+    fi
+    "$install_dir/rgy-autostart" $args
     code=$?
     if [ "$code" -eq 0 ]; then
         echo "The daemon starts at login. To take it out: rgy-autostart uninstall"
+        case "$args" in
+            *--launcher*) echo "The launcher starts at login too: Control twice opens the window." ;;
+        esac
     elif [ "$code" -eq 2 ]; then
-        echo "The daemon was written but the platform could not arm it (see above)." >&2
+        echo "The entries were written but the platform could not arm them (see above)." >&2
     else
         echo "The daemon was not registered. To register it: rgy-autostart install" >&2
     fi
 fi
 
-echo "Installed: searchctl, searchd and rgy-autostart in $install_dir"
+echo "Installed: searchctl, searchd, rgy-autostart and rgxy in $install_dir"

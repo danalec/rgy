@@ -620,6 +620,7 @@ dependencies = [
  "rgy-engine",
  "rgy-launcher",
  "rgy-launcher-windows",
+ "rgy-pick",
  "rgy-proto",
  "rgy-search-ui",
 ]

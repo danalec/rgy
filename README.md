@@ -24,19 +24,20 @@ That is the whole install for the tool you actually type. It needs **Rust
 `searchctl` binary into `~/.cargo/bin` — already on your PATH if Rust was
 installed the usual way.
 
-The other two binaries are separate crates, because most people only want
+The other binaries are separate crates, because most people only want
 the first one:
 
 ```sh
 cargo install rgy-searchd       # the daemon: searchd
 cargo install rgy-autostart     # the login item: rgy-autostart
+cargo install rgy-rgxy          # the window: rgxy
 ```
 
 The **packages** — the winget manifest and the Homebrew formula — are called
 **rgy-search**, and not `rgy`, because `rgy` is taken on crates.io (a GameBoy
-emulator library from 2019). The crates are `rgy-searchctl`, `rgy-searchd`
-and `rgy-autostart`, and the binaries keep the names they have everywhere
-else. The project itself is still rgy.
+emulator library from 2019). The crates are `rgy-searchctl`, `rgy-searchd`,
+`rgy-autostart` and `rgy-rgxy`, and the binaries keep the names they have
+everywhere else. The project itself is still rgy.
 
 ### The packages that are not out yet
 
@@ -53,14 +54,14 @@ the first release has not been pushed, so these install nothing today:
 | Linux | one-line installer | `curl -fsSL https://raw.githubusercontent.com/danalec/rgy/main/install.sh \| bash` |
 
 The installers download the release archive, **check its SHA256**, unpack the
-three binaries into `~/.local/bin` (Linux and macOS) or
+four binaries into `~/.local/bin` (Linux and macOS) or
 `%LOCALAPPDATA%\Programs\rgy` (Windows), add that directory to your PATH,
-and register the daemon to start at login. The archive that matches the
-machine is the one that gets installed: the operating system and the
-architecture decide it. The digest is pinned inside the installer, so a
-substituted download is refused before anything is unpacked.
+and register the daemon — and the launcher — to start at login. The archive
+that matches the machine is the one that gets installed: the operating
+system and the architecture decide it. The digest is pinned inside the
+installer, so a substituted download is refused before anything is unpacked.
 
-**When they land, prefer them**: they carry the same three binaries and the
+**When they land, prefer them**: they carry the same four binaries and the
 documents, and they need neither Rust nor a compiler on the machine. Until
 then, `cargo install` is the way in.
 
@@ -175,6 +176,13 @@ rgy-autostart doctor       # what is registered, whether it is up, and what to d
 rgy-autostart uninstall    # take it out
 ```
 
+The installers register the launcher with the daemon, so the window is
+there after the next login. When you install by hand, ask for it:
+
+```sh
+rgy-autostart install --launcher   # the daemon and the window, at login
+```
+
 `install` needs nothing: the daemon is the `searchd` beside the tool, and
 the tree it indexes is your home directory. The tree is always written into
 the entry, because the directory a login entry starts in is not your home —
@@ -203,6 +211,7 @@ is already built.
 rgxy                  # the resident launcher: Control twice opens the window
 rgxy --query invoice  # one search, printed, and out — the scriptable face
 rgxy --tui            # the terminal interface, for a machine with no desktop
+rgxy --pick --query invoice   # hand the results to your own fzf
 ```
 
 In the field:
@@ -220,6 +229,11 @@ In the field:
 all of them: arrows, `Enter` to open, `Control+Enter` for the folder,
 `Escape` to close, `Control+C` to copy the path, `Control+P` to preview
 the file, `Control+K` for the actions.
+
+The daemon's order is the relevance order and it rules; on top of it the
+launcher remembers what **you** opened, and a result you used recently comes
+up a few places — never more than three, so a better match is never
+overtaken by an old habit.
 
 The window is a Windows thing for now — the double-`Control` hotkey is a
 low-level keyboard hook, and the hook this repository has is the Windows
@@ -312,7 +326,8 @@ stderr, zero matches, exit 1.
 ## Status
 
 The merge is landed end to end: name search,
-content search, one daemon/CLI, and the polish layer. What is left is
+content search, one daemon/CLI, and the polish layer — and now the
+window over the daemon, `rgxy`. What is left is
 verification on machines this host does not have — macOS above all.
 
 The perf gate fails a PR on a >20% regression against any
@@ -322,6 +337,11 @@ The crates are on crates.io, all fourteen at 0.1.0: `rgy-name-core`,
 `rgy-discovery`, `rgy-engine`, `rgy-proto` and the rest. They carry the
 `rgy-` prefix because `name-core`, `discovery`, `engine`, `proto`, `par`
 and `zen-rs` are taken on crates.io.
+
+The launcher's own crates — `rgy-launcher`, `rgy-launcher-windows`,
+`rgy-pick`, `rgy-adapters` and `rgy-rgxy` — are **not published yet**:
+they arrive with the next release, and the release is what bumps the
+ones that are already out.
 
 ## Related projects
 

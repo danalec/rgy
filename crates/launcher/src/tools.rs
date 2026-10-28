@@ -85,9 +85,7 @@ pub fn content_unavailable(daemon_up: bool, rgx_present: bool) -> String {
             "o daemon não está a correr; a camada de conteúdo usa o rgx, sobre o escopo da última busca",
         )
     } else {
-        String::from(
-            "a camada de conteúdo precisa do daemon (searchd) ou do rgx no PATH",
-        )
+        String::from("a camada de conteúdo precisa do daemon (searchd) ou do rgx no PATH")
     }
 }
 

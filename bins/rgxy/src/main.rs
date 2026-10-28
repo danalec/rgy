@@ -25,6 +25,11 @@
 //! list, the same answers — in a terminal.
 
 mod daemon;
+// The memory of what the user used. The window is the only thing that
+// records a use, and the window is Windows-only for now: elsewhere the
+// module is compiled — and tested — with nothing calling it yet.
+#[cfg_attr(not(windows), allow(dead_code))]
+mod mru;
 #[cfg(windows)]
 mod preview;
 mod rgx;
@@ -33,7 +38,7 @@ mod tools;
 #[cfg(windows)]
 mod gui;
 
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
@@ -57,6 +62,12 @@ pub struct Options {
     pub hook: bool,
     /// Whether the window opens by itself.
     pub show: bool,
+    /// Hand the results to a picker and print what the user chose.
+    pub pick: bool,
+    /// The picker to run.
+    pub fzf_binary: Option<String>,
+    /// One argument for the picker, repeatable.
+    pub fzf_arg: Vec<String>,
 }
 
 impl Default for Options {
@@ -68,6 +79,9 @@ impl Default for Options {
             endpoint: None,
             hook: true,
             show: false,
+            pick: false,
+            fzf_binary: None,
+            fzf_arg: Vec::new(),
         }
     }
 }
@@ -78,7 +92,8 @@ fn usage() -> String {
         "rgxy {version} — a janela de procura do daemon rgy.\n\
          \n\
          usage:\n  \
-           rgxy [--tui] [--query <texto>] [--limit <n>] [--endpoint <e>] [--no-hook] [--show]\n\
+           rgxy [--tui] [--query <texto>] [--limit <n>] [--endpoint <e>] [--no-hook] [--show]\n  \
+                [--pick] [--fzf-binary <p>] [--fzf-arg <arg>]\n\
          \n\
          options:\n  \
            --tui              a interface de terminal, em vez da janela\n  \
@@ -87,11 +102,17 @@ fn usage() -> String {
            --endpoint <e>     pipe:<nome> | uds:<caminho> | stdio\n  \
            --no-hook          não instala o atalho global\n  \
            --show             abre a janela logo de início\n  \
+           --pick             entrega os resultados a um picker e imprime a escolha\n  \
+           --fzf-binary <p>   o picker a rodar (default: o primeiro de fzf, sk, peco, fz no PATH)\n  \
+           --fzf-arg <arg>    um argumento para o picker, repetível\n  \
            -h, --help         este texto\n  \
            -V, --version      a versão\n\
          \n\
          A janela é um cliente: o índice está no daemon (searchd), e uma\n\
          tecla é uma pergunta enviada por um pipe.\n\
+         \n\
+         Com --pick, os resultados vão para um picker e a escolha sai na\n\
+         stdout, um caminho por linha — o mesmo contrato de --query.\n\
          \n\
          Na barra: file: folder: doc: pic: video: audio: — filtros;\n\
          >open >folder >copy >preview >menu — comandos; grep: — o conteúdo\n\
@@ -134,18 +155,29 @@ fn run(argv: &[String]) -> Result<ExitCode, String> {
     }
 
     let options = parse(argv)?;
+    if options.pick && options.query.is_none() {
+        // A picker filters the results of a search: without a question
+        // there is no list to filter.
+        return Err(
+            "--pick precisa de --query: um picker filtra os resultados de uma busca".to_string(),
+        );
+    }
     let endpoint = match &options.endpoint {
         Some(text) => endpoint_of(text)?,
-        None => Endpoint::registered()
-            .ok_or("não se sabe onde o daemon escuta: nem XDG_CACHE_HOME nem HOME estão definidos")?,
+        None => Endpoint::registered().ok_or(
+            "não se sabe onde o daemon escuta: nem XDG_CACHE_HOME nem HOME estão definidos",
+        )?,
     };
     let source = DaemonSource::new(endpoint, tools::rgx());
 
     if let Some(query) = &options.query {
+        if options.pick {
+            return pick(source, query, options.limit, &options);
+        }
         return one_shot(source, query, options.limit);
     }
     if options.tui {
-        return run_tui(source);
+        return run_tui(source, None);
     }
     run_window(source, &options)
 }
@@ -159,6 +191,23 @@ fn parse(argv: &[String]) -> Result<Options, String> {
             "--tui" => options.tui = true,
             "--no-hook" => options.hook = false,
             "--show" => options.show = true,
+            "--pick" => options.pick = true,
+            "--fzf-binary" => {
+                index += 1;
+                options.fzf_binary = Some(
+                    argv.get(index)
+                        .ok_or("--fzf-binary precisa de um caminho")?
+                        .clone(),
+                );
+            }
+            "--fzf-arg" => {
+                index += 1;
+                options.fzf_arg.push(
+                    argv.get(index)
+                        .ok_or("--fzf-arg precisa de um argumento")?
+                        .clone(),
+                );
+            }
             "--query" => {
                 index += 1;
                 options.query = Some(
@@ -229,6 +278,95 @@ fn one_shot(mut source: DaemonSource, query: &str, limit: usize) -> Result<ExitC
     })
 }
 
+/// The results, through a picker.
+///
+/// The picker is the user's own — `fzf`, `sk`, `peco` or `fz` — and so
+/// are its arguments: each `--fzf-arg` is one argument of the picker,
+/// and nothing the user wrote is re-split by a shell.
+///
+/// The records are the paths, separated by NUL: a path may carry a tab
+/// or a newline on unix, and a separator a path can carry is a separator
+/// that breaks. The order is rgy's — the picker narrows the list, it
+/// does not re-score it, because the ranking is the product.
+///
+/// The exit status is the picker's own, mapped the way `searchctl` maps
+/// it: 0 for a choice, 1 for no choice (the user dismissed the picker,
+/// or there was nothing to choose), and 2 for a picker that could not
+/// run — which is not a search with no matches, and says so.
+fn pick(
+    mut source: DaemonSource,
+    query: &str,
+    limit: usize,
+    options: &Options,
+) -> Result<ExitCode, String> {
+    if !std::io::stdout().is_terminal() {
+        // A picker is interactive: without a terminal there is nothing
+        // for the user to choose with, and pretending otherwise would
+        // print a path nobody chose.
+        return Err("um picker precisa de um terminal".to_string());
+    }
+    let answer = wait_for_daemon(&mut source, query, limit);
+    for warning in source.status().borrow().warnings.clone() {
+        eprintln!("rgxy: {warning}");
+    }
+    if answer.is_empty() {
+        // There is nothing to pick, and the picker is not asked.
+        eprintln!("rgxy: nenhum resultado");
+        return Ok(ExitCode::from(1));
+    }
+
+    let req = rgy_pick::Request {
+        args: &options.fzf_arg,
+        binary: options.fzf_binary.as_deref(),
+        separator: rgy_pick::Separator::Nul,
+        order: rgy_pick::Order::Keep,
+    };
+    let buffer = records(&answer.paths);
+    let search = Box::new(
+        move |out: &mut (dyn Write + Send + 'static)| -> Result<bool, String> {
+            out.write_all(&buffer)
+                .map_err(|e| format!("os resultados não chegaram ao picker: {e}"))?;
+            Ok(!buffer.is_empty())
+        },
+    );
+    let (code, chosen) = match rgy_pick::pick_records(search, &req) {
+        Ok(picked) => picked,
+        Err(reason) => {
+            eprintln!("rgxy: {reason}");
+            return Ok(ExitCode::from(2));
+        }
+    };
+
+    // The choice, one path per line: the same contract as `--query`, so
+    // a script can read either.
+    let mut out = std::io::stdout();
+    print_selection(&chosen, &mut out);
+    Ok(ExitCode::from(u8::try_from(code).unwrap_or(1)))
+}
+
+/// The records the picker reads: the paths, separated by NUL.
+///
+/// A path may carry a tab or a newline on unix, and a separator a path
+/// can carry is a separator that breaks: the NUL byte cannot appear in
+/// a path anywhere.
+fn records(paths: &[String]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for path in paths {
+        out.extend_from_slice(path.as_bytes());
+        out.push(0);
+    }
+    out
+}
+
+/// Print what the picker chose, one path per line.
+fn print_selection(chosen: &[Vec<u8>], out: &mut impl Write) {
+    for record in chosen {
+        let _ = out.write_all(record);
+        let _ = out.write_all(b"\n");
+    }
+    let _ = out.flush();
+}
+
 /// How long a one-shot query waits for a daemon that is still starting.
 ///
 /// The daemon opens its pipe only when the index is ready, so a daemon
@@ -257,7 +395,23 @@ fn wait_for_daemon(source: &mut DaemonSource, query: &str, limit: usize) -> Answ
 }
 
 /// The terminal interface, over the same source.
-fn run_tui(mut source: DaemonSource) -> Result<ExitCode, String> {
+///
+/// A launcher with no terminal has nowhere to draw: a login entry on a
+/// machine with no session, a pipe, a service. There is nothing to say
+/// and nowhere to say it, so it says nothing — and it says it by leaving,
+/// not by failing, because a login entry that fails on every login is a
+/// login entry the user learns to ignore.
+///
+/// The reason, when there is one, is the reason the window was not
+/// chosen: the terminal is the fallback, and the fallback says what it
+/// is standing in for.
+fn run_tui(mut source: DaemonSource, reason: Option<&str>) -> Result<ExitCode, String> {
+    if !std::io::stdout().is_terminal() {
+        return Ok(ExitCode::SUCCESS);
+    }
+    if let Some(reason) = reason {
+        eprintln!("rgxy: {reason}");
+    }
     // The daemon is asked who it is: the answer says whether there is a
     // pack store, and the interface shows it.
     source.connect();
@@ -270,8 +424,10 @@ fn run_tui(mut source: DaemonSource) -> Result<ExitCode, String> {
 fn run_window(source: DaemonSource, options: &Options) -> Result<ExitCode, String> {
     if !rgy_launcher_windows::session_available() {
         // No desktop: the terminal is the fallback, and it says so.
-        eprintln!("rgxy: sem ecrã gráfico; a interface de terminal é a alternativa");
-        return run_tui(source);
+        return run_tui(
+            source,
+            Some("sem ecrã gráfico; a interface de terminal é a alternativa"),
+        );
     }
     gui::run(source, options).map(|_| ExitCode::SUCCESS)
 }
@@ -284,10 +440,12 @@ fn run_window(source: DaemonSource, options: &Options) -> Result<ExitCode, Strin
 /// launcher, and it is the same interface over the same source.
 #[cfg(not(windows))]
 fn run_window(source: DaemonSource, _options: &Options) -> Result<ExitCode, String> {
-    eprintln!(
-        "rgxy: a janela flutuante é só no Windows por agora; a interface de terminal é a alternativa"
-    );
-    run_tui(source)
+    run_tui(
+        source,
+        Some(
+            "a janela flutuante é só no Windows por agora; a interface de terminal é a alternativa",
+        ),
+    )
 }
 
 /// The user's home directory, for the header of the terminal interface.
@@ -305,23 +463,19 @@ mod tests {
     fn the_endpoints_are_the_daemons_own_spelling() {
         assert!(matches!(endpoint_of("stdio"), Ok(Endpoint::Stdio)));
         assert!(matches!(endpoint_of("pipe:abc"), Ok(Endpoint::Pipe(_))));
-        assert!(matches!(endpoint_of("uds:/tmp/x.sock"), Ok(Endpoint::Socket(_))));
+        assert!(matches!(
+            endpoint_of("uds:/tmp/x.sock"),
+            Ok(Endpoint::Socket(_))
+        ));
         assert!(endpoint_of("http://x").is_err());
     }
 
     #[test]
     fn the_options_are_read_the_way_they_are_written() {
-        let argv: Vec<String> = [
-            "--tui",
-            "--limit",
-            "10",
-            "--query",
-            "invoice",
-            "--no-hook",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+        let argv: Vec<String> = ["--tui", "--limit", "10", "--query", "invoice", "--no-hook"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let options = parse(&argv).expect("the options read");
         assert!(options.tui);
         assert!(!options.hook);
@@ -339,5 +493,42 @@ mod tests {
     fn a_limit_that_is_not_a_number_is_refused() {
         let argv = vec!["--limit".to_string(), "many".to_string()];
         assert!(parse(&argv).is_err());
+    }
+
+    #[test]
+    fn the_picker_flags_are_read_the_way_they_are_written() {
+        let argv: Vec<String> = [
+            "--pick",
+            "--fzf-binary",
+            "C:/bin/fzf.exe",
+            "--fzf-arg",
+            "--height",
+            "--fzf-arg",
+            "--border",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let options = parse(&argv).expect("the options read");
+        assert!(options.pick);
+        assert_eq!(options.fzf_binary.as_deref(), Some("C:/bin/fzf.exe"));
+        // Each `--fzf-arg` is one argument of the picker, and the order
+        // is the order they were written in.
+        assert_eq!(options.fzf_arg, vec!["--height", "--border"]);
+    }
+
+    #[test]
+    fn a_picker_without_a_search_is_refused() {
+        let argv = vec!["--pick".to_string()];
+        let reason = run(&argv).expect_err("a picker has nothing to filter");
+        assert!(reason.contains("--query"), "{reason}");
+    }
+
+    #[test]
+    fn the_help_names_the_picker_flags() {
+        let text = usage();
+        for needle in ["--pick", "--fzf-binary", "--fzf-arg"] {
+            assert!(text.contains(needle), "the help needs `{needle}`: {text}");
+        }
     }
 }

@@ -820,25 +820,16 @@ fn handle(req: Request, ctx: &Ctx) -> Vec<Response> {
                             // form (`/`); the answer is the platform's.
                             Some(path) => {
                                 let text = String::from_utf8_lossy(path).into_owned();
-                                let name = text
-                                    .rsplit(['/', '\\'])
-                                    .next()
-                                    .unwrap_or(&text)
-                                    .to_string();
-                                (
-                                    text.replace('/', std::path::MAIN_SEPARATOR_STR),
-                                    name,
-                                )
+                                let name =
+                                    text.rsplit(['/', '\\']).next().unwrap_or(&text).to_string();
+                                (text.replace('/', std::path::MAIN_SEPARATOR_STR), name)
                             }
                             None => {
                                 live_guard.base.path(h.idx as usize, &mut buf);
                                 let rel = String::from_utf8_lossy(&buf).into_owned();
                                 buf.clear();
-                                let name = rel
-                                    .rsplit(['/', '\\'])
-                                    .next()
-                                    .unwrap_or(&rel)
-                                    .to_string();
+                                let name =
+                                    rel.rsplit(['/', '\\']).next().unwrap_or(&rel).to_string();
                                 let mut full = String::from_utf8_lossy(&ctx.root).into_owned();
                                 let rel = rel.trim_start_matches(['/', '\\']);
                                 if !rel.is_empty() {
@@ -854,10 +845,28 @@ fn handle(req: Request, ctx: &Ctx) -> Vec<Response> {
                             }
                             None => Vec::new(),
                         };
+                        // Whether the hit is a folder, from the index's own
+                        // kind byte. The path does not say: a folder's path
+                        // is spelled like a file's, and an interface that
+                        // shows a folder with a file's icon shows the
+                        // wrong picture of the thing the user is about to
+                        // open.
+                        //
+                        // An overlay hit is not in the base index, so the
+                        // base's kind byte is not its kind: it answers as
+                        // a file, which is what the overlay holds.
+                        let folder = match &h.over {
+                            Some(_) => false,
+                            None => {
+                                live_guard.base.kind()[h.idx as usize] & 3
+                                    == rgy_discovery::walk::KIND_DIR
+                            }
+                        };
                         WireHit {
                             path: full,
                             score: h.score(),
                             span,
+                            folder,
                         }
                     })
                     .collect();
@@ -871,9 +880,9 @@ fn handle(req: Request, ctx: &Ctx) -> Vec<Response> {
             }
         },
         Request::Grep { q, limit } => responses.extend(grep(&q, limit, ctx)),
-        Request::Content { q, paths, limit, .. } => {
-            responses.extend(scoped_content(&q, &paths, limit, ctx))
-        }
+        Request::Content {
+            q, paths, limit, ..
+        } => responses.extend(scoped_content(&q, &paths, limit, ctx)),
         Request::Resolve { path } => responses.push(resolve(&path, ctx)),
     }
     warm_stop();
@@ -977,14 +986,30 @@ fn scoped_content(q: &str, paths: &[String], limit: usize, ctx: &Ctx) -> Vec<Res
     let mut files: Vec<GrepFile> = Vec::new();
     let mut plain: Vec<Vec<u8>> = Vec::new();
     for p in &scope {
+        // The limit counts files, and the adapter branch honours it too: an
+        // answer with more files than the caller asked for is an answer the
+        // caller has to throw away.
+        if files.len() >= limit {
+            break;
+        }
         let as_text = String::from_utf8_lossy(p).into_owned();
         if reg.may_claim_for_path(&as_text) {
             let Some(data) = read_for_adapter(p) else {
                 continue;
             };
             let mut found = Vec::new();
-            rgx_core::process(reg, &as_text, &data, 0, &rgx_core::Ctx::default(), &mut found);
+            rgx_core::process(
+                reg,
+                &as_text,
+                &data,
+                0,
+                &rgx_core::Ctx::default(),
+                &mut found,
+            );
             for f in found {
+                if files.len() >= limit {
+                    break;
+                }
                 let lines = g.lines_in(&f.bytes);
                 if !lines.is_empty() {
                     files.push(GrepFile {
@@ -1029,7 +1054,15 @@ fn same_path(a: &[u8], b: &[u8]) -> bool {
     }
     let norm = |p: &[u8]| {
         let s = String::from_utf8_lossy(p).replace('\\', "/");
-        s.trim_start_matches("./").trim_end_matches('/').to_ascii_lowercase()
+        let s = s.trim_start_matches("./").trim_end_matches('/');
+        // The case is folded only where the filesystem folds it: two names
+        // that differ in case are two files on Linux and macOS, and one file
+        // on Windows.
+        if cfg!(windows) {
+            s.to_ascii_lowercase()
+        } else {
+            s.to_owned()
+        }
     };
     norm(a) == norm(b)
 }
@@ -1045,7 +1078,9 @@ fn read_for_adapter(path: &[u8]) -> Option<Vec<u8>> {
     use std::io::Read;
     let file = content::open_regular(path)?;
     let mut buf = Vec::new();
-    file.take(content::MAX_FILE * 4).read_to_end(&mut buf).ok()?;
+    file.take(content::MAX_FILE * 4)
+        .read_to_end(&mut buf)
+        .ok()?;
     Some(buf)
 }
 
@@ -1095,12 +1130,29 @@ fn grep(q: &str, limit: usize, ctx: &Ctx) -> Vec<Response> {
         match Alternatives::parse(q, &ctx.home) {
             Ok(alts) => {
                 for alt in &alts.alts {
+                    // The limit is the limit. The store answers with every
+                    // file that matched, and a launcher that draws fifty
+                    // thousand rows is a launcher that froze.
+                    if files.len() >= limit {
+                        break;
+                    }
                     let pat = alt.grep.clone().unwrap_or_else(|| q.to_string());
                     match rgy_engine::tv::grep_tv(dir, &pat) {
-                        Ok(fs) => files.extend(fs.into_iter().map(|f| GrepFile {
-                            path: f.path,
-                            lines: f.lines.into_iter().map(|(n, t)| (n as usize, t)).collect(),
-                        })),
+                        Ok(fs) => {
+                            for f in fs {
+                                if files.len() >= limit {
+                                    break;
+                                }
+                                files.push(GrepFile {
+                                    path: f.path,
+                                    lines: f
+                                        .lines
+                                        .into_iter()
+                                        .map(|(n, t)| (n as usize, t))
+                                        .collect(),
+                                });
+                            }
+                        }
                         Err(e) => {
                             return vec![Response::Error {
                                 message: format!("tv store: {e}"),
@@ -2110,6 +2162,75 @@ mod tests {
         assert!(
             hits.iter().any(|h| h.path.ends_with("late.txt")),
             "the new file must be answered; hits={hits:?}"
+        );
+    }
+
+    /// A folder is a folder on the wire.
+    ///
+    /// A folder's path is spelled like a file's, and the icon beside a
+    /// result is the icon of the thing: the daemon says which hits are
+    /// folders, and it says it from the index's own kind byte — not from
+    /// a guess about the spelling.
+    #[test]
+    fn a_folder_is_a_folder_on_the_wire() {
+        let dir = std::env::temp_dir().join(format!(
+            "rgy-searchd-folder-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(dir.join("docs/notes.txt"), b"notes\n").unwrap();
+        std::fs::write(dir.join("top.txt"), b"top\n").unwrap();
+        let root = dir.as_os_str().as_encoded_bytes().to_vec();
+
+        let source = PortableSource::new(root.clone(), 2);
+        let live = Live::with_root(
+            Index::build(source.enumerate().expect("the walk"), 0, 1, b"/"),
+            &root,
+        );
+        let ctx = std::sync::Arc::new(Ctx {
+            root: root.clone(),
+            home: String::new(),
+            tv_dir: None,
+            live: std::sync::RwLock::new(live),
+            catch_up: std::sync::atomic::AtomicU8::new(CATCH_UP_RELISTED),
+            content: std::sync::Mutex::new(None),
+            wants_content: std::sync::atomic::AtomicBool::new(false),
+            sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
+        });
+
+        let hits_of = |q: &str| {
+            let responses = handle(
+                Request::Search {
+                    q: q.to_string(),
+                    limit: 10,
+                    session: None,
+                },
+                &ctx,
+            );
+            responses
+                .iter()
+                .find_map(|r| match r {
+                    Response::Hits { hits, .. } => Some(hits.clone()),
+                    _ => None,
+                })
+                .expect("a hits frame")
+        };
+
+        let folders = hits_of("docs");
+        assert!(
+            folders.iter().any(|h| h.path.ends_with("docs") && h.folder),
+            "the folder is a folder on the wire: {folders:?}"
+        );
+        let files = hits_of("top");
+        assert!(
+            files
+                .iter()
+                .any(|h| h.path.ends_with("top.txt") && !h.folder),
+            "the file is a file on the wire: {files:?}"
         );
     }
 

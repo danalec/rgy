@@ -204,13 +204,19 @@ impl DaemonSource {
     /// The search is made **without** the session: the session belongs to
     /// the window's own question, and a scope search that shared it would
     /// make the daemon re-rank the window's results against the scope.
-    fn scope_paths(&mut self, pattern: &str) -> Vec<String> {
+    ///
+    /// The argument is the query in the **engine's** words — the caller
+    /// rewrites it with `rgy_launcher::layer::scope_query` first. The
+    /// engine fails closed on a word it does not know, so a scope sent as
+    /// `doc:` comes back empty and the content layer answers "nothing
+    /// found" for a file that is on the disk.
+    fn scope_paths(&mut self, engine_query: &str) -> Vec<String> {
         let saved = self.session;
         if let Some(client) = self.client.as_mut() {
             client.set_session(None);
         }
         let answer = self.client_mut().and_then(|client| {
-            client.search(pattern, SCOPE_LIMIT).ok().map(|out| {
+            client.search(engine_query, SCOPE_LIMIT).ok().map(|out| {
                 out.hits
                     .into_iter()
                     .map(|h| h.path)
@@ -234,6 +240,10 @@ impl DaemonSource {
                     paths: outcome.hits.iter().map(|h| h.path.clone()).collect(),
                     spans: outcome.hits.iter().map(|h| h.span.clone()).collect(),
                     contexts: Vec::new(),
+                    // The daemon says which hits are folders; the path
+                    // does not, and a folder shown with a file's icon is
+                    // the wrong picture of the thing.
+                    folders: outcome.hits.iter().map(|h| h.folder).collect(),
                 };
                 {
                     let mut st = self.status.borrow_mut();
@@ -268,13 +278,18 @@ impl DaemonSource {
         // The daemon first, connected on demand: the launcher is resident
         // and the daemon may have come up since the last keystroke.
         let connected = self.client_mut().is_some();
+        // The scope is the names part of the query, in the **engine's**
+        // words. `doc:` is the launcher's word and `type:doc` is the
+        // engine's, and the engine fails closed on a word it does not
+        // know — so a scope sent as the user typed it comes back empty
+        // and the content layer answers "nothing found" for a file that
+        // is on the disk.
+        let scope = if connected && !names.is_empty() {
+            self.scope_paths(&rgy_launcher::layer::scope_query(names))
+        } else {
+            Vec::new()
+        };
         if connected {
-            let scope = if names.is_empty() {
-                // No scope: the whole tree.
-                Vec::new()
-            } else {
-                self.scope_paths(names)
-            };
             if names.is_empty() {
                 if let Some(answer) = self.whole_tree_content(pattern, limit) {
                     return answer;
@@ -290,11 +305,20 @@ impl DaemonSource {
         }
         // The fallback: the `rgx` binary, over the scope the names chose.
         //
-        // The scope is the **last** one — the files that were on the
-        // screen when the daemon went away. It is not the whole tree: a
-        // content search over a tree is a walk, and a launcher that
-        // blocks the window for minutes is a launcher nobody uses.
-        let scope = self.last_scope.clone();
+        // The scope is the one **this** query chose. The last one — the
+        // files that were on the screen when the daemon went away — is
+        // only used when the daemon is not there at all: a launcher that
+        // answers the previous question when the current one has no scope
+        // is a launcher that lies.
+        //
+        // It is not the whole tree either: a content search over a tree is
+        // a walk, and a launcher that blocks the window for minutes is a
+        // launcher nobody uses.
+        let scope = if connected {
+            scope
+        } else {
+            self.last_scope.clone()
+        };
         if !scope.is_empty()
             && let Some(binary) = self.rgx.clone()
         {
@@ -304,7 +328,10 @@ impl DaemonSource {
         st.layer = "conteúdo";
         st.matches = 0;
         st.connected = false;
-        st.warnings = vec![rgy_launcher::tools::content_unavailable(false, self.rgx.is_some())];
+        st.warnings = vec![rgy_launcher::tools::content_unavailable(
+            false,
+            self.rgx.is_some(),
+        )];
         Answer::empty()
     }
 
@@ -334,6 +361,9 @@ impl DaemonSource {
             paths,
             spans,
             contexts,
+            // A content answer is a list of files: the content layer reads
+            // files, and a folder has no lines to show.
+            folders: Vec::new(),
         };
         let backend = self.backend_label();
         {
@@ -374,6 +404,9 @@ impl DaemonSource {
             paths,
             spans,
             contexts,
+            // A content answer is a list of files: the content layer reads
+            // files, and a folder has no lines to show.
+            folders: Vec::new(),
         };
         // The label is read before the status is written: the status is
         // one cell, and a cell that is borrowed twice at once is a panic.
@@ -417,6 +450,9 @@ impl DaemonSource {
                     paths,
                     spans,
                     contexts,
+                    // A content answer is a list of files: the content layer
+                    // reads files, and a folder has no lines to show.
+                    folders: Vec::new(),
                 };
                 let backend = self.backend_label();
                 {

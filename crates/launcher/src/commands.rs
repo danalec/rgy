@@ -88,7 +88,11 @@ pub fn is_command(text: &str) -> bool {
 
 /// The sentence for a `>`-line that names no command.
 pub fn unknown(text: &str) -> alloc::string::String {
-    let name = text.trim().strip_prefix(COMMAND_PREFIX).unwrap_or("").trim();
+    let name = text
+        .trim()
+        .strip_prefix(COMMAND_PREFIX)
+        .unwrap_or("")
+        .trim();
     if name.is_empty() {
         alloc::string::String::from("escreva um comando: >open, >folder, >copy, >preview")
     } else {
@@ -112,9 +116,18 @@ mod tests {
 
     #[test]
     fn a_command_is_named_after_the_prefix() {
-        assert_eq!(command_for(">folder").map(|c| c.action), Some(Action::OpenFolder));
-        assert_eq!(command_for(">copy").map(|c| c.action), Some(Action::CopyPath));
-        assert_eq!(command_for("  >open ").map(|c| c.action), Some(Action::Open));
+        assert_eq!(
+            command_for(">folder").map(|c| c.action),
+            Some(Action::OpenFolder)
+        );
+        assert_eq!(
+            command_for(">copy").map(|c| c.action),
+            Some(Action::CopyPath)
+        );
+        assert_eq!(
+            command_for("  >open ").map(|c| c.action),
+            Some(Action::Open)
+        );
     }
 
     #[test]

@@ -308,7 +308,10 @@ impl App {
         if !self.filtered {
             self.results.clear();
             self.matched.clear();
-            let live = self.live.as_ref().expect("the in-process path has an index");
+            let live = self
+                .live
+                .as_ref()
+                .expect("the in-process path has an index");
             self.total = live.base.n.saturating_sub(1); // skip synthetic root
             let mut out = Vec::new();
             // Entry 0 is the synthetic root; the cap is on the range rather
@@ -334,7 +337,10 @@ impl App {
         // comparisons on every keystroke.
         let mut hits: Vec<Hit> = Vec::new();
         let mut tokens: Vec<rgy_name_core::name_query::Token> = Vec::new();
-        let live = self.live.as_ref().expect("the in-process path has an index");
+        let live = self
+            .live
+            .as_ref()
+            .expect("the in-process path has an index");
         if let Ok(alts) = Alternatives::parse(&self.input, &home) {
             let searcher = Searcher { live };
             hits = searcher.search_alternatives(&alts.alts, MAX_RESULTS);
@@ -841,10 +847,7 @@ pub fn run(live: Live, root: String, indexed: usize) -> Result<(), String> {
 /// same terminal UI over either, and the caller is the one that chooses.
 /// This is the launcher's fallback — the same interface, in a terminal,
 /// on a machine with no desktop.
-pub fn run_with_source(
-    source: Box<dyn rgy_launcher::Source>,
-    root: String,
-) -> Result<(), String> {
+pub fn run_with_source(source: Box<dyn rgy_launcher::Source>, root: String) -> Result<(), String> {
     run_app(App::with_source(source, root))
 }
 
@@ -1145,7 +1148,7 @@ mod bench {
 mod tests {
     use super::*;
     use rgy_discovery::walk::{KIND_DIR, KIND_FILE, Listing, NONE, RawEnt};
-    
+
     /// The same four entries the old zen fixture had, as the two DFS
     /// [`Listing`]s `name_index::Index::build` wants.
     fn sample_listings() -> Vec<Listing> {

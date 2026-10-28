@@ -111,10 +111,7 @@ mod tests {
     fn the_windows_prefix_is_the_platforms_and_not_the_callers() {
         // The daemon's own root has the prefix taken off, so a path that
         // is compared with the scope's has to have it taken off too.
-        assert_eq!(
-            join_root("\\\\?\\C:\\tree", "notes.md"),
-            "C:/tree/notes.md"
-        );
+        assert_eq!(join_root("\\\\?\\C:\\tree", "notes.md"), "C:/tree/notes.md");
         assert_eq!(root_as_spelled("\\\\?\\UNC\\srv\\share"), "//srv/share");
     }
 

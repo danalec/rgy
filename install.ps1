@@ -4,9 +4,9 @@
     Install rgy on Windows.
 
 .DESCRIPTION
-    Downloads the rgy release zip, verifies its SHA256, unpacks the three
+    Downloads the rgy release zip, verifies its SHA256, unpacks the four
     binaries into the install directory, prepends it to the user PATH and
-    registers the daemon to start at login.
+    registers the daemon -- and the launcher -- to start at login.
 
 .EXAMPLE
     irm https://raw.githubusercontent.com/danalec/rgy/main/install.ps1 | iex
@@ -32,7 +32,10 @@ param(
     [switch]$SkipChecksum,
 
     # do not register the daemon to start at login
-    [switch]$NoAutostart
+    [switch]$NoAutostart,
+
+    # do not register the launcher (rgxy) to start at login
+    [switch]$NoLauncher
 )
 
 $ErrorActionPreference = 'Stop'
@@ -112,7 +115,7 @@ $staging = Join-Path $env:TEMP "rgy-staging-$(Get-Random)"
 Expand-Archive -Path $tmp -DestinationPath $staging -Force
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-foreach ($exe in @('searchctl.exe', 'searchd.exe', 'rgy-autostart.exe', 'rgy.exe')) {
+foreach ($exe in @('searchctl.exe', 'searchd.exe', 'rgy-autostart.exe', 'rgxy.exe', 'rgy.exe')) {
     $src = Join-Path $staging $exe
     if (-not (Test-Path $src)) {
         $found = Get-ChildItem $staging -Recurse -Filter $exe -File | Select-Object -First 1
@@ -152,16 +155,29 @@ if (Test-Path (Join-Path $InstallDir 'rgy.exe')) {
 # copied into the same directory -- and registers it with the tree it
 # indexes. The entry goes into the user's own session: no administrator,
 # no prompt, no dialog.
+#
+# The launcher is registered with it, under its own name: the window is
+# there in a few milliseconds because the *daemon* has the index warm, not
+# because the launcher built one.
 if (-not $NoAutostart) {
-    & (Join-Path $InstallDir 'rgy-autostart.exe') install
+    # The launcher is registered with the daemon, under its own name, and
+    # only when it is actually on the machine: an entry that points at a
+    # binary that is not there is an entry that fails at every login.
+    $launcher = Join-Path $InstallDir 'rgxy.exe'
+    $args = @('install')
+    if ((-not $NoLauncher) -and (Test-Path $launcher)) { $args += '--launcher' }
+    & (Join-Path $InstallDir 'rgy-autostart.exe') @args
     $code = $LASTEXITCODE
     if ($code -eq 0) {
         Write-Host "The daemon starts at login. To take it out: rgy-autostart uninstall"
+        if ($args -contains '--launcher') {
+            Write-Host "The launcher starts at login too: Control twice opens the window."
+        }
     } elseif ($code -eq 2) {
-        [Console]::Error.WriteLine("The daemon was written but the platform could not arm it (see above).")
+        [Console]::Error.WriteLine("The entries were written but the platform could not arm them (see above).")
     } else {
         [Console]::Error.WriteLine("The daemon was not registered. To register it: rgy-autostart install")
     }
 }
 
-Write-Host "Installed: searchctl, searchd and rgy-autostart in $InstallDir" -ForegroundColor Green
+Write-Host "Installed: searchctl, searchd, rgy-autostart and rgxy in $InstallDir" -ForegroundColor Green

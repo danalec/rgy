@@ -26,10 +26,11 @@ pub mod query;
 pub mod results;
 pub mod source;
 pub mod tools;
+pub mod usage;
 
 pub use actions::Action;
 pub use app::{App, Mode, Preview};
-pub use commands::{Command, COMMANDS};
+pub use commands::{COMMANDS, Command};
 pub use hotkey::DoubleCtrl;
 pub use layer::{Layer, Split};
 pub use layout::Layout;

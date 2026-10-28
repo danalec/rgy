@@ -26,16 +26,40 @@
 //! care is `ERROR_PIPE_BUSY`: every instance of the pipe is in use. The
 //! daemon keeps a pool of acceptors for exactly that reason, and the client
 //! retries briefly rather than failing on the first busy moment.
+//!
+//! # The deadline
+//!
+//! Every request has one, and it is the deadline of the **whole** answer: a
+//! daemon that dribbles a line every second runs out of time just the same.
+//! A client that waits forever is a client that hangs the program it is in,
+//! and the launcher asks the daemon from its own thread — so a daemon that
+//! accepts the connection and then says nothing would freeze the window.
+//!
+//! The deadline belongs to the transport and not to the reader: a reader
+//! cannot time out, and the three transports say "there is something to
+//! read" in three different ways. The socket has a read timeout of its own;
+//! the named pipe has a peek that says how many bytes are waiting without
+//! taking them; and the standard input has neither, so its bytes arrive on
+//! a thread.
+//!
+//! # The limits
+//!
+//! A line is bounded, and a document is bounded in its nesting. The peer is
+//! another program: a line that never ends would make the client allocate
+//! until it dies, and a document that nests deeper than the reader allows
+//! would overflow the stack — and a stack overflow is an abort, not a
+//! catchable panic, in a process that is meant to stay up. Both are refused
+//! with a sentence that says what happened.
 
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use std::io::{BufRead, BufReader, Write};
-use std::time::Duration;
+use std::io::{Read, Write};
+use std::time::{Duration, Instant};
 
 use crate::endpoint::Endpoint;
-use crate::{Hit, Request, Response};
+use crate::{Hit, LineError, Request, Response};
 
 /// The window a client waits for the daemon's answer.
 ///
@@ -46,12 +70,32 @@ use crate::{Hit, Request, Response};
 /// into a wrong one.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// The longest answer line the client reads.
+///
+/// The content answer is the big one: it carries the matching lines of
+/// every file the daemon read. The plain engine reports five lines a file
+/// of four hundred bytes, so a fifty-file answer is a hundred kilobytes;
+/// the pack store answers with all of them and is an order of magnitude
+/// over that. The cap sits above every answer the daemon really sends and
+/// below "the peer decides how much the client allocates" — a line that
+/// never ends is a way to kill a resident process, and this client lives
+/// inside one.
+const MAX_LINE: usize = 8 * 1024 * 1024;
+
+/// How much the client reads at a time.
+///
+/// It is the transport's own chunk: the socket and the pipe hand over what
+/// they have, and the line reader puts the pieces together.
+const CHUNK: usize = 16 * 1024;
+
 /// A connection to a daemon.
 ///
 /// The client owns both halves of the stream, because the protocol is a
 /// conversation and a half-open one is a client that blocks forever.
 pub struct Client {
-    reader: Box<dyn BufRead + Send>,
+    /// The bytes the daemon answers with.
+    transport: Box<dyn Transport + Send>,
+    /// Where the questions go.
     writer: Box<dyn Write + Send>,
     /// The session id the client sends, when it has one.
     ///
@@ -65,35 +109,14 @@ pub struct Client {
 impl Client {
     /// Connect to a daemon listening on `endpoint`.
     pub fn connect(endpoint: &Endpoint) -> std::io::Result<Client> {
-        let (reader, writer): (Box<dyn BufRead + Send>, Box<dyn Write + Send>) = match endpoint {
-            Endpoint::Stdio => (
-                Box::new(BufReader::new(std::io::stdin())),
-                Box::new(std::io::stdout()),
-            ),
-            Endpoint::Socket(path) => {
-                #[cfg(unix)]
-                {
-                    let stream = std::os::unix::net::UnixStream::connect(path)?;
-                    let read = stream.try_clone()?;
-                    (Box::new(BufReader::new(read)), Box::new(stream))
-                }
-                #[cfg(not(unix))]
-                {
-                    let _ = path;
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Unsupported,
-                        "unix sockets are not available on this platform; use a named pipe",
-                    ));
-                }
-            }
-            Endpoint::Pipe(name) => {
-                let file = open_pipe(name)?;
-                let read = file.try_clone()?;
-                (Box::new(BufReader::new(read)), Box::new(file))
-            }
+        let (transport, writer): (Box<dyn Transport + Send>, Box<dyn Write + Send>) = match endpoint
+        {
+            Endpoint::Stdio => (Box::new(StdioTransport::new()), Box::new(std::io::stdout())),
+            Endpoint::Socket(path) => socket_transport(path)?,
+            Endpoint::Pipe(name) => pipe_transport(name)?,
         };
         Ok(Client {
-            reader,
+            transport,
             writer,
             session: None,
         })
@@ -119,30 +142,43 @@ impl Client {
     /// answer, not the end of it, because the daemon sends the warnings
     /// before the hits they belong to.
     pub fn request(&mut self, req: &Request) -> std::io::Result<Vec<Response>> {
+        self.request_within(req, READ_TIMEOUT)
+    }
+
+    /// The same, with the window the caller asks for.
+    ///
+    /// The window is the whole answer's, not the chunk's: the deadline is
+    /// computed once, here, and every read under it is measured against
+    /// the same moment.
+    fn request_within(
+        &mut self,
+        req: &Request,
+        window: Duration,
+    ) -> std::io::Result<Vec<Response>> {
         let line = req.to_json();
         self.writer.write_all(line.as_bytes())?;
         self.writer.write_all(b"\n")?;
         self.writer.flush()?;
 
+        let deadline = Instant::now() + window;
         let mut out = Vec::new();
         loop {
-            let mut buf = String::new();
-            let n = self.reader.read_line(&mut buf)?;
-            if n == 0 {
-                // The daemon closed the stream. Whatever arrived is what
-                // there is; a half answer is better than hanging.
-                break;
-            }
-            let line = buf.trim_end_matches(['\r', '\n']);
+            let Some(raw) = self.read_line(deadline)? else {
+                // The daemon closed the connection before the end of the
+                // answer. A half answer is not an answer: a caller that
+                // showed it would show "no results" for a daemon that died
+                // mid-sentence.
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "the daemon closed the connection before the end of the answer",
+                ));
+            };
+            let line = raw.trim_end_matches(['\r']);
             if line.trim().is_empty() {
                 continue;
             }
-            let Some(resp) = Response::from_json(line) else {
-                // A line this client cannot read is not an answer and not a
-                // failure of the daemon: skip it and keep reading.
-                continue;
-            };
-            let terminal = matches!(resp, Response::Done { .. } | Response::Error { .. });
+            let resp = Response::from_json_checked(line).map_err(unreadable_line)?;
+            let terminal = ends_the_answer(req, &resp);
             out.push(resp);
             if terminal {
                 break;
@@ -151,16 +187,63 @@ impl Client {
         Ok(out)
     }
 
+    /// Read one line, without its newline.
+    ///
+    /// `Ok(None)` is the end of the stream: the daemon closed it between
+    /// two answers. Everything else is an error with a sentence in it —
+    /// a timeout, a line cut in the middle, a line that never ends.
+    fn read_line(&mut self, deadline: Instant) -> std::io::Result<Option<String>> {
+        loop {
+            let at = self.transport.pending().iter().position(|&b| b == b'\n');
+            if let Some(at) = at {
+                let line = self.transport.pending()[..at].to_vec();
+                self.transport.consume(at + 1);
+                return match String::from_utf8(line) {
+                    Ok(line) => Ok(Some(line)),
+                    Err(_) => Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "the daemon sent a line that is not text",
+                    )),
+                };
+            }
+            // The line is not whole yet, and it must not grow without a
+            // bound: a peer that never sends a newline would make the
+            // client allocate until it dies.
+            if self.transport.pending().len() > MAX_LINE {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("the daemon sent a line longer than {MAX_LINE} bytes"),
+                ));
+            }
+            match self.transport.fill(deadline)? {
+                Filled::Data => continue,
+                Filled::Timeout => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "the daemon did not answer in time",
+                    ));
+                }
+                Filled::Eof => {
+                    if self.transport.pending().is_empty() {
+                        return Ok(None);
+                    }
+                    // The stream ended in the middle of a line: the answer
+                    // was cut, and what arrived is not an answer.
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "the daemon closed the connection in the middle of the answer",
+                    ));
+                }
+            }
+        }
+    }
+
     /// Search the index.
     ///
     /// The answers are the hits, the time the daemon took, and the warnings
     /// the query raised — a warning is a query that failed closed, and the
     /// caller is the one that has to say so.
-    pub fn search(
-        &mut self,
-        q: &str,
-        limit: usize,
-    ) -> std::io::Result<SearchOutcome> {
+    pub fn search(&mut self, q: &str, limit: usize) -> std::io::Result<SearchOutcome> {
         let session = self.session;
         let req = Request::Search {
             q: q.to_string(),
@@ -298,6 +381,410 @@ pub struct DaemonStatus {
     pub tv: bool,
 }
 
+/// The response that ends the answer to `req`.
+///
+/// The daemon answers a search with the hits and a `done`, and a status
+/// with the status alone: the client knows what it asked, so it knows what
+/// ends the answer. The `done` always ends it — it is the terminator the
+/// daemon writes — and an error always ends it, because the request
+/// failed. The answer of a request that never ends is a timeout, not a
+/// guess.
+fn ends_the_answer(req: &Request, resp: &Response) -> bool {
+    match resp {
+        Response::Done { .. } | Response::Error { .. } => true,
+        Response::Status { .. } => matches!(req, Request::Status),
+        Response::Resolved { .. } => matches!(req, Request::Resolve { .. }),
+        Response::Hits { .. } | Response::GrepFiles { .. } | Response::Warning { .. } => false,
+    }
+}
+
+/// The sentence a line the client cannot read gets.
+///
+/// The three are different facts: a line that is not JSON is a broken
+/// daemon, an answer the client does not know is a daemon that speaks
+/// another protocol, and a document that nests too deep is a daemon that
+/// sends something no reader should follow.
+fn unreadable_line(e: LineError) -> std::io::Error {
+    let message = match e {
+        LineError::NotJson => "the daemon sent a line this client cannot read",
+        LineError::NotAnAnswer => "the daemon sent an answer this client does not know",
+        LineError::TooDeep => "the daemon sent a line that nests too deep to read",
+    };
+    std::io::Error::new(std::io::ErrorKind::InvalidData, message)
+}
+
+// --- the transports --------------------------------------------------------
+
+/// What a read found.
+enum Filled {
+    /// Bytes arrived.
+    Data,
+    /// The window closed with nothing to read.
+    Timeout,
+    /// The other end closed the stream.
+    Eof,
+}
+
+/// The bytes under the client.
+///
+/// The transport owns the bytes because the transport is what knows how
+/// long to wait for them: a reader that cannot say "not yet" cannot be
+/// the one that gives up.
+trait Transport: Send {
+    /// Read more bytes, waiting at most until `deadline`.
+    fn fill(&mut self, deadline: Instant) -> std::io::Result<Filled>;
+    /// The bytes read and not yet consumed.
+    fn pending(&self) -> &[u8];
+    /// Drop the first `n` bytes.
+    fn consume(&mut self, n: usize);
+}
+
+/// The bytes a transport read, and the client has not consumed yet.
+#[derive(Default)]
+struct Pending {
+    buf: Vec<u8>,
+    /// Where the unconsumed bytes start.
+    start: usize,
+}
+
+impl Pending {
+    /// The bytes that were read and not consumed.
+    fn bytes(&self) -> &[u8] {
+        &self.buf[self.start..]
+    }
+
+    /// Add the bytes that were read.
+    fn push(&mut self, bytes: &[u8]) {
+        self.buf.extend_from_slice(bytes);
+    }
+
+    /// Drop the first `n` bytes.
+    fn consume(&mut self, n: usize) {
+        self.start += n;
+        if self.start == self.buf.len() {
+            // Nothing is left: the buffer starts over.
+            self.buf.clear();
+            self.start = 0;
+        } else if self.start >= 64 * 1024 {
+            // The dead part is worth more than the live one: the buffer is
+            // compacted instead of growing for the rest of the answer.
+            self.buf.drain(..self.start);
+            self.start = 0;
+        }
+    }
+}
+
+/// The unix socket under the client.
+///
+/// The socket has a read timeout of its own, and the deadline is that
+/// timeout: the read waits for what is left of the window and says that
+/// nothing arrived when the window is over.
+#[cfg(unix)]
+struct SocketTransport {
+    stream: std::os::unix::net::UnixStream,
+    pending: Pending,
+}
+
+#[cfg(unix)]
+impl SocketTransport {
+    /// The transport over an open socket.
+    fn new(stream: std::os::unix::net::UnixStream) -> SocketTransport {
+        SocketTransport {
+            stream,
+            pending: Pending::default(),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Transport for SocketTransport {
+    fn fill(&mut self, deadline: Instant) -> std::io::Result<Filled> {
+        let now = Instant::now();
+        if now >= deadline {
+            return Ok(Filled::Timeout);
+        }
+        // The socket's own timeout is the rest of the window, rounded up
+        // to the millisecond: a timeout of zero is not "no time left" on a
+        // socket, it is "wait forever".
+        let left = (deadline - now).max(Duration::from_millis(1));
+        self.stream.set_read_timeout(Some(left))?;
+        let mut chunk = [0u8; CHUNK];
+        match self.stream.read(&mut chunk) {
+            Ok(0) => Ok(Filled::Eof),
+            Ok(n) => {
+                self.pending.push(&chunk[..n]);
+                Ok(Filled::Data)
+            }
+            // The socket's timeout fired: the window is over.
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                Ok(Filled::Timeout)
+            }
+            // The other end went away with bytes still in flight. That is
+            // the same fact as the end of the stream — the peer is gone —
+            // and the reader decides what it means: an answer that
+            // stopped in the middle, or a clean end between two answers.
+            //
+            // A socket that is reset says so with its own errno, and the
+            // errno is the platform's business, not the client's: the
+            // sentence the caller reads has to be the same everywhere.
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => Ok(Filled::Eof),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn pending(&self) -> &[u8] {
+        self.pending.bytes()
+    }
+
+    fn consume(&mut self, n: usize) {
+        self.pending.consume(n)
+    }
+}
+
+/// The unix socket, and the half that writes to it.
+#[cfg(unix)]
+fn socket_transport(
+    path: &std::path::Path,
+) -> std::io::Result<(Box<dyn Transport + Send>, Box<dyn Write + Send>)> {
+    let stream = std::os::unix::net::UnixStream::connect(path)?;
+    let write = stream.try_clone()?;
+    Ok((Box::new(SocketTransport::new(stream)), Box::new(write)))
+}
+
+/// The unix socket is not a transport everywhere.
+#[cfg(not(unix))]
+fn socket_transport(
+    path: &std::path::Path,
+) -> std::io::Result<(Box<dyn Transport + Send>, Box<dyn Write + Send>)> {
+    let _ = path;
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "unix sockets are not available on this platform; use a named pipe",
+    ))
+}
+
+/// The Windows named pipe under the client.
+///
+/// A blocking read on a named pipe cannot time out: the pipe has no read
+/// timeout, and `SetNamedPipeHandleState` does not give it one. The way
+/// out is to look before reading — `PeekNamedPipe` says how many bytes are
+/// waiting without taking them, and it answers right away even when there
+/// are none — and to read only what is there.
+#[cfg(windows)]
+struct PipeTransport {
+    file: std::fs::File,
+    pending: Pending,
+}
+
+#[cfg(windows)]
+impl PipeTransport {
+    /// The transport over an open pipe.
+    fn new(file: std::fs::File) -> PipeTransport {
+        PipeTransport {
+            file,
+            pending: Pending::default(),
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Transport for PipeTransport {
+    fn fill(&mut self, deadline: Instant) -> std::io::Result<Filled> {
+        loop {
+            match peek(&self.file)? {
+                Peek::Bytes(waiting) => {
+                    let mut chunk = [0u8; CHUNK];
+                    let want = waiting.min(chunk.len());
+                    let got = self.file.read(&mut chunk[..want])?;
+                    if got == 0 {
+                        return Ok(Filled::Eof);
+                    }
+                    self.pending.push(&chunk[..got]);
+                    return Ok(Filled::Data);
+                }
+                Peek::Closed => return Ok(Filled::Eof),
+                Peek::None => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return Ok(Filled::Timeout);
+                    }
+                    // Look again in a moment: the peek is what turns a
+                    // blocking pipe into a deadline.
+                    std::thread::sleep((deadline - now).min(Duration::from_millis(5)));
+                }
+            }
+        }
+    }
+
+    fn pending(&self) -> &[u8] {
+        self.pending.bytes()
+    }
+
+    fn consume(&mut self, n: usize) {
+        self.pending.consume(n)
+    }
+}
+
+/// The named pipe, and the half that writes to it.
+#[cfg(windows)]
+fn pipe_transport(
+    name: &str,
+) -> std::io::Result<(Box<dyn Transport + Send>, Box<dyn Write + Send>)> {
+    let file = open_pipe(name)?;
+    let write = file.try_clone()?;
+    Ok((Box::new(PipeTransport::new(file)), Box::new(write)))
+}
+
+/// The named pipe is not a transport everywhere.
+#[cfg(not(windows))]
+fn pipe_transport(
+    name: &str,
+) -> std::io::Result<(Box<dyn Transport + Send>, Box<dyn Write + Send>)> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        format!("named pipes are not available on this platform: {name}"),
+    ))
+}
+
+/// What the pipe has waiting.
+#[cfg(windows)]
+enum Peek {
+    /// This many bytes are waiting.
+    Bytes(usize),
+    /// The pipe is empty.
+    None,
+    /// The other end closed the pipe.
+    Closed,
+}
+
+/// The bytes waiting in the pipe, without taking them.
+///
+/// `PeekNamedPipe` answers right away — blocking or not — and it says how
+/// many bytes are there without removing them. The one-byte buffer is the
+/// price of the answer: the count is what the client wants, and the byte
+/// the peek copies is still in the pipe afterwards.
+#[cfg(windows)]
+fn peek(file: &std::fs::File) -> std::io::Result<Peek> {
+    use std::os::windows::io::AsRawHandle;
+    unsafe extern "system" {
+        fn PeekNamedPipe(
+            pipe: *mut core::ffi::c_void,
+            buffer: *mut core::ffi::c_void,
+            size: u32,
+            read: *mut u32,
+            total: *mut u32,
+            left: *mut u32,
+        ) -> i32;
+    }
+    /// The other end closed the pipe.
+    const ERROR_BROKEN_PIPE: i32 = 109;
+    /// The pipe has nobody on the other end.
+    const ERROR_PIPE_NOT_CONNECTED: i32 = 233;
+    /// The message in the pipe is bigger than the buffer.
+    const ERROR_MORE_DATA: i32 = 234;
+
+    let mut one = [0u8; 1];
+    let mut total = 0u32;
+    let ok = unsafe {
+        PeekNamedPipe(
+            file.as_raw_handle(),
+            one.as_mut_ptr() as *mut core::ffi::c_void,
+            one.len() as u32,
+            core::ptr::null_mut(),
+            &mut total,
+            core::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        let err = std::io::Error::last_os_error();
+        return match err.raw_os_error() {
+            Some(ERROR_BROKEN_PIPE) | Some(ERROR_PIPE_NOT_CONNECTED) => Ok(Peek::Closed),
+            // A message bigger than the buffer is still a message that is
+            // there: the count is unknown, but the bytes are not.
+            Some(ERROR_MORE_DATA) => Ok(Peek::Bytes(1)),
+            _ => Err(err),
+        };
+    }
+    Ok(if total == 0 {
+        Peek::None
+    } else {
+        Peek::Bytes(total as usize)
+    })
+}
+
+/// The daemon's own standard input.
+///
+/// The standard input cannot say whether it has bytes: a console is not a
+/// pipe and a file is not a socket, and there is no `PeekNamedPipe` for
+/// either. The thread is what turns "nothing yet" into something the
+/// deadline can measure — the bytes arrive on their own, and the client
+/// waits for them with a clock.
+struct StdioTransport {
+    /// The bytes the thread read.
+    rx: std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>,
+    pending: Pending,
+}
+
+impl StdioTransport {
+    /// The transport over the standard input.
+    ///
+    /// The thread reads the standard input and hands the bytes over. It
+    /// stops when the input is over, or when the client is gone: a send
+    /// that fails means nobody is listening any more.
+    fn new() -> StdioTransport {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut stdin = std::io::stdin();
+            let mut chunk = vec![0u8; CHUNK];
+            loop {
+                match stdin.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if tx.send(Ok(chunk[..n].to_vec())).is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(e));
+                        break;
+                    }
+                }
+            }
+        });
+        StdioTransport {
+            rx,
+            pending: Pending::default(),
+        }
+    }
+}
+
+impl Transport for StdioTransport {
+    fn fill(&mut self, deadline: Instant) -> std::io::Result<Filled> {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match self.rx.recv_timeout(left) {
+            Ok(Ok(bytes)) => {
+                self.pending.push(&bytes);
+                Ok(Filled::Data)
+            }
+            Ok(Err(e)) => Err(e),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Ok(Filled::Timeout),
+            // The thread is gone and the standard input is over.
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Ok(Filled::Eof),
+        }
+    }
+
+    fn pending(&self) -> &[u8] {
+        self.pending.bytes()
+    }
+
+    fn consume(&mut self, n: usize) {
+        self.pending.consume(n)
+    }
+}
+
 /// Open a Windows named pipe, waiting out the busy case.
 ///
 /// `ERROR_PIPE_BUSY` means every instance of the pipe has a client on it.
@@ -323,15 +810,6 @@ fn open_pipe(name: &str) -> std::io::Result<std::fs::File> {
         }
     }
     Err(last.unwrap_or_else(|| std::io::Error::other("the named pipe stayed busy")))
-}
-
-/// The named pipe does not exist on this platform.
-#[cfg(not(windows))]
-fn open_pipe(name: &str) -> std::io::Result<std::fs::File> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        format!("named pipes are not available on this platform: {name}"),
-    ))
 }
 
 /// The window the client waits for, named so the caller can read it.
@@ -361,5 +839,322 @@ mod tests {
     #[test]
     fn the_read_timeout_is_a_window_and_not_a_deadline() {
         assert!(read_timeout() >= Duration::from_secs(1));
+    }
+
+    // --- the daemon that does not answer, and the daemon that dies -------
+
+    /// The window the tests give an answer that is not coming.
+    ///
+    /// It is short because the case under test is the wait, not the
+    /// answer: the production window is thirty seconds, and a test that
+    /// waited half a minute to prove a timeout would be a test nobody
+    /// runs.
+    const SHORT: Duration = Duration::from_millis(500);
+
+    /// A name no other test uses.
+    fn unique() -> String {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        format!(
+            "rgy-proto-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        )
+    }
+
+    /// The test's own end of the transport.
+    ///
+    /// The client speaks a socket on unix and a named pipe on Windows, and
+    /// the test speaks the same one: a stand-in that spoke something else
+    /// would prove nothing about the transport the client really uses.
+    enum Peer {
+        #[cfg(unix)]
+        Socket(std::os::unix::net::UnixStream),
+        #[cfg(windows)]
+        Pipe(std::fs::File),
+    }
+
+    impl Peer {
+        /// Send bytes to the client.
+        fn send(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+            match self {
+                #[cfg(unix)]
+                Peer::Socket(s) => s.write_all(bytes),
+                #[cfg(windows)]
+                Peer::Pipe(f) => f.write_all(bytes),
+            }
+        }
+    }
+
+    /// A daemon of the test's own, on an endpoint of the test's own.
+    struct Server {
+        endpoint: Endpoint,
+        thread: std::thread::JoinHandle<()>,
+    }
+
+    impl Server {
+        /// Wait for the daemon to be done.
+        fn join(self) {
+            let _ = self.thread.join();
+        }
+    }
+
+    /// A server that takes one client and does what the test says.
+    #[cfg(unix)]
+    fn serve(script: fn(Peer)) -> Server {
+        let path = std::env::temp_dir().join(format!("{}.sock", unique()));
+        let listener = std::os::unix::net::UnixListener::bind(&path).expect("the socket binds");
+        let socket = path.clone();
+        let thread = std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                script(Peer::Socket(stream));
+            }
+            let _ = std::fs::remove_file(&socket);
+        });
+        Server {
+            endpoint: Endpoint::Socket(path),
+            thread,
+        }
+    }
+
+    /// A server that takes one client and does what the test says.
+    #[cfg(windows)]
+    fn serve(script: fn(Peer)) -> Server {
+        use std::os::windows::io::AsRawHandle;
+        unsafe extern "system" {
+            fn ConnectNamedPipe(
+                pipe: *mut core::ffi::c_void,
+                overlapped: *mut core::ffi::c_void,
+            ) -> i32;
+        }
+        let name = unique();
+        let file = create_pipe(&name);
+        let thread = std::thread::spawn(move || {
+            // The instance is already there: the only thing left to wait
+            // for is the client.
+            unsafe { ConnectNamedPipe(file.as_raw_handle(), core::ptr::null_mut()) };
+            script(Peer::Pipe(file));
+        });
+        Server {
+            endpoint: Endpoint::Pipe(name),
+            thread,
+        }
+    }
+
+    /// The pipe instance the test's server waits on.
+    #[cfg(windows)]
+    fn create_pipe(name: &str) -> std::fs::File {
+        use std::os::windows::io::FromRawHandle;
+        unsafe extern "system" {
+            fn CreateNamedPipeW(
+                name: *const u16,
+                open_mode: u32,
+                pipe_mode: u32,
+                max_instances: u32,
+                out_size: u32,
+                in_size: u32,
+                timeout: u32,
+                sec: *mut core::ffi::c_void,
+            ) -> *mut core::ffi::c_void;
+        }
+        const PIPE_ACCESS_DUPLEX: u32 = 0x3;
+        const PIPE_TYPE_BYTE: u32 = 0x0;
+        const PIPE_UNLIMITED_INSTANCES: u32 = 255;
+        let path = format!(r"\\.\pipe\{name}");
+        let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+        let handle = unsafe {
+            CreateNamedPipeW(
+                wide.as_ptr(),
+                PIPE_ACCESS_DUPLEX,
+                PIPE_TYPE_BYTE,
+                PIPE_UNLIMITED_INSTANCES,
+                64 * 1024,
+                64 * 1024,
+                0,
+                core::ptr::null_mut(),
+            )
+        };
+        assert!(!handle.is_null(), "the pipe instance was created");
+        // The file owns the handle: dropping it closes the pipe, which is
+        // what tells the client the stream is over.
+        unsafe { std::fs::File::from_raw_handle(handle) }
+    }
+
+    /// A daemon that takes the connection and says nothing.
+    fn says_nothing(peer: Peer) {
+        // The connection stays open: the client is waiting for an answer
+        // that is not coming, and that is the case under test.
+        let _peer = peer;
+        std::thread::sleep(Duration::from_millis(1000));
+    }
+
+    /// A daemon that dies in the middle of the answer.
+    fn says_half(peer: Peer) {
+        let mut peer = peer;
+        let _ = peer.send(br#"{"op":"hits","hits":[{"path":"a""#);
+        // The peer is dropped here: the connection closes with the line
+        // unfinished.
+    }
+
+    /// A daemon that sends a line that never ends.
+    fn says_too_much(peer: Peer) {
+        let mut peer = peer;
+        let chunk = vec![b'x'; CHUNK];
+        for _ in 0..(MAX_LINE / CHUNK + 2) {
+            if peer.send(&chunk).is_err() {
+                // The client gave up and closed the connection: the rest
+                // of the line is not going anywhere.
+                break;
+            }
+        }
+    }
+
+    /// A daemon that sends a document that nests deeper than the reader
+    /// allows.
+    fn says_too_deep(peer: Peer) {
+        let mut peer = peer;
+        let deep = format!("{}{}", "[".repeat(500), "]".repeat(500));
+        let _ = peer.send(deep.as_bytes());
+        let _ = peer.send(b"\n");
+    }
+
+    /// A daemon that answers in another protocol.
+    fn says_something_else(peer: Peer) {
+        let mut peer = peer;
+        let _ = peer.send(b"{\"op\":\"rgx\",\"ready\":true}\n");
+    }
+
+    /// A daemon that says nothing must not hang the client.
+    ///
+    /// This is the whole point of the deadline: a daemon that accepts the
+    /// connection and never answers used to freeze the launcher, because
+    /// the launcher asks the daemon from its own thread.
+    #[test]
+    fn a_daemon_that_says_nothing_times_the_client_out() {
+        let server = serve(says_nothing);
+        let mut client = Client::connect(&server.endpoint).expect("the client connects");
+        let started = Instant::now();
+        let err = client
+            .request_within(&Request::Status, SHORT)
+            .expect_err("a silent daemon has no answer");
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::TimedOut,
+            "the wait ran out: {err}"
+        );
+        assert!(
+            err.to_string().contains("did not answer in time"),
+            "the reason says what happened: {err}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the client waited for the window, not forever"
+        );
+        server.join();
+    }
+
+    /// A daemon that dies in the middle of the answer is an error, and not
+    /// an answer with nothing in it.
+    #[test]
+    fn an_answer_cut_in_the_middle_is_an_error() {
+        let server = serve(says_half);
+        let mut client = Client::connect(&server.endpoint).expect("the client connects");
+        let err = client
+            .request_within(
+                &Request::Search {
+                    q: "a".into(),
+                    limit: 10,
+                    session: None,
+                },
+                SHORT,
+            )
+            .expect_err("half an answer is not an answer");
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::UnexpectedEof,
+            "the stream was cut: {err}"
+        );
+        assert!(
+            err.to_string().contains("in the middle of the answer"),
+            "the reason says what happened: {err}"
+        );
+        server.join();
+    }
+
+    /// A line that never ends is refused before it fills the memory.
+    #[test]
+    fn a_line_that_never_ends_is_refused() {
+        let server = serve(says_too_much);
+        let mut client = Client::connect(&server.endpoint).expect("the client connects");
+        let err = client
+            .request_within(&Request::Status, Duration::from_secs(30))
+            .expect_err("a line that never ends is not an answer");
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::InvalidData,
+            "the line was refused: {err}"
+        );
+        assert!(
+            err.to_string().contains("longer than"),
+            "the reason says what happened: {err}"
+        );
+        server.join();
+    }
+
+    /// A document that nests deeper than the reader allows is refused.
+    #[test]
+    fn a_line_that_nests_too_deep_is_refused() {
+        let server = serve(says_too_deep);
+        let mut client = Client::connect(&server.endpoint).expect("the client connects");
+        let err = client
+            .request_within(&Request::Status, SHORT)
+            .expect_err("a document too deep to read is not an answer");
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::InvalidData,
+            "the document was refused: {err}"
+        );
+        assert!(
+            err.to_string().contains("nests too deep"),
+            "the reason says what happened: {err}"
+        );
+        server.join();
+    }
+
+    /// An answer the client does not know is an error, and not a line to
+    /// skip on the way to the next one.
+    #[test]
+    fn an_answer_the_client_does_not_know_is_an_error() {
+        let server = serve(says_something_else);
+        let mut client = Client::connect(&server.endpoint).expect("the client connects");
+        let err = client
+            .request_within(&Request::Status, SHORT)
+            .expect_err("an answer in another protocol is not an answer");
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::InvalidData,
+            "the answer was refused: {err}"
+        );
+        assert!(
+            err.to_string().contains("does not know"),
+            "the reason says what happened: {err}"
+        );
+        server.join();
+    }
+
+    /// The daemon's own answers are read, and the answer ends where the
+    /// daemon ends it.
+    #[test]
+    fn the_daemons_own_answers_are_read() {
+        let server = serve(|mut peer: Peer| {
+            let _ = peer
+                .send(b"{\"op\":\"hits\",\"hits\":[{\"path\":\"a\",\"score\":1}],\"took_us\":2}\n");
+            let _ = peer.send(b"{\"op\":\"done\",\"count\":1}\n");
+        });
+        let mut client = Client::connect(&server.endpoint).expect("the client connects");
+        let out = client.search("a", 10).expect("the daemon answers");
+        assert_eq!(out.hits.len(), 1);
+        assert_eq!(out.hits[0].path, "a");
+        server.join();
     }
 }

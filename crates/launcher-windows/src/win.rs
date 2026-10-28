@@ -34,9 +34,11 @@ pub type HWND = *mut c_void;
 pub type HDC = *mut c_void;
 pub type HBRUSH = *mut c_void;
 pub type HFONT = *mut c_void;
+pub type HICON = *mut c_void;
 pub type HRGN = *mut c_void;
 pub type HHOOK = *mut c_void;
 pub type HMENU = *mut c_void;
+pub type HMONITOR = *mut c_void;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -99,6 +101,34 @@ pub struct KBDLLHOOKSTRUCT {
     pub dwExtraInfo: usize,
 }
 
+/// What the shell says about a file.
+///
+/// The struct is the shell's, whole: the names are the buffers it fills
+/// in, and the icon is the handle it hands over.
+#[repr(C)]
+pub struct SHFILEINFOW {
+    pub hIcon: HICON,
+    pub iIcon: i32,
+    pub dwAttributes: DWORD,
+    pub szDisplayName: [u16; 260],
+    pub szTypeName: [u16; 80],
+}
+
+/// What the platform says about a monitor.
+///
+/// The struct is the platform's, whole: the rectangles are where the
+/// monitor is and where the work is, and the size is what the platform
+/// writes back.
+#[repr(C)]
+pub struct MONITORINFO {
+    pub cbSize: DWORD,
+    /// The whole monitor, taskbar and bars included.
+    pub rcMonitor: RECT,
+    /// The part of the monitor the bars did not take.
+    pub rcWork: RECT,
+    pub dwFlags: DWORD,
+}
+
 // --- the constants the launcher uses -----------------------------------------
 
 pub const WS_POPUP: u32 = 0x8000_0000;
@@ -119,8 +149,10 @@ pub const WM_CLOSE: UINT = 0x0010;
 pub const WM_ERASEBKGND: UINT = 0x0014;
 pub const WM_TIMER: UINT = 0x0013;
 pub const WM_KEYDOWN: UINT = 0x0100;
+pub const WM_KEYUP: UINT = 0x0101;
 pub const WM_CHAR: UINT = 0x0102;
 pub const WM_SYSKEYDOWN: UINT = 0x0104;
+pub const WM_SYSKEYUP: UINT = 0x0105;
 pub const WM_APP: UINT = 0x8000;
 
 pub const VK_BACK: u32 = 0x08;
@@ -137,8 +169,14 @@ pub const VK_RIGHT: u32 = 0x27;
 pub const VK_DOWN: u32 = 0x28;
 pub const VK_ESCAPE: u32 = 0x1B;
 pub const VK_DELETE: u32 = 0x2E;
+/// The left and the right Control keys.
+///
+/// The hook tells the two apart, and never says the generic Control: the
+/// key that was pressed is the one on the keyboard, and the keyboard has
+/// two of them.
+pub const VK_LCONTROL: u32 = 0xA2;
+pub const VK_RCONTROL: u32 = 0xA3;
 
-pub const SWP_NOSIZE: UINT = 0x0001;
 pub const SWP_NOMOVE: UINT = 0x0002;
 pub const SWP_NOACTIVATE: UINT = 0x0010;
 
@@ -160,8 +198,28 @@ pub const FW_SEMIBOLD: i32 = 600;
 pub const SM_CXSCREEN: i32 = 0;
 pub const SM_CYSCREEN: i32 = 1;
 
+/// The monitor that has the point, or the nearest one when it has none.
+pub const MONITOR_DEFAULTTONEAREST: DWORD = 0x0000_0002;
+
 pub const WH_KEYBOARD_LL: i32 = 13;
 pub const HC_ACTION: i32 = 0;
+
+/// The shell's icon for a file, and the small one.
+pub const SHGFI_ICON: u32 = 0x0000_0100;
+pub const SHGFI_SMALLICON: u32 = 0x0000_0001;
+/// The shell answers from the spelling alone, and does not touch the disk.
+pub const SHGFI_USEFILEATTRIBUTES: u32 = 0x0000_0010;
+
+/// The file is a folder: the shell's own word for it.
+pub const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x0000_0010;
+/// The file is an ordinary one.
+pub const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
+
+/// The font the context has selected.
+pub const OBJ_FONT: UINT = 0;
+
+/// The icon is drawn at its own size.
+pub const DI_NORMAL: u32 = 0x0000;
 
 /// The window's corner radius, in pixels, as DWM wants it.
 pub const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
@@ -230,8 +288,12 @@ unsafe extern "system" {
         cy: i32,
         uFlags: UINT,
     ) -> BOOL;
-    pub fn GetMessageW(lpMsg: *mut MSG, hWnd: HWND, wMsgFilterMin: UINT, wMsgFilterMax: UINT)
-        -> BOOL;
+    pub fn GetMessageW(
+        lpMsg: *mut MSG,
+        hWnd: HWND,
+        wMsgFilterMin: UINT,
+        wMsgFilterMax: UINT,
+    ) -> BOOL;
     pub fn TranslateMessage(lpMsg: *const MSG) -> BOOL;
     pub fn DispatchMessageW(lpMsg: *const MSG) -> LRESULT;
     pub fn PostQuitMessage(nExitCode: i32);
@@ -239,12 +301,15 @@ unsafe extern "system" {
     pub fn GetWindowLongPtrW(hWnd: HWND, nIndex: i32) -> isize;
     pub fn SetWindowLongPtrW(hWnd: HWND, nIndex: i32, dwNewLong: isize) -> isize;
     pub fn GetSystemMetrics(nIndex: i32) -> i32;
-    pub fn SetTimer(
-        hWnd: HWND,
-        nIDEvent: usize,
-        uElapse: u32,
-        lpTimerFunc: *mut c_void,
-    ) -> usize;
+    /// Where the pointer is.
+    pub fn GetCursorPos(lpPoint: *mut POINT) -> BOOL;
+    /// The monitor that has the point.
+    pub fn MonitorFromPoint(pt: POINT, dwFlags: DWORD) -> HMONITOR;
+    /// The monitor the window is on.
+    pub fn MonitorFromWindow(hwnd: HWND, dwFlags: DWORD) -> HMONITOR;
+    /// What the platform says about a monitor.
+    pub fn GetMonitorInfoW(hMonitor: HMONITOR, lpmi: *mut MONITORINFO) -> BOOL;
+    pub fn SetTimer(hWnd: HWND, nIDEvent: usize, uElapse: u32, lpTimerFunc: *mut c_void) -> usize;
     pub fn KillTimer(hWnd: HWND, uIDEvent: usize) -> i32;
 
     pub fn BeginPaint(hWnd: HWND, lpPs: *mut PAINTSTRUCT) -> HDC;
@@ -258,12 +323,8 @@ unsafe extern "system" {
         lpRect: *mut RECT,
         uFormat: UINT,
     ) -> i32;
-    pub fn GetTextExtentPoint32W(
-        hdc: HDC,
-        lpString: *const u16,
-        c: i32,
-        pSize: *mut POINT,
-    ) -> BOOL;
+    pub fn GetTextExtentPoint32W(hdc: HDC, lpString: *const u16, c: i32, pSize: *mut POINT)
+    -> BOOL;
     pub fn SetBkMode(hdc: HDC, mode: i32) -> i32;
     pub fn SetTextColor(hdc: HDC, color: u32) -> u32;
     pub fn CreateSolidBrush(color: u32) -> HBRUSH;
@@ -285,6 +346,21 @@ unsafe extern "system" {
     ) -> HFONT;
     pub fn SelectObject(hdc: HDC, h: HANDLE) -> HANDLE;
     pub fn DeleteObject(ho: HANDLE) -> BOOL;
+    /// The object of a kind that the context has selected.
+    pub fn GetCurrentObject(hdc: HDC, iType: UINT) -> HANDLE;
+
+    pub fn DrawIconEx(
+        hdc: HDC,
+        hIcon: HICON,
+        x: i32,
+        y: i32,
+        cx: i32,
+        cy: i32,
+        istep: UINT,
+        hbr: HBRUSH,
+        flags: UINT,
+    ) -> BOOL;
+    pub fn DestroyIcon(hIcon: HICON) -> BOOL;
 
     pub fn SetWindowRgn(hWnd: HWND, hRgn: HRGN, bRedraw: BOOL) -> i32;
     pub fn CreateRoundRectRgn(
@@ -298,9 +374,7 @@ unsafe extern "system" {
 
     pub fn SetWindowsHookExW(
         idHook: i32,
-        lpfn: Option<
-            unsafe extern "system" fn(i32, WPARAM, LPARAM) -> LRESULT,
-        >,
+        lpfn: Option<unsafe extern "system" fn(i32, WPARAM, LPARAM) -> LRESULT>,
         hMod: HINSTANCE,
         dwThreadId: DWORD,
     ) -> HHOOK;
@@ -312,7 +386,18 @@ unsafe extern "system" {
     pub fn GetModuleHandleW(lpModuleName: *const u16) -> HINSTANCE;
     pub fn GetProcAddress(hModule: HINSTANCE, lpProcName: *const u8) -> *mut c_void;
     pub fn GetTickCount64() -> u64;
+    /// The last error, and the way to clear it.
+    ///
+    /// A call that fails says so in the last error, and a call that
+    /// succeeds leaves it as it was — so the way to tell a call that
+    /// failed from a call that succeeded with a null answer is to clear
+    /// the error first and to look at it after.
+    pub fn GetLastError() -> DWORD;
+    pub fn SetLastError(code: DWORD) -> DWORD;
 }
+
+/// The last error of a call that succeeded.
+pub const ERROR_SUCCESS: DWORD = 0;
 
 #[link(name = "dwmapi")]
 unsafe extern "system" {
@@ -322,4 +407,19 @@ unsafe extern "system" {
         pvAttribute: *const c_void,
         cbAttribute: u32,
     ) -> i32;
+}
+
+#[link(name = "shell32")]
+unsafe extern "system" {
+    /// The shell's icon for a path.
+    ///
+    /// The answer is a copy the caller owns: with `SHGFI_ICON` the
+    /// handle has to be given back with `DestroyIcon`.
+    pub fn SHGetFileInfoW(
+        pszPath: *const u16,
+        dwFileAttributes: DWORD,
+        psfi: *mut SHFILEINFOW,
+        cbFileInfo: UINT,
+        uFlags: UINT,
+    ) -> usize;
 }

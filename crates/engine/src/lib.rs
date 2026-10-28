@@ -29,7 +29,7 @@ pub mod warm;
 
 /// Console output encoding: the Windows code page.
 ///
-/// One place for the three binaries to put the console into UTF-8, and
+/// One place for every binary to put the console into UTF-8, and
 /// for the streams to fall back to `WriteConsoleW` when the console
 /// refuses. See the module docs for what it does and does not change.
 pub mod console;
