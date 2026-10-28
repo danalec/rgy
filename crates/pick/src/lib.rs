@@ -23,14 +23,23 @@
 //! So the record separator is a decision, and it is [`Separator::Nul`] by
 //! default: the NUL byte cannot appear in a path on any platform.
 //!
-//! The picker has the last word on it. Only the pickers that know
+//! The picker has the last word on the LIST. Only the pickers that know
 //! `--read0` and `--print0` — `fzf` and `sk` — read a NUL-separated list,
 //! and those are the ones the crate looks for when the caller named none:
-//! a picker that cannot read the list never sees the results. A picker
-//! the caller named that cannot read one is given the line separator
-//! instead, because every picker reads lines, and the crate translates
-//! the records on the way in. The caller writes its records once, in the
-//! separator it asked for.
+//! the default separator is NUL, and a picker that speaks it carries every
+//! record as it is. A picker the caller named that does not speak it is
+//! given the line separator instead, because every picker reads lines,
+//! and the crate translates the records on the way in. The caller writes
+//! its records once, in the separator it asked for.
+//!
+//! One record cannot always be carried. A path with a newline in it does
+//! not survive the translation into lines, and half of it is a path that
+//! does not exist, so such a record is not offered at all — and the crate
+//! says on stderr how many records were left out.
+//!
+//! The caller has the last word on the SELECTION: what the picker chose
+//! is printed in the separator the caller asked for, so a caller that
+//! asked for NUL reads a NUL-separated answer.
 //!
 //! # The ranking
 //!
@@ -67,10 +76,11 @@ pub type Result<T> = core::result::Result<T, Error>;
 
 /// The pickers that read and write NUL-separated records.
 ///
-/// These are the ones the crate looks for when the caller named none: a
-/// picker that cannot read a NUL-separated list never sees the results.
-/// `peco` and `fz` do not know `--read0` and `--print0`, and a list
-/// handed to one of them is a list that never arrives.
+/// These are the ones the crate looks for when the caller named none:
+/// the default separator is NUL, and a picker that speaks it needs no
+/// translation — and a path with a newline in it does not survive one.
+/// `peco` and `fz` do not know `--read0` and `--print0`, so a caller that
+/// names one of them gets the list translated into lines.
 pub const NUL_CAPABLE: &[&str] = &["fzf", "sk"];
 
 /// The pickers the crate looks for when the caller named none.
@@ -133,12 +143,13 @@ impl Separator {
 
 /// The separator a picker reads and writes.
 ///
-/// The caller asks for one, and the picker has the last word: only the
-/// pickers in [`NUL_CAPABLE`] know `--read0` and `--print0`, so a picker
-/// outside it gets the line separator — one record per line is what
-/// every picker reads, and a path with a newline in it is the rare case.
-/// The name is the only thing the crate knows the picker by, so a path
-/// to `fzf.exe` is `fzf` and is treated as `fzf`.
+/// The caller asks for one, and the picker has the last word on the list:
+/// only the pickers in [`NUL_CAPABLE`] know `--read0` and `--print0`, so a
+/// picker outside it gets the line separator — one record per line is what
+/// every picker reads, and a path with a newline in it is the rare case
+/// the crate will not offer to a picker that cannot carry it. The name is
+/// the only thing the crate knows the picker by, so a path to `fzf.exe` is
+/// `fzf` and is treated as `fzf`.
 pub fn separator_for(binary: &str, requested: Separator) -> Separator {
     match requested {
         Separator::Line => Separator::Line,
@@ -197,7 +208,9 @@ pub struct Request<'a> {
     /// The separator the records are written with.
     ///
     /// The picker may read another one: [`separator_for`] has the last
-    /// word, and the crate translates the records on the way in.
+    /// word on the list, and the crate translates the records on the way
+    /// in. A record the translation cannot carry is not offered, and the
+    /// crate says how many were left out.
     pub separator: Separator,
     /// Whether the picker keeps the order it was given.
     pub order: Order,
@@ -279,7 +292,7 @@ pub fn pick_records(search: Search, req: &Request<'_>) -> Result<(i32, Vec<Vec<u
 /// Runs the picker and reads back what it chose.
 #[cfg(feature = "std")]
 fn run(search: Search, req: &Request<'_>, plan: &Plan) -> Result<(i32, Vec<Vec<u8>>)> {
-    use std::io::Read;
+    use std::io::{Read, Write};
     use std::process::{Command, Stdio};
     use std::sync::mpsc;
 
@@ -306,9 +319,12 @@ fn run(search: Search, req: &Request<'_>, plan: &Plan) -> Result<(i32, Vec<Vec<u
     let writer = std::thread::spawn(move || {
         let mut out = Reflow::new(stdin, requested, separator);
         let result = search(&mut out);
-        // The picker's list is only final at EOF.
+        // The picker's list is only final at EOF: the last record may not
+        // have a separator yet.
+        let finished = if result.is_ok() { out.finish() } else { Ok(()) };
+        let dropped = out.dropped();
         drop(out);
-        let _ = tx.send(result);
+        let _ = tx.send((result, finished, dropped));
     });
 
     let mut selected: Vec<u8> = Vec::new();
@@ -317,10 +333,16 @@ fn run(search: Search, req: &Request<'_>, plan: &Plan) -> Result<(i32, Vec<Vec<u
         let _ = stdout.read_to_end(&mut selected);
     }
     let code = wait(&mut child);
-    let searched = rx.recv().unwrap_or(Ok(false));
+    let (searched, finished, dropped) = rx.recv().unwrap_or((Ok(false), Ok(()), 0));
     let _ = writer.join();
 
     searched?;
+    finished.map_err(|e| alloc::format!("the picker stopped reading the list: {e}"))?;
+    if dropped > 0 {
+        // The user has to know that a result is missing: the record was
+        // left out because the picker could not have carried it whole.
+        let _ = writeln!(std::io::stderr(), "{}", uncarryable(dropped, separator));
+    }
     let records: Vec<Vec<u8>> = separator
         .split(&selected)
         .into_iter()
@@ -333,23 +355,66 @@ fn run(search: Search, req: &Request<'_>, plan: &Plan) -> Result<(i32, Vec<Vec<u
 ///
 /// The caller writes its records separated by the separator it asked for;
 /// the picker reads them separated by the one it can speak. When the two
-/// differ the crate does the translating, so a caller that asked for NUL
-/// and named a picker that reads lines still works.
+/// differ the crate translates, and a record that holds the byte the
+/// picker separates on is not offered at all: half of it is a path that
+/// does not exist. The crate counts what it left out, so the user can be
+/// told.
 #[cfg(feature = "std")]
 struct Reflow<W> {
     inner: W,
-    from: u8,
-    to: u8,
+    from: Separator,
+    to: Separator,
+    /// The record being read, held until it is known to be carryable.
+    record: Vec<u8>,
+    /// Whether the record being read already holds the byte the picker
+    /// separates on.
+    poisoned: bool,
+    /// How many records could not be carried.
+    dropped: usize,
 }
 
 #[cfg(feature = "std")]
-impl<W> Reflow<W> {
+impl<W: std::io::Write> Reflow<W> {
     fn new(inner: W, from: Separator, to: Separator) -> Reflow<W> {
         Reflow {
             inner,
-            from: from.byte(),
-            to: to.byte(),
+            from,
+            to,
+            record: Vec::new(),
+            poisoned: false,
+            dropped: 0,
         }
+    }
+
+    /// The record ends here: it is offered whole, or not at all.
+    fn end_record(&mut self) -> std::io::Result<()> {
+        if self.poisoned {
+            self.dropped += 1;
+        } else {
+            self.inner.write_all(&self.record)?;
+            self.inner.write_all(&[self.to.byte()])?;
+        }
+        self.record.clear();
+        self.poisoned = false;
+        Ok(())
+    }
+
+    /// The stream ends: a record the caller did not end with a separator
+    /// is still a record, and it is offered whole or not at all.
+    fn finish(&mut self) -> std::io::Result<()> {
+        if self.poisoned {
+            self.dropped += 1;
+        } else if !self.record.is_empty() {
+            self.inner.write_all(&self.record)?;
+        }
+        self.record.clear();
+        self.poisoned = false;
+        Ok(())
+    }
+
+    /// How many records the picker could not be handed.
+    fn dropped(&self) -> usize {
+        self.dropped
     }
 }
 
@@ -360,16 +425,23 @@ impl<W: std::io::Write> std::io::Write for Reflow<W> {
             return self.inner.write(buf);
         }
         // A record never carries the byte it is separated by, so the
-        // separator is the only byte that changes.
-        let mut start = 0;
-        for (index, &byte) in buf.iter().enumerate() {
-            if byte == self.from {
-                self.inner.write_all(&buf[start..index])?;
-                self.inner.write_all(&[self.to])?;
-                start = index + 1;
+        // separator is the only byte that changes — and a record that
+        // carries the byte the PICKER separates on is one the picker
+        // cannot read whole.
+        let from = self.from.byte();
+        let to = self.to.byte();
+        for &byte in buf {
+            if byte == from {
+                self.end_record()?;
+            } else if byte == to {
+                self.poisoned = true;
+                // The record is lost already: there is no point in holding
+                // on to the bytes of a path that cannot be offered.
+                self.record.clear();
+            } else if !self.poisoned {
+                self.record.push(byte);
             }
         }
-        self.inner.write_all(&buf[start..])?;
         Ok(buf.len())
     }
 
@@ -378,25 +450,62 @@ impl<W: std::io::Write> std::io::Write for Reflow<W> {
     }
 }
 
+/// The warning for the records the picker could not carry.
+///
+/// The user has to know a result is missing: a record the picker cannot
+/// read whole is not offered, and half of it is a path that does not
+/// exist.
+#[cfg(feature = "std")]
+fn uncarryable(dropped: usize, to: Separator) -> String {
+    let (byte, reads) = match to {
+        Separator::Line => ("a newline", "one record per line"),
+        Separator::Nul => ("a NUL byte", "one record per NUL byte"),
+    };
+    if dropped == 1 {
+        alloc::format!(
+            "1 record was not offered to the picker: it carries {byte}, and the picker reads {reads}"
+        )
+    } else {
+        alloc::format!(
+            "{dropped} records were not offered to the picker: they carry {byte}, and the picker reads {reads}"
+        )
+    }
+}
+
 /// Runs `search` with its output on the picker's stdin, prints what the
 /// picker returns, and yields the process exit status.
+///
+/// The selection is printed in the separator the caller asked for — the
+/// same one the records were written in — so a caller that asked for NUL
+/// reads a NUL-separated answer, whatever separator the picker speaks.
 #[cfg(feature = "std")]
 pub fn pick(search: Search, req: &Request<'_>) -> Result<i32> {
-    use std::io::Write;
     let plan = plan(req)?;
     let (code, records) = run(search, req, &plan)?;
     if code == 0 && !records.is_empty() {
         let mut out = std::io::stdout();
-        for record in &records {
-            out.write_all(record)
-                .map_err(|e| alloc::format!("the selection could not be printed: {e}"))?;
-            out.write_all(&[plan.separator.byte()])
-                .map_err(|e| alloc::format!("the selection could not be printed: {e}"))?;
-        }
-        out.flush()
+        print_selection(&records, req, &mut out)
             .map_err(|e| alloc::format!("the selection could not be printed: {e}"))?;
     }
     Ok(code)
+}
+
+/// The selection, in the separator the caller asked for.
+///
+/// The picker speaks the separator it knows; the caller reads the one it
+/// asked for. The picker has the last word on the list, and the caller
+/// has the last word on what comes back.
+#[cfg(feature = "std")]
+fn print_selection<W: std::io::Write>(
+    records: &[Vec<u8>],
+    req: &Request<'_>,
+    out: &mut W,
+) -> std::io::Result<()> {
+    for record in records {
+        out.write_all(record)?;
+        out.write_all(&[req.separator.byte()])?;
+    }
+    out.flush()
 }
 
 /// The flags that carry the order, when the picker understands them.
@@ -478,6 +587,8 @@ fn scan(binary: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "std")]
+    use std::io::Write;
 
     #[test]
     fn a_selection_is_zero_and_a_dismissal_is_one() {
@@ -585,5 +696,333 @@ mod tests {
             std::io::Write::write_all(&mut out, b"src/a.txt\0src/b.txt\0").unwrap();
         }
         assert_eq!(buf, b"src/a.txt\nsrc/b.txt\n");
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn a_record_the_picker_cannot_carry_is_not_offered_at_all() {
+        // A path with a newline in it cannot be handed to a picker that
+        // reads lines, and half of it is a path that does not exist.
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut out = Reflow::new(&mut buf, Separator::Nul, Separator::Line);
+            out.write_all(b"src/a.txt\0src/has\nnewline.txt\0src/c.txt\0")
+                .unwrap();
+        }
+        // What the picker reads is two whole records: the one that cannot
+        // be carried is not there, and it is not there in halves either.
+        assert_eq!(buf, b"src/a.txt\nsrc/c.txt\n");
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn the_records_the_picker_cannot_carry_are_counted_and_named() {
+        let mut buf: Vec<u8> = Vec::new();
+        let dropped = {
+            let mut out = Reflow::new(&mut buf, Separator::Nul, Separator::Line);
+            out.write_all(b"src/a.txt\0src/has\nnewline.txt\0").unwrap();
+            out.finish().unwrap();
+            out.dropped()
+        };
+        assert_eq!(dropped, 1, "the record that cannot be carried is counted");
+        // The user has to be told what is missing, and why.
+        let warning = uncarryable(dropped, Separator::Line);
+        assert!(warning.contains("1 record"), "{warning}");
+        assert!(warning.contains("a newline"), "{warning}");
+        assert!(warning.contains("one record per line"), "{warning}");
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn the_selection_is_printed_in_the_separator_the_caller_asked_for() {
+        let args: Vec<String> = Vec::new();
+        let req = Request {
+            args: &args,
+            binary: None,
+            separator: Separator::Nul,
+            order: Order::Sort,
+        };
+        let records = vec![b"src/a.txt".to_vec()];
+        let mut buf: Vec<u8> = Vec::new();
+        print_selection(&records, &req, &mut buf).unwrap();
+        assert_eq!(buf, b"src/a.txt\0", "the caller asked for NUL");
+    }
+
+    /// A picker that is here: a script that reads its stdin, writes a line
+    /// back, and exits with the status it was given.
+    ///
+    /// The crate's whole job is to spawn something, and the real picker is
+    /// not on every machine. The script takes its instructions from its
+    /// arguments — so the test can see that the arguments arrived — and it
+    /// writes down what it read, so the test can see what the crate sent.
+    #[cfg(feature = "std")]
+    #[cfg(any(windows, unix))]
+    struct Fake {
+        /// The binary the crate spawns.
+        binary: String,
+        /// Where the script writes what it read.
+        stdin_dump: std::path::PathBuf,
+        /// Where the script writes the arguments it got.
+        args_dump: std::path::PathBuf,
+    }
+
+    #[cfg(feature = "std")]
+    #[cfg(any(windows, unix))]
+    impl Fake {
+        /// Writes the script into `dir`, and says how to run it.
+        fn new(dir: &std::path::Path) -> Fake {
+            std::fs::create_dir_all(dir).expect("the test directory");
+            let stdin_dump = dir.join("stdin.txt");
+            let args_dump = dir.join("args.txt");
+            let script = dir.join(if cfg!(windows) {
+                "picker.cmd"
+            } else {
+                "picker.sh"
+            });
+            let body = if cfg!(windows) {
+                // `%1` is the status, `%2` the file that gets the stdin,
+                // `%3` the file that gets the arguments. A batch file wants
+                // the line endings it expects.
+                r#"@echo off
+>"%~3" echo %*
+more > "%~2"
+echo PICKED
+exit /b %1
+"#
+                .replace('\n', "\r\n")
+            } else {
+                r#"#!/bin/sh
+echo "$*" > "$3"
+cat > "$2"
+echo PICKED
+exit "$1"
+"#
+                .to_string()
+            };
+            std::fs::write(&script, body).expect("the script");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = std::fs::metadata(&script)
+                    .expect("the script")
+                    .permissions();
+                perms.set_mode(0o755);
+                std::fs::set_permissions(&script, perms).expect("the script runs");
+            }
+            Fake {
+                binary: script.to_string_lossy().into_owned(),
+                stdin_dump,
+                args_dump,
+            }
+        }
+
+        /// The arguments the script takes: the status it exits with, the
+        /// file that gets its stdin, the file that gets its arguments, and
+        /// whatever the caller of the crate asked for.
+        fn args(&self, status: i32, extra: &[String]) -> Vec<String> {
+            let mut args = vec![
+                status.to_string(),
+                self.stdin_dump.to_string_lossy().into_owned(),
+                self.args_dump.to_string_lossy().into_owned(),
+            ];
+            args.extend_from_slice(extra);
+            args
+        }
+
+        /// The lines the script read.
+        fn lines(&self) -> Vec<String> {
+            let dump = std::fs::read_to_string(&self.stdin_dump).expect("the dump");
+            dump.lines()
+                .map(|line| line.trim_end_matches('\r').to_string())
+                .filter(|line| !line.is_empty())
+                .collect()
+        }
+    }
+
+    #[cfg(feature = "std")]
+    #[cfg(any(windows, unix))]
+    #[test]
+    fn the_picker_is_spawned_with_the_records_and_the_arguments() {
+        let dir = std::env::temp_dir().join(format!("rgy-pick-spawn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let fake = Fake::new(&dir);
+        let args = fake.args(0, &["--fzf-arg-value".to_string()]);
+        let req = Request {
+            args: &args,
+            binary: Some(&fake.binary),
+            separator: Separator::Nul,
+            order: Order::Sort,
+        };
+        // The records the caller offers: one of them carries a newline,
+        // and a picker that reads lines cannot be handed one whole.
+        let records = b"src/a.txt\0src/has\nnewline.txt\0src/c.txt\0";
+        let search: Search = Box::new(
+            move |out: &mut (dyn std::io::Write + Send + 'static)| -> Result<bool> {
+                out.write_all(records)
+                    .map_err(|e| alloc::format!("the records did not reach the picker: {e}"))?;
+                Ok(true)
+            },
+        );
+        let (code, chosen) = pick_records(search, &req).expect("the picker runs");
+        assert_eq!(code, 0, "a picker that chose something exits 0");
+        assert!(
+            chosen.iter().any(|record| record.starts_with(b"PICKED")),
+            "the selection must come back; got {chosen:?}"
+        );
+        // The arguments the caller asked for reached the child.
+        let got = std::fs::read_to_string(&fake.args_dump).expect("the dump");
+        assert!(
+            got.contains("--fzf-arg-value"),
+            "the arguments must reach the child; got {got:?}"
+        );
+        // The records reached the child whole: the record with a newline
+        // in it is not offered, and it is not offered in halves either.
+        assert_eq!(
+            fake.lines(),
+            ["src/a.txt".to_string(), "src/c.txt".to_string()],
+            "the child must not receive a split record"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(feature = "std")]
+    #[cfg(any(windows, unix))]
+    #[test]
+    fn the_exit_status_of_the_picker_is_mapped() {
+        let dir = std::env::temp_dir().join(format!("rgy-pick-status-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let fake = Fake::new(&dir);
+        // The crate's own table: a choice is 0, no choice is 1, and a
+        // picker that exits with anything else is broken — which the caller
+        // answers with 2.
+        for (status, expected) in [(0, 0), (1, 1), (130, 1)] {
+            let args = fake.args(status, &[]);
+            let req = Request {
+                args: &args,
+                binary: Some(&fake.binary),
+                separator: Separator::Nul,
+                order: Order::Sort,
+            };
+            let search: Search = Box::new(
+                |_out: &mut (dyn std::io::Write + Send + 'static)| -> Result<bool> { Ok(true) },
+            );
+            let (code, _) = pick_records(search, &req).expect("the picker runs");
+            assert_eq!(code, expected, "the picker exited with {status}");
+        }
+        // A picker that exits with 2 is not a search with no matches.
+        let args = fake.args(2, &[]);
+        let req = Request {
+            args: &args,
+            binary: Some(&fake.binary),
+            separator: Separator::Nul,
+            order: Order::Sort,
+        };
+        let search: Search = Box::new(
+            |_out: &mut (dyn std::io::Write + Send + 'static)| -> Result<bool> { Ok(true) },
+        );
+        let reason = pick_records(search, &req).expect_err("a broken picker is an error");
+        assert!(reason.contains("exited with 2"), "{reason}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(feature = "std")]
+    #[cfg(any(windows, unix))]
+    #[test]
+    fn a_picker_that_cannot_run_is_an_error_and_not_a_crash() {
+        let dir = std::env::temp_dir().join(format!("rgy-pick-missing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("the test directory");
+        let missing = dir.join("no-such-picker");
+        let missing = missing.to_string_lossy().into_owned();
+        let req = Request {
+            args: &[],
+            binary: Some(&missing),
+            separator: Separator::Nul,
+            order: Order::Sort,
+        };
+        let search: Search = Box::new(
+            |_out: &mut (dyn std::io::Write + Send + 'static)| -> Result<bool> { Ok(true) },
+        );
+        // The caller answers this error with 2: a picker that could not be
+        // run is not a search with no matches.
+        let reason = pick_records(search, &req).expect_err("a picker that cannot run is an error");
+        assert!(reason.contains("cannot run"), "{reason}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The child the parent test runs: it asks the picker for a selection
+    /// and prints it, so the parent can read the bytes the crate printed.
+    ///
+    /// The crate prints its selection on stdout, and stdout is the one
+    /// stream a test cannot take back — so the selection is printed by a
+    /// child, and the parent reads the child's stdout.
+    #[cfg(feature = "std")]
+    #[cfg(any(windows, unix))]
+    #[ignore]
+    #[test]
+    fn prints_the_selection_for_the_parent() {
+        if std::env::var_os("RGY_PICK_TEST_CHILD").is_none() {
+            // The ordinary run: only the parent sets the variable.
+            return;
+        }
+        let dir =
+            std::env::var_os("RGY_PICK_TEST_DIR").expect("the parent says where the picker is");
+        let dir = std::path::PathBuf::from(dir);
+        let fake = Fake::new(&dir);
+        let args = fake.args(0, &[]);
+        let req = Request {
+            args: &args,
+            binary: Some(&fake.binary),
+            separator: Separator::Nul,
+            order: Order::Sort,
+        };
+        let records = b"src/a.txt\0";
+        let search: Search = Box::new(
+            move |out: &mut (dyn std::io::Write + Send + 'static)| -> Result<bool> {
+                out.write_all(records)
+                    .map_err(|e| alloc::format!("the records did not reach the picker: {e}"))?;
+                Ok(true)
+            },
+        );
+        assert_eq!(pick(search, &req).expect("the picker runs"), 0);
+    }
+
+    #[cfg(feature = "std")]
+    #[cfg(any(windows, unix))]
+    #[test]
+    fn the_selection_comes_back_in_the_separator_the_caller_asked_for() {
+        let dir = std::env::temp_dir().join(format!("rgy-pick-selection-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let exe = std::env::current_exe().expect("the test binary");
+        let child = std::process::Command::new(exe)
+            .args([
+                "--ignored",
+                "--exact",
+                "tests::prints_the_selection_for_the_parent",
+            ])
+            .env("RGY_PICK_TEST_CHILD", "1")
+            .env("RGY_PICK_TEST_DIR", &dir)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("the test binary runs");
+        let out = child.wait_with_output().expect("the child finishes");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success(),
+            "the child must succeed; stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // The picker reads lines; the caller asked for NUL. The selection
+        // comes back in the separator the caller asked for.
+        assert!(
+            stdout.contains("PICKED"),
+            "the selection must be printed; got {stdout:?}"
+        );
+        assert!(
+            stdout.contains('\0'),
+            "the selection must be printed in the separator the caller asked for; got {stdout:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
