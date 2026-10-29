@@ -195,11 +195,28 @@ echo "syncing vendored rgx crates from $UPSTREAM" >&2
 # would spawn a process per file -- a thousand of them, for a question one
 # `ls-files` answers.
 upstream_list="$(mktemp)"
-trap 'rm -f "$upstream_list"' EXIT
+patched_paths="$(mktemp)"
+trap 'rm -f "$upstream_list" "$patched_paths"' EXIT
 for crate in $CRATES; do
     git -C "$UPSTREAM" ls-files "crates/$crate" >> "$upstream_list"
 done
 sort -o "$upstream_list" "$upstream_list"
+
+# The paths that have a local patch, repository-relative. One list for the
+# whole run, because the copy list asks it for every crate: a file with a
+# patch is rewritten whatever the hashes say, and this is what says so.
+#
+# The paths come from the patches and not from the tree: a patch is a
+# divergence from upstream, and the file it names is the one that has it.
+if [ -d "$PATCH_DIR" ]; then
+    find "$PATCH_DIR" -name '*.patch' -type f | while IFS= read -r patch_path; do
+        rel="${patch_path#"$PATCH_DIR"/}"
+        rel="${rel%.patch}"
+        printf '%s\n' "$rel"
+    done | sort > "$patched_paths"
+else
+    : > "$patched_paths"
+fi
 
 for crate in $CRATES; do
     src_dir="$UPSTREAM/crates/$crate"
@@ -273,18 +290,42 @@ for crate in $CRATES; do
         | paste -d'\t' "$local_paths" - > "$local_pairs"
 
     # The paths to copy: the ones the upstream has and this tree does not,
-    # and the ones whose content is not the blob's. A file with a local
-    # patch is in the second group by construction -- the patch changed its
-    # content -- so it is rewritten and the patch goes on top again.
+    # the ones whose content is not the blob's, and the ones that have a
+    # local patch.
+    #
+    # A file with a local patch is in the second group by construction --
+    # the patch changed its content -- so it is rewritten and the patch
+    # goes on top again. That is true only while the patch is applied to
+    # the tree. The moment the tree's copy IS the upstream blob (a patch
+    # that was never applied, or one whose effect was reverted), the file
+    # leaves the copy list, the copy skips it, and the patch never goes on
+    # top: the sync says nothing and the tree keeps upstream's bytes
+    # without the fix. A file with a patch is therefore always rewritten.
     #
     # Both directions matter. A path only upstream has is a new file; a
     # path both have with a different hash is a changed one. Asking only
     # "which local files differ" misses every new file the upstream brings,
     # which is how a rename arrives as a deletion and nothing else.
-    awk -F'\t' '
-        NR==FNR { local[$1]=$2; next }
-        { if (!(($2) in local)) print $2; else if (local[$2] != $1) print $2 }
-    ' "$local_pairs" "$upstream_pairs" > "$to_copy"
+    #
+    # The patched paths upstream never had are not in here: the upstream
+    # list holds only the paths upstream has, and the block below is what
+    # creates those. And a path under an excluded prefix is not here
+    # either: the upstream list was filtered before this.
+    #
+    # The three files are read by name and not by order: the local pairs
+    # are "path TAB hash" and the upstream pairs are "hash TAB path", so
+    # the awk has to know which is which.
+    awk -F'\t' \
+        -v patfile="$patched_paths" -v locfile="$local_pairs" -v upfile="$upstream_pairs" '
+        FILENAME == patfile { patched[$0] = 1; next }
+        FILENAME == locfile { local[$1] = $2; next }
+        FILENAME == upfile {
+            path = $2; hash = $1
+            if (!(path in local)) { print path; next }
+            if (local[path] != hash) { print path; next }
+            if (path in patched) { print path }
+        }
+    ' "$patched_paths" "$local_pairs" "$upstream_pairs" > "$to_copy"
 
     while IFS= read -r rel; do
         [ -n "$rel" ] || continue
@@ -511,6 +552,12 @@ if [ "$DRY_RUN" = 0 ]; then
         echo "# falls behind the tree it describes is worse than none, because it"
         echo "# reads as \"nothing to do here\"."
         echo "#"
+        echo "# The file holds two things: the rows, which are tab separated and"
+        echo "# five columns wide, and the excluded paths, which are comment"
+        echo "# lines of their own -- \"# exclude: <path>\", one per line. A"
+        echo "# comment line is not a row: the parsers skip the comments, and"
+        echo "# the rows are the rows."
+        echo "#"
         echo "# Columns, tab separated:"
         echo "#"
         echo "#   1  rgx_path    the path in this repository. A tree row names a"
@@ -532,6 +579,19 @@ if [ "$DRY_RUN" = 0 ]; then
         echo "# exclusion is in the sync script, so the paths cannot come back."
         echo ""
         echo "# The upstream commit the copy was taken from: $upstream_commit"
+        echo ""
+        echo "# The paths the copy does not carry, one per line. The sync removes"
+        echo "# them from this repository on every run, so a path that is here is"
+        echo "# a divergence from the rule that these trees are upstream's, minus"
+        echo "# what rgy does not carry."
+        echo "#"
+        echo "# The drift check reads this list: a file upstream holds under one of"
+        echo "# these paths is not a file the copy is missing, and one of them that"
+        echo "# is here is a file the copy should not have. The list is written"
+        echo "# here, by the sync, so there is one answer to what is excluded."
+        for prefix in $EXCLUDE; do
+            echo "# exclude: $prefix"
+        done
         echo ""
     } > "$tmp_manifest"
 

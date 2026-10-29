@@ -6,6 +6,12 @@
 # falls behind the tree it describes is worse than none, because it
 # reads as "nothing to do here".
 #
+# The file holds two things: the rows, which are tab separated and
+# five columns wide, and the excluded paths, which are comment
+# lines of their own -- "# exclude: <path>", one per line. A
+# comment line is not a row: the parsers skip the comments, and
+# the rows are the rows.
+#
 # Columns, tab separated:
 #
 #   1  rgx_path    the path in this repository. A tree row names a
@@ -27,6 +33,20 @@
 # exclusion is in the sync script, so the paths cannot come back.
 
 # The upstream commit the copy was taken from: c76a9248b538ed4de21188b034ff5ec26ce31f5f
+
+# The paths the copy does not carry, one per line. The sync removes
+# them from this repository on every run, so a path that is here is
+# a divergence from the rule that these trees are upstream's, minus
+# what rgy does not carry.
+#
+# The drift check reads this list: a file upstream holds under one of
+# these paths is not a file the copy is missing, and one of them that
+# is here is a file the copy should not have. The list is written
+# here, by the sync, so there is one answer to what is excluded.
+# exclude: crates/rgx-core/examples/
+# exclude: crates/rgx-core/fuzz/
+# exclude: crates/rgx-adapters-archive/examples/
+# exclude: crates/rar-codec/examples/
 
 crates/rgx-core	crates/rgx-core	c76a9248b538ed4de21188b034ff5ec26ce31f5f	tree	upstream rgx's crate, transported verbatim except the paths the copy excludes
 crates/rar-codec	crates/rar-codec	c76a9248b538ed4de21188b034ff5ec26ce31f5f	tree	upstream rgx's crate, transported verbatim except the paths the copy excludes
@@ -50,6 +70,7 @@ scripts/rgx-local-patches/crates/rgx-adapters-tabular/src/lib.rs.patch	crates/rg
 scripts/rgx-local-patches/crates/rgx-adapters-tabular/src/sqlite.rs.patch	crates/rgx-adapters-tabular/src/sqlite.rs	c76a9248b538ed4de21188b034ff5ec26ce31f5f	patch	a divergence from upstream: the patch is applied on top of the copy
 scripts/rgx-local-patches/crates/rgx-adapters-tabular/src/sqlite_oracle.rs.patch	crates/rgx-adapters-tabular/src/sqlite_oracle.rs	c76a9248b538ed4de21188b034ff5ec26ce31f5f	patch	a divergence from upstream: the patch is applied on top of the copy
 scripts/rgx-local-patches/crates/rgx-core/Cargo.toml.patch	crates/rgx-core/Cargo.toml	c76a9248b538ed4de21188b034ff5ec26ce31f5f	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-core/src/djson/intern.rs.patch	crates/rgx-core/src/djson/intern.rs	c76a9248b538ed4de21188b034ff5ec26ce31f5f	patch	a divergence from upstream: the patch is applied on top of the copy
 scripts/rgx-local-patches/crates/rgx-core/src/lib.rs.patch	crates/rgx-core/src/lib.rs	c76a9248b538ed4de21188b034ff5ec26ce31f5f	patch	a divergence from upstream: the patch is applied on top of the copy
 scripts/rgx-local-patches/crates/rgx-core/src/memchr.rs.patch	crates/rgx-core/src/memchr.rs	c76a9248b538ed4de21188b034ff5ec26ce31f5f	patch	a divergence from upstream: the patch is applied on top of the copy
 scripts/rgx-local-patches/crates/rgx-core/src/memchr/dispatch.rs.patch	crates/rgx-core/src/memchr/dispatch.rs	c76a9248b538ed4de21188b034ff5ec26ce31f5f	patch	a divergence from upstream: the patch is applied on top of the copy

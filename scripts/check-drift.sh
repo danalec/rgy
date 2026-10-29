@@ -17,12 +17,27 @@
 #
 # The manifest has two kinds of row, and they drift in different ways.
 #
-#   tree -- a vendored crate, copied whole from upstream. The question is
-#           whether upstream has touched that tree since the pin. Two
-#           answers are needed, not one: which commits upstream made, and
-#           which files those commits touched. The second is the actionable
-#           one -- it names the files to look at. A tree that upstream has
-#           not moved is fine, and says so by saying nothing.
+#   tree -- a vendored crate, copied whole from upstream. Two questions
+#           are asked of it, and they are different questions. The first
+#           is whether upstream has touched that tree since the pin. Two
+#           answers are needed for that, not one: which commits upstream
+#           made, and which files those commits touched. The second is
+#           the actionable one -- it names the files to look at. A tree
+#           that upstream has not moved is fine, and says so by saying
+#           nothing.
+#
+#           The second question is whether the copy here is the tree
+#           upstream holds at the pin, byte for byte. That is the half
+#           the rule is about: these trees are upstream's, and a local
+#           edit in one of them is a fork nobody asked for. It is
+#           answered by comparing blob hashes, because two equal hashes
+#           are two equal files: the upstream side from the pinned
+#           commit, and our side from the index, which is what a clone
+#           holds. The files that have a patch row of their own are left
+#           out -- the patch row checks them -- and so are the excluded
+#           paths, which upstream has and this repository does not carry.
+#           A file of ours that upstream does not have is a fork, and is
+#           reported as one.
 #
 #   patch -- a divergence from upstream, kept as a patch under
 #           scripts/rgx-local-patches/. Two things can be wrong with it,
@@ -287,6 +302,11 @@ patch_verdict() {
     work=$(mktemp -d) || { printf 'mismatch'; return 0; }
     # The patch, as the repository holds it: the index, like the rest of
     # this repository's own bytes.
+    #
+    # A patch that has not been staged is not in the index, so the gate
+    # cannot see it and says the patch does not apply. That is not a
+    # broken patch: it is a patch that has not been added to the
+    # repository yet. Stage it, and the gate sees it.
     if ! repo_blob "$patch_rel" > "$work/rgy.patch" 2>/dev/null; then
         rm -rf "$work"
         printf 'does-not-apply'
@@ -341,6 +361,89 @@ patch_verdict() {
     fi
 }
 
+# The tree upstream holds at the pin, and the tree this repository holds.
+#
+# Both sides come out of one call each: `ls-tree` gives the files of the
+# commit, `ls-files` gives the entries of the index. Two equal blob
+# hashes are two equal files, so the comparison never looks at the bytes
+# themselves -- and it does not look at the working tree either, because
+# the working tree is not what a clone holds.
+#
+# Three kinds of path are left out of the comparison, and each of them is
+# left out for a reason:
+#
+#   * the files that have a patch row of their own. The patch row is
+#     what checks them, byte for byte, against upstream plus the patch,
+#     and a file a patch creates is not upstream's at all.
+#
+#   * the excluded paths. They are upstream's files that this repository
+#     does not carry, so their absence is the rule and not a difference.
+#     The ones of them that the index holds are reported on their own:
+#     the sync removes them, so one that is here is a divergence.
+#
+# Prints one line per difference:
+#   missing: <path>   upstream has it, the copy does not
+#   differs: <path>   both have it, and the bytes are not the same
+#   fork: <path>      the copy has it, upstream does not
+#   excluded: <path>  an excluded path is in the index
+tree_problems() {
+    local up="$1" our="$2" pin="$3"
+    local up_pairs our_pairs problems
+    up_pairs=$(mktemp) || { printf 'error: the trees could not be compared\n'; return 1; }
+    our_pairs=$(mktemp) || { rm -f "$up_pairs"; printf 'error: the trees could not be compared\n'; return 1; }
+    # "<blob hash>\t<path>" for each side. `ls-tree` prints
+    # "<mode> SP <type> SP <hash> TAB <path>" and `ls-files` prints
+    # "<mode> SP <hash> SP <stage> TAB <path>", so the hash is the third
+    # field of the first one and the second of the second.
+    git -C "$upstream_dir" ls-tree -r "$pin" -- "$up" \
+        | awk -F'\t' '{ split($1, f, " "); print f[3] "\t" $2 }' > "$up_pairs"
+    git -C "$repo_root" ls-files -s -- "$our" \
+        | awk -F'\t' '{ split($1, f, " "); print f[2] "\t" $2 }' > "$our_pairs"
+    # The comparison, with the paths of the other two lists read first:
+    # the exclusions, and the paths the patch rows own.
+    problems="$(awk -F'\t' \
+        -v exclfile="$excludes" -v patfile="$patch_paths" \
+        -v upfile="$up_pairs" -v ourfile="$our_pairs" '
+        function is_excluded(path,   i) {
+            for (i = 1; i <= ne; i++) {
+                if (index(path, excl[i]) == 1) { return 1 }
+            }
+            return 0
+        }
+        FILENAME == exclfile { excl[++ne] = $0; next }
+        FILENAME == patfile { patched[$0] = 1; next }
+        FILENAME == upfile {
+            path = $2
+            if (is_excluded(path) || (path in patched)) { next }
+            up[path] = $1; uporder[++nup] = path; next
+        }
+        FILENAME == ourfile {
+            path = $2
+            if (is_excluded(path)) { exorder[++nex] = path; next }
+            if (path in patched) { next }
+            ours[path] = $1; ourorder[++nout] = path; next
+        }
+        END {
+            for (i = 1; i <= nup; i++) {
+                p = uporder[i]
+                if (!(p in ours)) { print "missing: " p }
+            }
+            for (i = 1; i <= nup; i++) {
+                p = uporder[i]
+                if ((p in ours) && up[p] != ours[p]) { print "differs: " p }
+            }
+            for (i = 1; i <= nout; i++) {
+                p = ourorder[i]
+                if (!(p in up)) { print "fork: " p }
+            }
+            for (i = 1; i <= nex; i++) { print "excluded: " exorder[i] }
+        }
+    ' "$excludes" "$patch_paths" "$up_pairs" "$our_pairs")" \
+        || { rm -f "$up_pairs" "$our_pairs"; printf 'error: the trees could not be compared\n'; return 1; }
+    rm -f "$up_pairs" "$our_pairs"
+    printf '%s\n' "$problems"
+}
+
 # --- the manifest ------------------------------------------------------------
 #
 # Five tab-separated columns: rgx_path, upstream path, pin, kind, note. The
@@ -349,14 +452,23 @@ patch_verdict() {
 # is generated, so a malformed one is a bug in the generator rather than
 # something to report here.
 #
+# The manifest carries the excluded paths as comment lines, one per line,
+# each of them "# exclude: <path>". A comment line is not a row, so the
+# rows stay the rows and the count of them does not move; the exclusions
+# are read out of the same file the rows come from, because the sync is
+# what writes both and there is one answer to what is excluded.
+#
 # awk splits on the tab and keeps the empty fields; the shell's IFS does
 # not, because a tab is IFS whitespace and a run of tabs is one separator.
 # The fields are handed over separated by \001, which is not whitespace, so
 # an empty pin stays an empty pin.
 rows=$(mktemp) || exit 1
-trap 'rm -f "$rows"' EXIT
-awk '
+excludes=$(mktemp) || exit 1
+patch_paths=$(mktemp) || exit 1
+trap 'rm -f "$rows" "$excludes" "$patch_paths"' EXIT
+awk -v exclfile="$excludes" '
     BEGIN { FS = "\t" }
+    /^# exclude: / { print substr($0, 12) > exclfile; next }
     /^#/ { next }
     /^[[:space:]]*$/ { next }
     NF < 4 { next }
@@ -370,6 +482,16 @@ awk '
         printf "%s\001%s\001%s\001%s\001%s\n", f1, f2, f3, f4, f5
     }
 ' "$manifest" > "$rows"
+
+# The paths that have a patch row of their own. The tree comparison
+# leaves them out of both sides: the patch row is what checks them, byte
+# for byte, against upstream plus the patch. A file a patch creates is in
+# here too, and that is what keeps it from being a fork.
+while IFS=$'\001' read -r rgx up pin kind note; do
+    if [ "$kind" = "patch" ]; then
+        printf '%s\n' "$up"
+    fi
+done < "$rows" > "$patch_paths"
 
 total=$(grep -c . "$rows" || true)
 
@@ -408,10 +530,13 @@ while IFS=$'\001' read -r rgx up pin kind note; do
 
     checked=$((checked + 1))
     if [ "$kind" = "tree" ]; then
+        # One row is one drift, whatever it complains about: the two
+        # questions below are two questions about the same row.
+        row_drifted=0
         commits="$(upstream_log "$pin" "$up")"
         n=$(printf '%s' "$commits" | grep -c . || true)
         if [ "$n" -gt 0 ]; then
-            drifted=$((drifted + 1))
+            row_drifted=1
             report red "  FAIL: $rgx: upstream has moved since $pin ($n commit(s)):"
             printf '%s\n' "$commits" | while IFS= read -r line; do report red "    $line"; done
             files="$(upstream_changed_files "$pin" "$up")"
@@ -420,6 +545,16 @@ while IFS=$'\001' read -r rgx up pin kind note; do
                 printf '%s\n' "$files" | while IFS= read -r line; do report red "      $line"; done
             fi
         fi
+        # And the other half: the copy has to be upstream's tree at the
+        # pin, byte for byte. A tree that was edited here is a fork, and
+        # a fork is what the vendoring rule forbids.
+        problems="$(tree_problems "$up" "$rgx" "$pin")"
+        if [ -n "$problems" ]; then
+            row_drifted=1
+            report red "  FAIL: $rgx: the copy does not match upstream's tree at $pin:"
+            printf '%s\n' "$problems" | while IFS= read -r line; do report red "    $line"; done
+        fi
+        drifted=$((drifted + row_drifted))
     elif [ "$kind" = "patch" ]; then
         verdict="$(patch_verdict "$rgx" "$up" "$pin")"
         case "$verdict" in

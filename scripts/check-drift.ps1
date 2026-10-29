@@ -13,13 +13,27 @@
 
     The manifest has two kinds of row, and they drift in different ways.
 
-      tree -- a vendored crate, copied whole from upstream. The question
+      tree -- a vendored crate, copied whole from upstream. Two questions
+              are asked of it, and they are different questions. The first
               is whether upstream has touched that tree since the pin. Two
-              answers are needed, not one: which commits upstream made, and
-              which files those commits touched. The second is the
-              actionable one -- it names the files to look at. A tree that
-              upstream has not moved is fine, and says so by saying
+              answers are needed for that, not one: which commits upstream
+              made, and which files those commits touched. The second is
+              the actionable one -- it names the files to look at. A tree
+              that upstream has not moved is fine, and says so by saying
               nothing.
+
+              The second question is whether the copy here is the tree
+              upstream holds at the pin, byte for byte. That is the half
+              the rule is about: these trees are upstream's, and a local
+              edit in one of them is a fork nobody asked for. It is
+              answered by comparing blob hashes, because two equal hashes
+              are two equal files: the upstream side from the pinned
+              commit, and our side from the index, which is what a clone
+              holds. The files that have a patch row of their own are left
+              out -- the patch row checks them -- and so are the excluded
+              paths, which upstream has and this repository does not carry.
+              A file of ours that upstream does not have is a fork, and is
+              reported as one.
 
       patch -- a divergence from upstream, kept as a patch under
               scripts/rgx-local-patches/. Two things can be wrong with it,
@@ -367,6 +381,11 @@ function Test-PatchRow([string]$patchRel, [string]$upstreamRel, [string]$pin) {
     try {
         # The patch, as the repository holds it: the index, like the rest
         # of this repository's own bytes.
+        #
+        # A patch that has not been staged is not in the index, so the
+        # gate cannot see it and says the patch does not apply. That is
+        # not a broken patch: it is a patch that has not been added to
+        # the repository yet. Stage it, and the gate sees it.
         $patchCopy = Join-Path $work 'rgy.patch'
         if (-not (Get-RepoBlob $patchRel $patchCopy)) { return 'does-not-apply' }
         $creates = Test-PatchCreatesFile $patchCopy
@@ -404,6 +423,99 @@ function Test-PatchRow([string]$patchRel, [string]$upstreamRel, [string]$pin) {
     }
 }
 
+# git, asked a question whose answer is a list of lines.
+#
+# The child's stderr is thrown away by the helper below, so a command
+# that fails answers with nothing instead of stopping the script.
+function Get-GitLines([string[]]$GitArgs) {
+    $r = Invoke-GitProcess $GitArgs
+    if ($r.ExitCode -ne 0) { return @() }
+    $text = [System.Text.Encoding]::UTF8.GetString($r.Bytes)
+    $out = @()
+    foreach ($l in ($text -split "`r?`n")) {
+        if ($l -ne '') { $out += $l }
+    }
+    return $out
+}
+
+# Is the path under one of the excluded prefixes?
+function Test-Excluded([string]$path, [string[]]$excluded) {
+    foreach ($e in $excluded) {
+        if ($e -and $path.StartsWith($e)) { return $true }
+    }
+    return $false
+}
+
+# The tree upstream holds at the pin, and the tree this repository holds.
+#
+# Both sides come out of one call each: `ls-tree` gives the files of the
+# commit, `ls-files` gives the entries of the index. Two equal blob
+# hashes are two equal files, so the comparison never looks at the bytes
+# themselves -- and it does not look at the working tree either, because
+# the working tree is not what a clone holds.
+#
+# Three kinds of path are left out of the comparison, and each of them is
+# left out for a reason:
+#
+#   * the files that have a patch row of their own. The patch row is
+#     what checks them, byte for byte, against upstream plus the patch,
+#     and a file a patch creates is not upstream's at all.
+#
+#   * the excluded paths. They are upstream's files that this repository
+#     does not carry, so their absence is the rule and not a difference.
+#     The ones of them that the index holds are reported on their own:
+#     the sync removes them, so one that is here is a divergence.
+#
+# Returns the lines:
+#   missing: <path>   upstream has it, the copy does not
+#   differs: <path>   both have it, and the bytes are not the same
+#   fork: <path>      the copy has it, upstream does not
+#   excluded: <path>  an excluded path is in the index
+function Get-TreeProblems {
+    param([string]$upstreamPath, [string]$repoPath, [string]$pin, [string[]]$excluded, [string[]]$patchPaths)
+    $up = [ordered]@{}
+    $upOrder = @()
+    $ours = [ordered]@{}
+    $ourOrder = @()
+    $excludedFound = @()
+    # "<blob hash>\t<path>" for each side. `ls-tree` prints
+    # "<mode> SP <type> SP <hash> TAB <path>" and `ls-files` prints
+    # "<mode> SP <hash> SP <stage> TAB <path>", so the hash is the third
+    # field of the first one and the second of the second.
+    foreach ($line in (Get-GitLines @('-C', $upstreamDir, 'ls-tree', '-r', $pin, '--', $upstreamPath))) {
+        $tab = $line.IndexOf("`t")
+        if ($tab -lt 0) { continue }
+        $meta = $line.Substring(0, $tab).Split(' ')
+        $path = $line.Substring($tab + 1)
+        if (Test-Excluded $path $excluded) { continue }
+        if ($patchPaths -contains $path) { continue }
+        $up[$path] = $meta[2]
+        $upOrder += $path
+    }
+    foreach ($line in (Get-GitLines @('-C', $repoRoot, 'ls-files', '-s', '--', $repoPath))) {
+        $tab = $line.IndexOf("`t")
+        if ($tab -lt 0) { continue }
+        $meta = $line.Substring(0, $tab).Split(' ')
+        $path = $line.Substring($tab + 1)
+        if (Test-Excluded $path $excluded) { $excludedFound += $path; continue }
+        if ($patchPaths -contains $path) { continue }
+        $ours[$path] = $meta[1]
+        $ourOrder += $path
+    }
+    $problems = @()
+    foreach ($p in $upOrder) {
+        if (-not $ours.Contains($p)) { $problems += "missing: $p" }
+    }
+    foreach ($p in $upOrder) {
+        if ($ours.Contains($p) -and $ours[$p] -ne $up[$p]) { $problems += "differs: $p" }
+    }
+    foreach ($p in $ourOrder) {
+        if (-not $up.Contains($p)) { $problems += "fork: $p" }
+    }
+    foreach ($p in $excludedFound) { $problems += "excluded: $p" }
+    return $problems
+}
+
 # --- the manifest ------------------------------------------------------------
 #
 # Five tab-separated columns: rgx_path, upstream path, pin, kind, note.
@@ -411,8 +523,16 @@ function Test-PatchRow([string]$patchRel, [string]$upstreamRel, [string]$pin) {
 # does not have four columns cannot say what kind of row it is, and the
 # manifest is generated, so a malformed one is a bug in the generator
 # rather than something to report here.
+#
+# The manifest carries the excluded paths as comment lines, one per line,
+# each of them "# exclude: <path>". A comment line is not a row, so the
+# rows stay the rows and the count of them does not move; the exclusions
+# are read out of the same file the rows come from, because the sync is
+# what writes both and there is one answer to what is excluded.
 $rows = @()
+$excluded = @()
 foreach ($line in Get-Content -LiteralPath $manifestPath -Encoding UTF8) {
+    if ($line -match '^# exclude: (.+)$') { $excluded += $Matches[1].Trim(); continue }
     if ($line.Trim() -eq '' -or $line.StartsWith('#')) { continue }
     $f = $line -split "`t"
     if ($f.Count -lt 4) { continue }
@@ -424,6 +544,12 @@ foreach ($line in Get-Content -LiteralPath $manifestPath -Encoding UTF8) {
         Note     = $(if ($f.Count -ge 5) { $f[4].Trim() } else { '' })
     }
 }
+
+# The paths that have a patch row of their own. The tree comparison
+# leaves them out of both sides: the patch row is what checks them, byte
+# for byte, against upstream plus the patch. A file a patch creates is in
+# here too, and that is what keeps it from being a fork.
+$patchPaths = @($rows | Where-Object { $_.Kind -eq 'patch' } | ForEach-Object { $_.Upstream })
 
 Write-Report "checking vendored drift against upstream at $upstreamDir" 'Cyan'
 
@@ -459,9 +585,12 @@ foreach ($r in $rows) {
     $checked++
     switch ($r.Kind) {
         'tree' {
+            # One row is one drift, whatever it complains about: the two
+            # questions below are two questions about the same row.
+            $rowDrifted = $false
             $commits = Get-UpstreamLog $r.Pin $r.Upstream
             if ($commits.Count -gt 0) {
-                $drifted++
+                $rowDrifted = $true
                 Write-Report "  FAIL: $($r.Rgx): upstream has moved since $($r.Pin) ($($commits.Count) commit(s)):" 'Red'
                 foreach ($c in $commits) { Write-Report "    $c" 'Red' }
                 $files = Get-UpstreamChangedFiles $r.Pin $r.Upstream
@@ -470,6 +599,16 @@ foreach ($r in $rows) {
                     foreach ($f in $files) { Write-Report "      $f" 'Red' }
                 }
             }
+            # And the other half: the copy has to be upstream's tree at the
+            # pin, byte for byte. A tree that was edited here is a fork,
+            # and a fork is what the vendoring rule forbids.
+            $problems = Get-TreeProblems $r.Upstream $r.Rgx $r.Pin $excluded $patchPaths
+            if ($problems) {
+                $rowDrifted = $true
+                Write-Report "  FAIL: $($r.Rgx): the copy does not match upstream's tree at $($r.Pin):" 'Red'
+                foreach ($p in $problems) { Write-Report "    $p" 'Red' }
+            }
+            if ($rowDrifted) { $drifted++ }
         }
         'patch' {
             $verdict = Test-PatchRow $r.Rgx $r.Upstream $r.Pin
