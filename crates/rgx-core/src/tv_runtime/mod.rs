@@ -17,6 +17,10 @@ pub mod inspect;
 pub mod searcher;
 pub mod store;
 pub mod update;
+pub mod walk;
+
+#[cfg(all(test, feature = "tv-runtime"))]
+mod walk_oracle;
 
 pub use builder::{
     build_or_update_store_with_extractor, build_store, build_store_with_extractor, member_rel,

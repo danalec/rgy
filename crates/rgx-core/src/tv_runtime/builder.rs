@@ -13,13 +13,12 @@ use std::time::{Instant, UNIX_EPOCH};
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use ignore::overrides::OverrideBuilder;
-use ignore::{Walk, WalkBuilder};
 use std::eprintln;
 
 use crate::compress::crc32::crc32;
 
 use super::format::{FileRecord, Manifest, PackHeader, PackRecord, DEFAULT_PACK_SIZE};
+use super::walk::{OverrideBuilder, Walk, WalkBuilder};
 
 /// Configuration options for building aggregated packs.
 #[derive(Debug, Clone)]
@@ -27,13 +26,13 @@ pub struct BuildConfig {
     pub target_pack_size: u64,
     pub follow_symlinks: bool,
     /// Search hidden files, which is what rgx's `--hidden` means. The
-    /// opposite of `ignore::WalkBuilder::hidden`, which reads `true` as
+    /// opposite of what the walker calls `hidden`, which reads `true` as
     /// "skip them" -- the walkers translate.
     pub hidden: bool,
     pub gitignore: bool,
     /// `--no-ignore` reaches the ignore files of the directories ABOVE the
-    /// search root, which `ignore` honours by default. rgx's direct walker
-    /// binds both to the same flag, so the store has to as well.
+    /// search root, which the walker honours by default. rgx's direct
+    /// walker binds both to the same flag, so the store has to as well.
     pub parents: bool,
     /// `--max-depth`. The direct walker applies it; a build that did not
     /// would ingest the whole tree under a flag that says otherwise.
@@ -160,7 +159,7 @@ pub fn walk_root(root: &Path, store: &Path, config: &BuildConfig) -> io::Result<
     });
 
     if !config.globs.is_empty() {
-        let mut ob = OverrideBuilder::new(".");
+        let mut ob = OverrideBuilder::new(Path::new("."));
         for g in &config.globs {
             ob.add(g).map_err(|e| {
                 io::Error::new(

@@ -9,7 +9,16 @@
  # The Tesla Valve pack store's codec, query vocabulary and planner. The
  # algorithmic half of `crates/rgx-tv`, held here so it can be `no_std` and so
  # `rgx` can take it without taking the thread pool with it. `rgx-tv` turns
-@@ -119,25 +119,19 @@
+@@ -92,7 +92,7 @@
+ # that does not read a pack store should not link its format tables. The
+ # engine alone, with no pack store, is `--no-default-features --features std`
+ # (AVX2/SWAR + regex core).
+-tv-runtime = ["tv", "std", "dep:ignore"]
++tv-runtime = ["tv", "std"]
+ # SHA-256 hardware acceleration. It is in `default` above, and the path it
+ # turns on replaces the scalar one rather than answering differently. One
+ # backend is wired: SHA-NI on x86_64, detected at runtime by this crate's own
+@@ -119,32 +119,31 @@
  # still loaded by the archive adapter's test suite.
  
  [dependencies]
@@ -48,3 +57,16 @@
  # Filesystem walker for the pack-store builder. Gated on the
  # `tv-runtime` feature because the builder is the only consumer and
  # the builder is std-bound. `default-features = false` keeps the
+ # rest of the crate no_std when tv-runtime is off.
+-ignore = { version = "0.4", default-features = false, optional = true }
+ 
+ [dev-dependencies]
++# The `ignore` crate was the walker of the pack store, and it is still the
++# oracle the tree's own walker is held to: the tests walk the same trees
++# through both and compare the entries. A dev-dependency does not enter
++# the crate a user installs.
++ignore = { version = "0.4", default-features = false }
++
+ # The oracle for the syntax and replacement tests, for the same reason and
+ # with the same rule: the `(?-u)` flag acceptance, the translated-glob
+ # fixtures and every shape of `$`-template are differential against what

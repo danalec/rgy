@@ -89,7 +89,7 @@ jobs:
       # The pack-store builder lives behind rgx-core's `tv-runtime`
       # feature, and the default build does not compile it: the `rgx-tv`
       # binary that carries it asks for the feature, so a default build
-      # leaves the whole builder -- and the crate it walks a tree with --
+      # leaves the whole builder -- and the walker it walks a tree with --
       # outside every gate there is.
       #
       # A feature nobody builds is a feature nobody breaks, until the day
