@@ -43,6 +43,24 @@
 # to a guess, is worse than one that admits it has not looked: the first
 # one reads as "nothing to do here".
 #
+# For a patch row the question is exact: is the file this repository holds
+# the upstream blob at the pinned commit with the local patch applied on
+# top? The three sides of that question are read from three places, and
+# each is the place that answers it:
+#
+#   upstream  the blob AT THE COMMIT, because the sync copies the commit
+#             and not the working tree upstream happens to have
+#   patched   that blob with the patch applied, in a scratch directory
+#             outside the repository
+#   mine      the repository's own bytes, from the index, because the
+#             index is what a fresh clone gets
+#
+# Nothing is normalised. A checkout is not a change, but the repository is
+# not a checkout: the index holds the bytes upstream's blob holds, and two
+# files that differ only in their line endings are two files. The gate
+# that folded that difference away is the gate that let four testdata
+# READMEs hide from it.
+#
 # The upstream checkout is a read-only input. Nothing in this repository is
 # written, and nothing in the upstream is written either.
 #
@@ -204,18 +222,38 @@ upstream_changed_files() {
     git -C "$upstream_dir" diff --name-only --no-color "$1..HEAD" -- "$2" 2>/dev/null
 }
 
-# A copy with the carriage returns taken out.
+# The upstream file, as the pinned commit holds it.
 #
-# A checkout is not a change: the same source is CRLF on one machine and LF
-# on another, and a patch that applies to one has to apply to the other.
-# tr moves bytes and touches nothing else.
-normalize() {
-    tr -d '\r' < "$1" > "$2"
+# The sync copies the COMMIT and not the working tree: the manifest pins a
+# commit, so the copy has to be that commit's bytes, and a dirty upstream
+# working tree would otherwise decide what this repository holds. The gate
+# has to ask the question the sync answers, so it reads the same bytes.
+#
+# The exit code is the answer: a path the commit does not have is an
+# answer ("no such file"), not a crash.
+upstream_blob() {
+    git -C "$upstream_dir" cat-file blob "$1:$2"
 }
 
-# Does the patch still apply to upstream's current content of the file?
+# The file this repository holds, as the repository holds it.
 #
-# The test is run against a copy of upstream's file in a scratch directory,
+# The index and not the working tree: with core.autocrlf the working tree
+# holds CRLF for a file whose blob is LF, and comparing a working tree
+# against an upstream blob reports a difference that is not one. The index
+# is what a fresh clone gets, so it is what the gate compares.
+repo_blob() {
+    git -C "$repo_root" cat-file blob ":$1"
+}
+
+# The hash of an index entry, which is the hash of the bytes a fresh clone
+# would check out.
+repo_index_hash() {
+    git -C "$repo_root" rev-parse --verify ":$1"
+}
+
+# Does the patch still apply to upstream's content of the file at the pin?
+#
+# The test is run against a copy of that file in a scratch directory,
 # because that is the question the next sync will ask: the sync copies
 # upstream's file over the one here and then applies the patch on top. A
 # patch that no longer applies means upstream changed the file and the patch
@@ -229,53 +267,74 @@ normalize() {
 # that changes a file needs upstream's content to change, and a file
 # upstream no longer has is a file the next sync has nothing to put the
 # patch on top of.
+#
+# The argument is the patch file in the scratch directory: the patch, as
+# the repository holds it.
 patch_creates_file() {
-    local patch_rel="$1"
-    grep -q -E '^(--- /dev/null|new file mode)' "$repo_root/$patch_rel"
+    grep -q -E '^(--- /dev/null|new file mode)' "$1"
 }
 
 # Prints: ok | no-upstream-file | no-copy | does-not-apply | mismatch
+#
+# The question is the one the sync asks: is the file this repository holds
+# the upstream blob at the pin with the local patch applied on top?
+#
+# The comparison is by bytes and nothing is folded away: two files that
+# differ only in their line endings are two files.
 patch_verdict() {
-    local patch_rel="$1" rel="$2" work target patched mine a b
-    if [ ! -f "$upstream_dir/$rel" ] && ! patch_creates_file "$patch_rel"; then
-        printf 'no-upstream-file'
+    local patch_rel="$1" rel="$2" pin="$3"
+    local work target creates=0 mine_hash patched_hash
+    work=$(mktemp -d) || { printf 'mismatch'; return 0; }
+    # The patch, as the repository holds it: the index, like the rest of
+    # this repository's own bytes.
+    if ! repo_blob "$patch_rel" > "$work/rgy.patch" 2>/dev/null; then
+        rm -rf "$work"
+        printf 'does-not-apply'
         return 0
     fi
-    [ -f "$repo_root/$rel" ] || { printf 'no-copy'; return 0; }
-    work=$(mktemp -d) || { printf 'mismatch'; return 0; }
+    if patch_creates_file "$work/rgy.patch"; then
+        creates=1
+    fi
     target="$work/$rel"
     mkdir -p "$(dirname "$target")" || { rm -rf "$work"; printf 'mismatch'; return 0; }
-    # Upstream has the file: the copy is the file and the patch goes on
-    # top of it. Upstream never had it: the patch creates it, and there is
-    # nothing to copy.
-    if [ -f "$upstream_dir/$rel" ]; then
-        normalize "$upstream_dir/$rel" "$target"
+    # Upstream has the file at the pin: the copy is the file and the patch
+    # goes on top of it. Upstream never had it: the patch creates it, and
+    # there is nothing to copy.
+    if ! upstream_blob "$pin" "$rel" > "$target" 2>/dev/null; then
+        rm -f "$target"
+        if [ "$creates" -eq 0 ]; then
+            rm -rf "$work"
+            printf 'no-upstream-file'
+            return 0
+        fi
     fi
-    normalize "$repo_root/$patch_rel" "$work/rgy.patch"
+    # The copy in this repository, from the index.
+    mine_hash=$(repo_index_hash "$rel" 2>/dev/null) || mine_hash=""
+    if [ -z "$mine_hash" ]; then
+        rm -rf "$work"
+        printf 'no-copy'
+        return 0
+    fi
     # git apply, in the scratch directory: the patch's paths are the
     # repository's paths, and the file it names is the copy of upstream's
     # file sitting next to it.
-    if ! ( cd "$work" && git apply --recount --whitespace=nowarn rgy.patch ) >/dev/null 2>&1; then
+    #
+    # core.autocrlf=false on purpose: the apply has to write exactly the
+    # bytes of the patch, and a checkout that rewrote the line endings
+    # would write a file the repository does not have. The scratch
+    # directory is outside the repository for the same reason: the
+    # repository's own rules must not answer for it.
+    if ! ( cd "$work" && git -c core.autocrlf=false apply --recount --whitespace=nowarn rgy.patch ) >/dev/null 2>&1; then
         rm -rf "$work"
         printf 'does-not-apply'
         return 0
     fi
     # The copy and the patch have to agree about what the divergence is.
-    # Compare the patched upstream file with the file here.
-    #
-    # Both sides are normalised, including the patched one: git apply
-    # writes the file back with the line endings the checkout's own rules
-    # say, and a checkout is not a change.
-    patched="$work/rgy-patched"
-    normalize "$target" "$patched"
-    mine="$work/rgy-mine"
-    normalize "$repo_root/$rel" "$mine"
-    a=$(git hash-object --no-filters -- "$patched")
-    b=$(git hash-object --no-filters -- "$mine")
+    patched_hash=$(git hash-object --no-filters -- "$target" 2>/dev/null) || patched_hash=""
     rm -rf "$work"
     # An empty hash means git refused the file, and two refusals are not
     # an agreement.
-    if [ -n "$a" ] && [ -n "$b" ] && [ "$a" = "$b" ]; then
+    if [ -n "$patched_hash" ] && [ -n "$mine_hash" ] && [ "$patched_hash" = "$mine_hash" ]; then
         printf 'ok'
     else
         printf 'mismatch'
@@ -362,7 +421,7 @@ while IFS=$'\001' read -r rgx up pin kind note; do
             fi
         fi
     elif [ "$kind" = "patch" ]; then
-        verdict="$(patch_verdict "$rgx" "$up")"
+        verdict="$(patch_verdict "$rgx" "$up" "$pin")"
         case "$verdict" in
             ok) ;;
             no-upstream-file)

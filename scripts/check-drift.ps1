@@ -40,6 +40,24 @@
     pins it to a guess, is worse than one that admits it has not looked:
     the first one reads as "nothing to do here".
 
+    For a patch row the question is exact: is the file this repository
+    holds the upstream blob at the pinned commit with the local patch
+    applied on top? The three sides of that question are read from three
+    places, and each is the place that answers it:
+
+      upstream  the blob AT THE COMMIT, because the sync copies the
+                commit and not the working tree upstream happens to have
+      patched   that blob with the patch applied, in a scratch directory
+                outside the repository
+      mine      the repository's own bytes, from the index, because the
+                index is what a fresh clone gets
+
+    Nothing is normalised. A checkout is not a change, but the repository
+    is not a checkout: the index holds the bytes upstream's blob holds,
+    and two files that differ only in their line endings are two files.
+    The gate that folded that difference away is the gate that let four
+    testdata READMEs hide from it.
+
     The upstream checkout is a read-only input. Nothing in this repository
     is written, and nothing in the upstream is written either.
 
@@ -209,30 +227,114 @@ function Get-UpstreamChangedFiles([string]$commit, [string]$path) {
     return Invoke-Git @('-C', $upstreamDir, 'diff', '--name-only', '--no-color', "$commit..HEAD", '--', $path)
 }
 
-# A copy with the carriage returns taken out.
+# One argument, quoted for the command line.
 #
-# A checkout is not a change: the same source is CRLF on one machine and LF
-# on another, and a patch that applies to one has to apply to the other.
-# The bytes are moved through Latin-1 so that what comes out is what went
-# in, minus the CRs -- no encoding is decoded and another one invented.
-function Write-Normalized([string]$src, [string]$dst) {
-    $latin = [System.Text.Encoding]::GetEncoding(28591)
-    $text = $latin.GetString([System.IO.File]::ReadAllBytes($src))
-    $text = $text.Replace("`r", "")
-    [System.IO.File]::WriteAllBytes($dst, $latin.GetBytes($text))
+# git is a native program and reads its arguments from the command line,
+# so an argument with a space in it has to be quoted -- and a backslash
+# before the closing quote has to be doubled, or the quote is escaped and
+# the argument runs on.
+function ConvertTo-GitArg([string]$arg) {
+    if ($arg -notmatch '[\s"]') { return $arg }
+    $escaped = $arg -replace '(\\*)"', '$1$1\"'
+    $escaped = $escaped -replace '(\\+)$', '$1$1'
+    return '"' + $escaped + '"'
 }
 
-# Does the patch still apply to upstream's current content of the file?
+# git, asked a question, with the child's output captured as bytes.
 #
-# The test is run against a copy of upstream's file in a scratch
-# directory, because that is the question the next sync will ask: the sync
-# copies upstream's file over the one here and then applies the patch on
-# top. A patch that no longer applies means upstream changed the file and
-# the patch was not re-derived -- the next sync would take upstream's
-# version and drop the fix without saying anything.
+# The child's stdout is a byte stream and is copied as one: the text
+# pipeline would decode it and invent an encoding, and a file with a byte
+# that is not valid UTF-8 would come back changed.
 #
-# Returns 'ok', 'no-upstream-file', 'no-copy', 'does-not-apply' or
-# 'mismatch'.
+# Both pipes are redirected and stderr is drained while stdout is
+# copied: a pipe that nobody reads fills up and stops the child. The
+# stderr is thrown away on purpose. A native command that writes to
+# stderr is turned into an error record, and this script stops on the
+# first error record -- so "the patch does not apply", which answers on
+# stderr, would arrive as a crash instead of as a verdict.
+function Invoke-GitProcess {
+    param([string[]]$GitArgs)
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = 'git'
+    $psi.Arguments = (($GitArgs | ForEach-Object { ConvertTo-GitArg $_ }) -join ' ')
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $proc = New-Object System.Diagnostics.Process
+    $proc.StartInfo = $psi
+    [void]$proc.Start()
+    $errTask = $proc.StandardError.ReadToEndAsync()
+    $ms = New-Object System.IO.MemoryStream
+    $proc.StandardOutput.BaseStream.CopyTo($ms)
+    try { [void]$errTask.Result } catch { }
+    $proc.WaitForExit()
+    $script:GitExit = $proc.ExitCode
+    return [pscustomobject]@{ ExitCode = $proc.ExitCode; Bytes = $ms.ToArray() }
+}
+
+# git, asked for bytes, into a file.
+function Invoke-GitToFile {
+    param([string[]]$GitArgs, [string]$OutFile)
+    $r = Invoke-GitProcess $GitArgs
+    if ($r.ExitCode -ne 0) { return $false }
+    [System.IO.File]::WriteAllBytes($OutFile, $r.Bytes)
+    return $true
+}
+
+# The answer to a question that has one line.
+#
+# The whole line and not its first character: a single line comes back
+# from a pipeline as a string, and $out[0] on a string is its first
+# character. A hash compared by its first character is a hash that is not
+# compared.
+function Get-GitLine([string[]]$GitArgs) {
+    $r = Invoke-GitProcess $GitArgs
+    if ($r.ExitCode -ne 0 -or $r.Bytes.Length -eq 0) { return '' }
+    $text = [System.Text.Encoding]::UTF8.GetString($r.Bytes)
+    $line = ($text -split "`r?`n")[0]
+    return $line.Trim()
+}
+
+# The upstream file, as the pinned commit holds it.
+#
+# The sync copies the COMMIT and not the working tree: the manifest pins
+# a commit, so the copy has to be that commit's bytes, and a dirty
+# upstream working tree would otherwise decide what this repository
+# holds. The gate has to ask the question the sync answers, so it reads
+# the same bytes.
+function Get-UpstreamBlob {
+    param([string]$commit, [string]$path, [string]$outFile)
+    $gitArgs = @('-C', $upstreamDir, 'cat-file', 'blob', "${commit}:$path")
+    return (Invoke-GitToFile $gitArgs $outFile)
+}
+
+# The file this repository holds, as the repository holds it.
+#
+# The index and not the working tree: with core.autocrlf the working tree
+# holds CRLF for a file whose blob is LF, and comparing a working tree
+# against an upstream blob reports a difference that is not one. The index
+# is what a fresh clone gets, so it is what the gate compares.
+function Get-RepoBlob {
+    param([string]$path, [string]$outFile)
+    $gitArgs = @('-C', $repoRoot, 'cat-file', 'blob', ":$path")
+    return (Invoke-GitToFile $gitArgs $outFile)
+}
+
+# The hash of an index entry, which is the hash of the bytes a fresh clone
+# would check out.
+function Get-RepoIndexHash([string]$path) {
+    return (Get-GitLine @('-C', $repoRoot, 'rev-parse', '--verify', ":$path"))
+}
+
+# Does the patch still apply to upstream's content of the file at the pin?
+#
+# The test is run against a copy of that file in a scratch directory,
+# because that is the question the next sync will ask: the sync copies
+# upstream's file over the one here and then applies the patch on top. A
+# patch that no longer applies means upstream changed the file and the
+# patch was not re-derived -- the next sync would take upstream's version
+# and drop the fix without saying anything.
+#
 # Does the patch create the file, or change a file that is already there?
 #
 # A patch that creates a file has no upstream behind it: the file is the
@@ -240,56 +342,61 @@ function Write-Normalized([string]$src, [string]$dst) {
 # that changes a file needs upstream's content to change, and a file
 # upstream no longer has is a file the next sync has nothing to put the
 # patch on top of.
-function Test-PatchCreatesFile([string]$patchRel) {
-    $patch = Join-Path $repoRoot $patchRel
-    if (-not (Test-Path -LiteralPath $patch)) { return $false }
-    foreach ($line in [System.IO.File]::ReadAllLines($patch)) {
+#
+# The argument is the patch file in the scratch directory: the patch, as
+# the repository holds it.
+function Test-PatchCreatesFile([string]$patchFile) {
+    if (-not (Test-Path -LiteralPath $patchFile)) { return $false }
+    foreach ($line in [System.IO.File]::ReadAllLines($patchFile)) {
         if ($line -match '^(--- /dev/null|new file mode)') { return $true }
     }
     return $false
 }
 
-function Test-PatchRow([string]$patchRel, [string]$upstreamRel) {
-    $upFile = Join-Path $upstreamDir $upstreamRel
-    $myFile = Join-Path $repoRoot $upstreamRel
-    if (-not (Test-Path -LiteralPath $upFile) -and -not (Test-PatchCreatesFile $patchRel)) {
-        return 'no-upstream-file'
-    }
-    if (-not (Test-Path -LiteralPath $myFile)) { return 'no-copy' }
-
+# Returns 'ok', 'no-upstream-file', 'no-copy', 'does-not-apply' or
+# 'mismatch'.
+#
+# The question is the one the sync asks: is the file this repository holds
+# the upstream blob at the pin with the local patch applied on top?
+#
+# The comparison is by bytes and nothing is folded away: two files that
+# differ only in their line endings are two files.
+function Test-PatchRow([string]$patchRel, [string]$upstreamRel, [string]$pin) {
     $work = Join-Path ([System.IO.Path]::GetTempPath()) ("rgy-drift-" + [guid]::NewGuid().ToString("N"))
     [void](New-Item -ItemType Directory -Path $work)
     try {
+        # The patch, as the repository holds it: the index, like the rest
+        # of this repository's own bytes.
+        $patchCopy = Join-Path $work 'rgy.patch'
+        if (-not (Get-RepoBlob $patchRel $patchCopy)) { return 'does-not-apply' }
+        $creates = Test-PatchCreatesFile $patchCopy
         $target = Join-Path $work $upstreamRel
         [void](New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force)
-        # Upstream has the file: the copy is the file and the patch goes on
-        # top of it. Upstream never had it: the patch creates it, and there
-        # is nothing to copy.
-        if (Test-Path -LiteralPath $upFile) {
-            Write-Normalized $upFile $target
-        }
-        $patchCopy = Join-Path $work 'rgy.patch'
-        Write-Normalized (Join-Path $repoRoot $patchRel) $patchCopy
-
+        # Upstream has the file at the pin: the copy is the file and the
+        # patch goes on top of it. Upstream never had it: the patch
+        # creates it, and there is nothing to copy.
+        if (-not (Get-UpstreamBlob $pin $upstreamRel $target) -and -not $creates) { return 'no-upstream-file' }
+        # The copy in this repository, from the index.
+        $mineHash = Get-RepoIndexHash $upstreamRel
+        if ($mineHash -eq '') { return 'no-copy' }
         # git apply, in the scratch directory: the patch's paths are the
         # repository's paths, and the file it names is the copy of
         # upstream's file sitting next to it.
-        & git -C $work apply --recount --whitespace=nowarn 'rgy.patch' 2>$null
-        if ($LASTEXITCODE -ne 0) { return 'does-not-apply' }
+        #
+        # core.autocrlf=false on purpose: the apply has to write exactly
+        # the bytes of the patch, and a checkout that rewrote the line
+        # endings would write a file the repository does not have. The
+        # scratch directory is outside the repository for the same
+        # reason: the repository's own rules must not answer for it.
+        $gitArgs = @('-C', $work, '-c', 'core.autocrlf=false', 'apply', '--recount', '--whitespace=nowarn', 'rgy.patch')
+        $applied = Invoke-GitProcess $gitArgs
+        if ($applied.ExitCode -ne 0) { return 'does-not-apply' }
 
         # The copy and the patch have to agree about what the divergence
-        # is. Compare the patched upstream file with the file here.
-        #
-        # Both sides are normalised, including the patched one: git apply
-        # writes the file back with the line endings the checkout's own
-        # rules say, and a checkout is not a change.
-        $patched = Join-Path $work 'rgy-patched'
-        Write-Normalized $target $patched
-        $mine = Join-Path $work 'rgy-mine'
-        Write-Normalized $myFile $mine
-        $a = Invoke-Git @('hash-object', '--no-filters', '--', $patched)
-        $b = Invoke-Git @('hash-object', '--no-filters', '--', $mine)
-        if ($a.Count -eq 0 -or $b.Count -eq 0 -or $a[0] -ne $b[0]) { return 'mismatch' }
+        # is. The comparison is by bytes: two files that differ only in
+        # their line endings are two files.
+        $patchedHash = Get-GitLine @('hash-object', '--no-filters', '--', $target)
+        if ($patchedHash -eq '' -or $patchedHash -ne $mineHash) { return 'mismatch' }
         return 'ok'
     }
     finally {
@@ -365,7 +472,7 @@ foreach ($r in $rows) {
             }
         }
         'patch' {
-            $verdict = Test-PatchRow $r.Rgx $r.Upstream
+            $verdict = Test-PatchRow $r.Rgx $r.Upstream $r.Pin
             if ($verdict -ne 'ok') {
                 $drifted++
                 switch ($verdict) {
