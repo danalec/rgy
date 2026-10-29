@@ -77,6 +77,13 @@ const VENDORED: &[&str] = &[
 /// The harness: Apache-2.0, like the product.
 const HARNESS: &[&str] = &["tests/"];
 
+/// The trees that hold Rust code, and that the lists above must name.
+///
+/// Every Rust file under one of these is the product, the harness or
+/// somebody else's code: there is no fourth answer, and a tree that none of
+/// the lists names is a tree whose licence nobody has said out loud.
+const RUST_TREES: &[&str] = &["crates/", "bins/"];
+
 const APACHE: &str = "// SPDX-License-Identifier: Apache-2.0";
 const MIT_OR_APACHE: &str = concat!("// SPDX-License-Identifier: MIT OR ", "Apache-2.0");
 const MIT: &str = "// SPDX-License-Identifier: MIT";
@@ -120,17 +127,28 @@ const VENDORED_ALLOWED: &[&str] = &[
 /// The list comes from git rather than from a directory walk, so the audit
 /// sees what the repository holds and not what the checkout happens to
 /// have on disk.
-fn tracked_files(root: &Path) -> Option<Vec<String>> {
-    let Ok(listed) = Command::new("git")
+fn tracked_files(root: &Path) -> Vec<String> {
+    match git_files(root) {
+        Some(files) => files,
+        // No git here: the tree is a copy of a checkout, or a source tree
+        // somebody unpacked. The walk is the list, and it is the stricter
+        // one -- it sees the files that git does not know about too.
+        None => walk_files(root),
+    }
+}
+
+/// The files git holds, when there is a work tree to ask.
+///
+/// `None` when there is no git, or no work tree: the caller then walks the
+/// tree instead. The audit does not skip itself either way -- a gate that
+/// skips is not a gate.
+fn git_files(root: &Path) -> Option<Vec<String>> {
+    let listed = Command::new("git")
         .args(["ls-files", "-z"])
         .current_dir(root)
         .output()
-    else {
-        eprintln!("git unavailable; skipping the SPDX audit");
-        return None;
-    };
+        .ok()?;
     if !listed.status.success() {
-        eprintln!("not a git work tree; skipping the SPDX audit");
         return None;
     }
     let files: Vec<String> = std::str::from_utf8(&listed.stdout)
@@ -141,6 +159,49 @@ fn tracked_files(root: &Path) -> Option<Vec<String>> {
         .collect();
     assert!(!files.is_empty(), "git ls-files returned nothing");
     Some(files)
+}
+
+/// The folders that are not source: the build's own output, the
+/// repository's metadata, and the caches the tools leave behind.
+const NOT_SOURCE: &[&str] = &[".git", "target", ".dist", ".remember", "__pycache__"];
+
+/// The files under `root`, relative to it, for a tree with no git.
+fn walk_files(root: &Path) -> Vec<String> {
+    let mut files = Vec::new();
+    walk(root, root, &mut files);
+    files.sort();
+    assert!(
+        !files.is_empty(),
+        "the SPDX audit cannot run: {} holds no file at all",
+        root.display()
+    );
+    files
+}
+
+/// The walk itself.
+fn walk(root: &Path, dir: &Path, files: &mut Vec<String>) {
+    let entries = std::fs::read_dir(dir).unwrap_or_else(|e| {
+        panic!(
+            "the SPDX audit cannot run: {} cannot be read ({e})",
+            dir.display()
+        )
+    });
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if path.is_dir() {
+            if NOT_SOURCE.contains(&name.as_ref()) {
+                continue;
+            }
+            walk(root, &path, files);
+            continue;
+        }
+        let Ok(rel) = path.strip_prefix(root) else {
+            continue;
+        };
+        files.push(rel.to_string_lossy().replace('\\', "/"));
+    }
 }
 
 fn under(rel: &str, roots: &[&str]) -> bool {
@@ -160,9 +221,7 @@ fn every_source_file_carries_the_licence_its_tree_is_licensed_under() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("the e2e harness sits in a workspace subdirectory");
-    let Some(files) = tracked_files(root) else {
-        return;
-    };
+    let files = tracked_files(root);
 
     let mut audited = 0usize;
     let mut wrong = Vec::new();
@@ -186,6 +245,14 @@ fn every_source_file_carries_the_licence_its_tree_is_licensed_under() {
             )
         } else if under(rel, HARNESS) {
             (&[APACHE], "the harness is Apache-2.0, like the product")
+        } else if under(rel, RUST_TREES) {
+            // A Rust file in a tree that no list names. The lists are the
+            // rule, and a file that is in none of them is a hole in the
+            // rule: nobody has said what that tree's licence is.
+            wrong.push(format!(
+                "{rel}: no list says what this tree's licence is"
+            ));
+            continue;
         } else {
             // The tooling under scripts/, tools/ and benchmark/ carries no
             // SPDX header: it is not Rust, and its licence is in COPYING.
@@ -193,7 +260,10 @@ fn every_source_file_carries_the_licence_its_tree_is_licensed_under() {
         };
         audited += 1;
         let Some(first) = first_line(root, rel) else {
-            eprintln!("cannot read {rel}; skipping it in the SPDX audit");
+            // A file the audit cannot read is a file the audit knows
+            // nothing about, and a licence nobody read is a licence nobody
+            // checked.
+            wrong.push(format!("{rel}: the audit could not read it"));
             continue;
         };
         if !expected.contains(&first.as_str()) {
@@ -221,9 +291,7 @@ fn the_vendored_trees_do_not_claim_the_mit_option() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("the e2e harness sits in a workspace subdirectory");
-    let Some(files) = tracked_files(root) else {
-        return;
-    };
+    let files = tracked_files(root);
 
     let mut audited = 0usize;
     let mut retired = Vec::new();
