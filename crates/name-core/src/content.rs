@@ -34,11 +34,10 @@ use alloc::vec::Vec;
 use rgy_discovery::walk::KIND_FILE;
 // Per-file confirmation runs on the rgx engine: literal/hybrid/fixed/VM +
 // SIMD prefilter replace memchr/regex verify. The plan that narrows the
-// content index is walked over the same
-// AST the confirm is compiled from, so the two cannot disagree about what
-// the pattern means; the regex crate remains only as the fallback for
-// patterns rgx's parser refuses (4.4 keeps it for content `regex:`
-// queries).
+// content index is walked over the same AST the confirm is compiled from,
+// so the two cannot disagree about what the pattern means. The engine is
+// the only engine: a pattern its parser refuses is a pattern this search
+// does not run, and the refusal is said to the caller.
 use rgx_core::byteclass::ByteSet;
 use rgx_core::regex::ByteRegex;
 use rgx_core::syntax::Ast;
@@ -2561,31 +2560,10 @@ pub struct Grep {
     pub budget: Option<std::time::Duration>,
     /// The matching regex on the rgx engine, compiled when first needed (a
     /// plain ASCII literal mostly is not: the literal path finds those).
-    re: std::sync::OnceLock<Confirm>,
+    re: std::sync::OnceLock<Box<ByteRegex>>,
     src: String,
     case_insensitive: bool,
     literal: Option<Literal>,
-}
-
-/// The per-file confirm matcher. The rgx engine is the primary (4.3:
-/// literal/hybrid/fixed/VM + SIMD prefilter); a pattern its parser refuses
-/// (some character-class shapes) falls back to the regex crate, which is
-/// what `regex:` content queries keep it around for (4.4).
-enum Confirm {
-    // Both boxed: a compiled regex is over a KiB and lives in this enum for
-    // the life of a Grep, one per worker lane — stack-cheap variants keep it
-    // Copy-free but small (clippy::large_enum_variant otherwise).
-    Rgx(Box<ByteRegex>),
-    Crate(Box<regex::bytes::Regex>),
-}
-
-impl Confirm {
-    fn starts(&self, hay: &[u8]) -> Vec<usize> {
-        match self {
-            Confirm::Rgx(re) => rgx_starts(re, hay),
-            Confirm::Crate(re) => re.find_iter(hay).map(|m| m.start()).collect(),
-        }
-    }
 }
 
 impl Grep {
@@ -2625,24 +2603,23 @@ impl Grep {
         Ok(g)
     }
 
-    fn build(&self) -> Result<Confirm, String> {
-        match ByteRegex::new_multiline(self.src.as_bytes(), self.case_insensitive, false) {
-            Ok(re) => Ok(Confirm::Rgx(Box::new(re))),
-            Err(e) => {
-                let re = regex::bytes::RegexBuilder::new(&self.src)
-                    .case_insensitive(self.case_insensitive)
-                    .multi_line(true)
-                    .size_limit(1 << 26)
-                    .build()
-                    .map_err(|_| e.to_string())?;
-                Ok(Confirm::Crate(Box::new(re)))
-            }
-        }
+    /// The confirm matcher: the engine, compiled.
+    ///
+    /// The engine is a byte engine, and it refuses what a byte engine has no
+    /// answer for: lookaround, and the Unicode property classes. The refusal
+    /// is the answer -- the pattern is named and the reason is given --
+    /// because a search that quietly matched nothing is
+    /// indistinguishable from a search that found nothing.
+    fn build(&self) -> Result<Box<ByteRegex>, String> {
+        ByteRegex::new_multiline(self.src.as_bytes(), self.case_insensitive, false)
+            .map(Box::new)
+            .map_err(|e| format!("the pattern `{}`: {e}", self.pattern))
     }
 
-    fn re(&self) -> &Confirm {
-        // A literal's regex always compiles (it was 4096 bytes at most).
-        self.re.get_or_init(|| self.build().expect("literal regex"))
+    fn re(&self) -> &ByteRegex {
+        // A literal's regex always compiles (it was 4096 bytes at most), and
+        // a pattern the engine refuses never reaches here: `new` refused it.
+        self.re.get_or_init(|| self.build().expect("the pattern compiles"))
     }
 
     /// The matching lines of a buffer the caller already has.
@@ -2655,7 +2632,7 @@ impl Grep {
     pub fn lines_in(&self, buf: &[u8]) -> Vec<(usize, String)> {
         let starts: Vec<usize> = match self.literal.as_ref().filter(|l| !l.needs_regex(buf)) {
             Some(l) => l.starts(buf).collect(),
-            None => self.re().starts(buf),
+            None => rgx_starts(self.re(), buf),
         };
         lines_at(self, buf, starts.into_iter())
     }
@@ -2683,10 +2660,9 @@ impl Grep {
             GrepMode::Literal | GrepMode::Symbol => literal_plan(self.pattern.as_bytes()),
             GrepMode::Regex => {
                 // The plan comes from the same parse the confirm is compiled
-                // from. A pattern rgx refuses has no AST here, and then the
-                // plan is "everything": the fallback confirm is the other
-                // engine's, and a plan built from a different parser's view
-                // of the pattern would be a plan about a different pattern.
+                // from. A pattern the parser refuses has no AST here, and
+                // then the plan is "everything" -- though a refused pattern
+                // never reaches this far: `new` refused it first.
                 let flags = rgx_core::syntax::Flags { case_insensitive: self.case_insensitive, ..Default::default() };
                 rgx_core::syntax::parse_with(self.pattern.as_bytes(), flags).map_or(TQ::All, |p| regex_plan(&p.ast))
             }
@@ -2985,7 +2961,7 @@ fn match_file(g: &Grep, path: &[u8], attrs: &Attrs<'_>, adapter: Option<&dyn Ada
         }
         let lines = match g.literal.as_ref().filter(|l| !l.needs_regex(buf)) {
             Some(l) => lines_at(g, buf, l.starts(buf)),
-            None => lines_at(g, buf, g.re().starts(buf).into_iter()),
+            None => lines_at(g, buf, rgx_starts(g.re(), buf).into_iter()),
         };
         if lines.is_empty() { Outcome::NoMatch } else { Outcome::Matches(vec![FileMatches { path: path.to_vec(), lines }]) }
     })
@@ -3705,11 +3681,7 @@ pub fn scan_paths(root: &[u8], live: &Live, mut q: Query) -> Vec<Vec<u8>> {
     // hundred thousand paths for a request that asked for ten files,
     // which is tens of megabytes and a full pass over the index to
     // answer ten.
-    q.limit = q
-        .limit
-        .max(1)
-        .saturating_mul(CANDIDATES_PER_FILE)
-        .min(MAX_CANDIDATES);
+    q.limit = q.limit.max(1).saturating_mul(CANDIDATES_PER_FILE).min(MAX_CANDIDATES);
     q.size = (q.size.0, q.size.1.min(MAX_FILE));
     let mut files: Vec<(Vec<u8>, u32)> = (crate::name_query::Searcher { live }.search(&q).into_iter())
         .map(|h| match h.over {
@@ -4752,16 +4724,38 @@ mod grep_pipeline_tests {
 mod plan_tests {
     use super::{Grep, GrepMode, TQ};
 
-    /// A pattern the byte engine refuses has no AST, and so no plan: the
-    /// fallback confirm is another engine's, and a plan built from a
-    /// different parser's view of the pattern would be a plan about a
-    /// different pattern.
+    /// A pattern the byte engine refuses is an error, not a search that
+    /// found nothing: the caller is told which pattern and why the engine
+    /// would not take it.
     #[test]
-    fn a_pattern_the_engine_refuses_plans_everything() {
-        // A Unicode property: rgx's parser refuses it, the fallback takes
-        // it, and the plan has nothing to work from.
-        let g = Grep::new(r"\p{L}+", GrepMode::Regex).expect("the fallback compiles");
-        assert!(matches!(g.plan(), TQ::All), "the plan is everything");
+    fn a_pattern_the_engine_refuses_is_an_error() {
+        // A Unicode property: the byte engine has no answer for it.
+        let Err(e) = Grep::new(r"\p{L}+", GrepMode::Regex) else {
+            panic!("the pattern must be refused");
+        };
+        assert!(e.contains("unicode property"), "the reason must be said: {e}");
+        assert!(e.contains(r"\p{L}+"), "the pattern must be named: {e}");
+    }
+
+    /// The same for the other thing a byte engine cannot answer: lookaround.
+    #[test]
+    fn a_lookaround_is_an_error_and_says_so() {
+        let Err(e) = Grep::new(r"foo(?=bar)", GrepMode::Regex) else {
+            panic!("the pattern must be refused");
+        };
+        assert!(e.contains("lookahead"), "the reason must be said: {e}");
+        assert!(e.contains("foo(?=bar)"), "the pattern must be named: {e}");
+    }
+
+    /// And what the engine does take still works: the refusal is narrow,
+    /// and the two tests above would also pass on an engine that refused
+    /// everything.
+    #[test]
+    fn a_pattern_the_engine_takes_still_matches() {
+        let g = Grep::new(r"fn\s+list", GrepMode::Regex).expect("the pattern compiles");
+        let lines = g.lines_in(b"fn list() {}\nfn other() {}\n");
+        assert_eq!(lines.len(), 1, "only the first line matches: {lines:?}");
+        assert!(lines[0].1.contains("fn list"), "the line is the match: {lines:?}");
     }
 
     /// A literal is the case the plan is best at, and it must not fall back

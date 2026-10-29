@@ -1408,9 +1408,19 @@ fn grep(q: &str, limit: usize, ctx: &Ctx) -> Vec<Answer> {
             // of every alternative are the facts of the answer.
             let mut complete = true;
             let mut skipped = 0usize;
+            // A pattern the engine refuses is said, not dropped. The
+            // alternative it belonged to matches nothing, and the answer
+            // says so: a query that answered with the other alternatives
+            // and said nothing would be a query that quietly searched less
+            // than it was asked for.
+            let mut refused: Vec<String> = Vec::new();
             for (pat, mode, mut filt) in jobs {
-                let Ok(g) = Grep::new(&pat, mode) else {
-                    continue;
+                let g = match Grep::new(&pat, mode) {
+                    Ok(g) => g,
+                    Err(e) => {
+                        refused.push(e);
+                        continue;
+                    }
                 };
                 // The request's limit is the limit. The candidates the scan
                 // names and the files the index found are both counted
@@ -1452,12 +1462,8 @@ fn grep(q: &str, limit: usize, ctx: &Ctx) -> Vec<Answer> {
                 // The same reader the scoped route uses: a file the
                 // adapters claim is read through them, whichever route the
                 // query took.
-                let rest = content::verify_paths_with(
-                    &g,
-                    &bare,
-                    room,
-                    Some(&rgy_adapters::Adapters),
-                );
+                let rest =
+                    content::verify_paths_with(&g, &bare, room, Some(&rgy_adapters::Adapters));
                 if let Some(why) = r.error.clone().or_else(|| rest.error.clone()) {
                     // A lane panicked: the answer is what the other lanes
                     // found, and it says so rather than pretending.
@@ -1484,6 +1490,11 @@ fn grep(q: &str, limit: usize, ctx: &Ctx) -> Vec<Answer> {
             files.truncate(limit);
             let count = files.len();
             let took = t0.elapsed().as_micros() as u64;
+            // The warning comes before the answer it belongs to, so a reader
+            // that reads the frames in order hears the refusal first.
+            for w in &refused {
+                out.push(Answer::Frame(Response::Warning { message: w.clone() }));
+            }
             out.push(Answer::Frame(Response::GrepFiles {
                 files,
                 took_us: took,
@@ -2139,7 +2150,10 @@ fn folders_of(base: &Index, root: &[u8]) -> Vec<Vec<u8>> {
 /// separators are the index's (`/`): the disk spells a path with `\` on
 /// Windows and this tree speaks `/` everywhere.
 fn on_disk(root: &[u8], rel: &[u8]) -> Vec<u8> {
-    let mut full: Vec<u8> = root.iter().map(|&b| if b == b'\\' { b'/' } else { b }).collect();
+    let mut full: Vec<u8> = root
+        .iter()
+        .map(|&b| if b == b'\\' { b'/' } else { b })
+        .collect();
     let rel = rel.strip_prefix(b"/").unwrap_or(rel);
     if !full.is_empty() && !full.ends_with(b"/") && !rel.is_empty() {
         full.push(b'/');
@@ -2827,10 +2841,8 @@ mod tests {
         let q = Query::parse("new", "").expect("the query parses");
         let hits = searcher.search_alternatives(&[q], 10);
         assert!(
-            hits.iter().any(|h| h
-                .over
-                .as_ref()
-                .is_some_and(|p| p.ends_with(b"new.txt"))),
+            hits.iter()
+                .any(|h| h.over.as_ref().is_some_and(|p| p.ends_with(b"new.txt"))),
             "the file the index did not have is in the answer; {} hits",
             hits.len()
         );
@@ -2885,7 +2897,90 @@ mod tests {
             "the limit is the limit, across the alternatives"
         );
         // Eight files match, and a limit of ten keeps all eight.
-        assert_eq!(count("grep:alpha|grep:multi", 10), 8, "every match is answered");
+        assert_eq!(
+            count("grep:alpha|grep:multi", 10),
+            8,
+            "every match is answered"
+        );
+    }
+
+    /// A pattern the engine refuses is said, not dropped.
+    ///
+    /// The whole-tree grep used to skip an alternative whose pattern the
+    /// engine would not compile, and answer with the others and no word
+    /// about it. A query that searched less than it was asked for, and
+    /// said nothing, is a query whose answer cannot be trusted.
+    ///
+    /// The pattern is a Unicode property: the byte engine has no answer for
+    /// one. A lookahead would do as well, but a word with a `?` in it is a
+    /// name glob before it is a pattern, so it never reaches this layer.
+    #[test]
+    fn a_refused_pattern_is_said_and_not_dropped() {
+        let dir = TempTree::new("rgy-searchd-refused");
+        std::fs::write(dir.join("alpha.txt"), b"alpha\n").unwrap();
+        let root = dir.as_os_str().as_encoded_bytes().to_vec();
+        let source = PortableSource::new(root.clone(), 2);
+        let live = Live::with_root(
+            Index::build(source.enumerate().expect("the walk"), 0, 1, b"/"),
+            &root,
+        );
+        let ctx = std::sync::Arc::new(Ctx {
+            root: root.clone(),
+            home: String::new(),
+            tv_dir: None,
+            live: std::sync::RwLock::new(live),
+            catch_up: std::sync::atomic::AtomicU8::new(CATCH_UP_RELISTED),
+            feed: std::sync::atomic::AtomicU8::new(FEED_NONE),
+            changed: Changed::new(),
+            content: std::sync::Mutex::new(None),
+            wants_content: std::sync::atomic::AtomicBool::new(false),
+            sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
+        });
+
+        let warnings = |answers: &[Answer]| -> Vec<String> {
+            answers
+                .iter()
+                .filter_map(|r| match r {
+                    Answer::Frame(Response::Warning { message }) => Some(message.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let files = |answers: &[Answer]| -> usize {
+            answers
+                .iter()
+                .filter_map(|r| match r {
+                    Answer::Frame(Response::GrepFiles { files, .. }) => Some(files.len()),
+                    _ => None,
+                })
+                .sum::<usize>()
+        };
+
+        // The refused alternative alone: the refusal is said, and nothing
+        // is claimed to have been found.
+        let answers = grep(r"regex:\p{L}+", 10, &ctx);
+        let said = warnings(&answers);
+        assert_eq!(said.len(), 1, "the refusal is said: {answers:?}");
+        assert!(
+            said[0].contains("unicode property"),
+            "the reason is said: {}",
+            said[0]
+        );
+        assert_eq!(files(&answers), 0, "a refused pattern finds nothing");
+
+        // And beside an alternative that runs: the answer is the one that
+        // could be given, and the refusal is still said.
+        let answers = grep(r"grep:alpha|regex:\p{L}+", 10, &ctx);
+        assert_eq!(
+            files(&answers),
+            1,
+            "the alternative that could be run is answered"
+        );
+        assert_eq!(
+            warnings(&answers).len(),
+            1,
+            "the refusal is said: {answers:?}"
+        );
     }
 
     /// Two files that appear after the daemon started both have to be

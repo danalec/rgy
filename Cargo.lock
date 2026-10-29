@@ -596,7 +596,6 @@ name = "rgy-name-core"
 version = "0.1.0"
 dependencies = [
  "hashbrown 0.16.1",
- "regex",
  "rgx-core",
  "rgy-discovery",
  "rgy-par",

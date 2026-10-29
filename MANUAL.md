@@ -353,6 +353,17 @@ searchctl --root ~ 'grep:"quarterly revenue"'
 searchctl --root ~ "regex:fn\s+list"
 ```
 
+The regular expression is the tree's own engine, and that engine works on
+**bytes**: literals, classes and their ranges, alternation, groups, `*`,
+`+`, `?` and `{m,n}`, the anchors `^`, `$`, `\A`, `\z`, `\b` and `\B`,
+and the flags `(?i)` and `(?m)`.
+
+Two things a byte engine has no answer for are **lookaround** (`(?=...)`
+and `(?<!...)`) and the **Unicode property classes** (`\p{L}`). A pattern
+with either is refused, and the refusal says which pattern it was and why
+it would not be taken -- a refused pattern is an error, not a search that
+found nothing.
+
 A pattern of more than one word has to be **quoted**. Without the quotes
 the second word is not part of the pattern: it is part of the file's
 *name*, and `grep:quarterly revenue` asks for the files called revenue

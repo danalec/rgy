@@ -19,7 +19,7 @@ default = ["std"]
 # `no_std`: the index and the query engine, over bytes the caller owns.
 # What goes away with it is the content grep (it reads files), the live
 # overlay, the persisted index, and the mmap of the name blob.
-std = ["rgy-par/std", "rgx-core/std", "rgy-discovery/std", "dep:regex"]
+std = ["rgy-par/std", "rgx-core/std", "rgy-discovery/std"]
 
 [dependencies]
 rgy-discovery = { path = "../discovery", version = "0.1.0", default-features = false }
@@ -34,11 +34,9 @@ rgx-core = { path = "../rgx-core", version = "0.1.0", default-features = false }
 # hot maps want the cheap hasher the index already carries. This is the
 # no_std map: the same API, the same hasher, no `std`.
 hashbrown = { version = "0.16", default-features = false, features = ["default-hasher", "inline-more"] }
-# The content grep's fallback: the content path reads files, so it is std,
-# and so is the crate it borrows. The name path (`re:`, `path:`, the rules)
-# runs on rgx-core and needs neither -- and the content path's own plan
-# walks the same rgx-core AST the confirm is compiled from.
-regex = { version = "1.12", optional = true }
+# The content grep runs on rgx-core's engine too -- the same one the name
+# path uses. There is no second engine behind it: a pattern that engine
+# refuses is a pattern the search refuses, and the refusal is said.
 
 # No libc (and no new platform crates): the few Darwin/unix bits in
 # content.rs declare their own `extern "C"` and ABI constants inline —
