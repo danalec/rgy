@@ -222,15 +222,35 @@ normalize() {
 # was not re-derived -- the next sync would take upstream's version and drop
 # the fix without saying anything.
 #
+# Does the patch create the file, or change a file that is already there?
+#
+# A patch that creates a file has no upstream behind it: the file is the
+# patch's own content, and the tree has to hold exactly that. A patch
+# that changes a file needs upstream's content to change, and a file
+# upstream no longer has is a file the next sync has nothing to put the
+# patch on top of.
+patch_creates_file() {
+    local patch_rel="$1"
+    grep -q -E '^(--- /dev/null|new file mode)' "$repo_root/$patch_rel"
+}
+
 # Prints: ok | no-upstream-file | no-copy | does-not-apply | mismatch
 patch_verdict() {
     local patch_rel="$1" rel="$2" work target patched mine a b
-    [ -f "$upstream_dir/$rel" ] || { printf 'no-upstream-file'; return 0; }
+    if [ ! -f "$upstream_dir/$rel" ] && ! patch_creates_file "$patch_rel"; then
+        printf 'no-upstream-file'
+        return 0
+    fi
     [ -f "$repo_root/$rel" ] || { printf 'no-copy'; return 0; }
     work=$(mktemp -d) || { printf 'mismatch'; return 0; }
     target="$work/$rel"
     mkdir -p "$(dirname "$target")" || { rm -rf "$work"; printf 'mismatch'; return 0; }
-    normalize "$upstream_dir/$rel" "$target"
+    # Upstream has the file: the copy is the file and the patch goes on
+    # top of it. Upstream never had it: the patch creates it, and there is
+    # nothing to copy.
+    if [ -f "$upstream_dir/$rel" ]; then
+        normalize "$upstream_dir/$rel" "$target"
+    fi
     normalize "$repo_root/$patch_rel" "$work/rgy.patch"
     # git apply, in the scratch directory: the patch's paths are the
     # repository's paths, and the file it names is the copy of upstream's

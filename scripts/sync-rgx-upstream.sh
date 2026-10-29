@@ -315,6 +315,46 @@ for crate in $CRATES; do
         fi
     done < "$to_copy"
 
+    # The files rgy has and the pinned upstream does not, that a patch
+    # carries.
+    #
+    # A patch is the source of truth for a diverged file: the sync takes
+    # upstream's content and puts the patch on top of it. For a file
+    # upstream never had, the patch alone is the content -- the patch
+    # creates the file, and the file here is what the patch says.
+    #
+    # The list comes from the patches and not from the tree, so a file that
+    # is missing here is created by the sync and not reported as stale.
+    while IFS= read -r patch_path; do
+        [ -n "$patch_path" ] || continue
+        rel="${patch_path#"$PATCH_DIR"/}"
+        rel="${rel%.patch}"
+        # Upstream has this file: the copy above already put the patch on
+        # top of it.
+        grep -Fxq "$rel" "$upstream_paths" && continue
+        dst="$repo_root/$rel"
+        # The patch creates the file, so the file has to be gone when the
+        # patch runs. It is moved aside first: a patch that does not apply
+        # must not take the tree's file with it.
+        saved=""
+        if [ -f "$dst" ]; then
+            saved="$(mktemp)"
+            cp "$dst" "$saved" || exit 1
+            rm -f "$dst"
+        fi
+        if ! git -c core.autocrlf=false apply --recount --whitespace=nowarn "$patch_path" 2>/dev/null; then
+            echo "  FAILED local patch does not apply: $rel" >&2
+            echo "         $patch_path" >&2
+            echo "         upstream has no $rel; the patch has to create it." >&2
+            [ -n "$saved" ] && cp "$saved" "$dst"
+            [ -n "$saved" ] && rm -f "$saved"
+            exit 1
+        fi
+        [ -n "$saved" ] && rm -f "$saved"
+        echo "  add    $rel (the patch creates it)"
+        patched=$((patched + 1))
+    done < <(find "$PATCH_DIR" -path "*/crates/$crate/*" -name '*.patch' -type f | sort)
+
     # What is left is what already matches the blob.
     unchanged=$((unchanged + $(wc -l < "$upstream_paths") - $(grep -c . "$to_copy")))
 
@@ -324,6 +364,10 @@ for crate in $CRATES; do
         is_kept "$rel" && continue
         is_excluded "$rel" && continue
         grep -Fxq "$rel" "$upstream_paths" && continue
+        # A patch carries it: the file is here because the patch says so,
+        # and the sync puts it back. It is not a file rgy has and upstream
+        # does not -- it is a divergence the patch records.
+        [ -f "$PATCH_DIR/$rel.patch" ] && continue
         stale_list="$stale_list$rel"$'\n'
     done < <(find "$dst_dir" -type f \
         -not -path '*/fuzz/target/*' \

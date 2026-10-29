@@ -233,10 +233,28 @@ function Write-Normalized([string]$src, [string]$dst) {
 #
 # Returns 'ok', 'no-upstream-file', 'no-copy', 'does-not-apply' or
 # 'mismatch'.
+# Does the patch create the file, or change a file that is already there?
+#
+# A patch that creates a file has no upstream behind it: the file is the
+# patch's own content, and the tree has to hold exactly that. A patch
+# that changes a file needs upstream's content to change, and a file
+# upstream no longer has is a file the next sync has nothing to put the
+# patch on top of.
+function Test-PatchCreatesFile([string]$patchRel) {
+    $patch = Join-Path $repoRoot $patchRel
+    if (-not (Test-Path -LiteralPath $patch)) { return $false }
+    foreach ($line in [System.IO.File]::ReadAllLines($patch)) {
+        if ($line -match '^(--- /dev/null|new file mode)') { return $true }
+    }
+    return $false
+}
+
 function Test-PatchRow([string]$patchRel, [string]$upstreamRel) {
     $upFile = Join-Path $upstreamDir $upstreamRel
-    if (-not (Test-Path -LiteralPath $upFile)) { return 'no-upstream-file' }
     $myFile = Join-Path $repoRoot $upstreamRel
+    if (-not (Test-Path -LiteralPath $upFile) -and -not (Test-PatchCreatesFile $patchRel)) {
+        return 'no-upstream-file'
+    }
     if (-not (Test-Path -LiteralPath $myFile)) { return 'no-copy' }
 
     $work = Join-Path ([System.IO.Path]::GetTempPath()) ("rgy-drift-" + [guid]::NewGuid().ToString("N"))
@@ -244,7 +262,12 @@ function Test-PatchRow([string]$patchRel, [string]$upstreamRel) {
     try {
         $target = Join-Path $work $upstreamRel
         [void](New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force)
-        Write-Normalized $upFile $target
+        # Upstream has the file: the copy is the file and the patch goes on
+        # top of it. Upstream never had it: the patch creates it, and there
+        # is nothing to copy.
+        if (Test-Path -LiteralPath $upFile) {
+            Write-Normalized $upFile $target
+        }
         $patchCopy = Join-Path $work 'rgy.patch'
         Write-Normalized (Join-Path $repoRoot $patchRel) $patchCopy
 
