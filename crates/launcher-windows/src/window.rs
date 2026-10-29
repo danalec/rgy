@@ -174,6 +174,25 @@ pub enum Control {
     Quit,
 }
 
+/// What the desktop window manager said about the window's own picture.
+///
+/// A layered window is composited by the compositor, and the compositor
+/// has the last word: a picture it refuses leaves the window with nothing
+/// to show, and a window with nothing to show is a launcher the user
+/// cannot see.
+///
+/// The answer is asked while the window is still hidden, because there is
+/// no second chance to find out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Compositor {
+    /// Nothing was handed to it yet.
+    Unknown,
+    /// It took the picture.
+    Accepted,
+    /// It threw the picture away.
+    Refused,
+}
+
 /// The state the window's procedure reads.
 struct State {
     view: View,
@@ -185,6 +204,13 @@ struct State {
     /// client area alone where there is one — and where there is not,
     /// the window has to paint its own near-black.
     backdrop: bool,
+    /// What the compositor said about the window's own picture.
+    ///
+    /// The window paints its own alpha and the compositor is the one that
+    /// puts it on the screen: a picture it refuses leaves the window with
+    /// nothing to show, and a window with nothing to show is a launcher
+    /// the user cannot see.
+    compositor: Compositor,
     /// The window's own pixels, when the platform gave no backdrop.
     ///
     /// The shadow is still the system's own: the window is created
@@ -394,6 +420,10 @@ impl Layer {
     /// The panel is drawn into the layer's own context, the alpha is
     /// worked out from what was drawn, and the whole thing is handed to
     /// the compositor: that is what a layered window is.
+    ///
+    /// The answer is the compositor's own: it took the picture or it
+    /// threw it away, and a window whose picture was thrown away shows
+    /// nothing at all. False says that.
     fn present(
         &mut self,
         hwnd: HWND,
@@ -402,7 +432,7 @@ impl Layer {
         icons: &mut Icons,
         fonts: &Fonts,
         scale: u32,
-    ) {
+    ) -> bool {
         unsafe {
             // The panel's own near-black is what the desktop shows
             // through.
@@ -412,7 +442,7 @@ impl Layer {
             self.compose();
             let screen = GetDC(core::ptr::null_mut());
             if screen.is_null() {
-                return;
+                return false;
             }
             let mut rect = RECT::default();
             GetWindowRect(hwnd, &mut rect);
@@ -431,10 +461,11 @@ impl Layer {
                 constant_alpha: 255,
                 alpha_format: AC_SRC_ALPHA,
             };
-            let _ = UpdateLayeredWindow(
+            let took = UpdateLayeredWindow(
                 hwnd, screen, &dest, &size, self.dc, &source, 0, &blend, ULW_ALPHA,
-            );
+            ) != 0;
             ReleaseDC(core::ptr::null_mut(), screen);
+            took
         }
     }
 
@@ -559,6 +590,7 @@ impl Window {
             },
             painted: (0, 0),
             backdrop: false,
+            compositor: Compositor::Unknown,
             layer: None,
             hiding: false,
             focus_lost: false,
@@ -642,6 +674,11 @@ impl Window {
                 w.paint_its_own_alpha();
             }
             w.apply_region();
+            // The compositor's answer, asked while the window is still
+            // hidden: a window that is up and has no picture is a
+            // launcher the user cannot see, and the window is never
+            // hidden again once the user has asked for it.
+            w.ask_the_compositor();
             Ok(w)
         }
     }
@@ -665,6 +702,55 @@ impl Window {
         unsafe {
             let style = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE) as u32;
             SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, (style | WS_EX_LAYERED) as isize);
+        }
+    }
+
+    /// Ask the compositor whether it takes the window's own picture.
+    ///
+    /// The question is asked with a real picture, while the window is
+    /// still hidden: the layer is painted once and handed over, and the
+    /// answer is the one the compositor gives.
+    ///
+    /// When the answer is no, the window gives the layered surface up and
+    /// paints itself into its own device context. The translucency is
+    /// lost -- the desktop stops showing through the panel -- and the
+    /// launcher is still there, which is the trade the window makes: a
+    /// window the user can see without its translucency beats a window
+    /// the user cannot see with it.
+    fn ask_the_compositor(&mut self) {
+        let hwnd = self.hwnd;
+        let state = self.state_mut();
+        let took = match state.layer.as_mut() {
+            Some(layer) => layer.present(
+                hwnd,
+                &state.view,
+                &mut state.painted,
+                &mut state.icons,
+                &state.fonts,
+                state.scale,
+            ),
+            // There is no layer: the window paints itself, and the
+            // compositor has nothing to refuse.
+            None => true,
+        };
+        state.compositor = if took {
+            Compositor::Accepted
+        } else {
+            Compositor::Refused
+        };
+        if took {
+            return;
+        }
+        // The surface goes, and the layered style with it: a window that
+        // is layered and has no surface shows nothing at all. The window
+        // is hidden here, and a window that has never been shown can be
+        // un-layered -- the style is a promise the compositor keeps for
+        // the windows that are already on the screen.
+        state.layer = None;
+        state.backdrop = false;
+        unsafe {
+            let style = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE) as u32;
+            SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, (style & !WS_EX_LAYERED) as isize);
         }
     }
 
@@ -792,6 +878,61 @@ impl Window {
     /// Whether the window is on the screen.
     pub fn is_visible(&self) -> bool {
         unsafe { IsWindowVisible(self.hwnd) != 0 }
+    }
+
+    /// What the compositor said about the window's own picture.
+    ///
+    /// The answer is what tells the launcher that the screen is the one
+    /// that is not cooperating: a window that is up and has no picture is
+    /// a launcher the user cannot see, and a launcher that says nothing
+    /// about it looks broken.
+    pub fn compositor(&self) -> Compositor {
+        self.state().compositor
+    }
+
+    /// Whether the window is on the screen.
+    ///
+    /// The three answers the platform gives: the window is visible, the
+    /// compositor is not hiding it, and the bounds the compositor draws
+    /// are the bounds the window has. A window that fails any of them is
+    /// a window the user cannot see, and a launcher that is up and
+    /// invisible looks broken -- so the launcher asks.
+    ///
+    /// This is the honest measurement on a host whose screen capture does
+    /// not carry the windows that are put on top of it: a picture of the
+    /// screen cannot answer this, and the platform can.
+    pub fn is_on_the_screen(&self) -> bool {
+        unsafe {
+            if IsWindowVisible(self.hwnd) == 0 {
+                return false;
+            }
+            // The compositor is not hiding it.
+            let mut cloaked: i32 = 0;
+            let asked = DwmGetWindowAttribute(
+                self.hwnd,
+                DWMWA_CLOAKED,
+                (&mut cloaked as *mut i32).cast::<core::ffi::c_void>(),
+                core::mem::size_of::<i32>() as u32,
+            );
+            if asked != 0 || cloaked != 0 {
+                return false;
+            }
+            // And it is where it says it is.
+            let mut drawn = RECT::default();
+            let asked = DwmGetWindowAttribute(
+                self.hwnd,
+                DWMWA_EXTENDED_FRAME_BOUNDS,
+                (&mut drawn as *mut RECT).cast::<core::ffi::c_void>(),
+                core::mem::size_of::<RECT>() as u32,
+            );
+            if asked != 0 {
+                return false;
+            }
+            let mut own = RECT::default();
+            GetWindowRect(self.hwnd, &mut own);
+            (drawn.left, drawn.top, drawn.right, drawn.bottom)
+                == (own.left, own.top, own.right, own.bottom)
+        }
     }
 
     /// Repaint the window.
@@ -1453,14 +1594,23 @@ unsafe extern "system" fn wnd_proc(
                         // goes into the layer's own bitmap, and the layer
                         // is what the compositor puts on the screen.
                         Some(layer) => {
-                            layer.present(
+                            if !layer.present(
                                 hwnd,
                                 &state.view,
                                 &mut state.painted,
                                 &mut state.icons,
                                 &state.fonts,
                                 state.scale,
-                            );
+                            ) {
+                                // The compositor threw the picture away.
+                                // The window keeps the one it had -- a
+                                // window with an old picture is better
+                                // than a window with none -- and the
+                                // answer is remembered, so the launcher
+                                // can say that the screen is the one that
+                                // is not cooperating.
+                                state.compositor = Compositor::Refused;
+                            }
                         }
                         // The platform's own backdrop is behind this
                         // window, and the drawing leaves it alone.
@@ -1847,5 +1997,50 @@ mod tests {
         let work = area();
         let spot = spot_on(work, 2400, 484);
         assert_eq!(spot.x, work.left);
+    }
+
+    /// The compositor takes the window's own picture.
+    ///
+    /// A layered window whose picture the compositor refuses shows
+    /// nothing at all, and the launcher would be a window the user
+    /// cannot see. The question is asked before the window is ever
+    /// shown, and this is the answer on the machine the test runs on.
+    #[test]
+    fn the_compositor_takes_the_window_picture() {
+        let window = Window::new("rgxy-test").expect("the window was made");
+        assert_eq!(window.compositor(), Compositor::Accepted);
+    }
+
+    /// The window is on the screen.
+    ///
+    /// The screen capture of this host does not carry the windows that
+    /// are put on top of it -- not the ones of this process, and not even
+    /// the ones the operating system drew -- so a picture of the screen
+    /// cannot answer this. The platform can: a window that is visible,
+    /// that the compositor is not cloaking, that is above everything, and
+    /// whose bounds the compositor agrees with, is a window the user is
+    /// looking at.
+    ///
+    /// The window is shown without the focus: the test does not take the
+    /// keyboard away from whatever the user is doing.
+    #[test]
+    fn the_window_is_on_the_screen() {
+        let window = Window::new("rgxy-test").expect("the window was made");
+        let hwnd = window.hwnd();
+        unsafe {
+            ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        }
+        // The platform's own answer: the window is visible, the
+        // compositor is not hiding it, and it is where it says it is.
+        assert!(window.is_on_the_screen(), "the window is on the screen");
+
+        // And it is above everything.
+        let style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32;
+        assert_ne!(style & WS_EX_LAYERED, 0, "the window paints its own alpha");
+        assert_ne!(style & WS_EX_TOPMOST, 0, "the window is above everything");
+
+        unsafe {
+            ShowWindow(hwnd, SW_HIDE);
+        }
     }
 }

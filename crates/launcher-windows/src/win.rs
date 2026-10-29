@@ -290,6 +290,20 @@ pub const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
 /// a number: this is the question that has an answer.
 pub const DWMWA_SYSTEM_BACKDROP_TYPE: u32 = 38;
 
+/// Whether the window is on the screen, or the compositor put it away.
+///
+/// The answer is what tells a window that exists from a window the user
+/// cannot see: a cloaked window is a window the compositor is not
+/// drawing, and it is not drawn for anybody.
+pub const DWMWA_CLOAKED: u32 = 14;
+
+/// The window's bounds on the glass, with the invisible frame around it.
+///
+/// The window's own rectangle is the one the platform gives, and it is
+/// the one the compositor draws: a window whose two rectangles are not
+/// the same is a window that is not where it says it is.
+pub const DWMWA_EXTENDED_FRAME_BOUNDS: u32 = 9;
+
 /// The backdrops that are really there.
 ///
 /// `AUTO` is the system deciding, and "the system deciding" is not the

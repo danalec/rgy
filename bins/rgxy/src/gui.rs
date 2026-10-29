@@ -28,7 +28,7 @@ use rgy_launcher::usage::History;
 use rgy_launcher::{Action, Answer, App, Layer, Mode, Row, Source, commands};
 use rgy_launcher_windows::actions;
 use rgy_launcher_windows::hook::Hook;
-use rgy_launcher_windows::window::{Control, Event, Key, View, Window};
+use rgy_launcher_windows::window::{Compositor, Control, Event, Key, View, Window};
 
 use crate::Options;
 use crate::daemon::{DaemonSource, Status};
@@ -241,6 +241,14 @@ pub fn run(source: DaemonSource, options: &Options) -> Result<(), String> {
     }
     if let Some(message) = memory_note {
         notes.push(message);
+    }
+    // The compositor refused the window's own picture: the window is up
+    // and it paints itself, without the translucency, and the line says
+    // so. A window that is not what it was is a thing the user has to be
+    // told about, and the line under the field is where the launcher says
+    // what is true of the machine it is on.
+    if window.compositor() == Compositor::Refused {
+        notes.push("o ecrã recusou a superfície translúcida".to_string());
     }
 
     let mut state = State {
