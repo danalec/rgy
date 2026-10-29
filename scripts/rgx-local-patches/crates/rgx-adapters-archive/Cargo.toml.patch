@@ -1,8 +1,25 @@
 --- a/crates/rgx-adapters-archive/Cargo.toml
 +++ b/crates/rgx-adapters-archive/Cargo.toml
-@@ -110,12 +110,7 @@ rgx-core = { path = "../rgx-core", version = "0.1.1", default-features = false,
+@@ -84,10 +84,10 @@ git-pack = ["std", "rgx-core/zlib"]
+ # A git bundle and a Subversion dump are read through the git-pack reader.
+ git-bundle = ["std", "git-pack", "rgx-core/zlib"]
+ svn-dump = ["std", "git-pack", "rgx-core/zlib"]
+-# The decompressor is the only user of libzstd: it is the oracle the
+-# in-house zstd decoder is measured against, and the fallback for the one
+-# frame shape the in-house decoder declines.
+-decompress = ["std", "dep:zstd", "rgx-core/gzip", "rgx-core/zlib", "rgx-core/bzip2", "rgx-core/xz", "rgx-core/lzma", "rgx-core/zstd"]
++# The decompressor reads the single-file formats, and every one of them
++# through the in-house decoder in rgx-core: gzip, zlib, bzip2, xz, legacy
++# lzma and zstd.
++decompress = ["std", "rgx-core/gzip", "rgx-core/zlib", "rgx-core/bzip2", "rgx-core/xz", "rgx-core/lzma", "rgx-core/zstd"]
+ # The RAR codec is the only user of `rar-codec`.
+ rar = ["std", "dep:rar-codec"]
+ pgdump = ["std"]
+@@ -108,14 +108,8 @@ squashfs = ["std", "rgx-core/lzma", "rgx-core/deflate", "rgx-core/xz", "rgx-core
+ [dependencies]
+ rgx-core = { path = "../rgx-core", version = "0.1.1", default-features = false, features = ["std", "sha256-hw"] }
  rar-codec = { path = "../rar-codec", version = "0.1.1", optional = true }
- zstd = { version = "0.14", optional = true }
+-zstd = { version = "0.14", optional = true }
  
 -# The benches reach into the codecs the adapter registry does not expose, so
 -# they are named with the features that carry them.
