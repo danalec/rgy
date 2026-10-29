@@ -85,6 +85,12 @@ pub struct Layout {
     /// The window's width, in the model's units.
     pub width: u32,
     /// The height of the input field, in the model's units.
+    ///
+    /// The field holds the query **and the line under it**: the query is
+    /// drawn fourteen units down and the line under it ends six units
+    /// above the field's bottom. A field that holds only the query hides
+    /// the line under the first row's band, and the line is what says
+    /// which question the rows answer.
     pub input_height: u32,
     /// The height of one result row, in the model's units.
     pub row_height: u32,
@@ -134,7 +140,7 @@ impl Default for Layout {
     fn default() -> Layout {
         Layout {
             width: 600,
-            input_height: 46,
+            input_height: 59,
             row_height: 34,
             padding: 14,
             radius: 12,

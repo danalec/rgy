@@ -610,12 +610,15 @@ pub unsafe fn paint(
                 content,
             );
             // The caret: two pixels, two pixels after the text before it.
+            // Its height is the text's height and not the field's: the
+            // field holds the line under the query too, and a caret as
+            // tall as the field is a caret that reaches past the text.
             fill(
                 hdc,
                 left + w + px(scale, 2),
                 field_top + px(scale, 12),
                 px(scale, 2),
-                field_h - px(scale, 26),
+                px(scale, 21),
                 colour::TEXT,
             );
             // The text after the caret starts where the caret ends.
@@ -630,13 +633,18 @@ pub unsafe fn paint(
         }
 
         // The status line, under the field.
+        //
+        // The line is the field's own: it ends six units above the
+        // field's bottom, and the rows start where the field ends. A
+        // line that reaches into the rows is a line the first row's
+        // band paints over.
         if !view.status.is_empty() {
             select(hdc, fonts.folder);
             draw_run(
                 hdc,
                 &view.status,
                 left,
-                field_top + field_h - px(scale, 6),
+                field_top + field_h - px(scale, STATUS_HEIGHT),
                 colour::DIM,
                 content,
             );
@@ -793,6 +801,12 @@ fn draw_row(
         }
     }
 }
+
+/// The height of the line under the field, in the model's units.
+///
+/// The line is drawn with the small face -- thirteen units of it -- and
+/// six units of room under it before the field ends.
+const STATUS_HEIGHT: i32 = 19;
 
 /// A rectangle of the picture, in device pixels.
 ///
@@ -1145,6 +1159,59 @@ mod tests {
     use rgy_launcher::Action;
 
     use super::*;
+
+    /// The line under the field is the field's own.
+    ///
+    /// The line says which question the rows answer, and the first row's
+    /// band is painted over the bottom of the window: a line that the
+    /// band hides is a line the user cannot read.
+    #[test]
+    fn the_line_under_the_field_is_above_the_first_row() {
+        let view = View {
+            query: "rela".to_string(),
+            status: "6 resultados".to_string(),
+            ..View::default()
+        };
+        // The picture is of the window the view describes: the same
+        // geometry the window's procedure would have used.
+        let model = Layout::with_rows(view.rows.len() as u32);
+        let layout = model.scaled(SCALE_PERCENT);
+        let width = device_pixels(model.width, SCALE_PERCENT) as i32;
+        let height = device_pixels(model.height(), SCALE_PERCENT) as i32;
+        let Some(canvas) = Canvas::new(width, height) else {
+            panic!("the platform gave no surface to draw on");
+        };
+        let fonts = Fonts::new(SCALE_PERCENT);
+        let mut icons = Icons::new();
+        let mut painted = (0, 0);
+        unsafe {
+            paint(
+                canvas.dc,
+                &view,
+                &mut painted,
+                false,
+                &mut icons,
+                &fonts,
+                SCALE_PERCENT,
+            );
+        }
+        // The lowest thing on the picture is the line under the field,
+        // and it is above the rows: the first row's band is painted over
+        // the bottom of the window, and a line under the band is a line
+        // nobody reads. The border is the window's own and is not a row.
+        let mut lowest = 0;
+        for y in 0..height - 2 {
+            for x in 1..width - 1 {
+                if canvas.pixel(x, y) != in_pixels(colour::BACKDROP) {
+                    lowest = y;
+                }
+            }
+        }
+        assert!(
+            lowest < layout.list_top() as i32,
+            "the line under the field is under the first row: {lowest}"
+        );
+    }
 
     /// A surface to draw into, and the pixels that were drawn on it.
     ///
