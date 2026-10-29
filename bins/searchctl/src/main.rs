@@ -559,6 +559,9 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
         // preview wearing a count's clothes.
         if count {
             let mut n = 0usize;
+            // A lane that panicked is a search that lost part of itself:
+            // the count is not the count, and it says so.
+            let mut lost: Option<String> = None;
             for alt in &alts.alts {
                 let Some(pat) = &alt.grep else { continue };
                 let mut g = Grep::new(pat, alt.grep_mode)?;
@@ -582,6 +585,13 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
                     usize::MAX,
                 );
                 n += res.files.iter().map(|f| f.lines.len()).sum::<usize>();
+                if let Some(why) = &res.error {
+                    lost = Some(why.clone());
+                }
+            }
+            if let Some(why) = lost {
+                eprintln!("searchctl: {why}");
+                std::process::exit(1);
             }
             if n == 0 {
                 std::process::exit(1);
@@ -594,6 +604,9 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
             return Ok(());
         }
         let mut shown = 0usize;
+        // A lane that panicked is a search that lost part of itself: the
+        // rows are what was found, and they are not all of it.
+        let mut lost: Option<String> = None;
         for alt in &alts.alts {
             let Some(pat) = &alt.grep else { continue };
             let g = Grep::new(pat, alt.grep_mode)?;
@@ -612,6 +625,9 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
                 },
                 limit,
             );
+            if let Some(why) = &res.error {
+                lost = Some(why.clone());
+            }
             // The records that cannot be one line: the line is one path,
             // and a path that carries a line break is not one line.
             let mut dropped = 0usize;
@@ -639,6 +655,10 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
             if dropped > 0 {
                 eprintln!("searchctl: {}", rgy_pick::uncarryable_paths(dropped));
             }
+        }
+        if let Some(why) = lost {
+            eprintln!("searchctl: {why}");
+            std::process::exit(1);
         }
         if shown == 0 {
             std::process::exit(1);

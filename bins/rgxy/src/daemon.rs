@@ -354,6 +354,14 @@ impl DaemonSource {
                 // is there does not carry the sentence that said it was
                 // not.
                 st.warnings.clear();
+                // The daemon says whether the tree is still followed. A
+                // feed that died leaves it answering on a snapshot, and a
+                // window that says "the daemon is there" is telling the
+                // user that a live tree is behind it.
+                if status.feed == "gone" {
+                    st.warnings
+                        .push("a árvore já não é seguida pelo daemon".to_string());
+                }
             }
             Err(e) => {
                 // The connection is dropped: the answer may still be on
