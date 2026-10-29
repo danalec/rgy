@@ -19,6 +19,7 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
+use rgy_launcher::layout::{SCALE_PERCENT, device_pixels};
 use rgy_launcher::results::IconKind;
 use rgy_launcher::{Layout, Mode, Preview, Row};
 
@@ -74,6 +75,15 @@ const ICON_SIZE: i32 = 16;
 /// same with an icon as without one.
 const GUTTER: i32 = ICON_SIZE + 8;
 
+/// One model unit, in the device pixels of this screen.
+///
+/// The drawing is in the model's units and the window is in device
+/// pixels, and the two are the same number only on a 96-DPI screen.
+fn px(scale: u32, units: i32) -> i32 {
+    let scaled = device_pixels(units.unsigned_abs(), scale) as i32;
+    if units < 0 { -scaled } else { scaled }
+}
+
 /// How many icons the cache keeps.
 ///
 /// The shell is asked about a name, and the names a search walks through
@@ -106,19 +116,26 @@ pub struct Fonts {
 
 impl Fonts {
     /// The window's fonts, made once.
-    pub fn new() -> Fonts {
+    ///
+    /// The scale is in per cent (see [`SCALE_PERCENT`]): the heights are
+    /// the model's, at the screen's own scale. An aware process does not
+    /// scale fonts for you — `CreateFontW(17)` is seventeen device pixels
+    /// whatever the monitor's DPI — so a font that was not scaled would
+    /// be half the size on a screen twice as big.
+    pub fn new(scale: u32) -> Fonts {
         let face = face();
         Fonts {
-            field: font(17, FW_SEMIBOLD, face),
-            row: font(15, FW_NORMAL, face),
-            folder: font(13, FW_NORMAL, face),
+            field: font(font_height(17, scale), FW_SEMIBOLD, face),
+            row: font(font_height(15, scale), FW_NORMAL, face),
+            folder: font(font_height(13, scale), FW_NORMAL, face),
         }
     }
 }
 
 impl Default for Fonts {
+    /// The fonts of a screen that is not scaled.
     fn default() -> Fonts {
-        Fonts::new()
+        Fonts::new(SCALE_PERCENT)
     }
 }
 
@@ -130,6 +147,15 @@ impl Drop for Fonts {
             DeleteObject(self.folder);
         }
     }
+}
+
+/// The height of a font, in device pixels.
+///
+/// The font is a size in device pixels, and the size the window was
+/// drawn with is the size of a 96-DPI screen: an aware process does not
+/// scale fonts for you, so the height has to be scaled here.
+fn font_height(units: i32, scale: u32) -> i32 {
+    device_pixels(units.unsigned_abs(), scale) as i32
 }
 
 /// One font, at a size and a weight.
@@ -457,16 +483,16 @@ fn shell_icon(source: &IconSource) -> Option<HICON> {
     }
 }
 
-/// Draw an icon, at its own size.
-fn draw_icon(hdc: HDC, icon: HICON, x: i32, y: i32) {
+/// Draw an icon, at the size of the screen.
+fn draw_icon(hdc: HDC, icon: HICON, x: i32, y: i32, size: i32) {
     unsafe {
         DrawIconEx(
             hdc,
             icon,
             x,
             y,
-            ICON_SIZE,
-            ICON_SIZE,
+            size,
+            size,
             0,
             core::ptr::null_mut(),
             DI_NORMAL,
@@ -479,6 +505,10 @@ fn draw_icon(hdc: HDC, icon: HICON, x: i32, y: i32) {
 /// The device context is a raw pointer: the caller has to have one, and
 /// the function that owns the window is the only caller there is.
 ///
+/// The scale is the screen's own, in per cent (see [`SCALE_PERCENT`]):
+/// the picture is drawn in device pixels, and every number of the
+/// drawing is a model unit at that scale.
+///
 /// # Safety
 ///
 /// `hdc` must be a device context the thread may draw on.
@@ -489,17 +519,24 @@ pub unsafe fn paint(
     backdrop: bool,
     icons: &mut Icons,
     fonts: &Fonts,
+    scale: u32,
 ) {
-    let mut layout = Layout::with_rows(view.rows.len() as u32);
+    let mut model = Layout::with_rows(view.rows.len() as u32);
     // The preview panel is a layer over the results, and it is as tall as
     // it needs to be: the host sized the window with the same geometry,
     // and the two have to agree or the panel would be cut off.
     if let Some(preview) = &view.preview {
-        layout.preview = preview.lines.len() as u32 + 1;
+        model.preview = preview.lines.len() as u32 + 1;
     }
-    let width = layout.width as i32;
-    let height = layout.height() as i32;
+    // The picture is the window's own size: the window's size is the
+    // model's size at this screen's scale, and the two have to be the
+    // same number of pixels or the picture does not fill the window.
+    let width = device_pixels(model.width, scale) as i32;
+    let height = device_pixels(model.height(), scale) as i32;
     *painted = (width, height);
+    // The geometry inside the picture: every number of it is a model
+    // unit, and every one of them is at this screen's scale.
+    let layout = model.scaled(scale);
 
     unsafe {
         SetBkMode(hdc, TRANSPARENT);
@@ -526,7 +563,13 @@ pub unsafe fn paint(
         let field_h = layout.input_height as i32;
         select(hdc, fonts.field);
         if view.query.is_empty() {
-            let w = draw_run(hdc, &view.placeholder, left, field_top + 14, colour::DIM);
+            let w = draw_run(
+                hdc,
+                &view.placeholder,
+                left,
+                field_top + px(scale, 14),
+                colour::DIM,
+            );
             let _ = w;
         } else {
             // The caret goes where the model says it is, and not after the
@@ -535,18 +578,24 @@ pub unsafe fn paint(
             // the end puts the blinking line away from the text that
             // just arrived.
             let (before, after) = split_at_caret(&view.query, view.caret);
-            let w = draw_run(hdc, before, left, field_top + 14, colour::TEXT);
+            let w = draw_run(hdc, before, left, field_top + px(scale, 14), colour::TEXT);
             // The caret: two pixels, two pixels after the text before it.
             fill(
                 hdc,
-                left + w + 2,
-                field_top + 12,
-                2,
-                field_h - 26,
+                left + w + px(scale, 2),
+                field_top + px(scale, 12),
+                px(scale, 2),
+                field_h - px(scale, 26),
                 colour::TEXT,
             );
             // The text after the caret starts where the caret ends.
-            draw_run(hdc, after, left + w + 5, field_top + 14, colour::TEXT);
+            draw_run(
+                hdc,
+                after,
+                left + w + px(scale, 5),
+                field_top + px(scale, 14),
+                colour::TEXT,
+            );
         }
 
         // The status line, under the field.
@@ -556,7 +605,7 @@ pub unsafe fn paint(
                 hdc,
                 &view.status,
                 left,
-                field_top + field_h - 6,
+                field_top + field_h - px(scale, 6),
                 colour::DIM,
             );
         }
@@ -569,20 +618,20 @@ pub unsafe fn paint(
             if i == view.selected {
                 fill(hdc, 0, top, width, row_h, colour::SELECTED);
                 // The accent bar on the left: the selection's own edge.
-                fill(hdc, 0, top, 3, row_h, colour::ACCENT);
+                fill(hdc, 0, top, px(scale, 3), row_h, colour::ACCENT);
             }
-            draw_row(hdc, fonts, row, left, top, row_h, content, icons);
+            draw_row(hdc, fonts, row, left, top, row_h, content, icons, scale);
         }
 
         // The actions menu, over the rows.
         if view.mode == Mode::Menu {
-            draw_menu(hdc, fonts, view, width, height);
+            draw_menu(hdc, fonts, view, width, height, scale);
         }
 
         // The preview panel, over everything the rows were.
         if let Some(preview) = &view.preview {
             let top = layout.list_top() as i32;
-            draw_preview(hdc, fonts, preview, left, top, width, height - top);
+            draw_preview(hdc, fonts, preview, left, top, width, height - top, &layout);
         }
 
         // The context is left as it was found.
@@ -595,6 +644,15 @@ pub unsafe fn paint(
 /// The panel is the window's own background with a hairline around it, so
 /// it reads as a sheet of paper on top of the list rather than as a
 /// different window.
+///
+/// The geometry is the layout's own: the title, the header under it and
+/// the spacing of the lines are the numbers the window's height was
+/// computed from, and a painter with numbers of its own is a painter
+/// that draws a panel the window did not ask for.
+///
+/// The scale is one of the numbers it is given, and a struct would be a
+/// struct that only this function and its caller ever see.
+#[allow(clippy::too_many_arguments)]
 fn draw_preview(
     hdc: HDC,
     fonts: &Fonts,
@@ -603,6 +661,7 @@ fn draw_preview(
     top: i32,
     width: i32,
     height: i32,
+    layout: &Layout,
 ) {
     if height <= 0 {
         return;
@@ -610,16 +669,25 @@ fn draw_preview(
     fill(hdc, 0, top, width, height, colour::BACKDROP);
     frame(hdc, 0, top, width, height, colour::BORDER);
     select(hdc, fonts.row);
-    draw_run(hdc, &preview.title, left, top + 5, colour::TEXT);
+    draw_run(
+        hdc,
+        &preview.title,
+        left,
+        top + layout.preview_title_top as i32,
+        colour::TEXT,
+    );
     select(hdc, fonts.folder);
-    let mut y = top + 34;
+    let line_height = layout.preview_line_height as i32;
+    let mut y = top + layout.preview_header_height as i32;
     for line in &preview.lines {
-        if y + 18 > top + height {
+        if y + line_height > top + height {
             break;
         }
+        // The cut is in characters and not in pixels: it is a number of
+        // letters, and a letter is a letter at any scale.
         let text = shorten(line, 90);
         draw_run(hdc, &text, left, y, colour::DIM);
-        y += 18;
+        y += line_height;
     }
 }
 
@@ -638,22 +706,24 @@ fn draw_row(
     row_h: i32,
     content: i32,
     icons: &mut Icons,
+    scale: u32,
 ) {
-    // The icon, in the gutter at the left of the row: what the row is,
+    // The icon, in the gutter at the left of row: what the row is,
     // asked of the shell and kept for the next row of the same type.
     if let Some(icon) = icons.get(row) {
-        draw_icon(hdc, icon, left, top + 5);
+        draw_icon(hdc, icon, left, top + px(scale, 5), px(scale, ICON_SIZE));
     }
     // The text, after the gutter.
-    let text_left = left + GUTTER;
-    let text_width = content.saturating_sub(GUTTER);
+    let gutter = px(scale, GUTTER);
+    let text_left = left + gutter;
+    let text_width = content.saturating_sub(gutter);
     {
         select(hdc, fonts.row);
         let name = row.name();
         let mut x = text_left;
         for (text, matched) in runs(name, row.matched()) {
             let colour = if matched { colour::MATCH } else { colour::TEXT };
-            x += draw_run(hdc, &text, x, top + 5, colour);
+            x += draw_run(hdc, &text, x, top + px(scale, 5), colour);
             if x - text_left > text_width {
                 break;
             }
@@ -663,35 +733,142 @@ fn draw_row(
         let context = row.context();
         if !context.is_empty() {
             select(hdc, fonts.folder);
+            // The cut is in characters and not in pixels: it is a number
+            // of letters, and a letter is a letter at any scale.
             let text = shorten(context, 90);
-            draw_run(hdc, &text, text_left, top + row_h - 17, colour::DIM);
+            draw_run(
+                hdc,
+                &text,
+                text_left,
+                top + row_h - px(scale, 17),
+                colour::DIM,
+            );
         }
     }
 }
 
-/// The actions menu, drawn over the results.
-fn draw_menu(hdc: HDC, fonts: &Fonts, view: &View, width: i32, height: i32) {
-    {
-        let h = 30;
-        let top = height - (view.menu.len() as i32 + 1) * h;
-        // The menu's own panel: a little darker than the window, so it
-        // reads as a layer above the results.
-        fill(hdc, 0, top, width, height - top, colour::BACKDROP);
-        frame(hdc, 0, top, width, height - top, colour::BORDER);
-        for (i, action) in view.menu.iter().enumerate() {
-            let y = top + (i as i32 + 1) * h;
-            let selected = i == view.menu_selected;
-            if selected {
-                fill(hdc, 0, y - 4, width, h, colour::SELECTED);
-                fill(hdc, 0, y - 4, 3, h, colour::ACCENT);
-            }
-            select(hdc, fonts.row);
-            draw_run(hdc, action.label(), 16, y + 6, colour::TEXT);
-            select(hdc, fonts.folder);
-            draw_run(hdc, action.shortcut(), width - 90, y + 7, colour::DIM);
-            select(hdc, fonts.row);
+/// The height of one entry of the actions menu, in the model's units.
+const MENU_ROW_HEIGHT: i32 = 30;
+
+/// The shortest an entry of the menu may be, in the model's units.
+///
+/// An entry holds a line of text and the margin under it, and an entry
+/// shorter than that would cut the label in half.
+const MENU_ROW_MINIMUM: i32 = 24;
+
+/// The menu's own geometry.
+///
+/// The menu is a panel at the bottom of the window, and it is exactly as
+/// tall as its entries: a row that is reserved and not drawn is a band
+/// of nothing between the panel's edge and the first action, and it
+/// reads as a fault in the drawing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Menu {
+    /// The top of the panel, in device pixels.
+    top: i32,
+    /// The height of the panel, in device pixels.
+    height: i32,
+    /// The height of one entry, in device pixels.
+    row: i32,
+}
+
+impl Menu {
+    /// The menu's geometry, in a window of this height.
+    ///
+    /// The entries are as tall as they can be and no taller: a window
+    /// with one result is shorter than a menu of four entries at their
+    /// full height, and the entries shrink to fit it. Only a window that
+    /// cannot hold even the shortest entry has no menu to draw.
+    fn at(entries: usize, window_height: i32, row: i32, shortest: i32) -> Option<Menu> {
+        if entries == 0 {
+            return None;
         }
+        let row = (window_height / entries as i32).clamp(shortest, row);
+        let height = row * entries as i32;
+        if height > window_height {
+            // The window has no room for the menu.
+            return None;
+        }
+        Some(Menu {
+            top: window_height - height,
+            height,
+            row,
+        })
     }
+
+    /// The top of one entry, in device pixels.
+    fn entry_top(&self, index: usize) -> i32 {
+        self.top + index as i32 * self.row
+    }
+}
+
+/// The actions menu, drawn over the results.
+fn draw_menu(hdc: HDC, fonts: &Fonts, view: &View, width: i32, height: i32, scale: u32) {
+    if view.menu.is_empty() {
+        return;
+    }
+    let row = px(scale, MENU_ROW_HEIGHT);
+    let Some(menu) = Menu::at(view.menu.len(), height, row, px(scale, MENU_ROW_MINIMUM)) else {
+        // The window has no room for the menu: the menu says so instead
+        // of drawing half of itself.
+        draw_too_short(hdc, fonts, width, height, scale);
+        return;
+    };
+    // The menu's own panel: a little darker than the window, so it
+    // reads as a layer above the results.
+    fill(hdc, 0, menu.top, width, menu.height, colour::BACKDROP);
+    frame(hdc, 0, menu.top, width, menu.height, colour::BORDER);
+    for (i, action) in view.menu.iter().enumerate() {
+        let y = menu.entry_top(i);
+        let selected = i == view.menu_selected;
+        if selected {
+            fill(hdc, 0, y, width, menu.row, colour::SELECTED);
+            fill(hdc, 0, y, px(scale, 3), menu.row, colour::ACCENT);
+        }
+        select(hdc, fonts.row);
+        draw_run(
+            hdc,
+            action.label(),
+            px(scale, 16),
+            y + px(scale, 6),
+            colour::TEXT,
+        );
+        select(hdc, fonts.folder);
+        draw_run(
+            hdc,
+            action.shortcut(),
+            width - px(scale, 90),
+            y + px(scale, 7),
+            colour::DIM,
+        );
+        select(hdc, fonts.row);
+    }
+}
+
+/// What the menu says when the window is too short for it.
+///
+/// The menu is drawn over the results, and the window is as tall as the
+/// model asked for: a window with one result is shorter than a menu of
+/// four entries. A menu that cannot be drawn is not drawn half — it says
+/// so, in the language the window speaks, because the model cannot know
+/// how tall the window ended up.
+const TOO_SHORT: &str = "a janela é curta demais para o menu";
+
+/// The menu that does not fit.
+fn draw_too_short(hdc: HDC, fonts: &Fonts, width: i32, height: i32, scale: u32) {
+    // The panel is the whole window: there is no room for a panel at the
+    // bottom, and a message without a panel reads as a line of the
+    // results.
+    fill(hdc, 0, 0, width, height, colour::BACKDROP);
+    frame(hdc, 0, 0, width, height, colour::BORDER);
+    select(hdc, fonts.folder);
+    draw_run(
+        hdc,
+        TOO_SHORT,
+        px(scale, 16),
+        height / 2 - px(scale, 9),
+        colour::DIM,
+    );
 }
 
 /// The name, split into runs of matched and unmatched characters.
@@ -820,27 +997,110 @@ fn shorten(s: &str, max: usize) -> String {
     format!("…{head}")
 }
 
-#[link(name = "user32")]
-unsafe extern "system" {
-    /// The device context of the whole screen.
-    ///
-    /// The face a font really has is only known to the context that has
-    /// it selected, and the window has no context of its own until it
-    /// paints.
-    fn GetDC(hWnd: HWND) -> HDC;
-    /// Give the context back.
-    fn ReleaseDC(hWnd: HWND, hDC: HDC) -> i32;
-}
-
-#[link(name = "gdi32")]
-unsafe extern "system" {
-    /// The face of the font the context has selected.
-    fn GetTextFaceW(hdc: HDC, lpszFace: *mut u16, cFace: i32) -> i32;
-}
-
 #[cfg(test)]
 mod tests {
+    use core::ffi::c_void;
+
+    use rgy_launcher::Action;
+
     use super::*;
+
+    /// A surface to draw into, and the pixels that were drawn on it.
+    ///
+    /// The menu is a drawing, and the drawing is what the user sees: a
+    /// test that only counts rows would not see the band of nothing the
+    /// menu used to open with.
+    struct Canvas {
+        dc: HDC,
+        bits: *mut u8,
+        bitmap: HANDLE,
+        width: i32,
+    }
+
+    impl Canvas {
+        /// A surface of this size, in device pixels.
+        fn new(width: i32, height: i32) -> Option<Canvas> {
+            unsafe {
+                let screen = GetDC(core::ptr::null_mut());
+                if screen.is_null() {
+                    return None;
+                }
+                let dc = CreateCompatibleDC(screen);
+                ReleaseDC(core::ptr::null_mut(), screen);
+                if dc.is_null() {
+                    return None;
+                }
+                let info = BitmapInfo {
+                    header: BitmapInfoHeader {
+                        size: core::mem::size_of::<BitmapInfoHeader>() as u32,
+                        width,
+                        // The height is negative so that the first row of
+                        // the bitmap is the top of the surface.
+                        height: -height,
+                        planes: 1,
+                        bits: 32,
+                        compression: BI_RGB,
+                        image_size: 0,
+                        x_pixels_per_meter: 0,
+                        y_pixels_per_meter: 0,
+                        colors_used: 0,
+                        colors_important: 0,
+                    },
+                    colors: [0; 1],
+                };
+                let mut bits: *mut c_void = core::ptr::null_mut();
+                let bitmap = CreateDIBSection(
+                    dc,
+                    &info,
+                    DIB_RGB_COLORS,
+                    &mut bits,
+                    core::ptr::null_mut(),
+                    0,
+                );
+                if bitmap.is_null() {
+                    DeleteDC(dc);
+                    return None;
+                }
+                SelectObject(dc, bitmap);
+                Some(Canvas {
+                    dc,
+                    bits: bits.cast::<u8>(),
+                    bitmap,
+                    width,
+                })
+            }
+        }
+
+        /// The colour of a pixel, in the order the platform stores it.
+        fn pixel(&self, x: i32, y: i32) -> (u8, u8, u8) {
+            let stride = (self.width * 4) as usize;
+            let at = (y as usize) * stride + (x as usize) * 4;
+            unsafe {
+                let pixel = self.bits.add(at);
+                (*pixel, *pixel.add(1), *pixel.add(2))
+            }
+        }
+    }
+
+    impl Drop for Canvas {
+        fn drop(&mut self) {
+            unsafe {
+                // The bitmap that is selected cannot be deleted: it goes
+                // back to nothing first.
+                SelectObject(self.dc, core::ptr::null_mut());
+                DeleteObject(self.bitmap);
+                DeleteDC(self.dc);
+            }
+        }
+    }
+
+    /// A GDI colour in the order the platform stores the pixels in.
+    ///
+    /// GDI's colours are `0x00BBGGRR` and a 32-bit bitmap is `BGRA`, so
+    /// the blue byte is the high one and the red byte is the low one.
+    fn in_pixels(colour: u32) -> (u8, u8, u8) {
+        ((colour >> 16) as u8, (colour >> 8) as u8, colour as u8)
+    }
 
     #[test]
     fn a_name_with_no_match_is_one_run() {
@@ -1010,6 +1270,135 @@ mod tests {
             icons.icons.len() <= ICON_CACHE_LIMIT,
             "the cache kept {} icons",
             icons.icons.len()
+        );
+    }
+
+    /// The fonts are the size of the screen they are drawn on.
+    ///
+    /// An aware process does not scale fonts for you: `CreateFontW(17)`
+    /// is seventeen device pixels whatever the monitor's DPI, so a font
+    /// that was not scaled would be half the size on a screen twice as
+    /// big.
+    #[test]
+    fn the_fonts_are_the_size_of_the_screen() {
+        assert_eq!(font_height(17, SCALE_PERCENT), 17);
+        assert_eq!(font_height(15, SCALE_PERCENT), 15);
+        assert_eq!(font_height(13, SCALE_PERCENT), 13);
+        assert_eq!(font_height(17, SCALE_PERCENT * 2), 34);
+        assert_eq!(font_height(15, SCALE_PERCENT * 2), 30);
+        assert_eq!(font_height(13, SCALE_PERCENT * 2), 26);
+    }
+
+    /// The drawing's own numbers are at the screen's scale too.
+    ///
+    /// The icon and the gutter are the window's own decoration, and they
+    /// are model units like everything else.
+    #[test]
+    fn the_drawing_is_at_the_screen_s_scale() {
+        assert_eq!(px(SCALE_PERCENT, ICON_SIZE), 16);
+        assert_eq!(px(SCALE_PERCENT * 2, ICON_SIZE), 32);
+        assert_eq!(px(SCALE_PERCENT, GUTTER), 24);
+        assert_eq!(px(SCALE_PERCENT * 2, GUTTER), 48);
+    }
+
+    /// The menu opens with its first entry.
+    ///
+    /// The panel is exactly as tall as its entries, so the first row of
+    /// the panel is the first entry's own: a row that is reserved and
+    /// not drawn is a band of nothing between the panel's edge and the
+    /// first action, and it reads as a fault in the drawing.
+    #[test]
+    fn the_menu_opens_with_its_first_entry() {
+        let Some(canvas) = Canvas::new(300, 200) else {
+            panic!("the platform gave no surface to draw on");
+        };
+        let fonts = Fonts::new(SCALE_PERCENT);
+        let view = View {
+            menu: vec![
+                Action::Open,
+                Action::OpenFolder,
+                Action::CopyPath,
+                Action::Preview,
+            ],
+            menu_selected: 0,
+            ..View::default()
+        };
+        // The surface is the window's own colour, so the panel's edge
+        // is the first thing on it that is not.
+        fill(canvas.dc, 0, 0, 300, 200, colour::BACKDROP);
+        draw_menu(canvas.dc, &fonts, &view, 300, 200, SCALE_PERCENT);
+        let top = (0..200)
+            .find(|&y| canvas.pixel(10, y) != in_pixels(colour::BACKDROP))
+            .expect("the menu drew a panel");
+        assert_eq!(
+            canvas.pixel(10, top),
+            in_pixels(colour::SELECTED),
+            "the panel opens with its first entry"
+        );
+        unsafe {
+            // The font that is still selected cannot be deleted: the
+            // stock one goes back in before the window's fonts go.
+            let stock = GetCurrentObject(canvas.dc, OBJ_FONT);
+            SelectObject(canvas.dc, stock);
+        }
+    }
+
+    /// The menu is exactly as tall as its entries.
+    ///
+    /// A row that is reserved and not drawn is a band of nothing between
+    /// the panel's edge and the first action, and it reads as a fault in
+    /// the drawing.
+    #[test]
+    fn the_menu_is_as_tall_as_its_entries() {
+        let menu = Menu::at(4, 300, 30, 24).expect("the menu fits");
+        assert_eq!(menu.height, 4 * 30);
+        assert_eq!(menu.top, 300 - 4 * 30);
+        assert_eq!(menu.entry_top(0), menu.top, "the first entry is the top");
+        assert_eq!(menu.entry_top(3), menu.top + 3 * 30);
+    }
+
+    /// A window with one result is shorter than a menu of four entries,
+    /// and the entries shrink to fit it.
+    #[test]
+    fn the_menu_shrinks_to_fit_a_short_window() {
+        let menu = Menu::at(4, 110, 30, 24).expect("the menu still fits");
+        assert!(menu.height <= 110, "the menu is inside the window");
+        assert_eq!(menu.row, 27);
+        assert_eq!(
+            menu.entry_top(3) + menu.row,
+            110,
+            "and the last entry ends at the bottom"
+        );
+    }
+
+    /// A window with no room for the menu has no menu: the menu says so
+    /// instead of drawing half of itself.
+    #[test]
+    fn a_window_with_no_room_for_the_menu_has_no_menu() {
+        assert_eq!(Menu::at(4, 80, 30, 24), None);
+    }
+
+    /// The preview's lines fit in the panel the window asked for.
+    ///
+    /// The painter and the layout have to agree: a panel shorter than
+    /// its own text cuts the last line off, and a panel taller is a
+    /// hundred units of nothing under the text.
+    #[test]
+    fn the_preview_fits_in_the_window_the_layout_asked_for() {
+        let mut model = Layout::with_rows(1);
+        // A title and thirteen lines under it.
+        model.preview = 14;
+        let window = model.height();
+        let panel = window - model.list_top();
+        assert_eq!(
+            panel,
+            model.preview_height() + model.padding + model.border,
+            "the panel is the text and the window's own margin"
+        );
+        let last = model.preview_header_height + 12 * model.preview_line_height;
+        assert!(
+            last + model.preview_line_height <= panel,
+            "the last line of the panel is inside it"
         );
     }
 

@@ -40,6 +40,10 @@ pub type HHOOK = *mut c_void;
 pub type HMENU = *mut c_void;
 pub type HMONITOR = *mut c_void;
 
+/// The process's own DPI awareness: a pointer-sized value the platform
+/// takes and hands back.
+pub type DPI_AWARENESS_CONTEXT = isize;
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RECT {
@@ -129,6 +133,49 @@ pub struct MONITORINFO {
     pub dwFlags: DWORD,
 }
 
+/// The bitmap's own header, as the platform writes it.
+///
+/// A struct the platform writes is the platform's struct, whole: the
+/// header is the size the platform expects, and the sizes are the
+/// platform's own.
+#[repr(C)]
+pub struct BitmapInfoHeader {
+    pub size: u32,
+    pub width: i32,
+    pub height: i32,
+    pub planes: u16,
+    pub bits: u16,
+    pub compression: u32,
+    pub image_size: u32,
+    pub x_pixels_per_meter: i32,
+    pub y_pixels_per_meter: i32,
+    pub colors_used: u32,
+    pub colors_important: u32,
+}
+
+/// The bitmap's information: the header, and the room for the colours.
+#[repr(C)]
+pub struct BitmapInfo {
+    pub header: BitmapInfoHeader,
+    pub colors: [u32; 1],
+}
+
+/// The size of a surface, in pixels.
+#[repr(C)]
+pub struct Size {
+    pub width: i32,
+    pub height: i32,
+}
+
+/// The blend the compositor uses for a layered window.
+#[repr(C)]
+pub struct BlendFunction {
+    pub operation: u8,
+    pub flags: u8,
+    pub constant_alpha: u8,
+    pub alpha_format: u8,
+}
+
 // --- the constants the launcher uses -----------------------------------------
 
 pub const WS_POPUP: u32 = 0x8000_0000;
@@ -201,6 +248,12 @@ pub const FW_SEMIBOLD: i32 = 600;
 pub const SM_CXSCREEN: i32 = 0;
 pub const SM_CYSCREEN: i32 = 1;
 
+/// Per-monitor v2: the window's own scale is the monitor's, and the
+/// window is told when it moves to another monitor.
+///
+/// The value is the platform's own: a pointer-sized `-4`.
+pub const DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2: DPI_AWARENESS_CONTEXT = -4;
+
 /// The monitor that has the point, or the nearest one when it has none.
 pub const MONITOR_DEFAULTTONEAREST: DWORD = 0x0000_0002;
 
@@ -220,6 +273,12 @@ pub const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
 
 /// The font the context has selected.
 pub const OBJ_FONT: UINT = 0;
+
+/// The bitmap's colours are the ones the platform writes.
+pub const DIB_RGB_COLORS: u32 = 0;
+
+/// The bitmap is not compressed.
+pub const BI_RGB: u32 = 0;
 
 /// The icon is drawn at its own size.
 pub const DI_NORMAL: u32 = 0x0000;
@@ -280,8 +339,10 @@ pub type SetWindowCompositionAttributeFn =
 
 // --- the calls ---------------------------------------------------------------
 
+#[link(name = "user32")]
 unsafe extern "system" {
     pub fn RegisterClassExW(lpwcx: *const WNDCLASSEXW) -> u16;
+
     pub fn CreateWindowExW(
         dwExStyle: DWORD,
         lpClassName: *const u16,
@@ -296,12 +357,19 @@ unsafe extern "system" {
         hInstance: HINSTANCE,
         lpParam: *mut c_void,
     ) -> HWND;
+
     pub fn DefWindowProcW(hWnd: HWND, Msg: UINT, wParam: WPARAM, lParam: LPARAM) -> LRESULT;
+
     pub fn DestroyWindow(hWnd: HWND) -> BOOL;
+
     pub fn ShowWindow(hWnd: HWND, nCmdShow: i32) -> BOOL;
+
     pub fn UpdateWindow(hWnd: HWND) -> BOOL;
+
     pub fn SetForegroundWindow(hWnd: HWND) -> BOOL;
+
     pub fn SetFocus(hWnd: HWND) -> HWND;
+
     pub fn SetWindowPos(
         hWnd: HWND,
         hWndInsertAfter: HWND,
@@ -311,34 +379,62 @@ unsafe extern "system" {
         cy: i32,
         uFlags: UINT,
     ) -> BOOL;
+
     pub fn GetMessageW(
         lpMsg: *mut MSG,
         hWnd: HWND,
         wMsgFilterMin: UINT,
         wMsgFilterMax: UINT,
     ) -> BOOL;
+
     pub fn TranslateMessage(lpMsg: *const MSG) -> BOOL;
+
     pub fn DispatchMessageW(lpMsg: *const MSG) -> LRESULT;
+
     pub fn PostQuitMessage(nExitCode: i32);
+
     pub fn PostMessageW(hWnd: HWND, Msg: UINT, wParam: WPARAM, lParam: LPARAM) -> BOOL;
+
     pub fn GetWindowLongPtrW(hWnd: HWND, nIndex: i32) -> isize;
+
     pub fn SetWindowLongPtrW(hWnd: HWND, nIndex: i32, dwNewLong: isize) -> isize;
+
     pub fn GetSystemMetrics(nIndex: i32) -> i32;
+
+    /// Make the process aware of the monitor's own scale.
+    ///
+    /// The awareness is asked once, before the first window exists: an
+    /// awareness set after the window is on the screen is not an
+    /// awareness the window can use.
+    pub fn SetProcessDpiAwarenessContext(value: DPI_AWARENESS_CONTEXT) -> BOOL;
+
+    /// The scale of the monitor the window is on, in dots per inch.
+    pub fn GetDpiForWindow(hwnd: HWND) -> UINT;
+
     /// Where the pointer is.
     pub fn GetCursorPos(lpPoint: *mut POINT) -> BOOL;
+
     /// The monitor that has the point.
     pub fn MonitorFromPoint(pt: POINT, dwFlags: DWORD) -> HMONITOR;
+
     /// The monitor the window is on.
     pub fn MonitorFromWindow(hwnd: HWND, dwFlags: DWORD) -> HMONITOR;
+
     /// What the platform says about a monitor.
     pub fn GetMonitorInfoW(hMonitor: HMONITOR, lpmi: *mut MONITORINFO) -> BOOL;
+
     pub fn SetTimer(hWnd: HWND, nIDEvent: usize, uElapse: u32, lpTimerFunc: *mut c_void) -> usize;
+
     pub fn KillTimer(hWnd: HWND, uIDEvent: usize) -> i32;
 
     pub fn BeginPaint(hWnd: HWND, lpPs: *mut PAINTSTRUCT) -> HDC;
+
     pub fn EndPaint(hWnd: HWND, lpPs: *const PAINTSTRUCT) -> BOOL;
+
     pub fn FillRect(hdc: HDC, lpRect: *const RECT, hBrush: HBRUSH) -> i32;
+
     pub fn FrameRect(hdc: HDC, lpRect: *const RECT, hBrush: HBRUSH) -> i32;
+
     pub fn DrawTextW(
         hdc: HDC,
         lpchText: *const u16,
@@ -346,11 +442,95 @@ unsafe extern "system" {
         lpRect: *mut RECT,
         uFormat: UINT,
     ) -> i32;
+
+    pub fn DrawIconEx(
+        hdc: HDC,
+        hIcon: HICON,
+        x: i32,
+        y: i32,
+        cx: i32,
+        cy: i32,
+        istep: UINT,
+        hbr: HBRUSH,
+        flags: UINT,
+    ) -> BOOL;
+
+    pub fn DestroyIcon(hIcon: HICON) -> BOOL;
+
+    pub fn SetWindowRgn(hWnd: HWND, hRgn: HRGN, bRedraw: BOOL) -> i32;
+
+    pub fn SetWindowsHookExW(
+        idHook: i32,
+        lpfn: Option<unsafe extern "system" fn(i32, WPARAM, LPARAM) -> LRESULT>,
+        hMod: HINSTANCE,
+        dwThreadId: DWORD,
+    ) -> HHOOK;
+
+    pub fn CallNextHookEx(hhk: HHOOK, nCode: i32, wParam: WPARAM, lParam: LPARAM) -> LRESULT;
+
+    pub fn UnhookWindowsHookEx(hhk: HHOOK) -> BOOL;
+
+    /// The state of a key, as the system's own view of the keyboard has it.
+    pub fn GetKeyState(vKey: i32) -> i16;
+    /// Whether the window is on the screen.
+    pub fn IsWindowVisible(hWnd: HWND) -> BOOL;
+    /// Mark the window as needing to be painted again.
+    pub fn InvalidateRect(hWnd: HWND, lpRect: *const RECT, bErase: BOOL) -> BOOL;
+    /// The window's own rectangle, in the process's own coordinates.
+    pub fn GetWindowRect(hWnd: HWND, lpRect: *mut RECT) -> BOOL;
+    /// The context of the whole screen.
+    ///
+    /// The face a font really has is only known to the context that has
+    /// it selected, and the window has no context of its own until it
+    /// paints.
+    pub fn GetDC(hWnd: HWND) -> HDC;
+    /// Give the context back.
+    pub fn ReleaseDC(hWnd: HWND, hDC: HDC) -> i32;
+    /// Put the window's own pixels on the screen.
+    pub fn UpdateLayeredWindow(
+        hWnd: HWND,
+        hdcDst: HDC,
+        pptDst: *const POINT,
+        psize: *const Size,
+        hdcSrc: HDC,
+        pptSrc: *const POINT,
+        crKey: u32,
+        pblend: *const BlendFunction,
+        dwFlags: u32,
+    ) -> BOOL;
+    /// The clipboard, opened for the caller.
+    pub fn OpenClipboard(hWndNewOwner: HWND) -> i32;
+    /// Take everything the clipboard holds.
+    pub fn EmptyClipboard() -> i32;
+    /// Give the clipboard back.
+    pub fn CloseClipboard() -> i32;
+    /// Put data in the clipboard, which takes it over.
+    pub fn SetClipboardData(uFormat: u32, hMem: HANDLE) -> HANDLE;
+    /// What the clipboard holds.
+    pub fn GetClipboardData(uFormat: u32) -> HANDLE;
+    /// The window station of the process.
+    pub fn GetProcessWindowStation() -> *mut c_void;
+    /// What the platform says about an object of the user's session.
+    pub fn GetUserObjectInformationW(
+        hObj: *mut c_void,
+        nIndex: i32,
+        pvInfo: *mut c_void,
+        nLength: u32,
+        lpnLengthNeeded: *mut u32,
+    ) -> i32;
+}
+
+#[link(name = "gdi32")]
+unsafe extern "system" {
     pub fn GetTextExtentPoint32W(hdc: HDC, lpString: *const u16, c: i32, pSize: *mut POINT)
     -> BOOL;
+
     pub fn SetBkMode(hdc: HDC, mode: i32) -> i32;
+
     pub fn SetTextColor(hdc: HDC, color: u32) -> u32;
+
     pub fn CreateSolidBrush(color: u32) -> HBRUSH;
+
     pub fn CreateFontW(
         nHeight: i32,
         nWidth: i32,
@@ -367,25 +547,14 @@ unsafe extern "system" {
         fdwPitchAndFamily: DWORD,
         lpszFace: *const u16,
     ) -> HFONT;
+
     pub fn SelectObject(hdc: HDC, h: HANDLE) -> HANDLE;
+
     pub fn DeleteObject(ho: HANDLE) -> BOOL;
+
     /// The object of a kind that the context has selected.
     pub fn GetCurrentObject(hdc: HDC, iType: UINT) -> HANDLE;
 
-    pub fn DrawIconEx(
-        hdc: HDC,
-        hIcon: HICON,
-        x: i32,
-        y: i32,
-        cx: i32,
-        cy: i32,
-        istep: UINT,
-        hbr: HBRUSH,
-        flags: UINT,
-    ) -> BOOL;
-    pub fn DestroyIcon(hIcon: HICON) -> BOOL;
-
-    pub fn SetWindowRgn(hWnd: HWND, hRgn: HRGN, bRedraw: BOOL) -> i32;
     pub fn CreateRoundRectRgn(
         left: i32,
         top: i32,
@@ -395,14 +564,21 @@ unsafe extern "system" {
         heightEllipse: i32,
     ) -> HRGN;
 
-    pub fn SetWindowsHookExW(
-        idHook: i32,
-        lpfn: Option<unsafe extern "system" fn(i32, WPARAM, LPARAM) -> LRESULT>,
-        hMod: HINSTANCE,
-        dwThreadId: DWORD,
-    ) -> HHOOK;
-    pub fn CallNextHookEx(hhk: HHOOK, nCode: i32, wParam: WPARAM, lParam: LPARAM) -> LRESULT;
-    pub fn UnhookWindowsHookEx(hhk: HHOOK) -> BOOL;
+    /// A context that draws into a bitmap of the window's own.
+    pub fn CreateCompatibleDC(hdc: HDC) -> HDC;
+    /// Give the context back.
+    pub fn DeleteDC(hdc: HDC) -> BOOL;
+    /// A bitmap the context can draw into, with the pixels of the panel.
+    pub fn CreateDIBSection(
+        hdc: HDC,
+        pbmi: *const BitmapInfo,
+        usage: u32,
+        ppvBits: *mut *mut c_void,
+        hSection: HANDLE,
+        offset: u32,
+    ) -> HANDLE;
+    /// The face of the font the context has selected.
+    pub fn GetTextFaceW(hdc: HDC, lpszFace: *mut u16, cFace: i32) -> i32;
 }
 
 unsafe extern "system" {
@@ -417,6 +593,18 @@ unsafe extern "system" {
     /// the error first and to look at it after.
     pub fn GetLastError() -> DWORD;
     pub fn SetLastError(code: DWORD) -> DWORD;
+
+    /// The size of a block of the global memory.
+    pub fn GlobalSize(hMem: HANDLE) -> usize;
+    /// A block of the global memory, moveable so that it can be given
+    /// away.
+    pub fn GlobalAlloc(uFlags: u32, dwBytes: usize) -> HANDLE;
+    /// The block's bytes, locked for reading or writing.
+    pub fn GlobalLock(hMem: HANDLE) -> *mut c_void;
+    /// Give the block back, unlocked.
+    pub fn GlobalUnlock(hMem: HANDLE) -> i32;
+    /// Give the block back to the memory.
+    pub fn GlobalFree(hMem: HANDLE) -> HANDLE;
 }
 
 /// The last error of a call that succeeded.
@@ -461,8 +649,22 @@ pub struct MARGINS {
     pub cy_bottom_height: i32,
 }
 
+// The shell's library is not one the toolchain links by default: a
+// launch that cannot open a file is not a launch.
 #[link(name = "shell32")]
 unsafe extern "system" {
+    /// Open a path with the platform's default program.
+    ///
+    /// The answer is a value above thirty-two on success: anything at
+    /// or below it is an error code.
+    pub fn ShellExecuteW(
+        hwnd: HWND,
+        lpOperation: *const u16,
+        lpFile: *const u16,
+        lpParameters: *const u16,
+        lpDirectory: *const u16,
+        nShowCmd: i32,
+    ) -> isize;
     /// The shell's icon for a path.
     ///
     /// The answer is a copy the caller owns: with `SHGFI_ICON` the

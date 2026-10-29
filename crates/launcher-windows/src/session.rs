@@ -11,6 +11,8 @@
 //! So the question is asked before the window is built, and the answer
 //! decides what happens: the window, the terminal UI, or nothing at all.
 
+use crate::win::*;
+
 /// Whether this session has a desktop to draw on.
 pub fn available() -> bool {
     windows_available()
@@ -39,18 +41,6 @@ fn windows_available() -> bool {
 /// The platform's own flags, read from the window station.
 fn station_flags() -> Result<u32, ()> {
     use core::ffi::c_void;
-
-    #[link(name = "user32")]
-    unsafe extern "system" {
-        fn GetProcessWindowStation() -> *mut c_void;
-        fn GetUserObjectInformationW(
-            hObj: *mut c_void,
-            nIndex: i32,
-            pvInfo: *mut c_void,
-            nLength: u32,
-            lpnLengthNeeded: *mut u32,
-        ) -> i32;
-    }
 
     /// `UOI_FLAGS`: the station's flags.
     const UOI_FLAGS: i32 = 1;

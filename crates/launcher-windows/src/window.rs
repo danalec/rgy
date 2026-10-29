@@ -39,6 +39,7 @@ use core::ffi::c_void;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU16, Ordering};
 
+use rgy_launcher::layout::{BASE_DPI, SCALE_PERCENT, device_pixels, model_pixels};
 use rgy_launcher::{Action, Layout, Mode, Preview, Row};
 
 use crate::paint::{self, Fonts, Icons};
@@ -211,6 +212,20 @@ struct State {
     icons: Icons,
     /// The window's fonts, made once and deleted with the window.
     fonts: Fonts,
+    /// The scale of the monitor the window is on, in per cent.
+    ///
+    /// The picture is drawn in device pixels and the drawing is in the
+    /// model's units: the scale is what tells the two apart.
+    scale: u32,
+    /// The half of a character the platform is sending in two pieces.
+    ///
+    /// A character outside the Basic Multilingual Plane is two UTF-16
+    /// code units, and the platform sends them as two messages. The
+    /// window keeps the first half until the second one arrives: a
+    /// surrogate is not a scalar value, and a window that reads each
+    /// message on its own drops the character — the field would not
+    /// move while the user typed an emoji.
+    pending_char: Option<u16>,
 }
 
 /// The window's own pixels, for a window that paints its own alpha.
@@ -263,12 +278,6 @@ const WS_EX_LAYERED: u32 = 0x0008_0000;
 
 /// The window's own styles.
 const GWL_EXSTYLE: i32 = -20;
-
-/// The bitmap's colours are the ones the platform writes.
-const DIB_RGB_COLORS: u32 = 0;
-
-/// The bitmap is not compressed.
-const BI_RGB: u32 = 0;
 
 /// The alpha of the window's own pixels is the alpha of the window.
 const AC_SRC_ALPHA: u8 = 1;
@@ -392,11 +401,12 @@ impl Layer {
         painted: &mut (i32, i32),
         icons: &mut Icons,
         fonts: &Fonts,
+        scale: u32,
     ) {
         unsafe {
             // The panel's own near-black is what the desktop shows
             // through.
-            paint::paint(self.dc, view, painted, false, icons, fonts);
+            paint::paint(self.dc, view, painted, false, icons, fonts, scale);
             // The alpha is worked out after the drawing: GDI writes the
             // colour of a pixel and never its alpha.
             self.compose();
@@ -490,49 +500,6 @@ fn premultiplied(colour: u8, alpha: u8) -> u8 {
     ((colour as u32 * alpha as u32) / 255) as u8
 }
 
-/// The bitmap's own header, as the platform writes it.
-///
-/// A struct the platform writes is the platform's struct, whole: the
-/// header is the size the platform expects, and the sizes are the
-/// platform's own.
-#[repr(C)]
-struct BitmapInfoHeader {
-    size: u32,
-    width: i32,
-    height: i32,
-    planes: u16,
-    bits: u16,
-    compression: u32,
-    image_size: u32,
-    x_pixels_per_meter: i32,
-    y_pixels_per_meter: i32,
-    colors_used: u32,
-    colors_important: u32,
-}
-
-/// The bitmap's information: the header, and the room for the colours.
-#[repr(C)]
-struct BitmapInfo {
-    header: BitmapInfoHeader,
-    colors: [u32; 1],
-}
-
-/// The blend the compositor uses for a layered window.
-#[repr(C)]
-struct BlendFunction {
-    operation: u8,
-    flags: u8,
-    constant_alpha: u8,
-    alpha_format: u8,
-}
-
-/// The size of a surface, in pixels.
-#[repr(C)]
-struct Size {
-    width: i32,
-    height: i32,
-}
-
 /// The window.
 pub struct Window {
     hwnd: HWND,
@@ -545,8 +512,19 @@ pub struct Window {
     /// same object are what the compiler is free to assume cannot
     /// happen.
     state: NonNull<State>,
+    /// The window's width, in device pixels.
     width: i32,
+    /// The window's height, in device pixels.
     height: i32,
+    /// The size the model asked for, in the model's own units.
+    ///
+    /// The model speaks in the units of a 96-DPI screen and the window
+    /// is in device pixels: the scale is what tells the two apart, and
+    /// the model's size is kept so that the window can be sized again
+    /// when the scale changes.
+    model: (i32, i32),
+    /// The scale of the monitor the window is on, in per cent.
+    scale: u32,
 }
 
 impl Window {
@@ -555,6 +533,17 @@ impl Window {
     /// It is not shown until [`Window::show`]: a window that appears and
     /// disappears at start-up is a window the user did not ask for.
     pub fn new(title: &str) -> Result<Window, String> {
+        // The process has to know the monitor's scale before the first
+        // window exists: an awareness set after the window is on the
+        // screen is not an awareness the window can use.
+        //
+        // The call can fail because somebody else set the awareness
+        // already, and that is not an error to report: the platform's
+        // own answer about the monitor is read anyway, and the window is
+        // drawn at that scale.
+        unsafe {
+            SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        }
         register_class()?;
         let mut title16: Vec<u16> = title.encode_utf16().collect();
         title16.push(0);
@@ -574,7 +563,9 @@ impl Window {
             hiding: false,
             focus_lost: false,
             icons: Icons::new(),
-            fonts: Fonts::new(),
+            fonts: Fonts::new(SCALE_PERCENT),
+            scale: SCALE_PERCENT,
+            pending_char: None,
         }));
         let state = match NonNull::new(raw) {
             Some(state) => state,
@@ -621,7 +612,26 @@ impl Window {
                 state,
                 width: 600,
                 height: 80,
+                model: (600, 80),
+                scale: SCALE_PERCENT,
             };
+            // The window exists: the platform says what a unit is worth
+            // on the monitor it is on, and the picture is drawn at that
+            // size.
+            let scale = scale_of(GetDpiForWindow(hwnd));
+            w.scale = scale;
+            w.state_mut().scale = scale;
+            // The fonts are made again: a font is a size in device
+            // pixels, and the provisional ones were made for a screen
+            // that may not be the one the window is on.
+            w.state_mut().fonts = Fonts::new(scale);
+            let (width, height) = w.device_size();
+            w.width = width;
+            w.height = height;
+            // And the window itself is sized at that scale: it was made
+            // with the model's numbers, and the model does not know the
+            // scale.
+            w.resize(600, 80);
             // The backdrop says what the painting has to do: with one, the
             // client area is left alone for the blur to show through.
             let backdrop = w.apply_backdrop();
@@ -700,7 +710,7 @@ impl Window {
         self.hwnd
     }
 
-    /// How tall the work area is, in pixels.
+    /// How tall the work area is, in the model's own units.
     ///
     /// The host needs it to know how many rows the window can show: the
     /// model sizes the window from the rows, and the rows have to fit
@@ -708,17 +718,21 @@ impl Window {
     /// The work area and not the screen, because the taskbar is not room
     /// for rows.
     ///
+    /// The answer is in the model's units and not in device pixels: the
+    /// rows are counted in them, and a screen that is twice as big in
+    /// device pixels is not twice as many rows.
+    ///
     /// The answer is never zero: a host that read zero would show a
     /// single row.
     pub fn work_area_height(&self) -> u32 {
         let work = self.target_work_area();
         let height = work.bottom - work.top;
         if height > 0 {
-            return height as u32;
+            return model_pixels(height as u32, self.scale);
         }
         // The platform would not say, and the screen is the answer that
         // is always there.
-        unsafe { GetSystemMetrics(SM_CYSCREEN).max(0) as u32 }
+        unsafe { model_pixels(GetSystemMetrics(SM_CYSCREEN).max(0) as u32, self.scale) }
     }
 
     /// What the window draws.
@@ -763,6 +777,9 @@ impl Window {
     pub fn hide(&mut self) {
         // The window is the one that is going away, and it says so.
         self.state_mut().hiding = true;
+        // A half character is not a character, and it does not survive
+        // the session that typed it.
+        self.state_mut().pending_char = None;
         // And it is not the user who left: the window is going, so the
         // answer to "the user left" is stale.
         self.state_mut().focus_lost = false;
@@ -818,6 +835,36 @@ impl Window {
                 SWP_NOACTIVATE,
             );
         }
+        // The window was made on the monitor the process started on and
+        // moved to the monitor the user is looking at: a monitor has a
+        // scale of its own, and the picture has to be drawn at it.
+        self.follow_the_monitor();
+    }
+
+    /// Take the scale of the monitor the window is on.
+    ///
+    /// The window moves between monitors, and a monitor with another
+    /// scale gives the window another scale: the fonts are made again —
+    /// a font is a size in device pixels, and the size of the old
+    /// monitor's is not the size of this one's — and the window is
+    /// sized again at the new scale.
+    fn follow_the_monitor(&mut self) {
+        let dpi = unsafe { GetDpiForWindow(self.hwnd) };
+        if dpi == 0 {
+            // The platform would not say: the scale stays the one the
+            // window was made with.
+            return;
+        }
+        let scale = scale_of(dpi);
+        if scale == self.scale {
+            return;
+        }
+        self.scale = scale;
+        self.state_mut().scale = scale;
+        self.state_mut().fonts = Fonts::new(scale);
+        // And the window is sized again, at the new scale.
+        let (width, height) = self.model;
+        self.resize(width, height);
     }
 
     /// The work area the window lives in.
@@ -837,7 +884,13 @@ impl Window {
     }
 
     /// Resize the window to fit what it has to show.
+    ///
+    /// The numbers are the model's own — the units of a 96-DPI screen —
+    /// and the window is in device pixels: the window multiplies them by
+    /// its scale, and the picture is drawn at that size.
     pub fn resize(&mut self, width: i32, height: i32) {
+        self.model = (width, height);
+        let (width, height) = self.device_size();
         // The window is never taller than the room the work area has: the
         // model sizes it from the rows, and the rows have to fit between
         // the top of the area and the bottom of the screen.
@@ -869,6 +922,18 @@ impl Window {
                 SWP_NOMOVE | SWP_NOACTIVATE,
             );
         }
+    }
+
+    /// The window's size in device pixels, at this screen's scale.
+    ///
+    /// The model's size is in the units of a 96-DPI screen and the
+    /// window is in device pixels, and the scale is what tells the two
+    /// apart.
+    fn device_size(&self) -> (i32, i32) {
+        (
+            device_pixels(self.model.0.unsigned_abs(), self.scale) as i32,
+            device_pixels(self.model.1.unsigned_abs(), self.scale) as i32,
+        )
     }
 
     /// The acrylic backdrop, when the platform has one.
@@ -1036,7 +1101,7 @@ impl Window {
     /// window's *frame*, and the backdrop the accent painted is square
     /// behind it. A region clips both, so the blur follows the corner.
     fn apply_region(&self) {
-        let radius = Layout::default().radius as i32;
+        let radius = Layout::default().scaled(self.scale).radius as i32;
         unsafe {
             let region = CreateRoundRectRgn(
                 0,
@@ -1156,10 +1221,17 @@ impl Window {
             {
                 return on_event(Event::Key(key));
             }
-            if msg.message == WM_CHAR
-                && let Some(key) = translate_char(msg)
-            {
-                return on_event(Event::Key(key));
+            if msg.message == WM_CHAR {
+                // The platform sends a character outside the Basic
+                // Multilingual Plane in two messages: the high
+                // surrogate and then the low one. The window keeps the
+                // first half until the second one arrives.
+                let pending = self.state_mut().pending_char;
+                let (key, pending) = translate_char(msg.wParam as u16, pending);
+                self.state_mut().pending_char = pending;
+                if let Some(key) = key {
+                    return on_event(Event::Key(key));
+                }
             }
             if msg.message == WM_ACTIVATEAPP && msg.wParam == 0 {
                 // The user clicked somewhere else and the launcher gets out
@@ -1193,6 +1265,20 @@ impl Window {
         }
         Control::None
     }
+}
+
+/// The scale of a monitor, in per cent.
+///
+/// The platform answers with the monitor's own DPI — 96 on a screen
+/// that is not scaled, 192 on one that is twice as big — and the scale
+/// is that number over the baseline.
+fn scale_of(dpi: u32) -> u32 {
+    if dpi == 0 {
+        // The platform would not say, and a window with no scale is a
+        // window at the baseline one.
+        return SCALE_PERCENT;
+    }
+    dpi * SCALE_PERCENT / BASE_DPI
 }
 
 /// Whether the backdrop the desktop window manager named is one a
@@ -1373,6 +1459,7 @@ unsafe extern "system" fn wnd_proc(
                                 &mut state.painted,
                                 &mut state.icons,
                                 &state.fonts,
+                                state.scale,
                             );
                         }
                         // The platform's own backdrop is behind this
@@ -1385,6 +1472,7 @@ unsafe extern "system" fn wnd_proc(
                                 state.backdrop,
                                 &mut state.icons,
                                 &state.fonts,
+                                state.scale,
                             );
                         }
                     }
@@ -1506,61 +1594,50 @@ fn translate_key(msg: &MSG, ctrl: bool) -> Option<Key> {
 ///
 /// `WM_CHAR` is the right message for text: it knows the keyboard layout,
 /// and it is the only one that does.
-fn translate_char(msg: &MSG) -> Option<Key> {
-    let c = msg.wParam as u16;
-    if c == 0 {
-        return None;
+///
+/// A character outside the Basic Multilingual Plane arrives in two
+/// messages — the high surrogate and then the low one — and the two
+/// halves are one character. The window keeps the first half until the
+/// second one arrives, and a half whose other half never comes is
+/// dropped: it is not a character, and a character nobody finished is a
+/// character the field does not get.
+///
+/// The answer is the character and the half that is left waiting.
+fn translate_char(code: u16, pending: Option<u16>) -> (Option<Key>, Option<u16>) {
+    if code == 0 {
+        return (None, pending);
     }
     // The control characters the system sends for the keys it already
     // reported as a key event: they would be typed twice. The tab is one
     // of them -- the key is already a key, and a tab inside a search box
     // is a character nobody typed.
-    if c < 0x20 {
-        return None;
+    if code < 0x20 {
+        return (None, None);
     }
-    char::from_u32(c as u32).map(Key::Char)
+    // The high surrogate: the first half of a character the platform
+    // sends in two pieces.
+    if (0xD800..=0xDBFF).contains(&code) {
+        return (None, Some(code));
+    }
+    // The low surrogate: it completes the half the window kept.
+    if (0xDC00..=0xDFFF).contains(&code) {
+        let Some(high) = pending else {
+            // A low surrogate with no half before it is not a character.
+            return (None, None);
+        };
+        let together = 0x1_0000 + ((high as u32 - 0xD800) << 10) + (code as u32 - 0xDC00);
+        return match char::from_u32(together) {
+            Some(c) => (Some(Key::Char(c)), None),
+            None => (None, None),
+        };
+    }
+    // A whole character: it ends whatever half was waiting.
+    (char::from_u32(code as u32).map(Key::Char), None)
 }
 
 /// A UTF-16 string with a NUL, for the calls that take one.
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(core::iter::once(0)).collect()
-}
-
-unsafe extern "system" {
-    fn GetKeyState(vKey: i32) -> i16;
-    fn IsWindowVisible(hWnd: HWND) -> BOOL;
-    fn InvalidateRect(hWnd: HWND, lpRect: *const RECT, bErase: BOOL) -> BOOL;
-    /// The window's own rectangle, in the process's own coordinates.
-    fn GetWindowRect(hWnd: HWND, lpRect: *mut RECT) -> BOOL;
-    /// The context of the whole screen.
-    fn GetDC(hWnd: HWND) -> HDC;
-    /// Give the context back.
-    fn ReleaseDC(hWnd: HWND, hDC: HDC) -> i32;
-    /// A context that draws into a bitmap of the window's own.
-    fn CreateCompatibleDC(hdc: HDC) -> HDC;
-    /// Give the context back.
-    fn DeleteDC(hdc: HDC) -> BOOL;
-    /// A bitmap the context can draw into, with the pixels of the panel.
-    fn CreateDIBSection(
-        hdc: HDC,
-        pbmi: *const BitmapInfo,
-        usage: u32,
-        ppvBits: *mut *mut c_void,
-        hSection: HANDLE,
-        offset: u32,
-    ) -> HANDLE;
-    /// Put the window's own pixels on the screen.
-    fn UpdateLayeredWindow(
-        hWnd: HWND,
-        hdcDst: HDC,
-        pptDst: *const POINT,
-        psize: *const Size,
-        hdcSrc: HDC,
-        pptSrc: *const POINT,
-        crKey: u32,
-        pblend: *const BlendFunction,
-        dwFlags: u32,
-    ) -> BOOL;
 }
 
 #[cfg(test)]
@@ -1604,18 +1681,55 @@ mod tests {
     /// is the same control character, would do the same.
     #[test]
     fn the_tab_is_not_a_character() {
-        let mut msg = MSG {
-            hwnd: core::ptr::null_mut(),
-            message: WM_CHAR,
-            wParam: 0x09,
-            lParam: 0,
-            time: 0,
-            pt: POINT { x: 0, y: 0 },
-        };
-        assert_eq!(translate_char(&msg), None);
+        assert_eq!(translate_char(0x09, None).0, None);
         // A letter is still a letter.
-        msg.wParam = 'a' as usize;
-        assert_eq!(translate_char(&msg), Some(Key::Char('a')));
+        assert_eq!(translate_char('a' as u16, None).0, Some(Key::Char('a')));
+    }
+
+    /// A character outside the Basic Multilingual Plane is two messages
+    /// and one character.
+    ///
+    /// The platform sends it as a high surrogate and then a low one, and
+    /// a window that reads each message on its own drops both: a
+    /// surrogate is not a scalar value, and the field does not move
+    /// while the user types an emoji.
+    #[test]
+    fn a_character_outside_the_bmp_is_one_character() {
+        // U+1D54F is 𝕏, and the platform sends it as the high
+        // surrogate 0xD835 and then the low one, 0xDD4F.
+        let (high, low) = (0xD835u16, 0xDD4Fu16);
+        assert_eq!(char::from_u32(0x1D54F), Some('\u{1D54F}'));
+        // The first message: the half is kept, and it is not a
+        // character yet.
+        let (key, pending) = translate_char(high, None);
+        assert_eq!(key, None);
+        assert_eq!(pending, Some(high));
+        // The second message: the two halves are one character.
+        let (key, pending) = translate_char(low, pending);
+        assert_eq!(key, Some(Key::Char('\u{1D54F}')));
+        assert_eq!(pending, None, "and the half is gone");
+    }
+
+    /// A half that never gets its other half is dropped.
+    ///
+    /// The next character is a whole one: the half does not join it, and
+    /// the field gets what the user typed.
+    #[test]
+    fn a_half_character_is_dropped() {
+        let (key, pending) = translate_char(0xD835, None);
+        assert_eq!(key, None);
+        assert_eq!(pending, Some(0xD835));
+        let (key, pending) = translate_char('a' as u16, pending);
+        assert_eq!(key, Some(Key::Char('a')));
+        assert_eq!(pending, None);
+    }
+
+    /// A low surrogate with no half before it is not a character.
+    #[test]
+    fn a_low_surrogate_alone_is_not_a_character() {
+        let (key, pending) = translate_char(0xDD4F, None);
+        assert_eq!(key, None);
+        assert_eq!(pending, None);
     }
 
     /// So the window believes in a blur, the platform has to say there is
@@ -1704,6 +1818,27 @@ mod tests {
         let spot = spot_on(work, 640, 484);
         assert_eq!(spot.x, -1280, "the window is centred on that monitor");
         assert_eq!(spot.y, 187);
+    }
+
+    /// The window is the model's size at the screen's scale.
+    ///
+    /// The model asks for six hundred units and the window is in device
+    /// pixels: a screen twice as big gets a window twice as big, and the
+    /// text inside it is drawn twice as big.
+    #[test]
+    fn the_window_is_the_model_s_size_at_the_screen_s_scale() {
+        assert_eq!(scale_of(96), SCALE_PERCENT);
+        assert_eq!(scale_of(120), SCALE_PERCENT + SCALE_PERCENT / 4);
+        assert_eq!(scale_of(144), SCALE_PERCENT + SCALE_PERCENT / 2);
+        assert_eq!(scale_of(192), SCALE_PERCENT * 2);
+        assert_eq!(device_pixels(600, scale_of(192)), 1200);
+        assert_eq!(device_pixels(600, scale_of(96)), 600);
+    }
+
+    /// A screen that does not answer is the baseline one.
+    #[test]
+    fn a_screen_that_does_not_answer_is_the_baseline_one() {
+        assert_eq!(scale_of(0), SCALE_PERCENT);
     }
 
     #[test]

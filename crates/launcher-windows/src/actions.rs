@@ -162,33 +162,6 @@ pub fn paste_text() -> Clipboard {
     }
 }
 
-// `ShellExecuteW` is the one call here that is not in a library the Rust
-// toolchain links by default: it lives in the shell library, and a launch
-// that cannot open a file is not a launch.
-#[link(name = "shell32")]
-unsafe extern "system" {
-    fn ShellExecuteW(
-        hwnd: HWND,
-        lpOperation: *const u16,
-        lpFile: *const u16,
-        lpParameters: *const u16,
-        lpDirectory: *const u16,
-        nShowCmd: i32,
-    ) -> isize;
-    fn OpenClipboard(hWndNewOwner: HWND) -> i32;
-    fn EmptyClipboard() -> i32;
-    fn CloseClipboard() -> i32;
-    fn SetClipboardData(uFormat: u32, hMem: HANDLE) -> HANDLE;
-    fn GetClipboardData(uFormat: u32) -> HANDLE;
-    fn GlobalSize(hMem: HANDLE) -> usize;
-    fn GlobalAlloc(uFlags: u32, dwBytes: usize) -> HANDLE;
-    fn GlobalLock(hMem: HANDLE) -> *mut c_void;
-    fn GlobalUnlock(hMem: HANDLE) -> i32;
-    fn GlobalFree(hMem: HANDLE) -> HANDLE;
-}
-
-use core::ffi::c_void;
-
 const SW_SHOWNORMAL: i32 = 1;
 const CF_UNICODETEXT: u32 = 13;
 const GMEM_MOVEABLE: u32 = 0x0002;
