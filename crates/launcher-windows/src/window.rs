@@ -38,7 +38,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::ffi::c_void;
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicU16, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use rgy_launcher::layout::{BASE_DPI, SCALE_PERCENT, device_pixels, model_pixels};
 use rgy_launcher::{Action, Layout, Mode, Preview, Row};
@@ -1747,18 +1747,26 @@ unsafe fn state_of(hwnd: HWND) -> Option<*mut State> {
 
 /// The registered window class, once.
 ///
-/// The atom is a word: zero is "not registered yet", and anything else is
-/// the atom itself. The class is registered once per process — registering
+/// The flag is a word: false is "not registered yet", and true is the
+/// class itself. The class is registered once per process -- registering
 /// the same class twice is an error on Windows, and the launcher has one
-/// window — and the word is what the second caller reads instead of
+/// window -- and the flag is what the second caller reads instead of
 /// registering again.
-static CLASS_ATOM: AtomicU16 = AtomicU16::new(0);
+static CLASS_REGISTERED: AtomicBool = AtomicBool::new(false);
 
 /// Register the window class, once.
-fn register_class() -> Result<u16, String> {
-    let known = CLASS_ATOM.load(Ordering::Acquire);
-    if known != 0 {
-        return Ok(known);
+///
+/// The window is made by the class's **name**, so the platform's handle
+/// for the class -- the atom -- is not needed to make it, and the only
+/// thing the registration has to get right is that the class is there.
+///
+/// Two callers that both find the class missing are two threads, and the
+/// second registration is an error that says the class is already there.
+/// That is not a failure: a class that is registered is the class this
+/// caller wanted.
+fn register_class() -> Result<(), String> {
+    if CLASS_REGISTERED.load(Ordering::Acquire) {
+        return Ok(());
     }
     let atom = unsafe {
         let wc = WNDCLASSEXW {
@@ -1781,13 +1789,13 @@ fn register_class() -> Result<u16, String> {
     };
     if atom == 0 {
         let code = unsafe { GetLastError() };
-        return Err(format!("the window class could not be registered ({code})"));
+        if code != ERROR_CLASS_ALREADY_EXISTS {
+            return Err(format!("the window class could not be registered ({code})"));
+        }
+        // The class is there: another thread registered it a moment ago.
     }
-    // The first one to register owns the class; whoever comes later takes
-    // the atom it got, because a second registration of the same class is
-    // an error and not a new class.
-    let _ = CLASS_ATOM.compare_exchange(0, atom, Ordering::AcqRel, Ordering::Acquire);
-    Ok(CLASS_ATOM.load(Ordering::Acquire))
+    CLASS_REGISTERED.store(true, Ordering::Release);
+    Ok(())
 }
 
 /// Whether a Control key is down.
@@ -2101,6 +2109,27 @@ mod tests {
     fn the_compositor_takes_the_window_picture() {
         let window = Window::new("rgxy-test").expect("the window was made");
         assert_eq!(window.compositor(), Compositor::Accepted);
+    }
+
+    /// Two windows at once are two windows.
+    ///
+    /// The class is registered once per process, and two threads that
+    /// both find it missing are two threads that both try to register
+    /// it: the second one is told the class is already there, and a
+    /// class that is already registered is the class the caller wanted.
+    /// The window is made by the class's name, so the atom is not needed.
+    #[test]
+    fn two_windows_at_once_are_two_windows() {
+        extern crate std;
+        let handles: Vec<_> = (0..8)
+            .map(|_| std::thread::spawn(|| Window::new("rgxy-test").is_ok()))
+            .collect();
+        for handle in handles {
+            assert!(
+                handle.join().expect("the thread ended"),
+                "the window was made"
+            );
+        }
     }
 
     /// The window is on the screen.

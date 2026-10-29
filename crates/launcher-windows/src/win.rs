@@ -183,6 +183,12 @@ pub const WS_EX_TOOLWINDOW: u32 = 0x0000_0080;
 pub const WS_EX_TOPMOST: u32 = 0x0000_0008;
 pub const CS_VREDRAW: u32 = 0x0001;
 pub const CS_HREDRAW: u32 = 0x0002;
+
+/// The error Windows gives when a window class is registered twice.
+///
+/// It is not a failure of the class: the class is there, and whoever
+/// asked for it has what it asked for.
+pub const ERROR_CLASS_ALREADY_EXISTS: u32 = 1410;
 pub const CS_DROPSHADOW: u32 = 0x0002_0000;
 
 pub const SW_HIDE: i32 = 0;
