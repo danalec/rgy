@@ -289,30 +289,53 @@ for crate in $CRATES; do
     while IFS= read -r rel; do
         [ -n "$rel" ] || continue
         dst="$repo_root/$rel"
-        if [ ! -f "$dst" ]; then
-            if [ "$DRY_RUN" = 1 ]; then
-                echo "  add    $rel"
+        if [ "$DRY_RUN" = 1 ]; then
+            # A dry run writes nothing: not the copy, not the patch, and not
+            # the file a patch creates. A dry run that moves a file out of
+            # the tree and puts it back is a dry run that can be caught out.
+            if [ -f "$dst" ]; then
+                echo "  update $rel"
+                copied=$((copied + 1))
             else
-                mkdir -p "$(dirname "$dst")" || exit 1
-                git -C "$UPSTREAM" cat-file blob "$upstream_commit:$rel" > "$dst" || exit 1
                 echo "  add    $rel"
-            fi
-            added=$((added + 1))
-            if [ "$DRY_RUN" = 0 ]; then
-                apply_local_patch "$rel" || exit 1
+                added=$((added + 1))
             fi
             continue
         fi
-        if [ "$DRY_RUN" = 1 ]; then
-            echo "  update $rel"
-        else
+        # The tree's file is moved aside before the copy. The copy is
+        # upstream's bytes and the patch goes on top of it; if the patch
+        # does not apply, the file that was here goes back -- a failed patch
+        # must not leave the tree holding upstream's bytes with the local
+        # fix silently gone.
+        existed=0
+        saved=""
+        if [ -f "$dst" ]; then
+            existed=1
+            saved="$(mktemp)" || exit 1
+            cp "$dst" "$saved" || exit 1
+        fi
+        if [ "$existed" = 1 ]; then
             git -C "$UPSTREAM" cat-file blob "$upstream_commit:$rel" > "$dst" || exit 1
             echo "  update $rel"
+            copied=$((copied + 1))
+        else
+            mkdir -p "$(dirname "$dst")" || exit 1
+            git -C "$UPSTREAM" cat-file blob "$upstream_commit:$rel" > "$dst" || exit 1
+            echo "  add    $rel"
+            added=$((added + 1))
         fi
-        copied=$((copied + 1))
-        if [ "$DRY_RUN" = 0 ]; then
-            apply_local_patch "$rel" || exit 1
+        if ! apply_local_patch "$rel"; then
+            if [ "$existed" = 1 ]; then
+                cp "$saved" "$dst"
+            else
+                # The copy created it, and the patch that would have made it
+                # right did not apply: the file goes away again.
+                rm -f "$dst"
+            fi
+            [ -n "$saved" ] && rm -f "$saved"
+            exit 1
         fi
+        [ -n "$saved" ] && rm -f "$saved"
     done < "$to_copy"
 
     # The files rgy has and the pinned upstream does not, that a patch
@@ -333,6 +356,14 @@ for crate in $CRATES; do
         # top of it.
         grep -Fxq "$rel" "$upstream_paths" && continue
         dst="$repo_root/$rel"
+        if [ "$DRY_RUN" = 1 ]; then
+            # A dry run writes nothing -- and this block is the one that
+            # takes the tree's file away, so it is the one that has to be
+            # careful.
+            echo "  add    $rel (the patch creates it)"
+            patched=$((patched + 1))
+            continue
+        fi
         # The patch creates the file, so the file has to be gone when the
         # patch runs. It is moved aside first: a patch that does not apply
         # must not take the tree's file with it.
