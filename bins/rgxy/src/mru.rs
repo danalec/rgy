@@ -19,17 +19,31 @@
 //! A text file, one line per path:
 //!
 //! ```text
-//! # rgy usage: count<TAB>last<TAB>path
+//! # rgy usage v2: count<TAB>last<TAB>path
+//! # the path is escaped: \n, \r, \t and \\ are the characters a line cannot carry
 //! 3<TAB>1760000000<TAB>C:/Users/dana/notas.txt
 //! ```
 //!
-//! The path is **last**, because a path may carry a tab and the first two
-//! tabs are the only separators there are. A line that does not parse is
-//! a line that is skipped, and a file whose last line was cut short does
-//! not get that line at all. A store that cannot be **read** is another
-//! thing altogether: the launcher says so and carries on, because a
-//! memory that is silently not there is a memory the user believes in
-//! and the machine does not have.
+//! The path is **last**, because the first two tabs are the only
+//! separators there are. A path that carries a tab, a newline or a
+//! backslash is **escaped**: a backslash stands for the character after
+//! it, and the character is spelled out — `\n`, `\r`, `\t` — while a
+//! backslash is a backslash. Without it a path with a newline in it is
+//! two lines, and the launcher opens half a path.
+//!
+//! The **version** is in the header, and it is what tells the two
+//! formats apart: a store that starts with the header above is read
+//! with the escape, and a store that does not is the one written before
+//! the escape existed and is read the old way, with the path as it is.
+//! An old file whose path looks like an escape is read the old way too.
+//!
+//! A line that does not parse is a line that is skipped, and a file
+//! whose last line was cut short does not get that line at all. A store
+//! that cannot be **read** is another thing altogether: the launcher
+//! says so and carries on, because a memory that is silently not there
+//! is a memory the user believes in and the machine does not have — and
+//! the write that follows moves the broken file aside and starts the
+//! memory again, so one bad file does not cost every use from then on.
 //!
 //! The path is the **daemon's** spelling of the path, and it is the
 //! spelling the history is looked up with: the launcher and the daemon
@@ -71,6 +85,20 @@ const LOCK_WAIT_MS: u64 = 5;
 #[cfg(windows)]
 const ERROR_SHARING_VIOLATION: i32 = 32;
 
+/// The first line of a store in the format this version writes.
+///
+/// The version is what tells the two formats apart: a store that starts
+/// with this line is read with the escape, and a store that does not is
+/// the one written before the escape existed.
+const HEADER: &str = "# rgy usage v2: count\tlast\tpath";
+
+/// The second line of the header: what the escape is.
+///
+/// The store is a file a person may have to read, and a backslash in a
+/// path says nothing unless the file says what it means.
+const HEADER_NOTE: &str =
+    "# the path is escaped: \\n, \\r, \\t and \\\\ are what a line cannot carry";
+
 /// The file the history lives in.
 pub fn store_path() -> Option<PathBuf> {
     let cache = rgy_proto::endpoint::cache_dir()?;
@@ -97,7 +125,8 @@ pub fn now() -> u64 {
 /// A file that is there and cannot be read is an error, and it is kept:
 /// the history is gone for this run, the ranking falls back to the
 /// daemon's order and the nudge does not come back — and the launcher
-/// has to say that much.
+/// has to say that much. The **write** is what recovers: it moves the
+/// broken file aside and starts the memory again.
 pub fn load(path: &Path) -> Result<History, std::io::Error> {
     match std::fs::read_to_string(path) {
         Ok(text) => Ok(parse(&text)),
@@ -121,9 +150,18 @@ pub fn read_error(err: &std::io::Error) -> String {
 /// Every line that does not make sense is skipped: the store is written
 /// by a program that can be killed halfway through, and a launcher that
 /// refuses to start because of half a line is a launcher nobody uses.
+///
+/// The **version** is what tells the two formats apart: a store that
+/// carries the header of this version is read with the escape, and a
+/// store that does not is the one written before the escape existed, and
+/// its paths are read as they are.
 pub fn parse(text: &str) -> History {
     let mut history = History::new();
     let lines: Vec<&str> = text.lines().collect();
+    // The version is in the header: a store that does not carry it is
+    // the one written before the escape existed, and its paths are read
+    // as they are.
+    let escaped = text.starts_with(HEADER);
     // A file that does not end in a newline was cut short by whatever cut
     // it, and its last line is half a line: half a line is not a path.
     let whole = text.ends_with('\n');
@@ -150,7 +188,12 @@ pub fn parse(text: &str) -> History {
         if uses == 0 || path.is_empty() {
             continue;
         }
-        history.insert(path, uses, last);
+        let path = if escaped {
+            unescape_path(path)
+        } else {
+            path.to_string()
+        };
+        history.insert(&path, uses, last);
     }
     history
 }
@@ -198,13 +241,38 @@ pub fn save(path: &Path, history: &History) -> std::io::Result<()> {
     // writes a store that says nothing about what the first one did.
     let _lock = Lock::take(&lock_path(path))?;
     // The file says what it says now: another launcher may have written
-    // while this one was running. A file that cannot be read is not a
-    // file with no history: the merge would throw away what is in it,
-    // and the write is refused rather than the history lost.
-    let on_disk = load(path)?;
+    // while this one was running.
+    let on_disk = match load(path) {
+        Ok(history) => history,
+        Err(err) => {
+            // A file that cannot be read is not a file with no history:
+            // the merge would throw away what is in it, and the write is
+            // refused rather than the history lost. But a store that
+            // stays broken takes every use with it, for every run after
+            // this one, so the broken file is moved aside and the memory
+            // starts again from what the caller holds.
+            quarantine(path, err)?;
+            History::new()
+        }
+    };
     let merged = merge(&on_disk, history);
     let id = TEMP_ID.fetch_add(1, Ordering::Relaxed);
     write_store(path, &merged, id)
+}
+
+/// Move a store that could not be read aside.
+///
+/// The file stays on the disk under a name of its own: the launcher
+/// cannot use what is in it, but the person who has to look at what
+/// happened can still read it.
+fn quarantine(path: &Path, cause: std::io::Error) -> std::io::Result<()> {
+    // Only a file is moved: a directory at the store's path is
+    // something else that took the name, and moving it away would move
+    // a thing the launcher does not own.
+    if path.is_dir() {
+        return Err(cause);
+    }
+    std::fs::rename(path, quarantine_path(path))
 }
 
 /// The history that is written down: what the file says, and what the
@@ -305,6 +373,20 @@ fn temp_path(path: &Path, id: u64) -> PathBuf {
 /// the write, and a lock on a file that is replaced is a lock on nothing.
 fn lock_path(path: &Path) -> PathBuf {
     sibling(path, ".lock")
+}
+
+/// The file a store that could not be read is moved to.
+///
+/// The number keeps every broken store: the one with no number is the
+/// one that broke last, and the ones before it are still there.
+fn quarantine_path(path: &Path) -> PathBuf {
+    let mut name = sibling(path, ".broken");
+    let mut number = 1;
+    while std::fs::symlink_metadata(&name).is_ok() {
+        name = sibling(path, &format!(".broken.{number}"));
+        number += 1;
+    }
+    name
 }
 
 /// A file of the store's own, beside it.
@@ -431,16 +513,76 @@ mod unix_lock {
 
 /// The text of the store.
 pub fn render(history: &History) -> String {
-    let mut text = String::from("# rgy usage: count\tlast\tpath\n");
+    let mut text = String::from(HEADER);
+    text.push('\n');
+    text.push_str(HEADER_NOTE);
+    text.push('\n');
     for entry in history.entries() {
         text.push_str(&entry.uses.to_string());
         text.push('\t');
         text.push_str(&entry.last.to_string());
         text.push('\t');
-        text.push_str(&entry.path);
+        text.push_str(&escape_path(&entry.path));
         text.push('\n');
     }
     text
+}
+
+/// The path, with the characters a line cannot carry escaped.
+///
+/// The escape is the one everybody knows: a backslash stands for the
+/// character after it. The characters the format needs are spelled out —
+/// a newline, a carriage return and a tab — and a backslash is a
+/// backslash.
+pub fn escape_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for ch in path.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// The path the escaped text says.
+///
+/// A backslash before a character the escape does not name is the
+/// backslash and the character: the store is a file a person may fix by
+/// hand, and a path that carries a backslash nobody meant to escape is
+/// still the path it was.
+pub fn unescape_path(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut escaped = false;
+    for ch in text.chars() {
+        if escaped {
+            escaped = false;
+            match ch {
+                'n' => out.push('\n'),
+                'r' => out.push('\r'),
+                't' => out.push('\t'),
+                '\\' => out.push('\\'),
+                other => {
+                    out.push('\\');
+                    out.push(other);
+                }
+            }
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        out.push(ch);
+    }
+    if escaped {
+        // A backslash at the end of the line is a backslash.
+        out.push('\\');
+    }
+    out
 }
 
 #[cfg(test)]
@@ -843,6 +985,128 @@ mod tests {
         assert!(
             temporary_files(&dir).is_empty(),
             "a temporary file was left behind"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The path that carries a character a line cannot carry.
+    ///
+    /// A newline in a path is two lines in a file that has one entry per
+    /// line, and the launcher would open the first half of the path.
+    /// The escape is what keeps the entry whole.
+    #[test]
+    fn a_path_with_a_newline_survives_the_store() {
+        let dir = scratch("mru-newline");
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("usage.tsv");
+
+        let tricky = "/a/we\nird.txt";
+        let mut history = History::new();
+        history.record(tricky, 1_000);
+        save(&path, &history).expect("the store is written");
+
+        // The store is one entry per line: the newline in the path did
+        // not become a second line.
+        let text = std::fs::read_to_string(&path).expect("the store is there");
+        assert_eq!(text.lines().count(), 3, "{text}");
+        assert!(text.contains("we\\nird.txt"), "{text}");
+
+        let read = load(&path).expect("the store is read");
+        assert!(
+            read.get(tricky).is_some(),
+            "the path did not survive: {:?}",
+            read.entries()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What is written is what is read back.
+    ///
+    /// Every shape a path can take: the separators of the format, the
+    /// character the escape is made of, and a name that is not ASCII.
+    #[test]
+    fn the_escape_round_trips() {
+        let paths = [
+            "/a/plain.txt",
+            "/a/we\tird.txt",
+            "/a/we\nird.txt",
+            "/a/we\\ird.txt",
+            "/a/we\\nird.txt",
+            "/a/ção — ñ.txt",
+        ];
+        for path in paths {
+            let mut history = History::new();
+            history.record(path, 1_000);
+            let read = parse(&render(&history));
+            assert!(read.get(path).is_some(), "{path} did not survive");
+            assert_eq!(unescape_path(&escape_path(path)), path);
+        }
+    }
+
+    /// The store that was written before the escape is still read.
+    ///
+    /// The old format has no escape in it, so a path that looks like one
+    /// is still the path it was: the version in the header is what tells
+    /// the two formats apart.
+    #[test]
+    fn a_store_written_before_the_escape_is_still_read() {
+        // The old header, and a path whose backslash-n is two
+        // characters and not a newline.
+        let old = parse("# rgy usage: count\tlast\tpath\n3\t1000\t/a/we\\nird.txt\n");
+        let entry = old.get("/a/we\\nird.txt").expect("the path is there");
+        assert_eq!(entry.uses, 3);
+        assert_eq!(entry.last, 1000);
+
+        // A file with no header at all is the old format too.
+        let old = parse("3\t1000\t/a/we\\nird.txt\n");
+        assert!(old.get("/a/we\\nird.txt").is_some());
+    }
+
+    /// The same path, written by the two formats, is the same path.
+    ///
+    /// The new format escapes the backslash, so the file says what the
+    /// old file said: the escape is not a change of the path, it is a
+    /// change of the spelling.
+    #[test]
+    fn the_header_tells_the_two_formats_apart() {
+        let old = parse("# rgy usage: count\tlast\tpath\n1\t1000\t/a/we\\nird.txt\n");
+        let new = parse("# rgy usage v2: count\tlast\tpath\n1\t1000\t/a/we\\\\nird.txt\n");
+        assert!(old.get("/a/we\\nird.txt").is_some(), "{:?}", old.entries());
+        assert!(new.get("/a/we\\nird.txt").is_some(), "{:?}", new.entries());
+    }
+
+    /// A store that cannot be read does not take every use with it.
+    ///
+    /// The broken file is moved aside and the store is written again: a
+    /// store that stays broken is a launcher that forgets everything
+    /// from now on, and the file that broke is still there to look at.
+    #[test]
+    fn a_store_that_cannot_be_read_is_moved_aside_and_written_again() {
+        let dir = scratch("mru-recover");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("the folder is there");
+        let path = dir.join("usage.tsv");
+        // A file that is not text: the read fails on the bytes.
+        let broken = [0xff_u8, 0xfe, 0x00];
+        std::fs::write(&path, broken).expect("the broken store is there");
+
+        let mut history = History::new();
+        history.record("/a/notas.txt", 1_000);
+        save(&path, &history).expect("the store is written again");
+
+        let read = load(&path).expect("the store is read");
+        assert!(
+            read.get("/a/notas.txt").is_some(),
+            "the entry did not survive: {:?}",
+            read.entries()
+        );
+
+        // The broken file is still there, under a name of its own.
+        let aside = dir.join("usage.tsv.broken");
+        assert_eq!(
+            std::fs::read(&aside).expect("the broken store is there"),
+            broken,
+            "the broken store was not kept"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
