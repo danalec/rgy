@@ -38,7 +38,7 @@
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 use rgy_launcher::usage::History;
-use rgy_launcher::{Action, Answer, App, Mode, Row, Source, commands};
+use rgy_launcher::{Action, Answer, App, Mode, Preview, Row, Source, commands};
 use rgy_launcher_windows::actions;
 use rgy_launcher_windows::hook::Hook;
 use rgy_launcher_windows::window::{Compositor, Control, Event, Key, View, Window};
@@ -74,6 +74,13 @@ enum Waiting {
 /// session belongs to the window, and the answer comes back to the
 /// thread that draws it.
 ///
+/// A preview that came back, with the path it answers for.
+///
+/// The path is the answer's: a preview for a path the user has moved on
+/// from is dropped, and the panel does not show a file the user did not
+/// ask about.
+type PreviewReply = (String, Preview);
+
 /// The trait is here and not in the launcher crate because the launcher
 /// crate is `no_std` and knows nothing about a window.
 trait WindowSource {
@@ -81,10 +88,15 @@ trait WindowSource {
     fn set_session(&mut self, id: u64);
 
     /// Ask the daemon who it is.
-    fn ask_who(&mut self);
+    ///
+    /// False when the question did not go down: the worker is gone, and
+    /// an answer that cannot come is not an answer.
+    fn ask_who(&mut self) -> bool;
 
     /// Ask the daemon for the rows.
-    fn ask(&mut self, query: &str, limit: usize, generation: u64);
+    ///
+    /// False when the question did not go down, for the same reason.
+    fn ask(&mut self, query: &str, limit: usize, generation: u64) -> bool;
 
     /// The answer that came back, if there is one.
     fn take(&mut self) -> Option<Reply>;
@@ -231,6 +243,18 @@ impl Daemon {
         Daemon { outbox, inbox }
     }
 
+    /// A daemon whose worker is gone.
+    ///
+    /// The channel the questions go down is closed: nothing reads it,
+    /// and the question has nowhere to go.
+    #[cfg(test)]
+    fn dead() -> Daemon {
+        let (outbox, requests) = channel::<Request>();
+        drop(requests);
+        let (_answers, inbox) = channel::<Reply>();
+        Daemon { outbox, inbox }
+    }
+
     /// A daemon that asks through a worker of the test's own.
     #[cfg(test)]
     fn with_worker<F, W>(make: F) -> Daemon
@@ -251,16 +275,20 @@ impl WindowSource for Daemon {
         let _ = self.outbox.send(Request::Session(id));
     }
 
-    fn ask_who(&mut self) {
-        let _ = self.outbox.send(Request::Who);
+    fn ask_who(&mut self) -> bool {
+        // The send fails when the worker is gone: the channel it reads
+        // is closed, and the question has nowhere to go.
+        self.outbox.send(Request::Who).is_ok()
     }
 
-    fn ask(&mut self, query: &str, limit: usize, generation: u64) {
-        let _ = self.outbox.send(Request::Search {
-            query: query.to_string(),
-            limit,
-            generation,
-        });
+    fn ask(&mut self, query: &str, limit: usize, generation: u64) -> bool {
+        self.outbox
+            .send(Request::Search {
+                query: query.to_string(),
+                limit,
+                generation,
+            })
+            .is_ok()
     }
 
     fn take(&mut self) -> Option<Reply> {
@@ -351,6 +379,21 @@ struct State {
     notes: Receiver<String>,
     /// Where the notes go.
     note_tx: Sender<String>,
+    /// The previews that come back from the thread that reads them.
+    ///
+    /// The preview reads the file, and the file may be on a share that
+    /// is not there: the read blocks for the SMB timeout, and the
+    /// thread that draws the window must not block.
+    previews: Receiver<PreviewReply>,
+    /// Where the previews go.
+    preview_tx: Sender<PreviewReply>,
+    /// The path whose preview is being read.
+    ///
+    /// Two previews can be on their way at once, and the one the user
+    /// asked for last is the one that counts: a preview that arrives
+    /// for a path the user has moved on from is dropped, and the panel
+    /// does not show a file the user did not ask about.
+    preview_pending: Option<String>,
     /// What the user used, and when.
     ///
     /// The launcher's own memory: the daemon ranks by relevance, and what
@@ -472,6 +515,7 @@ pub fn run(source: DaemonSource, options: &Options) -> Result<(), String> {
     };
 
     let (note_tx, notes): (Sender<String>, Receiver<String>) = channel();
+    let (preview_tx, previews): (Sender<PreviewReply>, Receiver<PreviewReply>) = channel();
     let mut state = State {
         app: App::new(),
         source: Box::new(Daemon::new(source)),
@@ -487,6 +531,9 @@ pub fn run(source: DaemonSource, options: &Options) -> Result<(), String> {
         note,
         notes,
         note_tx,
+        previews,
+        preview_tx,
+        preview_pending: None,
         history,
         usage_path,
     };
@@ -563,6 +610,9 @@ fn handle(state: &mut State, event: Event) -> Control {
     // machine, and the line under the field is where the machine is
     // described.
     take_notes(state);
+    // The preview that came back is applied here too: it was read on
+    // another one, for the same reason.
+    let previewed = take_preview(state);
     // The answer that came back is applied here, on the thread that
     // draws the window: the daemon was asked on another one.
     let answered = apply_reply(state);
@@ -597,7 +647,7 @@ fn handle(state: &mut State, event: Event) -> Control {
         Event::Resize => paint(state),
         Event::Quit => Control::Quit,
     };
-    if answered && matches!(control, Control::None) {
+    if (answered || previewed) && matches!(control, Control::None) {
         // The answer is on the screen and nothing else changed: the
         // window has to be told.
         return paint(state);
@@ -615,6 +665,25 @@ fn take_notes(state: &mut State) {
     while let Ok(message) = state.notes.try_recv() {
         state.note = Some(message);
     }
+}
+
+/// The preview that came back.
+///
+/// The preview answers for the path it was asked about: two previews
+/// can be on their way at once, and the one that lands is the one the
+/// user asked for last. A preview for a path the user has moved on from
+/// is dropped -- the panel does not show a file the user did not ask
+/// about.
+fn take_preview(state: &mut State) -> bool {
+    let mut applied = false;
+    while let Ok((path, preview)) = state.previews.try_recv() {
+        if state.preview_pending.as_deref() == Some(path.as_str()) {
+            state.preview_pending = None;
+            state.app.set_preview(preview);
+            applied = true;
+        }
+    }
+    applied
 }
 
 /// A key.
@@ -915,7 +984,18 @@ fn run_action(state: &mut State, action: Action) -> Control {
             paint(state)
         }
         Action::Preview => {
-            state.app.set_preview(preview::of(&row.path));
+            // The preview reads the file, and the file may be on a share
+            // that is not there: the read blocks for the SMB timeout, and
+            // the thread that draws the window must not block. The read
+            // goes to a thread of its own, and the panel says it is
+            // waiting.
+            let path = row.path.clone();
+            let tx = state.preview_tx.clone();
+            state.preview_pending = Some(path.clone());
+            state.app.set_preview(preview::pending(&path));
+            std::thread::spawn(move || {
+                let _ = tx.send((path.clone(), preview::of(&path)));
+            });
             paint(state)
         }
         Action::Menu => {
@@ -991,7 +1071,9 @@ fn tick(state: &mut State) -> Control {
         // The question the user typed comes first.
         let generation = state.generation;
         let query = state.app.query().text().to_string();
-        state.source.ask(&query, LIMIT, generation);
+        if !state.source.ask(&query, LIMIT, generation) {
+            return worker_gone(state);
+        }
         state.in_flight = true;
         return paint(state);
     }
@@ -1000,11 +1082,27 @@ fn tick(state: &mut State) -> Control {
     // with nothing else to do: the question the user typed comes first.
     if state.ask_daemon {
         state.ask_daemon = false;
-        state.source.ask_who();
+        if !state.source.ask_who() {
+            return worker_gone(state);
+        }
         state.in_flight = true;
         return paint(state);
     }
     Control::None
+}
+
+/// The worker that asks the daemon is gone.
+///
+/// The question did not go down, so no answer is coming: the launcher
+/// is not waiting for one, and it says why. A launcher that waits for
+/// an answer that cannot come is a launcher that stopped answering the
+/// keyboard, and one that says nothing about it is a launcher the user
+/// cannot tell from a frozen one.
+fn worker_gone(state: &mut State) -> Control {
+    state.in_flight = false;
+    state.waiting = Waiting::Idle;
+    state.note = Some("a thread que pergunta ao daemon morreu".to_string());
+    paint(state)
 }
 
 /// The answer, on the screen.
@@ -1201,7 +1299,7 @@ mod tests {
     impl WindowSource for Recording {
         fn set_session(&mut self, _id: u64) {}
 
-        fn ask_who(&mut self) {
+        fn ask_who(&mut self) -> bool {
             // A test has no daemon: the question is asked and nothing
             // answers it. The status knows that it was asked, so a test
             // can see when the launcher spoke to it.
@@ -1210,15 +1308,17 @@ mod tests {
                 messages: Vec::new(),
                 status: self.status.clone(),
             });
+            true
         }
 
-        fn ask(&mut self, query: &str, _limit: usize, generation: u64) {
+        fn ask(&mut self, query: &str, _limit: usize, generation: u64) -> bool {
             self.asked.borrow_mut().push(query.to_string());
             self.answers.push(Reply::Search {
                 generation,
                 answer: answer_with("C:/a/notas.txt"),
                 status: self.status.clone(),
             });
+            true
         }
 
         fn take(&mut self) -> Option<Reply> {
@@ -1234,6 +1334,7 @@ mod tests {
     fn recording() -> (State, Rc<RefCell<Vec<String>>>) {
         let asked = Rc::new(RefCell::new(Vec::new()));
         let (note_tx, notes): (Sender<String>, Receiver<String>) = channel();
+        let (preview_tx, previews): (Sender<PreviewReply>, Receiver<PreviewReply>) = channel();
         let state = State {
             app: App::new(),
             source: Box::new(Recording::new(Rc::clone(&asked))),
@@ -1249,6 +1350,9 @@ mod tests {
             note: None,
             notes,
             note_tx,
+            previews,
+            preview_tx,
+            preview_pending: None,
             history: History::new(),
             usage_path: None,
         };
@@ -2069,6 +2173,77 @@ mod tests {
         let line = status_line(&state);
         assert!(line.contains("histórico"), "{line}");
         assert!(!line.contains("atalho global"), "{line}");
+    }
+
+    /// The worker that asks the daemon is gone.
+    ///
+    /// The question did not go down, so no answer is coming: the
+    /// launcher is not waiting for one, and it says why. A launcher that
+    /// waits for an answer that cannot come is a launcher that stopped
+    /// answering the keyboard, and one that says nothing about it is a
+    /// launcher the user cannot tell from a frozen one.
+    #[test]
+    fn a_worker_that_is_gone_is_said_out_loud() {
+        let (mut state, _) = recording();
+        state.source = Box::new(Daemon::dead());
+        state.app.insert('i');
+        let _ = handle(&mut state, Event::Toggle);
+
+        let _ = handle(&mut state, Event::Tick);
+        assert!(
+            !state.in_flight,
+            "the launcher is not waiting for an answer that cannot come"
+        );
+        assert_eq!(state.waiting, Waiting::Idle, "the launcher is not looking");
+        let line = status_line(&state);
+        assert!(line.contains("morreu"), "the launcher says why: {line}");
+        assert!(
+            !line.contains("procurando"),
+            "the launcher is not looking for an answer: {line}"
+        );
+    }
+
+    /// The preview does not wait for the file.
+    ///
+    /// The file may be on a share that is not there, and the read blocks
+    /// for the SMB timeout: the window that waits for it is a window
+    /// that does not move. The read goes to a thread of its own, the
+    /// panel says it is waiting, and the preview lands when the read is
+    /// over.
+    #[test]
+    fn the_preview_does_not_wait_for_the_file() {
+        let (mut state, _) = recording();
+        let dir = scratch("preview");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("the folder is there");
+        let file = dir.join("notas.txt");
+        std::fs::write(&file, "zebra\n").expect("the file is written");
+        state
+            .app
+            .set_results(vec![Row::new(file.to_string_lossy().into_owned(), 0)]);
+        let _ = run_action(&mut state, Action::Preview);
+
+        // The panel says it is waiting: the read has not come back yet.
+        let panel = state.app.preview().expect("the panel is there");
+        assert!(
+            panel.lines.join(" ").contains("a ler"),
+            "the panel says it is waiting: {panel:?}"
+        );
+
+        // And the preview lands when the read is over.
+        let mut landed = false;
+        for _ in 0..200 {
+            take_preview(&mut state);
+            if let Some(panel) = state.app.preview()
+                && panel.lines.join(" ").contains("zebra")
+            {
+                landed = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(landed, "the preview landed");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The window does not wait for the store.

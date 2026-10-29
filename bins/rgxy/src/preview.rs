@@ -61,6 +61,19 @@ pub fn of(path: &str) -> Preview {
     Preview { title, lines }
 }
 
+/// The preview that says the file is being read.
+///
+/// The read happens on a thread of its own -- the file may be on a
+/// share that is not there, and the read blocks for the SMB timeout --
+/// so the panel has something to show while it waits. A panel that is
+/// empty looks like a bug.
+pub fn pending(path: &str) -> Preview {
+    Preview {
+        title: name_of(path),
+        lines: vec!["a ler\u{2026}".to_string()],
+    }
+}
+
 /// The beginning of the file, and only the beginning.
 ///
 /// The file is opened and the first [`MAX_BYTES`] are read: the preview
