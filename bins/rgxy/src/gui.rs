@@ -20,12 +20,25 @@
 //! after the window is up, and the line under the field says the launcher
 //! is looking. A key handler that waits for the daemon is a window that
 //! does not move.
+//!
+//! # The worker
+//!
+//! The daemon is asked on a **thread of its own**. The thread that owns
+//! the window must never wait for the daemon: the daemon can take
+//! seconds to answer, and a window that waits for it is a window that
+//! does not move and does not take keys. The question goes down a
+//! channel, the answer comes back the same way, and the answer is
+//! applied on the thread that draws the window.
+//!
+//! One question is on its way at a time. A keystroke typed while the
+//! answer is in flight does not start a second question: the answer
+//! that comes back is the answer to the question that was asked, and an
+//! answer for a question the user has moved on from is dropped.
 
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::mpsc::{Receiver, Sender, channel};
 
 use rgy_launcher::usage::History;
-use rgy_launcher::{Action, Answer, App, Layer, Mode, Row, Source, commands};
+use rgy_launcher::{Action, Answer, App, Mode, Row, Source, commands};
 use rgy_launcher_windows::actions;
 use rgy_launcher_windows::hook::Hook;
 use rgy_launcher_windows::window::{Compositor, Control, Event, Key, View, Window};
@@ -50,48 +63,208 @@ const PLACEHOLDER: &str = "Buscar arquivos, apps ou comandos…";
 enum Waiting {
     /// Nothing: the launcher is not waiting for an answer.
     Idle,
-    /// The name layer's answer: the question has not been asked yet, and
-    /// the clock asks it.
-    Names,
-    /// The content layer's answer: the files were chosen and the clock
-    /// waited for them.
-    Content,
+    /// An answer is on its way.
+    Answer,
 }
 
 /// What the state needs from a source.
 ///
 /// The launcher's own trait is the question and the answer; the window
-/// needs two more things: the line under the field is about the last
-/// answer, and the session belongs to the window.
+/// needs three more things: the daemon is asked on another thread, the
+/// session belongs to the window, and the answer comes back to the
+/// thread that draws it.
 ///
 /// The trait is here and not in the launcher crate because the launcher
 /// crate is `no_std` and knows nothing about a window.
-trait WindowSource: Source {
-    /// What the window shows about the last answer.
-    fn status(&self) -> Rc<RefCell<Status>>;
-
+trait WindowSource {
     /// The session the daemon knows this window by.
     fn set_session(&mut self, id: u64);
 
-    /// Ask the daemon who it is, and say what it said.
-    ///
-    /// The sentences are the ones the window shows under the field: the
-    /// daemon's own when it is not there, and what the daemon said when
-    /// it is there but slow.
-    fn ask_the_daemon(&mut self) -> Vec<String>;
+    /// Ask the daemon who it is.
+    fn ask_who(&mut self);
+
+    /// Ask the daemon for the rows.
+    fn ask(&mut self, query: &str, limit: usize, generation: u64);
+
+    /// The answer that came back, if there is one.
+    fn take(&mut self) -> Option<Reply>;
 }
 
-impl WindowSource for DaemonSource {
-    fn status(&self) -> Rc<RefCell<Status>> {
-        DaemonSource::status(self)
+/// A question that goes down to the worker.
+enum Request {
+    /// The daemon's own question: whether it is there, and whether it
+    /// has a pack store.
+    Who,
+    /// The user's question, and the number of the question it is.
+    Search {
+        /// The question, as the user typed it.
+        query: String,
+        /// How many results are asked for.
+        limit: usize,
+        /// The number of the question.
+        generation: u64,
+    },
+    /// The session the daemon knows this window by.
+    Session(u64),
+}
+
+/// An answer that comes back from the worker.
+enum Reply {
+    /// The daemon's own question, answered.
+    Who {
+        /// The sentences the user is to be told.
+        messages: Vec<String>,
+        /// The status the answer left behind.
+        status: Status,
+    },
+    /// The user's question, answered.
+    Search {
+        /// The number of the question the answer is for.
+        generation: u64,
+        /// The rows.
+        answer: Answer,
+        /// The status the answer left behind.
+        status: Status,
+    },
+}
+
+/// What the thread that asks the daemon does.
+///
+/// The trait is the seam a test uses: a worker that takes three seconds
+/// to answer is a worker the window must not wait for.
+trait Worker {
+    /// The answer to the question. `None` when the question needs no
+    /// answer.
+    fn answer(&mut self, request: Request) -> Option<Reply>;
+}
+
+/// The worker that asks the daemon.
+///
+/// The source lives here, on the thread that asks: the window's thread
+/// must not hold the connection, because the connection is what waits.
+struct DaemonWorker {
+    /// The source that answers.
+    source: DaemonSource,
+}
+
+impl Worker for DaemonWorker {
+    fn answer(&mut self, request: Request) -> Option<Reply> {
+        match request {
+            Request::Who => Some(Reply::Who {
+                messages: self.source.ask_the_daemon(),
+                status: self.source.snapshot(),
+            }),
+            Request::Search {
+                query,
+                limit,
+                generation,
+            } => Some(Reply::Search {
+                generation,
+                answer: self.source.search(&query, limit),
+                status: self.source.snapshot(),
+            }),
+            Request::Session(id) => {
+                self.source.set_session(id);
+                None
+            }
+        }
+    }
+}
+
+/// The thread that asks the daemon.
+///
+/// The worker is built **inside** the thread: the source that answers
+/// holds a connection, and a connection is not something the thread
+/// that draws the window may keep.
+fn spawn_worker<F, W>(make: F) -> (Sender<Request>, Receiver<Reply>)
+where
+    F: FnOnce() -> W + Send + 'static,
+    W: Worker + 'static,
+{
+    let (outbox, requests) = channel::<Request>();
+    let (answers, inbox) = channel::<Reply>();
+    std::thread::Builder::new()
+        .name("rgxy-daemon".to_string())
+        .spawn(move || {
+            let mut worker = make();
+            while let Ok(request) = requests.recv() {
+                let Some(reply) = worker.answer(request) else {
+                    continue;
+                };
+                if answers.send(reply).is_err() {
+                    // The window is gone: nobody is going to read the
+                    // answer.
+                    break;
+                }
+            }
+        })
+        .expect("the daemon's thread starts");
+    (outbox, inbox)
+}
+
+/// The daemon, asked on a worker thread.
+///
+/// The window's thread must never wait for the daemon: the daemon can
+/// take seconds to answer, and the window that waits for it is a
+/// window that does not move. The question goes down a channel and the
+/// answer comes back the same way, and the thread that draws the
+/// window blocks on neither.
+struct Daemon {
+    /// The questions that go down.
+    outbox: Sender<Request>,
+    /// The answers that come back.
+    inbox: Receiver<Reply>,
+}
+
+impl Daemon {
+    /// The daemon, asked on a worker thread.
+    fn new(source: DaemonSource) -> Daemon {
+        // The source that answers is the worker's: the window's thread
+        // must not hold the connection, because the connection is what
+        // waits.
+        let endpoint = source.endpoint().clone();
+        let rgx = source.rgx().map(str::to_string);
+        let window = source.window();
+        let (outbox, inbox) = spawn_worker(move || DaemonWorker {
+            source: DaemonSource::with_window(endpoint, rgx, window),
+        });
+        Daemon { outbox, inbox }
     }
 
+    /// A daemon that asks through a worker of the test's own.
+    #[cfg(test)]
+    fn with_worker<F, W>(make: F) -> Daemon
+    where
+        F: FnOnce() -> W + Send + 'static,
+        W: Worker + 'static,
+    {
+        let (outbox, inbox) = spawn_worker(make);
+        Daemon { outbox, inbox }
+    }
+}
+
+impl WindowSource for Daemon {
     fn set_session(&mut self, id: u64) {
-        DaemonSource::set_session(self, id);
+        // The session belongs to the source, and the source is on the
+        // worker: the session goes down the same channel the questions
+        // do.
+        let _ = self.outbox.send(Request::Session(id));
     }
 
-    fn ask_the_daemon(&mut self) -> Vec<String> {
-        DaemonSource::ask_the_daemon(self)
+    fn ask_who(&mut self) {
+        let _ = self.outbox.send(Request::Who);
+    }
+
+    fn ask(&mut self, query: &str, limit: usize, generation: u64) {
+        let _ = self.outbox.send(Request::Search {
+            query: query.to_string(),
+            limit,
+            generation,
+        });
+    }
+
+    fn take(&mut self) -> Option<Reply> {
+        self.inbox.try_recv().ok()
     }
 }
 
@@ -138,6 +311,46 @@ struct State {
     /// the window is up: the window is up before the daemon is asked, and
     /// the answer lands in the window that is already there.
     ask_daemon: bool,
+    /// Whether a question is on its way to the daemon.
+    ///
+    /// One at a time: a keystroke typed while the first question is on
+    /// its way does not start a second question, and the answer that
+    /// comes back is the answer to the question that was asked.
+    in_flight: bool,
+    /// The question the launcher is on.
+    ///
+    /// The number goes up every time the query changes, and the answer
+    /// that comes back carries the number of the question it answers: an
+    /// answer for a question the user has moved on from is dropped
+    /// rather than shown as the answer to the question on the screen.
+    generation: u64,
+    /// The query the rows on the screen answer.
+    ///
+    /// The rows are the answer to a question, and the question is not
+    /// always the one in the field: a keystroke typed while the answer
+    /// was on its way leaves the list showing the results of the
+    /// question before it.
+    rows_query: Option<String>,
+    /// The status of the answer that is on the screen.
+    ///
+    /// The status comes with the answer: the count, the layer and the
+    /// time belong to the answer, and a status that describes another
+    /// answer describes a question the user is not asking.
+    status: Status,
+    /// What the launcher has to say about the machine it is on.
+    ///
+    /// One note and not a list: the note is about the machine, it is
+    /// true while the launcher is the way it is, and an answer does not
+    /// change it. A list would grow with every use and push the answer
+    /// off the line.
+    note: Option<String>,
+    /// The notes that arrive while the window is down.
+    ///
+    /// The write of the memory is on a thread of its own, and what it
+    /// has to say arrives here.
+    notes: Receiver<String>,
+    /// Where the notes go.
+    note_tx: Sender<String>,
     /// What the user used, and when.
     ///
     /// The launcher's own memory: the daemon ranks by relevance, and what
@@ -145,12 +358,6 @@ struct State {
     history: History,
     /// Where the memory is kept.
     usage_path: Option<std::path::PathBuf>,
-    /// What the launcher has to say about the machine it is on.
-    ///
-    /// The notes are here and not in the warnings because an answer
-    /// does not make them go away: a refused hotkey is still refused
-    /// when the daemon answers.
-    notes: Vec<String>,
 }
 
 impl State {
@@ -166,10 +373,8 @@ impl State {
         let text = self.app.query().text();
         if text.is_empty() {
             Waiting::Idle
-        } else if self.app.layer() == Layer::Content {
-            Waiting::Content
         } else {
-            Waiting::Names
+            Waiting::Answer
         }
     }
 
@@ -177,21 +382,29 @@ impl State {
     /// down so that the next run of the launcher knows it too.
     fn record_use(&mut self, path: &str) {
         self.history.record(path, mru::now());
-        // The write is tried and its answer is kept: a memory that
-        // cannot be written is not a launcher that stops working — the
-        // use is remembered for this session, and the write is tried
-        // again on the next use. The user is told anyway: a memory that
-        // is silently not written is a memory the user believes in and
-        // the machine does not have.
-        let written = match &self.usage_path {
-            Some(file) => mru::save(file, &self.history),
-            None => return,
+        // The write is on a thread of its own: the store is behind a
+        // lock, and the lock can be held for half a second. The
+        // launcher that opened the result is already gone by then, and
+        // the window that waits for a file lock is a window that does
+        // not move.
+        let Some(file) = self.usage_path.clone() else {
+            return;
         };
-        if let Err(reason) = written {
-            let message = format!("o histórico não foi gravado: {reason}");
-            eprintln!("rgxy: {message}");
-            self.notes.push(message);
-        }
+        let history = self.history.clone();
+        let notes = self.note_tx.clone();
+        std::thread::spawn(move || {
+            // The write is tried and its answer is kept: a memory that
+            // cannot be written is not a launcher that stops working — the
+            // use is remembered for this session, and the write is tried
+            // again on the next use. The user is told anyway: a memory
+            // that is silently not written is a memory the user believes
+            // in and the machine does not have.
+            if let Err(reason) = mru::save(&file, &history) {
+                let message = format!("o histórico não foi gravado: {reason}");
+                eprintln!("rgxy: {message}");
+                let _ = notes.send(message);
+            }
+        });
     }
 }
 
@@ -226,8 +439,10 @@ pub fn run(source: DaemonSource, options: &Options) -> Result<(), String> {
 
     // What the launcher has to say about the machine it is on: a
     // refused hotkey and a memory that could not be read are two
-    // facts, and the line under the field carries both of them.
-    let mut notes: Vec<String> = Vec::new();
+    // facts, and the line under the field carries both of them — in
+    // one note, because a note that grows with every use pushes the
+    // answer off the line.
+    let mut facts: Vec<String> = Vec::new();
     // The window goes up when the launcher was asked to show itself, and
     // also when the hotkey was refused: the hotkey is the only thing that
     // raises the window, and a launcher that cannot be raised is a
@@ -236,11 +451,11 @@ pub fn run(source: DaemonSource, options: &Options) -> Result<(), String> {
     // says what happened when the user opens it.
     let mut open_at_startup = options.show;
     if let Some(message) = refused {
-        notes.push(message);
+        facts.push(message);
         open_at_startup = true;
     }
     if let Some(message) = memory_note {
-        notes.push(message);
+        facts.push(message);
     }
     // The compositor refused the window's own picture: the window is up
     // and it paints itself, without the translucency, and the line says
@@ -248,20 +463,32 @@ pub fn run(source: DaemonSource, options: &Options) -> Result<(), String> {
     // told about, and the line under the field is where the launcher says
     // what is true of the machine it is on.
     if window.compositor() == Compositor::Refused {
-        notes.push("o ecrã recusou a superfície translúcida".to_string());
+        facts.push("o ecrã recusou a superfície translúcida".to_string());
     }
+    let note = if facts.is_empty() {
+        None
+    } else {
+        Some(facts.join("; "))
+    };
 
+    let (note_tx, notes): (Sender<String>, Receiver<String>) = channel();
     let mut state = State {
         app: App::new(),
-        source: Box::new(source),
+        source: Box::new(Daemon::new(source)),
         clipboard: Box::new(actions::paste_text),
         open: Box::new(actions::open),
         reveal: Box::new(actions::reveal),
         waiting: Waiting::Idle,
         ask_daemon: true,
+        in_flight: false,
+        generation: 0,
+        rows_query: None,
+        status: Status::default(),
+        note,
+        notes,
+        note_tx,
         history,
         usage_path,
-        notes,
     };
 
     // The rows the screen has room for: the window is sized from them, and
@@ -296,7 +523,9 @@ pub fn run(source: DaemonSource, options: &Options) -> Result<(), String> {
     // takes the connection and then says nothing does not keep the window
     // off the screen, and it does not keep the hotkey from working
     // either — the launcher that waits for the daemon before it waits for
-    // the user is a launcher that is late for both.
+    // the user is a launcher that is late for both. The question goes
+    // down to the worker, and the thread that draws the window never
+    // waits for the answer.
 
     window.pump(|event| handle(&mut state, event))
 }
@@ -330,7 +559,14 @@ fn memory(path: Option<&std::path::Path>) -> (History, Option<String>) {
 
 /// One event, and what the window should do about it.
 fn handle(state: &mut State, event: Event) -> Control {
-    match event {
+    // The notes that arrived while the window was down are about the
+    // machine, and the line under the field is where the machine is
+    // described.
+    take_notes(state);
+    // The answer that came back is applied here, on the thread that
+    // draws the window: the daemon was asked on another one.
+    let answered = apply_reply(state);
+    let control = match event {
         Event::Toggle => {
             state.app.toggle();
             if state.app.is_visible() {
@@ -349,8 +585,9 @@ fn handle(state: &mut State, event: Event) -> Control {
                 show(state)
             } else {
                 // The window goes down and nothing is waited for: the
-                // clock stops with it, and the answer that was on its way
-                // has nowhere to land.
+                // clock stops with it. The answer that was on its way
+                // lands when the window comes back up — the question it
+                // answers is still the one in the field.
                 state.waiting = Waiting::Idle;
                 Control::Hide
             }
@@ -359,6 +596,24 @@ fn handle(state: &mut State, event: Event) -> Control {
         Event::Tick => tick(state),
         Event::Resize => paint(state),
         Event::Quit => Control::Quit,
+    };
+    if answered && matches!(control, Control::None) {
+        // The answer is on the screen and nothing else changed: the
+        // window has to be told.
+        return paint(state);
+    }
+    control
+}
+
+/// The notes that arrived while the window was down.
+///
+/// The note is about the machine: it is true while the launcher is the
+/// way it is, and an answer does not change it. One note and not a
+/// list: a list grows with every use and pushes the answer off the
+/// line.
+fn take_notes(state: &mut State) {
+    while let Ok(message) = state.notes.try_recv() {
+        state.note = Some(message);
     }
 }
 
@@ -475,6 +730,10 @@ fn on_key(state: &mut State, key: Key) -> Control {
 /// move. The line under the field says the launcher is looking, and the
 /// answer lands in a window that is already up.
 fn changed(state: &mut State) -> Control {
+    // The question moved on: the answer that comes back for the
+    // previous question is dropped, and the rows that are on the screen
+    // are the answer to the question before it.
+    state.generation = state.generation.wrapping_add(1);
     // A command line is not a search: the engine would look for the
     // literal text ">folder" and answer nothing, while the line is a
     // command — so the launcher takes it before the engine sees it.
@@ -510,6 +769,7 @@ fn changed(state: &mut State) -> Control {
 fn cleared(state: &mut State) {
     state.app.set_results(Vec::new());
     state.app.set_warnings(Vec::new());
+    state.rows_query = None;
 }
 
 /// The clipboard's text, into the query.
@@ -611,8 +871,13 @@ fn run_action(state: &mut State, action: Action) -> Control {
             let opened = (state.open)(&row.path);
             match opened {
                 Ok(()) => {
-                    state.record_use(&row.path);
+                    // The window goes down **before** the memory is
+                    // written: the write is behind a lock that another
+                    // writer can hold for half a second, and the
+                    // launcher that opened the result does not wait for
+                    // any of it.
                     state.app.hide();
+                    state.record_use(&row.path);
                     Control::Hide
                 }
                 Err(reason) => {
@@ -663,23 +928,51 @@ fn run_action(state: &mut State, action: Action) -> Control {
     }
 }
 
-/// Ask for the answers, now.
-fn ask(state: &mut State) {
-    let text = state.app.query().text().to_string();
-    if text.is_empty() {
-        // An empty box is not a question. The launcher that opens in a
-        // blink does not ask the daemon to rank the whole index before
-        // the user has typed anything.
-        cleared(state);
-        return;
+/// The answer that came back, on the screen.
+///
+/// The answer is applied here, on the thread that draws the window: it
+/// was asked on another one, and a row installed by a thread that does
+/// not own the model is a row nobody can paint.
+///
+/// False when nothing was applied: an answer for a question the user
+/// has moved on from is dropped, and the question that is on the screen
+/// is asked again on the next tick.
+fn apply_reply(state: &mut State) -> bool {
+    let Some(reply) = state.source.take() else {
+        return false;
+    };
+    match reply {
+        Reply::Who { messages, status } => {
+            state.in_flight = false;
+            state.status = status;
+            for message in &messages {
+                eprintln!("rgxy: {message}");
+            }
+            if !messages.is_empty() {
+                // Whatever the user has to be told, the window tells it:
+                // the stderr of a program started from a shortcut is
+                // nowhere.
+                state.app.set_warnings(messages);
+            }
+        }
+        Reply::Search {
+            generation,
+            answer,
+            status,
+        } => {
+            state.in_flight = false;
+            if generation != state.generation {
+                // The answer is for a question the user has moved on
+                // from: it is dropped rather than shown as the answer
+                // to the question that is on the screen.
+                return false;
+            }
+            state.status = status;
+            apply(state, answer);
+            state.waiting = Waiting::Idle;
+        }
     }
-    if state.app.layer() == Layer::Content {
-        // The content layer reads files: it waits for the clock.
-        state.waiting = Waiting::Content;
-        return;
-    }
-    let answer = state.source.search(&text, LIMIT);
-    apply(state, answer);
+    true
 }
 
 /// The clock ticked: the turn of whatever the launcher was waiting for.
@@ -688,40 +981,27 @@ fn ask(state: &mut State) {
 /// clock only ticks while the window is up — and the answer lands in
 /// that window.
 fn tick(state: &mut State) -> Control {
-    match state.waiting {
-        Waiting::Idle => {}
-        Waiting::Names => {
-            // The window is up; now the daemon is asked.
-            state.waiting = Waiting::Idle;
-            ask(state);
-            return paint(state);
-        }
-        Waiting::Content => {
-            state.waiting = Waiting::Idle;
-            let text = state.app.query().text().to_string();
-            let answer = state.source.search(&text, LIMIT);
-            apply(state, answer);
-            return paint(state);
-        }
+    if state.in_flight {
+        // One question at a time: the answer that is on its way is the
+        // answer to the question that was asked, and a keystroke typed
+        // while it is on its way does not start a second one.
+        return Control::None;
+    }
+    if state.waiting != Waiting::Idle {
+        // The question the user typed comes first.
+        let generation = state.generation;
+        let query = state.app.query().text().to_string();
+        state.source.ask(&query, LIMIT, generation);
+        state.in_flight = true;
+        return paint(state);
     }
     // The daemon's own question — whether it is there, and whether it has
     // a pack store — is asked on the clock too, and it waits for a tick
     // with nothing else to do: the question the user typed comes first.
-    //
-    // The question is asked in the launcher's own window — two seconds,
-    // and not the client's thirty — because the launcher lives on the
-    // thread that draws the window.
     if state.ask_daemon {
         state.ask_daemon = false;
-        let messages = state.source.ask_the_daemon();
-        for message in &messages {
-            eprintln!("rgxy: {message}");
-        }
-        if !messages.is_empty() {
-            // Whatever the user has to be told, the window tells it: the
-            // stderr of a program started from a shortcut is nowhere.
-            state.app.set_warnings(messages);
-        }
+        state.source.ask_who();
+        state.in_flight = true;
         return paint(state);
     }
     Control::None
@@ -751,7 +1031,10 @@ fn apply(state: &mut State, answer: Answer) {
         })
         .collect();
     state.app.set_results(rows);
-    let warnings = state.source.status().borrow().warnings.clone();
+    // The rows on the screen answer the question that was asked: the
+    // line says so when the question on the screen is another one.
+    state.rows_query = Some(state.app.query().text().to_string());
+    let warnings = state.status.warnings.clone();
     state.app.set_warnings(warnings);
 }
 
@@ -807,8 +1090,7 @@ fn show(state: &State) -> Control {
 
 /// The one line under the field.
 fn status_line(state: &State) -> String {
-    let status = state.source.status();
-    let status = status.borrow();
+    let status = &state.status;
     let mut parts: Vec<String> = Vec::new();
     if state.waiting != Waiting::Idle {
         // The answer is on its way, and the line says so: a launcher that
@@ -825,7 +1107,17 @@ fn status_line(state: &State) -> String {
     // `rgx` fallback answers while the daemon is away, and a line that
     // hides the answer because the daemon is not there hides the one
     // thing the user asked for.
-    parts.push(format!("{} resultados", status.matches));
+    let mut count = format!("{} resultados", status.matches);
+    if let Some(query) = &state.rows_query
+        && query != state.app.query().text()
+        && !state.app.results().is_empty()
+    {
+        // The rows on the screen answer another question, and the line
+        // says which one: a list of results under a field that says
+        // something else is a list of results for another question.
+        count = format!("{count} de \"{query}\"");
+    }
+    parts.push(count);
     if !status.layer.is_empty() {
         parts.push(status.layer.to_string());
     }
@@ -844,7 +1136,7 @@ fn status_line(state: &State) -> String {
             parts.push(format!("{} ms", status.took_us / 1000));
         }
     }
-    for note in &state.notes {
+    if let Some(note) = &state.note {
         // The note is about the machine: it is true while the launcher
         // is the way it is, and an answer does not change it.
         parts.push(note.clone());
@@ -858,80 +1150,90 @@ fn status_line(state: &State) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
     /// A directory of the test's own.
     fn scratch(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("rgy-rgxy-{name}-{}", std::process::id()))
     }
 
+    /// An answer with one row in it.
+    fn answer_with(path: &str) -> Answer {
+        Answer {
+            paths: vec![path.to_string()],
+            spans: vec![Vec::new()],
+            contexts: Vec::new(),
+            folders: vec![false],
+        }
+    }
+
     /// A state with no daemon and no results.
     fn empty() -> State {
-        let mut source = DaemonSource::new(
-            rgy_proto::endpoint::Endpoint::Socket(std::path::PathBuf::from(
-                "/tmp/rgy-rgxy-nope.sock",
-            )),
-            None,
-        );
-        let _ = source.search("invoice", LIMIT);
-        State {
-            app: App::new(),
-            source: Box::new(source),
-            clipboard: Box::new(|| actions::Clipboard::Text(String::new())),
-            open: Box::new(|_| Err("um teste não abre ficheiros".to_string())),
-            reveal: Box::new(|_| Err("um teste não abre pastas".to_string())),
-            waiting: Waiting::Idle,
-            ask_daemon: false,
-            history: History::new(),
-            usage_path: None,
-            notes: Vec::new(),
-        }
+        let (mut state, _) = recording();
+        // The daemon was asked and it is not there: the line says so.
+        state.status.asked = true;
+        state.status.connected = false;
+        state
     }
 
     /// A source that remembers the questions it was asked.
     ///
     /// The daemon is not there in a test, and a question that is never
-    /// asked is a question that cannot break: the double answers
-    /// nothing, and the test says what the launcher asked.
+    /// asked is a question that cannot break: the double answers, and
+    /// the test says what the launcher asked.
     struct Recording {
         asked: Rc<RefCell<Vec<String>>>,
-        status: Rc<RefCell<Status>>,
+        status: Status,
+        answers: Vec<Reply>,
     }
 
     impl Recording {
         fn new(asked: Rc<RefCell<Vec<String>>>) -> Recording {
             Recording {
                 asked,
-                status: Rc::new(RefCell::new(Status::default())),
+                status: Status::default(),
+                answers: Vec::new(),
             }
         }
     }
 
-    impl Source for Recording {
-        fn search(&mut self, query: &str, _limit: usize) -> Answer {
-            self.asked.borrow_mut().push(query.to_string());
-            Answer::empty()
-        }
-    }
-
     impl WindowSource for Recording {
-        fn status(&self) -> Rc<RefCell<Status>> {
-            Rc::clone(&self.status)
-        }
-
         fn set_session(&mut self, _id: u64) {}
 
-        fn ask_the_daemon(&mut self) -> Vec<String> {
+        fn ask_who(&mut self) {
             // A test has no daemon: the question is asked and nothing
             // answers it. The status knows that it was asked, so a test
             // can see when the launcher spoke to it.
-            self.status.borrow_mut().asked = true;
-            Vec::new()
+            self.status.asked = true;
+            self.answers.push(Reply::Who {
+                messages: Vec::new(),
+                status: self.status.clone(),
+            });
+        }
+
+        fn ask(&mut self, query: &str, _limit: usize, generation: u64) {
+            self.asked.borrow_mut().push(query.to_string());
+            self.answers.push(Reply::Search {
+                generation,
+                answer: answer_with("C:/a/notas.txt"),
+                status: self.status.clone(),
+            });
+        }
+
+        fn take(&mut self) -> Option<Reply> {
+            if self.answers.is_empty() {
+                None
+            } else {
+                Some(self.answers.remove(0))
+            }
         }
     }
 
     /// A state whose source is a double, and the questions it was asked.
     fn recording() -> (State, Rc<RefCell<Vec<String>>>) {
         let asked = Rc::new(RefCell::new(Vec::new()));
+        let (note_tx, notes): (Sender<String>, Receiver<String>) = channel();
         let state = State {
             app: App::new(),
             source: Box::new(Recording::new(Rc::clone(&asked))),
@@ -940,9 +1242,15 @@ mod tests {
             reveal: Box::new(|_| Err("um teste não abre pastas".to_string())),
             waiting: Waiting::Idle,
             ask_daemon: false,
+            in_flight: false,
+            generation: 0,
+            rows_query: None,
+            status: Status::default(),
+            note: None,
+            notes,
+            note_tx,
             history: History::new(),
             usage_path: None,
-            notes: Vec::new(),
         };
         (state, asked)
     }
@@ -953,6 +1261,91 @@ mod tests {
         let text = text.to_string();
         state.clipboard = Box::new(move || actions::Clipboard::Text(text.clone()));
         (state, asked)
+    }
+
+    /// The note the worker sends, when it arrives.
+    ///
+    /// The write of the memory is on a thread of its own, and the test
+    /// waits for it: a test that does not wait is a test that races the
+    /// machine.
+    fn wait_for_note(state: &mut State) -> Option<String> {
+        for _ in 0..200 {
+            take_notes(state);
+            if let Some(note) = state.note.clone() {
+                return Some(note);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        None
+    }
+
+    /// A worker that takes its time.
+    ///
+    /// The daemon can take seconds to answer, and the window that waits
+    /// for it is a window that does not move. The worker remembers what
+    /// it was asked, so a test can say how many questions went down.
+    struct SlowWorker {
+        /// How long the answer takes.
+        delay: std::time::Duration,
+        /// The questions that went down.
+        asked: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl Worker for SlowWorker {
+        fn answer(&mut self, request: Request) -> Option<Reply> {
+            match request {
+                Request::Who => {
+                    std::thread::sleep(self.delay);
+                    Some(Reply::Who {
+                        messages: Vec::new(),
+                        status: Status::default(),
+                    })
+                }
+                Request::Search {
+                    query, generation, ..
+                } => {
+                    self.asked.lock().unwrap().push(query.clone());
+                    std::thread::sleep(self.delay);
+                    Some(Reply::Search {
+                        generation,
+                        answer: Answer::empty(),
+                        status: Status::default(),
+                    })
+                }
+                // The session is not a question: it does not wait.
+                Request::Session(_) => None,
+            }
+        }
+    }
+
+    /// The lock beside the store.
+    ///
+    /// The name is the store's own business, and the test finds it
+    /// instead of spelling it: a test that spells the name of a file
+    /// that belongs to another module breaks when that module changes
+    /// its mind.
+    fn lock_file(store: &std::path::Path) -> std::path::PathBuf {
+        let dir = store.parent().expect("the store is in a folder");
+        let mut beside: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+            .expect("the folder is there")
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path != store)
+            .collect();
+        beside.sort();
+        beside
+            .into_iter()
+            .next()
+            .expect("the lock is beside the store")
+    }
+
+    /// Hold the lock, the way another writer holds it.
+    fn hold(path: &std::path::Path) -> std::fs::File {
+        use std::os::windows::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .share_mode(0)
+            .open(path)
+            .expect("the lock is held")
     }
 
     #[test]
@@ -995,7 +1388,7 @@ mod tests {
         // And the question is still to be asked: the daemon has not been
         // asked yet, and the answer is on its way to the window that is
         // already up.
-        assert_eq!(state.waiting, Waiting::Names, "the answer is on its way");
+        assert_eq!(state.waiting, Waiting::Answer, "the answer is on its way");
     }
 
     #[test]
@@ -1005,6 +1398,9 @@ mod tests {
         let mut state = empty();
         state.app.insert('i');
         let _ = handle(&mut state, Event::Toggle);
+        // The question goes down on the first tick, and the answer comes
+        // back on the next one: the daemon was asked on another thread.
+        let _ = handle(&mut state, Event::Tick);
         let control = handle(&mut state, Event::Tick);
         assert!(
             matches!(control, Control::Paint(..)),
@@ -1083,7 +1479,7 @@ mod tests {
         assert_eq!(state.app.query().text(), "invoice", "the text landed");
         // The question is asked on the clock: the window is up, and the
         // answer is on its way.
-        assert_eq!(state.waiting, Waiting::Names, "the answer is on its way");
+        assert_eq!(state.waiting, Waiting::Answer, "the answer is on its way");
         assert!(asked.borrow().is_empty(), "the daemon is asked later");
         let _ = handle(&mut state, Event::Tick);
         assert_eq!(asked.borrow().len(), 1, "the daemon was asked once");
@@ -1100,7 +1496,7 @@ mod tests {
         let (mut state, asked) = recording();
         let _ = on_key(&mut state, Key::Char('i'));
         assert!(asked.borrow().is_empty(), "the daemon is asked later");
-        assert_eq!(state.waiting, Waiting::Names, "the answer is on its way");
+        assert_eq!(state.waiting, Waiting::Answer, "the answer is on its way");
         let line = status_line(&state);
         assert!(line.contains("procurando"), "{line}");
         let _ = handle(&mut state, Event::Tick);
@@ -1227,7 +1623,7 @@ mod tests {
 
         // And the line under the field carries it.
         let mut state = empty();
-        state.notes = vec![note];
+        state.note = Some(note);
         let line = status_line(&state);
         assert!(line.contains("histórico"), "{line}");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1257,7 +1653,7 @@ mod tests {
     #[test]
     fn the_note_about_the_machine_is_in_the_line() {
         let mut state = empty();
-        state.notes = vec!["o atalho global não foi instalado: sem permissão".to_string()];
+        state.note = Some("o atalho global não foi instalado: sem permissão".to_string());
         let line = status_line(&state);
         assert!(line.contains("atalho global"), "{line}");
     }
@@ -1391,22 +1787,21 @@ mod tests {
         // The launcher starts: the daemon has to be asked who it is, and
         // the question is not asked yet.
         state.ask_daemon = true;
-        assert!(
-            !state.source.status().borrow().asked,
-            "the daemon was not asked yet"
-        );
+        assert!(!state.status.asked, "the daemon was not asked yet");
 
         // The window goes up.
         let _ = handle(&mut state, Event::Toggle);
         assert!(
-            !state.source.status().borrow().asked,
+            !state.status.asked,
             "the window goes up before the daemon is asked"
         );
 
-        // And the clock asks.
+        // And the clock asks. The answer comes back on the next tick:
+        // the daemon was asked on another thread.
+        let _ = handle(&mut state, Event::Tick);
         let _ = handle(&mut state, Event::Tick);
         assert!(
-            state.source.status().borrow().asked,
+            state.status.asked,
             "the clock asks the daemon, and the clock only ticks while the
             window is up"
         );
@@ -1420,10 +1815,9 @@ mod tests {
     /// one thing the user asked for.
     #[test]
     fn the_line_shows_the_answer_even_when_the_daemon_is_not_there() {
-        let (state, _) = recording();
+        let (mut state, _) = recording();
         {
-            let status = state.source.status();
-            let mut st = status.borrow_mut();
+            let st = &mut state.status;
             st.connected = false;
             st.matches = 3;
             st.layer = "conteúdo";
@@ -1468,7 +1862,7 @@ mod tests {
 
         assert_eq!(state.app.query().text(), "invoice", "the text landed");
         assert_ne!(state.app.mode(), Mode::Menu, "the menu is closed");
-        assert_eq!(state.waiting, Waiting::Names, "the answer is on its way");
+        assert_eq!(state.waiting, Waiting::Answer, "the answer is on its way");
         assert!(asked.borrow().is_empty(), "the daemon is asked later");
     }
 
@@ -1481,7 +1875,7 @@ mod tests {
     /// the same way the note about the hotkey does.
     #[test]
     fn the_history_that_could_not_be_written_is_said_out_loud() {
-        let mut state = empty();
+        let (mut state, _) = recording();
         // The parent of the store is a **file**: the write cannot be
         // made, and the launcher has to say so.
         let blocker = std::env::temp_dir().join(format!("rgy-rgxy-history-{}", std::process::id()));
@@ -1492,6 +1886,11 @@ mod tests {
             .set_results(vec![Row::new("C:/a/notas.txt".to_string(), 0)]);
         state.open = Box::new(|_| Ok(()));
         let _ = run_action(&mut state, Action::Open);
+
+        // The write is on another thread, and the note comes when it is
+        // over.
+        let note = wait_for_note(&mut state).expect("the note arrives");
+        assert!(note.contains("histórico"), "{note}");
         let line = status_line(&state);
         assert!(line.contains("histórico"), "{line}");
         let _ = std::fs::remove_file(&blocker);
@@ -1509,5 +1908,207 @@ mod tests {
             .set_results(vec![Row::new("C:/a/notas.txt".to_string(), 0)]);
         let _ = on_key(&mut state, Key::CtrlK);
         assert_eq!(state.app.mode(), Mode::Menu, "the menu is open");
+    }
+
+    /// The window does not wait for the daemon.
+    ///
+    /// The daemon takes three seconds to answer, and the window that
+    /// waits for it is a window that does not move and does not take
+    /// keys: the question goes down a channel and the clock returns.
+    #[test]
+    fn the_window_does_not_wait_for_the_daemon() {
+        let (mut state, _) = recording();
+        state.source = Box::new(Daemon::with_worker(|| SlowWorker {
+            delay: std::time::Duration::from_secs(3),
+            asked: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        }));
+        state.app.insert('i');
+        let _ = handle(&mut state, Event::Toggle);
+
+        let started = std::time::Instant::now();
+        let _ = handle(&mut state, Event::Tick);
+        let waited = started.elapsed();
+        assert!(
+            waited < std::time::Duration::from_secs(1),
+            "the window waited for the daemon: {waited:?}"
+        );
+        // And the answer is not there yet: it is on its way.
+        assert!(
+            state.app.results().is_empty(),
+            "the answer is still on its way"
+        );
+    }
+
+    /// A keystroke does not start a second question.
+    ///
+    /// A keystroke typed while the answer is in flight does not ask the
+    /// daemon anything: the question is asked on the clock, and the
+    /// clock waits for the question that is already on its way.
+    #[test]
+    fn a_keystroke_does_not_start_a_second_question() {
+        let (mut state, asked) = recording();
+        let _ = on_key(&mut state, Key::Char('i'));
+        let _ = handle(&mut state, Event::Tick);
+        assert_eq!(asked.borrow().len(), 1, "the daemon was asked once");
+        assert!(state.in_flight, "the question is on its way");
+
+        // The user types while the answer is on its way.
+        let _ = on_key(&mut state, Key::Char('n'));
+        assert_eq!(
+            asked.borrow().len(),
+            1,
+            "the keystroke did not start a second question"
+        );
+        assert!(state.in_flight, "the question is still on its way");
+    }
+
+    /// The question that is on its way is not asked a second time.
+    ///
+    /// The daemon is still answering when the clock ticks again, and a
+    /// second question would be a second daemon waiting on the same
+    /// pipe.
+    #[test]
+    fn a_question_that_is_on_its_way_is_not_asked_twice() {
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = std::sync::Arc::clone(&asked);
+        let (mut state, _) = recording();
+        state.source = Box::new(Daemon::with_worker(move || SlowWorker {
+            delay: std::time::Duration::from_secs(3),
+            asked: std::sync::Arc::clone(&recorder),
+        }));
+        state.app.insert('i');
+        let _ = handle(&mut state, Event::Toggle);
+        let _ = handle(&mut state, Event::Tick);
+        // The worker has the question; the answer is three seconds away.
+        for _ in 0..100 {
+            if !asked.lock().unwrap().is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        // The clock ticks again, and the question is not asked a second
+        // time.
+        let _ = handle(&mut state, Event::Tick);
+        let _ = handle(&mut state, Event::Tick);
+        let asked = asked.lock().unwrap();
+        assert_eq!(asked.len(), 1, "the daemon was asked once: {asked:?}");
+        assert_eq!(asked[0], "i", "the daemon was asked");
+    }
+
+    /// An answer for a question the user moved on from is dropped.
+    ///
+    /// The rows on the screen are the answer to a question, and a
+    /// question the user has moved on from is not the one the answer is
+    /// for.
+    #[test]
+    fn an_answer_for_a_question_the_user_moved_on_from_is_dropped() {
+        let (mut state, asked) = recording();
+        let _ = on_key(&mut state, Key::Char('i'));
+        // The question goes down.
+        let _ = handle(&mut state, Event::Tick);
+        assert_eq!(asked.borrow().len(), 1, "the daemon was asked once");
+        assert_eq!(asked.borrow()[0], "i", "the daemon was asked");
+
+        // The user types while the answer is on its way: the second
+        // keystroke does not start a second question, and the answer to
+        // the first one is dropped when it comes back.
+        let _ = on_key(&mut state, Key::Char('n'));
+        let _ = handle(&mut state, Event::Tick);
+        assert_eq!(
+            asked.borrow().len(),
+            2,
+            "the question on the screen is asked again"
+        );
+        assert_eq!(asked.borrow()[1], "in", "the question on the screen");
+        assert!(
+            state.app.results().is_empty(),
+            "the answer to another question is not shown"
+        );
+
+        // And the answer to the question on the screen lands.
+        let _ = handle(&mut state, Event::Tick);
+        assert!(
+            !state.app.results().is_empty(),
+            "the answer to the question on the screen is on the screen"
+        );
+    }
+
+    /// The rows on the screen say which question they answer.
+    ///
+    /// A keystroke typed while the answer is in flight leaves the list
+    /// showing the results of the question before it, and the line says
+    /// which question that is.
+    #[test]
+    fn the_rows_on_the_screen_say_which_question_they_answer() {
+        let (mut state, _) = recording();
+        let _ = on_key(&mut state, Key::Char('i'));
+        // The question goes down, and the answer comes back.
+        let _ = handle(&mut state, Event::Tick);
+        let _ = handle(&mut state, Event::Tick);
+        assert!(
+            !state.app.results().is_empty(),
+            "the answer is on the screen"
+        );
+
+        // The user types: the rows on the screen answer another
+        // question, and the line says which one.
+        let _ = on_key(&mut state, Key::Char('n'));
+        let line = status_line(&state);
+        assert!(line.contains("de \"i\""), "the line marks the rows: {line}");
+    }
+
+    /// The note about the machine is one note.
+    ///
+    /// The note is about the machine, and a note that grows with every
+    /// use pushes the answer off the line.
+    #[test]
+    fn the_note_about_the_machine_is_one_note() {
+        let mut state = empty();
+        state.note = Some("o atalho global não foi instalado: sem permissão".to_string());
+        state.note = Some("o histórico não foi gravado: o disco está cheio".to_string());
+        let line = status_line(&state);
+        assert!(line.contains("histórico"), "{line}");
+        assert!(!line.contains("atalho global"), "{line}");
+    }
+
+    /// The window does not wait for the store.
+    ///
+    /// The store is behind a lock, and the lock is held by another
+    /// writer: the write waits for it, and the launcher that opened the
+    /// result is already gone.
+    #[test]
+    fn the_window_does_not_wait_for_the_store() {
+        let (mut state, _) = recording();
+        let dir = scratch("gui-store");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("the folder is there");
+        let store = dir.join("usage.tsv");
+        // One write, so that the lock is there to be held.
+        mru::save(&store, &History::new()).expect("the store is written");
+        // The lock is held: the write cannot be made, and the writer
+        // waits for it.
+        let held = hold(&lock_file(&store));
+
+        state.usage_path = Some(store);
+        state
+            .app
+            .set_results(vec![Row::new("C:/a/notas.txt".to_string(), 0)]);
+        state.open = Box::new(|_| Ok(()));
+
+        let started = std::time::Instant::now();
+        let _ = run_action(&mut state, Action::Open);
+        let waited = started.elapsed();
+        assert!(
+            waited < std::time::Duration::from_millis(200),
+            "the window waited for the store: {waited:?}"
+        );
+        // And the window is already down.
+        assert!(!state.app.is_visible(), "the window went down first");
+
+        // The write gives up, and the launcher says so.
+        let note = wait_for_note(&mut state).expect("the write is over");
+        assert!(note.contains("histórico"), "{note}");
+        drop(held);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

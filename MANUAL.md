@@ -525,19 +525,29 @@ a warm index and the content layer **reads files** — the clock is the
 same for both, and the difference is in how long the answer takes, not
 in when it is asked.
 
-The window is up **before** the daemon is asked. The daemon is asked on
-the window's clock, and the clock only ticks while the window is up: a
-daemon that takes the connection and then says nothing does not keep the
-window off the screen, and it does not keep the hotkey from working
-either. The field is there, the line under it says `procurando…` while
-the question is on its way, and the answer lands in a window that is
-already on the screen. No single wait of the **window** is longer than
-**two seconds**: the client's own window is thirty, which is right for a
-program that waits in the background and wrong for a search box — thirty
-seconds of silence is a window that stopped answering the keyboard. The
-two seconds are the budget of the whole answer: the scope, the files and
-the fallback share it, so the window never stops answering for longer
-than it was given. A content query waits for the scope before it reads a
+The window is up **before** the daemon is asked, and the daemon is asked
+on a **thread of its own**: the thread that draws the window never waits
+for the daemon, so the window keeps taking keys while the question is on
+its way. The question goes down on the window's clock, and the clock only
+ticks while the window is up: a daemon that takes the connection and then
+says nothing does not keep the window off the screen, and it does not keep
+the hotkey from working either. The field is there, the line under it says
+`procurando…` while the question is on its way, and the answer lands
+in a window that is already on the screen.
+
+One question is on its way at a time. A keystroke typed while the answer
+is in flight does not start a second question, and the answer that comes
+back is the answer to the question that was asked: an answer for a
+question the user has moved on from is dropped, and the line under the
+field says which question the rows on the screen answer.
+
+The window itself never waits. The **two seconds** are the budget of the
+whole answer — the scope, the files and the fallback share it — and
+it is the worker that gives up when they are gone. The client's own window
+is thirty, which is right for a program that waits in the background and
+wrong for a search box — thirty seconds of silence is a window that
+stopped answering the keyboard.
+ A content query waits for the scope before it reads a
 byte. A daemon that is slow says so and the launcher carries on — a
 daemon that is slow is not a daemon that is gone, and the line under the
 field still shows what the last answer said.

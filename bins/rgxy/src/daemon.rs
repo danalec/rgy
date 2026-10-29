@@ -43,14 +43,16 @@ const SCOPE_LIMIT: usize = 64;
 
 /// The window the launcher gives the daemon to answer in.
 ///
-/// The launcher asks from the thread that draws the window, and the
-/// client's own window is thirty seconds — generous for a program that
-/// waits for an answer in the background, and far too long for a search
-/// box: thirty seconds of silence is a window that stopped answering the
-/// keyboard. Two seconds is long enough for the daemon to answer a warm
-/// index (which is microseconds) and for a cold one to be worth waiting
-/// for, and short enough that the launcher is still a launcher when the
-/// daemon is slow or stuck.
+/// The client's own window is thirty seconds — generous for a program
+/// that waits for an answer in the background, and far too long for a
+/// search box: thirty seconds of silence is a window that stopped
+/// answering the keyboard. Two seconds is long enough for the daemon to
+/// answer a warm index (which is microseconds) and for a cold one to be
+/// worth waiting for, and short enough that the launcher is still a
+/// launcher when the daemon is slow or stuck.
+///
+/// The launcher asks on a thread of its own, so the window never waits
+/// for this budget at all: the budget is what the **worker** gives up.
 pub const LAUNCHER_WINDOW: Duration = Duration::from_secs(2);
 
 /// What the launcher shows about the last answer.
@@ -81,17 +83,35 @@ pub struct Status {
     pub matches: usize,
 }
 
+/// Whether the daemon is there.
+///
+/// The three are three different facts about the machine: a daemon that
+/// could not be reached is gone, a daemon that took the connection and
+/// said nothing in the window is up and slow, and a daemon that took
+/// the connection and answered badly is up — it answered, and what it
+/// said was wrong. The line that says "sem ligação ao daemon" under
+/// a daemon that is up is a lie.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Presence {
+    /// The daemon is not there at all.
+    Gone,
+    /// The daemon is there and did not answer in the window.
+    Slow,
+    /// The daemon is there and answered badly.
+    Answered,
+}
+
 /// Why there is no answer.
 ///
-/// The sentence is what the user reads, and the flag says what the
+/// The sentence is what the user reads, and the presence says what the
 /// failure is: a daemon that did not answer in the window is up and
-/// slow, and a daemon that is not there is not there. The line that
-/// says "sem ligação ao daemon" under a daemon that is up is a lie.
+/// slow, a daemon that answered badly is up, and a daemon that is not
+/// there is not there.
 struct Failure {
     /// The sentence for the user.
     reason: String,
-    /// Whether the daemon was slow rather than gone.
-    slow: bool,
+    /// Whether the daemon is there.
+    presence: Presence,
 }
 
 impl Failure {
@@ -102,7 +122,7 @@ impl Failure {
     fn of(reason: &str, e: &std::io::Error) -> Failure {
         Failure {
             reason: format!("{reason}: {e}"),
-            slow: e.kind() == std::io::ErrorKind::TimedOut,
+            presence: presence(e),
         }
     }
 
@@ -110,8 +130,64 @@ impl Failure {
     fn gone(reason: String) -> Failure {
         Failure {
             reason,
-            slow: false,
+            presence: Presence::Gone,
         }
+    }
+}
+
+/// Whether the daemon is there, told by what went wrong.
+///
+/// Only a daemon that could not be **reached** is gone: the pipe that
+/// is not there, and the pipe that was closed. Everything else — the
+/// daemon's own error, a line that is not an answer, an answer that
+/// stops in the middle — is a daemon that IS there and answered badly,
+/// and the line that says "sem ligação ao daemon" about it is a lie.
+fn presence(e: &std::io::Error) -> Presence {
+    match e.kind() {
+        std::io::ErrorKind::TimedOut => Presence::Slow,
+        // The daemon that is not there: the pipe that is not there, the
+        // pipe that was closed, and the socket that refuses the
+        // connection because nobody is listening on it. A socket file
+        // left behind by a daemon that died is the common case, and a
+        // launcher that calls it "connected" is a launcher that hides
+        // the daemon the user has to start.
+        std::io::ErrorKind::BrokenPipe
+        | std::io::ErrorKind::NotFound
+        | std::io::ErrorKind::ConnectionRefused
+        | std::io::ErrorKind::ConnectionReset
+        | std::io::ErrorKind::ConnectionAborted => Presence::Gone,
+        _ => Presence::Answered,
+    }
+}
+
+/// The accessors the window's worker needs.
+///
+/// The window is the only reader: the platforms that have no window do
+/// not compile the module that reads them, and a method with no reader
+/// is a warning the gate fails on.
+#[cfg(windows)]
+impl DaemonSource {
+    /// Where the daemon is asked.
+    ///
+    /// The window's worker builds the source that answers, and it needs
+    /// to know where to ask: the source the caller made is only a
+    /// description of the daemon.
+    pub fn endpoint(&self) -> &Endpoint {
+        &self.endpoint
+    }
+
+    /// The `rgx` binary, when the machine has one.
+    pub fn rgx(&self) -> Option<&str> {
+        self.rgx.as_deref()
+    }
+
+    /// The status, as a copy.
+    ///
+    /// The copy is what travels to the thread that draws the window:
+    /// the status is about the answer, and the answer and the words
+    /// about it are two different moments.
+    pub fn snapshot(&self) -> Status {
+        (*self.status.borrow()).clone()
     }
 }
 
@@ -141,9 +217,8 @@ pub struct DaemonSource {
     /// The window the caller gives the daemon to answer in.
     ///
     /// The window is the **caller's** and not the source's: the window
-    /// that lives on the thread that draws it cannot wait the client's
-    /// thirty seconds, and the command line — which waits in the
-    /// background — can.
+    /// that draws cannot wait the client's thirty seconds, and the
+    /// command line — which waits in the background — can.
     window: Duration,
 }
 
@@ -180,8 +255,12 @@ impl DaemonSource {
     /// The window this source gives the daemon to answer in.
     ///
     /// The window is a property of the caller, and the caller that sets
-    /// it is the one that reads it: this is here for the tests.
-    #[cfg(test)]
+    /// it is the one that reads it.
+    ///
+    /// The window is the only reader outside a test, and the platforms
+    /// that have no window do not compile the module that reads it: a
+    /// reader that is not there is a warning the gate fails on.
+    #[cfg(any(windows, test))]
     pub fn window(&self) -> Duration {
         self.window
     }
@@ -239,9 +318,8 @@ impl DaemonSource {
     /// the content layer answers differently with one, and the user is
     /// told which.
     ///
-    /// The window is the **caller's**: the launcher asks from the thread
-    /// that draws the window, and a daemon that takes the connection and
-    /// then says nothing must not hold the window off the screen.
+    /// The window is the **caller's**: a daemon that takes the connection
+    /// and then says nothing must not hold the window off the screen.
     ///
     /// `false` when the daemon is not there at all — the connection
     /// failed. A daemon that is there and slow is not a daemon that is
@@ -344,9 +422,9 @@ impl DaemonSource {
         self.client = None;
         let mut st = self.status.borrow_mut();
         st.asked = true;
-        if !failure.slow {
-            st.connected = false;
-        }
+        // A daemon that answered badly is there: only the one that
+        // could not be reached is gone.
+        st.connected = failure.presence != Presence::Gone;
         st.warnings = vec![failure.reason.clone()];
     }
 
@@ -362,9 +440,8 @@ impl DaemonSource {
     /// `doc:` comes back empty and the content layer answers "nothing
     /// found" for a file that is on the disk.
     ///
-    /// The window is the **caller's**: the scope is asked on the thread
-    /// that draws the window, and a scope that takes thirty seconds is a
-    /// window that stopped answering the keyboard.
+    /// The window is the **caller's**: a scope that takes thirty seconds
+    /// is a window that stopped answering the keyboard.
     ///
     /// `Err` is the daemon's reason. A daemon that stopped answering is
     /// not a daemon that chose nothing, and the caller has to say which
@@ -556,7 +633,7 @@ impl DaemonSource {
             // The daemon's own sentence is the reason: it failed, and this
             // function did not. A daemon that is slow is not a daemon that
             // is gone, and the line says which one it was.
-            Some(reason) => (!reason.slow, reason.reason),
+            Some(reason) => (reason.presence != Presence::Gone, reason.reason),
             // The daemon is up and answering: the name part chose nothing,
             // so there was nothing to read. Saying the daemon is down here
             // would be a lie — it is answering.
@@ -830,6 +907,53 @@ mod tests {
     }
     use super::*;
 
+    /// A daemon that answered badly is a daemon that is there.
+    ///
+    /// The daemon's own error, a line that is not an answer and an
+    /// answer that stops in the middle are three ways of saying the
+    /// same thing: the daemon took the connection and said something
+    /// wrong. Only the daemon that could not be reached is gone.
+    #[test]
+    fn a_daemon_that_answered_badly_is_a_daemon_that_is_there() {
+        // The daemon's own error.
+        assert_eq!(
+            presence(&std::io::Error::other(
+                "o índice está em modo somente-leitura"
+            )),
+            Presence::Answered
+        );
+        // A line that is not an answer.
+        assert_eq!(
+            presence(&std::io::Error::from(std::io::ErrorKind::InvalidData)),
+            Presence::Answered
+        );
+        // An answer that stops in the middle.
+        assert_eq!(
+            presence(&std::io::Error::from(std::io::ErrorKind::UnexpectedEof)),
+            Presence::Answered
+        );
+        // A daemon that is not there.
+        assert_eq!(
+            presence(&std::io::Error::from(std::io::ErrorKind::NotFound)),
+            Presence::Gone
+        );
+        assert_eq!(
+            presence(&std::io::Error::from(std::io::ErrorKind::BrokenPipe)),
+            Presence::Gone
+        );
+        // The socket file of a daemon that died: the connection is
+        // refused, and the daemon is not there.
+        assert_eq!(
+            presence(&std::io::Error::from(std::io::ErrorKind::ConnectionRefused)),
+            Presence::Gone
+        );
+        // A daemon that took the connection and said nothing.
+        assert_eq!(
+            presence(&std::io::Error::from(std::io::ErrorKind::TimedOut)),
+            Presence::Slow
+        );
+    }
+
     #[test]
     fn a_content_line_says_where_the_word_is() {
         let file = rgy_proto::GrepFile {
@@ -995,6 +1119,29 @@ mod tests {
             } else {
                 let _ = peer.send(b"{\"op\":\"hits\",\"hits\":[],\"took_us\":1}\n");
                 let _ = peer.send(b"{\"op\":\"done\",\"count\":0}\n");
+            }
+        }
+    }
+
+    /// A daemon that answers with an error.
+    ///
+    /// The daemon is there and it says that it could not do what it was
+    /// asked: the sentence is its own, and it is what the user is told.
+    fn says_an_error(peer: Peer) {
+        let mut peer = peer;
+        while let Ok(request) = peer.read_line() {
+            if request.is_empty() {
+                break;
+            }
+            if request.contains("\"op\":\"status\"") {
+                let _ = peer.send(
+                    b"{\"op\":\"status\",\"docs\":0,\"event_id\":0,\"catch_up\":\"replayed\",\"tv\":false}\n",
+                );
+            } else {
+                let _ = peer.send(
+                    "{\"op\":\"error\",\"message\":\"o índice está em modo somente-leitura\"}\n"
+                        .as_bytes(),
+                );
             }
         }
     }
@@ -1214,6 +1361,35 @@ mod tests {
         assert!(
             warnings.iter().any(|w| w.contains("não respondeu a tempo")),
             "the status says the daemon did not answer in time: {warnings:?}"
+        );
+        drop(source);
+        daemon.join();
+    }
+
+    /// A daemon that answers with an error is not a daemon that is down.
+    ///
+    /// The daemon is there — it took the connection and it answered —
+    /// and what it said is what the user is told. The line that says
+    /// "sem ligação ao daemon" under it is a lie, and the daemon's
+    /// own sentence is the one that belongs there.
+    #[test]
+    fn a_daemon_that_answers_with_an_error_is_not_a_daemon_that_is_down() {
+        let daemon = serve(says_an_error);
+        let mut source = DaemonSource::new(daemon.endpoint.clone(), None);
+        let answer = source.search("invoice", 10);
+        assert!(answer.is_empty(), "there was no answer");
+        let st = source.status();
+        assert!(st.borrow().connected, "the daemon is there: it answered");
+        let warnings = st.borrow().warnings.clone();
+        assert!(
+            !warnings.iter().any(|w| w.contains("sem ligação ao daemon")),
+            "the daemon is not down: {warnings:?}"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("o índice está em modo somente-leitura")),
+            "the daemon's own sentence is kept: {warnings:?}"
         );
         drop(source);
         daemon.join();
