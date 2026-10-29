@@ -422,6 +422,13 @@ unsafe extern "system" {
     /// awareness the window can use.
     pub fn SetProcessDpiAwarenessContext(value: DPI_AWARENESS_CONTEXT) -> BOOL;
 
+    /// The older way of saying the same thing.
+    ///
+    /// A platform that does not know the newer call knows this one, and a
+    /// process that is aware of the screen's scale is a window that is not
+    /// a stretched picture.
+    pub fn SetProcessDPIAware() -> BOOL;
+
     /// The scale of the monitor the window is on, in dots per inch.
     pub fn GetDpiForWindow(hwnd: HWND) -> UINT;
 
@@ -689,5 +696,5 @@ unsafe extern "system" {
         psfi: *mut SHFILEINFOW,
         cbFileInfo: UINT,
         uFlags: UINT,
-    ) -> usize;
+    ) -> u32;
 }

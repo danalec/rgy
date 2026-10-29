@@ -33,6 +33,7 @@
 //! search box, and it gives it back the moment it is hidden.
 
 use alloc::boxed::Box;
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::ffi::c_void;
@@ -193,6 +194,24 @@ pub enum Compositor {
     Refused,
 }
 
+/// What the process knows about the screen's scale.
+///
+/// A process that does not know it has its windows virtualized: the
+/// platform stretches the picture, and every scale the launcher works out
+/// is the system's instead of the monitor's. The launcher still works --
+/// it is the picture that is stretched -- and the answer is kept so that
+/// the line under the field can say so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Awareness {
+    /// The process knows the scale of the monitor the window is on.
+    PerMonitor,
+    /// The process knows the system's scale, and the platform stretches
+    /// the window when the monitor's is another.
+    System,
+    /// The process does not know the scale at all.
+    Unaware,
+}
+
 /// The state the window's procedure reads.
 struct State {
     view: View,
@@ -211,6 +230,8 @@ struct State {
     /// nothing to show, and a window with nothing to show is a launcher
     /// the user cannot see.
     compositor: Compositor,
+    /// What the process knows about the screen's scale.
+    awareness: Awareness,
     /// The window's own pixels, when the platform gave no backdrop.
     ///
     /// The shadow is still the system's own: the window is created
@@ -273,6 +294,13 @@ struct Layer {
     dc: HDC,
     /// The bitmap that context holds.
     bitmap: HANDLE,
+    /// The bitmap the context held before this one.
+    ///
+    /// A bitmap that is selected into a context cannot be deleted, and a
+    /// null handle does not deselect it: the context goes back to this
+    /// one before the panel's own bitmap is given back, or the panel
+    /// leaks -- with its pixels -- every time the window is closed.
+    previous: HANDLE,
     /// The bitmap's pixels, in the order the platform stores them.
     bits: *mut u8,
     /// The panel's width.
@@ -328,7 +356,7 @@ impl Layer {
             if dc.is_null() {
                 return None;
             }
-            let (bitmap, bits) = Layer::bitmap(dc, width, height);
+            let (bitmap, bits, previous) = Layer::bitmap(dc, width, height);
             if bitmap.is_null() {
                 DeleteDC(dc);
                 return None;
@@ -336,6 +364,7 @@ impl Layer {
             Some(Layer {
                 dc,
                 bitmap,
+                previous,
                 bits,
                 width,
                 height,
@@ -348,7 +377,11 @@ impl Layer {
     /// The height is negative so that the first row of the bitmap is the
     /// top of the panel: a bitmap that grows upwards would put the
     /// panel's own picture upside down.
-    fn bitmap(dc: HDC, width: i32, height: i32) -> (HANDLE, *mut u8) {
+    ///
+    /// The handle that was in the context comes back with it: the panel's
+    /// own bitmap cannot be deleted while it is selected, so the context
+    /// has to go back to what it held before.
+    fn bitmap(dc: HDC, width: i32, height: i32) -> (HANDLE, *mut u8, HANDLE) {
         let info = Layer::info(width, height);
         let mut bits: *mut c_void = core::ptr::null_mut();
         let bitmap = unsafe {
@@ -361,12 +394,11 @@ impl Layer {
                 0,
             )
         };
+        let mut previous = core::ptr::null_mut();
         if !bitmap.is_null() {
-            unsafe {
-                SelectObject(dc, bitmap);
-            }
+            previous = unsafe { SelectObject(dc, bitmap) };
         }
-        (bitmap, bits.cast::<u8>())
+        (bitmap, bits.cast::<u8>(), previous)
     }
 
     /// The bitmap's own information: the header, and the room for the
@@ -400,13 +432,20 @@ impl Layer {
             return;
         }
         unsafe {
-            let (bitmap, bits) = Layer::bitmap(self.dc, width, height);
-            if bitmap.is_null() {
+            let (bitmap, bits, previous) = Layer::bitmap(self.dc, width, height);
+            if bitmap.is_null() || previous.is_null() {
+                // The context did not take the new bitmap: the panel keeps
+                // the one it has.
+                if !bitmap.is_null() {
+                    DeleteObject(bitmap);
+                }
                 return;
             }
             // The old bitmap is given back only after the new one is in
             // the context: a bitmap that is still selected cannot be
-            // deleted.
+            // deleted. The context held the old panel's bitmap, so
+            // putting the new one in deselected it -- and the old one can
+            // go back now.
             let old = core::mem::replace(&mut self.bitmap, bitmap);
             DeleteObject(old);
             self.bits = bits;
@@ -504,8 +543,13 @@ impl Layer {
 impl Drop for Layer {
     fn drop(&mut self) {
         unsafe {
-            // The context holds the bitmap: the bitmap goes back first.
-            SelectObject(self.dc, core::ptr::null_mut());
+            // The context goes back to the bitmap it held before the
+            // panel's own: a bitmap that is selected cannot be deleted,
+            // and a null handle does not deselect it -- the panel's
+            // bitmap and its pixels would leak with it.
+            if !self.previous.is_null() {
+                SelectObject(self.dc, self.previous);
+            }
             DeleteObject(self.bitmap);
             DeleteDC(self.dc);
         }
@@ -572,9 +616,20 @@ impl Window {
         // already, and that is not an error to report: the platform's
         // own answer about the monitor is read anyway, and the window is
         // drawn at that scale.
-        unsafe {
-            SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        }
+        let awareness = unsafe {
+            // The answer is acted upon: a process that does not know the
+            // screen's scale has its window virtualized, and a virtualized
+            // window is a stretched picture. The older call knows the
+            // scale too, and it is the way out on a platform that does
+            // not know the newer one.
+            if SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) != 0 {
+                Awareness::PerMonitor
+            } else if SetProcessDPIAware() != 0 {
+                Awareness::System
+            } else {
+                Awareness::Unaware
+            }
+        };
         register_class()?;
         let mut title16: Vec<u16> = title.encode_utf16().collect();
         title16.push(0);
@@ -591,6 +646,7 @@ impl Window {
             painted: (0, 0),
             backdrop: false,
             compositor: Compositor::Unknown,
+            awareness,
             layer: None,
             hiding: false,
             focus_lost: false,
@@ -636,7 +692,8 @@ impl Window {
             if hwnd.is_null() {
                 // The state was ours and nobody else has it now.
                 drop(Box::from_raw(state.as_ptr()));
-                return Err("the window could not be created".to_string());
+                let code = GetLastError();
+                return Err(format!("the window could not be created ({code})"));
             }
             SetWindowLongPtrW(hwnd, GWL_USERDATA, state.as_ptr() as isize);
             let mut w = Window {
@@ -890,6 +947,16 @@ impl Window {
         self.state().compositor
     }
 
+    /// What the process knows about the screen's scale.
+    ///
+    /// The answer is what tells the launcher that the picture it draws
+    /// is going to be stretched: a window on a screen whose scale the
+    /// process does not know is a window the platform draws at the
+    /// system's scale and then stretches.
+    pub fn awareness(&self) -> Awareness {
+        self.state().awareness
+    }
+
     /// Whether the window is on the screen.
     ///
     /// The three answers the platform gives: the window is visible, the
@@ -962,9 +1029,16 @@ impl Window {
     fn place(&mut self) {
         let spot = spot_on(self.target_work_area(), self.width, self.height);
         // The spot may have cut the window, and the region is the
-        // window's shape: it has to follow.
+        // window's shape: it has to follow. The layer is the panel's own
+        // bitmap, and a panel of another size is a panel of another
+        // bitmap.
+        self.width = spot.width;
         self.height = spot.height;
         self.apply_region();
+        let (width, height) = (self.width, self.height);
+        if let Some(layer) = self.state_mut().layer.as_mut() {
+            layer.resize(width, height);
+        }
         unsafe {
             SetWindowPos(
                 self.hwnd,
@@ -1036,10 +1110,10 @@ impl Window {
         // model sizes it from the rows, and the rows have to fit between
         // the top of the area and the bottom of the screen.
         let spot = spot_on(self.target_work_area(), width, height);
-        if width == self.width && spot.height == self.height {
+        if spot.width == self.width && spot.height == self.height {
             return;
         }
-        self.width = width;
+        self.width = spot.width;
         self.height = spot.height;
         self.apply_region();
         // The layer is the panel's own bitmap: a panel of another size
@@ -1299,7 +1373,14 @@ impl Window {
         loop {
             unsafe {
                 let got = GetMessageW(&mut msg, core::ptr::null_mut(), 0, 0);
-                if got <= 0 {
+                if got < 0 {
+                    // The loop itself failed. The window is broken, and a
+                    // launcher that leaves with the code of a clean run
+                    // says nothing about it.
+                    let code = GetLastError();
+                    return Err(format!("the message loop failed ({code})"));
+                }
+                if got == 0 {
                     break;
                 }
                 let control = self.dispatch(&msg, &mut on_event);
@@ -1451,6 +1532,8 @@ struct Spot {
     x: i32,
     /// The top edge.
     y: i32,
+    /// The width the window may have: it is never wider than the area.
+    width: i32,
     /// The height the window may have: it is never taller than the room
     /// it has.
     height: i32,
@@ -1468,8 +1551,11 @@ struct Spot {
 fn spot_on(work: RECT, width: i32, height: i32) -> Spot {
     let area_w = work.right - work.left;
     let area_h = work.bottom - work.top;
-    // A window wider than the area starts at its left edge: centred, it
-    // would hang over the edge of the screen.
+    // A window wider than the area is cut to the area: centred, it would
+    // hang over the edge of the screen, and the window's own contract is
+    // that it never falls outside it. The height is cut the same way
+    // below, and the two cuts are the same cut.
+    let width = width.min(area_w);
     let x = work.left + (area_w - width).max(0) / 2;
     // The offset is where the window starts, and the room below it is
     // what the window has to fit in.
@@ -1479,6 +1565,7 @@ fn spot_on(work: RECT, width: i32, height: i32) -> Spot {
         return Spot {
             x,
             y: work.top,
+            width,
             height: area_h,
         };
     }
@@ -1486,6 +1573,7 @@ fn spot_on(work: RECT, width: i32, height: i32) -> Spot {
     Spot {
         x,
         y: work.top + offset,
+        width,
         height: height.min(room),
     }
 }
@@ -1571,16 +1659,19 @@ unsafe extern "system" fn wnd_proc(
 ) -> LRESULT {
     match msg {
         WM_PAINT => {
+            // The painting is begun and ended whatever the window's state
+            // is: a message that does not validate its update region is a
+            // message the platform sends again, and again, forever.
+            let mut ps = PAINTSTRUCT {
+                hdc: core::ptr::null_mut(),
+                fErase: 0,
+                rcPaint: RECT::default(),
+                fRestore: 0,
+                fIncUpdate: 0,
+                rgbReserved: [0; 32],
+            };
+            let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
             if let Some(state) = unsafe { state_of(hwnd) } {
-                let mut ps = PAINTSTRUCT {
-                    hdc: core::ptr::null_mut(),
-                    fErase: 0,
-                    rcPaint: RECT::default(),
-                    fRestore: 0,
-                    fIncUpdate: 0,
-                    rgbReserved: [0; 32],
-                };
-                let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
                 // SAFETY: the state lives in the window's own thread, the
                 // window procedure runs on that thread, and no other
                 // thread ever holds a pointer to it — the hotkey posts a
@@ -1627,8 +1718,8 @@ unsafe extern "system" fn wnd_proc(
                         }
                     }
                 }
-                unsafe { EndPaint(hwnd, &ps) };
             }
+            unsafe { EndPaint(hwnd, &ps) };
             0
         }
         // The backdrop is the system's: erasing the background here would
@@ -1689,7 +1780,8 @@ fn register_class() -> Result<u16, String> {
         RegisterClassExW(&wc)
     };
     if atom == 0 {
-        return Err("the window class could not be registered".to_string());
+        let code = unsafe { GetLastError() };
+        return Err(format!("the window class could not be registered ({code})"));
     }
     // The first one to register owns the class; whoever comes later takes
     // the atom it got, because a second registration of the same class is

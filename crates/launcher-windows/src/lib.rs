@@ -35,7 +35,7 @@ pub mod window;
 
 mod win;
 
-pub use window::{Compositor, Event, Key, View, Window};
+pub use window::{Awareness, Compositor, Event, Key, View, Window};
 
 /// Whether this session has a desktop to draw on.
 ///

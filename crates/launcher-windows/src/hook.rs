@@ -14,7 +14,8 @@
 //! the thread that installed it, and those are the same thread only by
 //! accident.
 
-use alloc::string::{String, ToString};
+use alloc::format;
+use alloc::string::String;
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 
@@ -194,7 +195,11 @@ impl Hook {
                 0,
             );
             if handle.is_null() {
-                return Err("the keyboard hook could not be installed".to_string());
+                // The reason is in the last error, and the reason is the
+                // difference between a policy that said no and a machine
+                // that could not.
+                let code = GetLastError();
+                return Err(format!("the keyboard hook could not be installed ({code})"));
             }
             Ok(Hook { handle })
         }

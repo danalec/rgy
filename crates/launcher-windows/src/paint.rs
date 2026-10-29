@@ -1014,6 +1014,10 @@ mod tests {
         dc: HDC,
         bits: *mut u8,
         bitmap: HANDLE,
+        /// The bitmap the context held before this one: a bitmap that is
+        /// selected cannot be deleted, and a null handle does not
+        /// deselect it.
+        previous: HANDLE,
         width: i32,
     }
 
@@ -1061,11 +1065,12 @@ mod tests {
                     DeleteDC(dc);
                     return None;
                 }
-                SelectObject(dc, bitmap);
+                let previous = SelectObject(dc, bitmap);
                 Some(Canvas {
                     dc,
                     bits: bits.cast::<u8>(),
                     bitmap,
+                    previous,
                     width,
                 })
             }
@@ -1085,9 +1090,12 @@ mod tests {
     impl Drop for Canvas {
         fn drop(&mut self) {
             unsafe {
-                // The bitmap that is selected cannot be deleted: it goes
-                // back to nothing first.
-                SelectObject(self.dc, core::ptr::null_mut());
+                // The bitmap that is selected cannot be deleted: the
+                // context goes back to the bitmap it held before it, and
+                // a null handle does not deselect it.
+                if !self.previous.is_null() {
+                    SelectObject(self.dc, self.previous);
+                }
                 DeleteObject(self.bitmap);
                 DeleteDC(self.dc);
             }
