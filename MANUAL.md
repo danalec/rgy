@@ -463,10 +463,13 @@ up after the last restart:
 {"op":"status","docs":128,"event_id":0,"catch_up":"relisted"}
 ```
 
-`catch_up` is `replayed` where the operating system keeps a journal of what
-changed — Windows and macOS — and `relisted` where it keeps none — Linux and
-FreeBSD — because there the tree is walked again instead. The field is
-additive: a reader that does not know it keeps working.
+`catch_up` is what this process did, not what the platform could do:
+`replayed` when the change journal was resumed at the position the index
+carries and the backlog applied, and `relisted` when the tree was walked
+again instead. That is the answer on Linux and FreeBSD, where no journal
+exists — and also on a Windows machine where the journal is there and this
+process was not allowed to open it. The field is additive: a reader that
+does not know it keeps working.
 
 It can also listen on a socket instead of stdin:
 

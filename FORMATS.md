@@ -1,8 +1,7 @@
 # rgy — the formats
 
 What rgy can find, format by format: the names it knows, the bytes it can
-read, and what it will read *inside* once the container adapters are wired
-into the search path.
+read, and what it reads *inside* a container through the format adapters.
 
 The list of families, and what each one gives, is in this file. The
 [README](README.md) is the map: what rgy is, how to run it, and where the
@@ -23,9 +22,10 @@ the part of rgy that is finished and measured.
 
 **The bytes.** `grep:`, `regex:` and `sym:` read the file and search its
 bytes, line by line. The output is `path:line:text`, the same shape `rg`
-prints. This works on *any* file, including a PDF or a `.docx` — but on
-those it searches the compressed bytes, which is to say it finds nothing
-useful. That is the honest limit of the content layer today.
+prints. A file the format adapters claim is read *through* them — a PDF's
+text layer, a `.docx`'s paragraphs, a zip's members — and the rendering is
+what the search sees. A file no adapter claims is read as bytes, which is
+what a `.txt` has always been.
 
 **The corpus.** A pack store (`searchd --tv-dir`, or `rgx-tv build`) ingests
 a tree once into verified packs, and content queries then run against the
@@ -39,7 +39,7 @@ searchctl --root ~ "invoice grep:tesla"     # the bytes
 searchctl --root ~ "invoice ext:pdf grep:tesla"   # both, one query
 ```
 
-## What a container search would add
+## What the container search adds
 
 A PDF's text is not in the file as text: it sits in compressed object
 streams. A `.docx` is a zip with XML inside. A `.mbox` holds a stack of

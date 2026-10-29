@@ -253,10 +253,11 @@ user quits, so it quits — and the copy is the `>copy` command.
   the quotes to go fuzzy, and check the filter: `ext:pdf`, not `ext:.pdf`.
 - **The first run is slow** — it is walking the tree. Every run after it is
   fast.
-- **A PDF search finds nothing** — expected today. `grep:` reads the file's
-  own bytes, and a PDF's text is compressed. The adapters that read inside
-  PDFs are not wired into the search path yet; that is what
-  [rgx](https://github.com/danalec/rgx) is for.
+- **A PDF search finds nothing** — the words are not in the file. `grep:` asks
+  the format adapters first, and a PDF's text layer is read through the
+  adapter, so the words of a PDF are words the query can match. A **scanned**
+  PDF has no text layer at all: its pages are images, and they are read only
+  when `tesseract` is installed. See [FORMATS.md](FORMATS.md).
 
 The [manual](MANUAL.md) has the whole query language, every flag, the daemon
 protocol and the pack store.
@@ -277,7 +278,7 @@ filesystem, then **what is inside it?** in the same query.
 |---|---|---|
 | Which file, anywhere on the disk | ✅ name index, fzf-v1 ranking, typos, live overlay | walk + path globs |
 | What is inside it | ✅ `grep:` / `regex:` / `sym:` | ✅ rg patterns |
-| Inside PDF / Office / archives / mail / 3D / LLM | ⬜ families vendored, search path not wired yet | ✅ |
+| Inside PDF / Office / archives / mail / 3D / LLM | ✅ the same adapters, read through the search path | ✅ |
 | Name and content in one query | ✅ `report ext:pdf grep:tesla` | pattern + globs |
 | Drop-in `rg` (flags, output, exit codes) | exit codes only | ✅ |
 | Persistent index across runs | ✅ `--index` (pinned root, `--max-age`) | walk per run (pack store opt-in) |
@@ -333,7 +334,8 @@ stderr, zero matches, exit 1.
 The merge is landed end to end: name search,
 content search, one daemon/CLI, and the polish layer — and now the
 window over the daemon, `rgxy`. What is left is
-verification on machines this host does not have — macOS above all.
+verification on machines this host does not have — macOS above all: its
+code is clippy-checked from a Linux box, but it has never *run* there.
 
 The perf gate fails a PR on a >20% regression against any
 [`benchmark/baseline-names.md`](benchmark/baseline-names.md) row.
@@ -343,10 +345,23 @@ The crates are on crates.io, all fourteen at 0.1.0: `rgy-name-core`,
 `rgy-` prefix because `name-core`, `discovery`, `engine`, `proto`, `par`
 and `zen-rs` are taken on crates.io.
 
-The launcher's own crates — `rgy-launcher`, `rgy-launcher-windows`,
-`rgy-pick`, `rgy-adapters` and `rgy-rgxy` — are **not published yet**:
-they arrive with the next release, and the release is what bumps the
-ones that are already out.
+Six crates are **not published yet**: `rgy-par`, `rgy-launcher`,
+`rgy-launcher-windows`, `rgy-pick`, `rgy-adapters` and `rgy-rgxy`. They
+arrive with the next release, and the release is what bumps the ones that
+are already out.
+
+**The order they go up in is not a detail.** crates.io resolves a
+dependency when a crate is *installed*, not when it is published, so a
+crate that depends on another one cannot be published first: `rgy-name-core`
+depends on `rgy-par`, and publishing it before `rgy-par` was on the
+registry would have shipped a crate that nobody could install. The order
+is computed from the manifests themselves, and the publish script follows
+it:
+
+```sh
+bash scripts/publish-crates.sh --dry-run   # the plan, nothing published
+bash scripts/publish-crates.sh             # publish what the plan says
+```
 
 ## Related projects
 
