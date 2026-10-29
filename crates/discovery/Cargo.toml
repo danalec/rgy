@@ -30,15 +30,12 @@ std = ["rgy-par/std"]
 # caller names.
 rgy-par = { path = "../par", version = "0.1.0", default-features = false }
 
-# The unix reader (`openat`, `fdopendir`, `readdir`, `fstatat`) needs the
-# `dirent` and `stat` layouts, and those are the platform's: glibc, musl,
-# the BSDs and macOS each lay them out differently. `libc` has the right
-# one per platform, and the tree's own Linux and FreeBSD backends read
-# them the same way -- the FreeBSD one says why, in
-# `crates/discovery-freebsd/src/walk.rs`: the offsets come from
-# `libc::dirent`, "never hand-remembered".
-#
-# Gated to unix, like the reader that uses it: a build for a target with
-# no operating system never sees it.
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
+# The seam has no dependency of its own. The unix reader (`openat`,
+# `fdopendir`, `readdir`, `fstatat`) needs the `dirent` and `stat`
+# layouts, and those are the platform's: glibc, musl, the BSDs and macOS
+# each lay them out differently. So they are declared by hand, one
+# platform at a time, in `src/dir.rs` -- the way `src/file.rs` declares
+# the file layer -- with the sizes and the offsets the reader reads at
+# asserted where the structs are. A struct the platform writes is the
+# platform's struct, whole: a field left out is not a shorter struct, it
+# is a buffer the platform writes past.

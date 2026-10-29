@@ -6,8 +6,9 @@
 //! `cfg(target_os = "freebsd")`; on other hosts this crate compiles empty
 //! and the portable walk stays the Source.
 //!
-//! The crate is `no_std`: it asks the kernel through `libc` and keeps its
-//! paths as bytes, the shape the rest of the tree speaks.
+//! The crate is `no_std`: it asks the kernel through calls it declares
+//! itself and keeps its paths as bytes, the shape the rest of the tree
+//! speaks.
 //!
 //! Verified against the sequential oracle on a real FreeBSD kernel by
 //! `freebsd_reader_matches_sequential_oracle` below — the phase-4 suite

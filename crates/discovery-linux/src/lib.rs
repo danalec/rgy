@@ -12,9 +12,11 @@
 //! crate compiles empty and the portable `rgy_discovery::PortableSource` is
 //! the Source.
 //!
-//! The crate is `no_std`: it asks the kernel through `libc` and keeps its
-//! paths as bytes, the shape the rest of the tree speaks. Nothing here
-//! needs the standard library, and nothing here brings it in.
+//! The crate is `no_std`: it asks the kernel through the calls it declares
+//! itself -- the house pattern, the one `crates/discovery/src/file.rs` and
+//! `crates/name-core/src/clock.rs` follow -- and keeps its paths as bytes,
+//! the shape the rest of the tree speaks. Nothing here needs the standard
+//! library, and nothing here brings it in.
 
 #![no_std]
 

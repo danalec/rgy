@@ -13,6 +13,8 @@ use crate::memmap2::platform::MmapInner;
 use crate::memmap2::advice::Advice;
 #[cfg(unix)]
 use crate::memmap2::advice::UncheckedAdvice;
+#[cfg(unix)]
+use core::ffi::c_int;
 
 pub struct Mmap {
     inner: MmapInner,
@@ -38,19 +40,17 @@ impl Mmap {
 
     #[cfg(unix)]
     pub fn advise(&self, advice: Advice) -> io::Result<()> {
-        self.inner
-            .advise(advice as libc::c_int, 0, self.inner.len())
+        self.inner.advise(advice as c_int, 0, self.inner.len())
     }
 
     #[cfg(unix)]
     pub unsafe fn unchecked_advise(&self, advice: UncheckedAdvice) -> io::Result<()> {
-        self.inner
-            .advise(advice as libc::c_int, 0, self.inner.len())
+        self.inner.advise(advice as c_int, 0, self.inner.len())
     }
 
     #[cfg(unix)]
     pub fn advise_range(&self, advice: Advice, offset: usize, len: usize) -> io::Result<()> {
-        self.inner.advise(advice as libc::c_int, offset, len)
+        self.inner.advise(advice as c_int, offset, len)
     }
 
     #[cfg(unix)]
@@ -60,7 +60,7 @@ impl Mmap {
         offset: usize,
         len: usize,
     ) -> io::Result<()> {
-        self.inner.advise(advice as libc::c_int, offset, len)
+        self.inner.advise(advice as c_int, offset, len)
     }
 
     #[cfg(unix)]

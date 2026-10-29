@@ -9,6 +9,12 @@
 //!
 //! Paths are bytes: the walk joins them the way the tree joins them
 //! (`rgy_discovery::path::join`) and hands them to the kernel unchanged.
+//!
+//! The kernel is asked through the calls declared in [`sys`], by hand: the
+//! crate is `no_std` and has no `libc`, so the symbols are spelled out the
+//! way `crates/discovery/src/file.rs` spells out the file layer. The
+//! metadata of an entry is asked of the seam (`rgy_discovery::dir::stat`),
+//! which is where the platform's `stat` layout lives.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -17,6 +23,70 @@ use rgy_discovery::path;
 use rgy_discovery::walk::{
     KIND_DIR, KIND_FILE, KIND_LINK, KIND_OTHER, Listing, NONE, RawEnt, blocked,
 };
+
+/// The Linux calls this backend makes, declared by hand.
+///
+/// The crate has no `std` and no `libc`: the kernel is asked through the
+/// symbols spelled here, the way `crates/discovery/src/file.rs` declares
+/// the file layer.
+mod sys {
+    use core::ffi::{c_char, c_int, c_long};
+
+    /// Read only.
+    pub(super) const O_RDONLY: c_int = 0;
+    /// `O_DIRECTORY`: the open has to be of a folder
+    /// (`asm-generic/fcntl.h`).
+    pub(super) const O_DIRECTORY: c_int = 0o200_000;
+    /// `O_NOFOLLOW`: the open is of the folder itself, not of what it
+    /// points at.
+    pub(super) const O_NOFOLLOW: c_int = 0o400_000;
+
+    /// `getdents64`'s syscall number, which is the architecture's.
+    ///
+    /// `x86_64` is 217; `aarch64`, `riscv64` and `loongarch64` are 61.
+    #[cfg(target_arch = "x86_64")]
+    pub(super) const SYS_GETDENTS64: c_long = 217;
+    #[cfg(any(
+        target_arch = "aarch64",
+        target_arch = "riscv64",
+        target_arch = "loongarch64"
+    ))]
+    pub(super) const SYS_GETDENTS64: c_long = 61;
+    #[cfg(target_arch = "s390x")]
+    pub(super) const SYS_GETDENTS64: c_long = 220;
+    #[cfg(target_arch = "powerpc64")]
+    pub(super) const SYS_GETDENTS64: c_long = 202;
+    #[cfg(target_arch = "mips64")]
+    pub(super) const SYS_GETDENTS64: c_long = 5308;
+    #[cfg(target_arch = "sparc64")]
+    pub(super) const SYS_GETDENTS64: c_long = 154;
+    /// The syscall number is the architecture's, and the tree builds for
+    /// the ones above.
+    #[cfg(not(any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "riscv64",
+        target_arch = "loongarch64",
+        target_arch = "s390x",
+        target_arch = "powerpc64",
+        target_arch = "mips64",
+        target_arch = "sparc64"
+    )))]
+    compile_error!("getdents64's syscall number is declared for the 64-bit Linux architectures");
+
+    /// The kinds a directory's own rows carry (`DT_*`).
+    pub(super) const DT_DIR: u8 = 4;
+    pub(super) const DT_REG: u8 = 8;
+    pub(super) const DT_LNK: u8 = 10;
+
+    unsafe extern "C" {
+        pub(super) fn open(pathname: *const c_char, flags: c_int, ...) -> c_int;
+        pub(super) fn close(fd: c_int) -> c_int;
+        /// `getdents64` is a raw syscall: the C library does not wrap it,
+        /// and the rows it fills in are the kernel's own.
+        pub(super) fn syscall(number: c_long, ...) -> c_long;
+    }
+}
 
 pub struct LinuxSource {
     pub root: Vec<u8>,
@@ -29,16 +99,18 @@ impl rgy_discovery::Source for LinuxSource {
 }
 
 /// One directory via `getdents64`. `child` is left `NONE`; the walk fills
-/// it once the subdirectory's listing exists. Entries whose d_type is
-/// `DT_UNKNOWN` (some filesystems) take one `lstat64` fallback; every
-/// entry takes one `lstat64` for size/mtime — the plan's `statx` batching
-/// replaces that.
+/// it once the subdirectory's listing exists.
+///
+/// The kind of an entry and its length and its time come from the seam,
+/// which reads the metadata without following a link. Where the metadata
+/// says nothing about the kind (a socket, a fifo, a filesystem that does
+/// not fill the mode in), the row's own kind is what there is.
 fn list_dir(dir: &[u8]) -> Option<Listing> {
     let c = path::cstring(dir)?;
     let fd = unsafe {
-        libc::open(
+        sys::open(
             path::as_c_ptr(&c),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+            sys::O_RDONLY | sys::O_DIRECTORY | sys::O_NOFOLLOW,
         )
     };
     if fd < 0 {
@@ -48,9 +120,9 @@ fn list_dir(dir: &[u8]) -> Option<Listing> {
     let mut ents: Vec<RawEnt> = Vec::new();
     let mut buf = alloc::vec![0u8; 64 * 1024];
     loop {
-        // getdents64 is a raw syscall (the libc crate does not wrap it);
+        // getdents64 is a raw syscall (the C library does not wrap it);
         // the buffer of linux_dirent64 rows is parsed below.
-        let n = unsafe { libc::syscall(libc::SYS_getdents64, fd, buf.as_mut_ptr(), buf.len()) };
+        let n = unsafe { sys::syscall(sys::SYS_GETDENTS64, fd, buf.as_mut_ptr(), buf.len()) };
         if n <= 0 {
             break;
         }
@@ -72,30 +144,23 @@ fn list_dir(dir: &[u8]) -> Option<Listing> {
                 continue;
             }
 
+            // The metadata of the entry, read by the seam: a link is a
+            // link, and its own length and its own time are its own.
             let full = path::join(dir, &name);
-            let fc = match path::cstring(&full) {
-                Some(c) => c,
-                None => continue,
-            };
-            let mut st: libc::stat64 = unsafe { core::mem::zeroed() };
-            if unsafe { libc::lstat64(path::as_c_ptr(&fc), &mut st) } != 0 {
+            let Some(st) = rgy_discovery::dir::stat(&full) else {
                 continue;
-            }
-            let m = st.st_mode & libc::S_IFMT;
-            let kind = if m == libc::S_IFLNK {
-                KIND_LINK
-            } else if m == libc::S_IFDIR {
-                KIND_DIR
-            } else if m == libc::S_IFREG {
-                KIND_FILE
-            } else {
-                // Prefer the stat over d_type when they could disagree.
+            };
+            let kind = if st.kind == KIND_OTHER {
+                // The mode said nothing: the row's own kind is what
+                // there is.
                 match kind_byte {
-                    libc::DT_LNK => KIND_LINK,
-                    libc::DT_DIR => KIND_DIR,
-                    libc::DT_REG => KIND_FILE,
+                    sys::DT_LNK => KIND_LINK,
+                    sys::DT_DIR => KIND_DIR,
+                    sys::DT_REG => KIND_FILE,
                     _ => KIND_OTHER,
                 }
+            } else {
+                st.kind
             };
 
             let name_off = names.len() as u32;
@@ -104,14 +169,14 @@ fn list_dir(dir: &[u8]) -> Option<Listing> {
                 name_off,
                 name_len: name.len().min(u16::MAX as usize) as u16,
                 kind,
-                size: st.st_size as u64,
-                mtime: st.st_mtime.clamp(0, u32::MAX as i64) as u32,
+                size: st.size,
+                mtime: st.mtime,
                 child: NONE,
             });
         }
     }
     unsafe {
-        libc::close(fd);
+        sys::close(fd);
     }
     Some(Listing { id: 0, names, ents })
 }

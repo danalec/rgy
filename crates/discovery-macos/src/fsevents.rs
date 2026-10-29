@@ -4,7 +4,7 @@
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use core::ffi::{CStr, c_void};
+use core::ffi::{CStr, c_char, c_int, c_void};
 
 use rgy_par::mpsc::Sender;
 use rgy_par::sync::{Mutex, OnceCell};
@@ -17,6 +17,14 @@ use crate::event::Event;
 /// stream stays directory-granular: it names the folder whose contents
 /// changed, not the item that changed.
 const CREATE_FLAG_NO_DEFER: u32 = 0x2;
+
+// `RTLD_LAZY`: the framework's symbols are resolved on first use, not on
+// load. `dlfcn.h`.
+const RTLD_LAZY: c_int = 0x1;
+
+// `QOS_CLASS_USER_INITIATED`: the queue the stream's callback runs on.
+// `sys/qos.h`.
+const QOS_CLASS_USER_INITIATED: u32 = 0x19;
 
 /// A stream's callback context.
 ///
@@ -77,7 +85,7 @@ fn api() -> &'static Api {
     static API: OnceCell<Api> = OnceCell::new();
     API.get_or_init(|| unsafe {
         let open = |path: &CStr| {
-            let h = libc::dlopen(path.as_ptr(), libc::RTLD_LAZY);
+            let h = dlopen(path.as_ptr(), RTLD_LAZY);
             assert!(!h.is_null(), "cannot load {path:?}");
             h
         };
@@ -103,7 +111,7 @@ fn api() -> &'static Api {
 /// A symbol of a loaded image, as `T` (a function pointer, or a data
 /// symbol's address).
 unsafe fn sym<T>(h: *mut c_void, name: &CStr) -> T {
-    let p = unsafe { libc::dlsym(h, name.as_ptr()) };
+    let p = unsafe { dlsym(h, name.as_ptr()) };
     assert!(!p.is_null(), "missing {name:?}");
     unsafe { core::mem::transmute_copy(&p) }
 }
@@ -114,6 +122,10 @@ pub fn current_id() -> u64 {
 }
 
 unsafe extern "C" {
+    // The dynamic loader: the frameworks are loaded on first use, not
+    // linked. `dlfcn.h`.
+    fn dlopen(filename: *const c_char, flag: c_int) -> *mut c_void;
+    fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
     fn dispatch_queue_create(label: *const i8, attr: *const c_void) -> *mut c_void;
     fn dispatch_queue_attr_make_with_qos_class(
         attr: *const c_void,
@@ -201,7 +213,7 @@ pub fn watch(since: u64, latency: f64, tx: Sender<Vec<Event>>, stream: u32) -> S
         // busy threads (a first build runs on every core at user-initiated
         // QoS): fseventsd drops what a client falls behind on, and the drop
         // costs a relist of every folder changed since the last sync.
-        let qos = libc::qos_class_t::QOS_CLASS_USER_INITIATED as u32;
+        let qos = QOS_CLASS_USER_INITIATED;
         let q = dispatch_queue_create(
             c"fsearch.fsevents".as_ptr(),
             dispatch_queue_attr_make_with_qos_class(core::ptr::null(), qos, 0),

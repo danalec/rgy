@@ -9,8 +9,10 @@
 //!
 //! The calls are declared by hand, the way `crates/discovery/src/file.rs`
 //! declares the file layer and the way `crates/name-core/src/clock.rs`
-//! declares the clock. The seam stays a crate of bytes: no new dependency,
-//! and nothing here that a target without an operating system cannot build.
+//! declares the clock -- and so are the two structs the platform writes,
+//! one platform at a time. The seam stays a crate of bytes: no
+//! dependency, and nothing here that a target without an operating system
+//! cannot build.
 //!
 //! # What the reader promises
 //!
@@ -115,20 +117,367 @@ fn seconds(secs: i64) -> u32 {
 /// The unix side: `openat(2)`, `fdopendir(3)`, `readdir(3)` and
 /// `fstatat(2)`.
 ///
-/// The `dirent` and `stat` layouts are the platform's, and they differ
-/// from one unix to the next -- glibc, musl, the BSDs and macOS each lay
-/// them out differently. They are taken from `libc`, which has the right
-/// one per platform, rather than written out here: the tree's own Linux
-/// and FreeBSD backends read them the same way, and the FreeBSD one says
-/// why (`crates/discovery-freebsd/src/walk.rs`: the offsets come from
-/// `libc::dirent` "never hand-remembered").
+/// The calls are the platform's, and so are the two structs the platform
+/// writes: the `dirent` a directory read hands out and the `stat` a
+/// metadata read fills in. They differ from one unix to the next -- Linux,
+/// macOS and FreeBSD each lay them out differently, and their open flags
+/// and their `AT_*` numbers differ too -- so the declarations are written
+/// out here by hand, one platform at a time, the way
+/// `crates/discovery/src/file.rs` declares the file layer and the way
+/// `crates/name-core/src/clock.rs` declares the clock. A struct the
+/// platform writes is the platform's struct, whole: a field left out is
+/// not a shorter struct, it is a buffer the platform writes past.
+///
+/// The sizes and the offsets the reader reads at are asserted where the
+/// structs are declared, so a layout that drifts fails the build and not
+/// the walk.
 #[cfg(unix)]
 mod imp {
     use alloc::vec::Vec;
+    use core::ffi::c_int;
 
     use crate::walk::{KIND_DIR, KIND_FILE, KIND_LINK, KIND_OTHER};
 
     use super::{DirList, Stat};
+
+    /// The Linux declarations: the calls the reader makes, the flags they
+    /// take, and the two structs the kernel writes.
+    ///
+    /// The layout is the one glibc and musl agree on for a 64-bit Linux:
+    /// `struct stat` is 144 bytes and `struct dirent` is 280, with the
+    /// name at 19 (`bits/struct_stat.h` and `bits/dirent.h`).
+    #[cfg(target_os = "linux")]
+    mod sys {
+        use core::ffi::{c_char, c_int, c_void};
+
+        /// Read only.
+        pub(super) const O_RDONLY: c_int = 0;
+        /// `O_DIRECTORY`: the open has to be of a folder
+        /// (`asm-generic/fcntl.h`).
+        pub(super) const O_DIRECTORY: c_int = 0o200_000;
+        /// `O_CLOEXEC`: the descriptor does not outlive the process.
+        pub(super) const O_CLOEXEC: c_int = 0o2_000_000;
+
+        /// `AT_FDCWD`: the folder the call is made against when the
+        /// caller has none of its own.
+        pub(super) const AT_FDCWD: c_int = -100;
+        /// `AT_SYMLINK_NOFOLLOW`: a link is a link, and its own length
+        /// and its own time are its own.
+        pub(super) const AT_SYMLINK_NOFOLLOW: c_int = 0x100;
+
+        /// The mode's type: the file kind bits live in it.
+        pub type Mode = u32;
+        /// The file kind mask.
+        pub const S_IFMT: Mode = 0o17_0000;
+        /// A link.
+        pub const S_IFLNK: Mode = 0o12_0000;
+        /// A folder.
+        pub const S_IFDIR: Mode = 0o4_0000;
+        /// A regular file.
+        pub const S_IFREG: Mode = 0o10_0000;
+
+        /// What the platform writes for one directory entry.
+        ///
+        /// The name is the last field and it is 256 bytes long, so the
+        /// reader takes the name's length from the type and never reads
+        /// past the row.
+        #[repr(C)]
+        #[allow(dead_code)]
+        pub struct PlatformDirent {
+            pub d_ino: u64,
+            pub d_off: i64,
+            pub d_reclen: u16,
+            pub d_type: u8,
+            pub d_name: [u8; 256],
+        }
+
+        /// What the platform writes for one file's metadata.
+        ///
+        /// The whole struct, because the platform writes the whole
+        /// struct: a field left out is not a shorter struct, it is a
+        /// buffer the platform writes past.
+        #[repr(C)]
+        #[allow(dead_code)]
+        pub struct PlatformStat {
+            pub st_dev: u64,
+            pub st_ino: u64,
+            pub st_nlink: u64,
+            pub st_mode: u32,
+            pub st_uid: u32,
+            pub st_gid: u32,
+            pub st_pad0: u32,
+            pub st_rdev: u64,
+            pub st_size: i64,
+            pub st_blksize: i64,
+            pub st_blocks: i64,
+            pub st_atime: i64,
+            pub st_atime_nsec: i64,
+            pub st_mtime: i64,
+            pub st_mtime_nsec: i64,
+            pub st_ctime: i64,
+            pub st_ctime_nsec: i64,
+            pub st_unused: [i64; 3],
+        }
+
+        /// The struct is the platform's, and the platform writes all of
+        /// it. The sizes and the offsets the reader reads at are pinned
+        /// here: a layout that drifts fails the build and not the walk.
+        const _: () = assert!(core::mem::size_of::<PlatformStat>() == 144);
+        const _: () = assert!(core::mem::size_of::<PlatformDirent>() == 280);
+        const _: () = assert!(core::mem::offset_of!(PlatformStat, st_mode) == 24);
+        const _: () = assert!(core::mem::offset_of!(PlatformStat, st_size) == 48);
+        const _: () = assert!(core::mem::offset_of!(PlatformStat, st_mtime) == 88);
+        const _: () = assert!(core::mem::offset_of!(PlatformDirent, d_name) == 19);
+
+        unsafe extern "C" {
+            pub(super) fn openat(dirfd: c_int, pathname: *const c_char, flags: c_int, ...)
+            -> c_int;
+            pub(super) fn fdopendir(fd: c_int) -> *mut c_void;
+            pub(super) fn readdir(dirp: *mut c_void) -> *mut PlatformDirent;
+            pub(super) fn closedir(dirp: *mut c_void) -> c_int;
+            pub(super) fn close(fd: c_int) -> c_int;
+            pub(super) fn fstatat(
+                dirfd: c_int,
+                pathname: *const c_char,
+                buf: *mut PlatformStat,
+                flags: c_int,
+            ) -> c_int;
+        }
+    }
+
+    /// The macOS declarations: the same calls, and the two structs
+    /// Darwin writes.
+    ///
+    /// `struct stat` is 144 bytes and `struct dirent` is 1048, with the
+    /// name at 21 (`bsd/sys/stat.h` and `bsd/sys/dirent.h`).
+    #[cfg(target_os = "macos")]
+    mod sys {
+        use core::ffi::{c_char, c_int, c_void};
+
+        /// Read only.
+        pub(super) const O_RDONLY: c_int = 0;
+        /// `O_DIRECTORY`: Darwin's own value.
+        pub(super) const O_DIRECTORY: c_int = 0x0010_0000;
+        /// `O_CLOEXEC`: Darwin's own value.
+        pub(super) const O_CLOEXEC: c_int = 0x0100_0000;
+
+        /// `AT_FDCWD`: Darwin's own value, and it is not Linux's.
+        pub(super) const AT_FDCWD: c_int = -2;
+        /// `AT_SYMLINK_NOFOLLOW`: Darwin's own value.
+        pub(super) const AT_SYMLINK_NOFOLLOW: c_int = 0x0020;
+
+        /// The mode's type: the file kind bits live in it.
+        pub type Mode = u16;
+        /// The file kind mask.
+        pub const S_IFMT: Mode = 0o17_0000;
+        /// A link.
+        pub const S_IFLNK: Mode = 0o12_0000;
+        /// A folder.
+        pub const S_IFDIR: Mode = 0o4_0000;
+        /// A regular file.
+        pub const S_IFREG: Mode = 0o10_0000;
+
+        /// What the platform writes for one directory entry.
+        ///
+        /// The name is the last field and it is 1024 bytes long, so the
+        /// reader takes the name's length from the type and never reads
+        /// past the row.
+        #[repr(C)]
+        #[allow(dead_code)]
+        pub struct PlatformDirent {
+            pub d_ino: u64,
+            pub d_seekoff: u64,
+            pub d_reclen: u16,
+            pub d_namlen: u16,
+            pub d_type: u8,
+            pub d_name: [u8; 1024],
+        }
+
+        /// What the platform writes for one file's metadata.
+        ///
+        /// The whole struct, because the platform writes the whole
+        /// struct: a field left out is not a shorter struct, it is a
+        /// buffer the platform writes past.
+        #[repr(C)]
+        #[allow(dead_code)]
+        pub struct PlatformStat {
+            pub st_dev: i32,
+            pub st_mode: u16,
+            pub st_nlink: u16,
+            pub st_ino: u64,
+            pub st_uid: u32,
+            pub st_gid: u32,
+            pub st_rdev: i32,
+            pub st_atime: i64,
+            pub st_atime_nsec: i64,
+            pub st_mtime: i64,
+            pub st_mtime_nsec: i64,
+            pub st_ctime: i64,
+            pub st_ctime_nsec: i64,
+            pub st_birthtime: i64,
+            pub st_birthtime_nsec: i64,
+            pub st_size: i64,
+            pub st_blocks: i64,
+            pub st_blksize: i32,
+            pub st_flags: u32,
+            pub st_gen: u32,
+            pub st_lspare: i32,
+            pub st_qspare: [i64; 2],
+        }
+
+        /// The struct is the platform's, and the platform writes all of
+        /// it. The sizes and the offsets the reader reads at are pinned
+        /// here: a layout that drifts fails the build and not the walk.
+        const _: () = assert!(core::mem::size_of::<PlatformStat>() == 144);
+        const _: () = assert!(core::mem::size_of::<PlatformDirent>() == 1048);
+        const _: () = assert!(core::mem::offset_of!(PlatformStat, st_mode) == 4);
+        const _: () = assert!(core::mem::offset_of!(PlatformStat, st_size) == 96);
+        const _: () = assert!(core::mem::offset_of!(PlatformStat, st_mtime) == 48);
+        const _: () = assert!(core::mem::offset_of!(PlatformDirent, d_name) == 21);
+
+        unsafe extern "C" {
+            pub(super) fn openat(dirfd: c_int, pathname: *const c_char, flags: c_int, ...)
+            -> c_int;
+            pub(super) fn fdopendir(fd: c_int) -> *mut c_void;
+            pub(super) fn readdir(dirp: *mut c_void) -> *mut PlatformDirent;
+            pub(super) fn closedir(dirp: *mut c_void) -> c_int;
+            pub(super) fn close(fd: c_int) -> c_int;
+            pub(super) fn fstatat(
+                dirfd: c_int,
+                pathname: *const c_char,
+                buf: *mut PlatformStat,
+                flags: c_int,
+            ) -> c_int;
+        }
+    }
+
+    /// The FreeBSD declarations: the same calls, and the two structs
+    /// FreeBSD writes.
+    ///
+    /// `struct stat` is 224 bytes and `struct dirent` is 280, with the
+    /// name at 24 (`sys/sys/stat.h` and `sys/sys/dirent.h`).
+    #[cfg(target_os = "freebsd")]
+    mod sys {
+        use core::ffi::{c_char, c_int, c_void};
+
+        /// Read only.
+        pub(super) const O_RDONLY: c_int = 0;
+        /// `O_DIRECTORY`: FreeBSD's own value.
+        pub(super) const O_DIRECTORY: c_int = 0x0002_0000;
+        /// `O_CLOEXEC`: FreeBSD's own value.
+        pub(super) const O_CLOEXEC: c_int = 0x0010_0000;
+
+        /// `AT_FDCWD`: the folder the call is made against when the
+        /// caller has none of its own.
+        pub(super) const AT_FDCWD: c_int = -100;
+        /// `AT_SYMLINK_NOFOLLOW`: FreeBSD's own value.
+        pub(super) const AT_SYMLINK_NOFOLLOW: c_int = 0x0200;
+
+        /// The mode's type: the file kind bits live in it.
+        pub type Mode = u16;
+        /// The file kind mask.
+        pub const S_IFMT: Mode = 0o17_0000;
+        /// A link.
+        pub const S_IFLNK: Mode = 0o12_0000;
+        /// A folder.
+        pub const S_IFDIR: Mode = 0o4_0000;
+        /// A regular file.
+        pub const S_IFREG: Mode = 0o10_0000;
+
+        /// What the platform writes for one directory entry.
+        ///
+        /// The name is the last field and it is 256 bytes long, so the
+        /// reader takes the name's length from the type and never reads
+        /// past the row.
+        #[repr(C)]
+        #[allow(dead_code)]
+        pub struct PlatformDirent {
+            pub d_fileno: u64,
+            pub d_off: i64,
+            pub d_reclen: u16,
+            pub d_type: u8,
+            pub d_pad0: u8,
+            pub d_namlen: u16,
+            pub d_pad1: u16,
+            pub d_name: [u8; 256],
+        }
+
+        /// What the platform writes for one file's metadata.
+        ///
+        /// The whole struct, because the platform writes the whole
+        /// struct: a field left out is not a shorter struct, it is a
+        /// buffer the platform writes past.
+        ///
+        /// The tail is FreeBSD 14's (`st_filerev` and nine spare words);
+        /// FreeBSD 12 and 13 have ten spare words there instead. Both
+        /// are 224 bytes and both put the fields the reader reads at the
+        /// same offsets, so one layout answers for the three of them.
+        #[repr(C)]
+        #[allow(dead_code)]
+        pub struct PlatformStat {
+            pub st_dev: u64,
+            pub st_ino: u64,
+            pub st_nlink: u16,
+            pub st_mode: u16,
+            pub st_bsdflags: i16,
+            pub st_uid: u32,
+            pub st_gid: u32,
+            pub st_padding1: i32,
+            pub st_rdev: u64,
+            pub st_atime: i64,
+            pub st_atime_nsec: i64,
+            pub st_mtime: i64,
+            pub st_mtime_nsec: i64,
+            pub st_ctime: i64,
+            pub st_ctime_nsec: i64,
+            pub st_birthtime: i64,
+            pub st_birthtime_nsec: i64,
+            pub st_size: i64,
+            pub st_blocks: i64,
+            pub st_blksize: i32,
+            pub st_flags: u32,
+            pub st_gen: u64,
+            pub st_filerev: u64,
+            pub st_spare: [u64; 9],
+        }
+
+        /// The struct is the platform's, and the platform writes all of
+        /// it. The sizes and the offsets the reader reads at are pinned
+        /// here: a layout that drifts fails the build and not the walk.
+        const _: () = assert!(core::mem::size_of::<PlatformStat>() == 224);
+        const _: () = assert!(core::mem::size_of::<PlatformDirent>() == 280);
+        const _: () = assert!(core::mem::offset_of!(PlatformStat, st_mode) == 18);
+        const _: () = assert!(core::mem::offset_of!(PlatformStat, st_size) == 112);
+        const _: () = assert!(core::mem::offset_of!(PlatformStat, st_mtime) == 64);
+        const _: () = assert!(core::mem::offset_of!(PlatformDirent, d_name) == 24);
+
+        unsafe extern "C" {
+            pub(super) fn openat(dirfd: c_int, pathname: *const c_char, flags: c_int, ...)
+            -> c_int;
+            pub(super) fn fdopendir(fd: c_int) -> *mut c_void;
+            pub(super) fn readdir(dirp: *mut c_void) -> *mut PlatformDirent;
+            pub(super) fn closedir(dirp: *mut c_void) -> c_int;
+            pub(super) fn close(fd: c_int) -> c_int;
+            pub(super) fn fstatat(
+                dirfd: c_int,
+                pathname: *const c_char,
+                buf: *mut PlatformStat,
+                flags: c_int,
+            ) -> c_int;
+        }
+    }
+
+    /// The reader is declared for the three unixes the tree builds for.
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd")))]
+    compile_error!("the unix reader is declared for Linux, macOS and FreeBSD");
+
+    /// The structs above are the 64-bit unix ones. On a 32-bit unix
+    /// `off_t` and `time_t` are 32 bits wide, the same fields land
+    /// somewhere else, and the layout is a different one.
+    #[cfg(not(target_pointer_width = "64"))]
+    compile_error!("the unix reader is declared for a 64-bit unix");
+
+    use sys::*;
 
     /// The entries of the directory at `path`.
     pub fn list(path: &[u8]) -> Option<DirList> {
@@ -138,10 +487,10 @@ mod imp {
         // *in that folder*, and the metadata of an entry is read
         // without following a link.
         let fd = unsafe {
-            libc::openat(
-                libc::AT_FDCWD,
+            openat(
+                AT_FDCWD,
                 crate::path::as_c_ptr(&c),
-                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+                O_RDONLY | O_DIRECTORY | O_CLOEXEC,
             )
         };
         if fd < 0 {
@@ -150,15 +499,15 @@ mod imp {
         // `fdopendir` takes the descriptor over, and `closedir` closes
         // it. The descriptor number does not change, so it is still the
         // folder the entries are read from.
-        let dir = unsafe { libc::fdopendir(fd) };
+        let dir = unsafe { fdopendir(fd) };
         if dir.is_null() {
-            unsafe { libc::close(fd) };
+            unsafe { close(fd) };
             return None;
         }
         let mut names = Vec::new();
         let mut stats = Vec::new();
         loop {
-            let entry = unsafe { libc::readdir(dir) };
+            let entry = unsafe { readdir(dir) };
             if entry.is_null() {
                 break;
             }
@@ -177,20 +526,20 @@ mod imp {
             names.push(name);
             stats.push(stat);
         }
-        unsafe { libc::closedir(dir) };
+        unsafe { closedir(dir) };
         Some(DirList { names, stats })
     }
 
     /// What the platform knows about `path`, without following a link.
     pub fn stat(path: &[u8]) -> Option<Stat> {
         let c = crate::path::cstring(path)?;
-        let mut st: libc::stat = unsafe { core::mem::zeroed() };
+        let mut st: PlatformStat = unsafe { core::mem::zeroed() };
         let rc = unsafe {
-            libc::fstatat(
-                libc::AT_FDCWD,
+            fstatat(
+                AT_FDCWD,
                 crate::path::as_c_ptr(&c),
                 &mut st,
-                libc::AT_SYMLINK_NOFOLLOW,
+                AT_SYMLINK_NOFOLLOW,
             )
         };
         if rc != 0 {
@@ -201,17 +550,17 @@ mod imp {
 
     /// What the platform knows about `name` inside the folder `dirfd`,
     /// without following a link.
-    fn stat_in(dirfd: libc::c_int, name: &[u8]) -> Option<Stat> {
+    fn stat_in(dirfd: c_int, name: &[u8]) -> Option<Stat> {
         let c = crate::path::cstring(name)?;
-        let mut st: libc::stat = unsafe { core::mem::zeroed() };
+        let mut st: PlatformStat = unsafe { core::mem::zeroed() };
         // `AT_SYMLINK_NOFOLLOW`: a link is a link, and its own length and
         // its own time are its own.
         let rc = unsafe {
-            libc::fstatat(
+            fstatat(
                 dirfd,
                 crate::path::as_c_ptr(&c),
                 &mut st,
-                libc::AT_SYMLINK_NOFOLLOW,
+                AT_SYMLINK_NOFOLLOW,
             )
         };
         if rc != 0 {
@@ -220,26 +569,14 @@ mod imp {
         Some(stat_of(&st))
     }
 
-    /// The time of what the platform described, in seconds.
-    ///
-    /// The `time_t` is 64 bits on the targets this tree is verified against
-    /// and 32 bits on some of the others, so the value is widened by hand.
-    /// On a target where it is already 64 bits the cast changes nothing and
-    /// the lint that says so is allowed here: the cast is not decoration,
-    /// it is what makes the 32-bit targets work.
-    #[allow(clippy::unnecessary_cast)]
-    fn mtime_of(st: &libc::stat) -> i64 {
-        st.st_mtime as i64
-    }
-
     /// The kind, the length and the time of what the platform described.
-    fn stat_of(st: &libc::stat) -> Stat {
-        let mode = st.st_mode & libc::S_IFMT;
-        let kind = if mode == libc::S_IFLNK {
+    fn stat_of(st: &PlatformStat) -> Stat {
+        let mode = st.st_mode & S_IFMT;
+        let kind = if mode == S_IFLNK {
             KIND_LINK
-        } else if mode == libc::S_IFDIR {
+        } else if mode == S_IFDIR {
             KIND_DIR
-        } else if mode == libc::S_IFREG {
+        } else if mode == S_IFREG {
             KIND_FILE
         } else {
             KIND_OTHER
@@ -250,7 +587,9 @@ mod imp {
             // has no such bit to give.
             flags: 0,
             size: st.st_size as u64,
-            mtime: super::seconds(mtime_of(st)),
+            // The `time_t` is 64 bits on every unix the reader is
+            // declared for, so the seconds are the seconds.
+            mtime: super::seconds(st.st_mtime),
         }
     }
 
@@ -259,7 +598,7 @@ mod imp {
     /// The platform's `dirent` carries the name in an array whose length
     /// differs from one platform to the next, so the array's own size is
     /// read from the type and the name is the bytes before the NUL.
-    fn name_of(entry: *mut libc::dirent) -> Option<Vec<u8>> {
+    fn name_of(entry: *mut PlatformDirent) -> Option<Vec<u8>> {
         let name = unsafe { core::ptr::addr_of!((*entry).d_name) }.cast::<u8>();
         let max = core::mem::size_of_val(unsafe { &(*entry).d_name });
         let mut len = 0;
@@ -650,6 +989,49 @@ mod tests {
             assert_ne!(name.as_slice(), b".", "`.` is not a child");
             assert_ne!(name.as_slice(), b"..", "`..` is not a child");
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The reader reads a real folder: the names it hands back are the
+    /// names the folder holds, and the kinds are the kinds they are.
+    ///
+    /// This is what proves the platform's layouts. A name read at the
+    /// wrong offset is garbage, and a mode read at the wrong offset is
+    /// not a kind -- so the folder below is read and its entries are
+    /// named, one at a time, instead of being compared with another
+    /// reader's answer.
+    #[test]
+    fn the_reader_names_and_kinds_a_real_folder() {
+        let root = fixture("names");
+        let bytes = root.as_os_str().as_encoded_bytes().to_vec();
+        let list = list_dir(&bytes).expect("the fixture folder is readable");
+
+        let kinds: BTreeMap<Vec<u8>, u8> = list
+            .names
+            .iter()
+            .cloned()
+            .zip(list.stats.iter().map(|s| s.kind))
+            .collect();
+
+        assert_eq!(
+            kinds.get(b"hello.txt".as_slice()),
+            Some(&crate::walk::KIND_FILE),
+            "hello.txt is a file: {kinds:?}"
+        );
+        assert_eq!(
+            kinds.get(b"sub".as_slice()),
+            Some(&crate::walk::KIND_DIR),
+            "sub is a folder: {kinds:?}"
+        );
+        // A link is a link: the reader must not read the file it points
+        // at. Where the platform refuses to make one (Windows needs a
+        // privilege for it), there is nothing to pin.
+        #[cfg(unix)]
+        assert_eq!(
+            kinds.get(b"link.txt".as_slice()),
+            Some(&crate::walk::KIND_LINK),
+            "link.txt is a link: {kinds:?}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

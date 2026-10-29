@@ -29,9 +29,101 @@
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::ffi::{c_char, c_int, c_void};
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use rgy_par::sync::{Mutex, OnceCell};
+
+// The platform vocabulary, spelled from the Darwin headers: the crate has
+// no dependency to reach the platform through, so the calls and the structs
+// they take are declared here, by hand — the way
+// `crates/discovery/src/file.rs` declares its own.
+
+// The attribute groups the walk asks for. `sys/attr.h`.
+const ATTR_BIT_MAP_COUNT: u16 = 5;
+const ATTR_CMN_RETURNED_ATTRS: u32 = 0x8000_0000;
+const ATTR_CMN_NAME: u32 = 0x0000_0001;
+const ATTR_CMN_OBJTYPE: u32 = 0x0000_0008;
+const ATTR_CMN_MODTIME: u32 = 0x0000_0400;
+const ATTR_CMN_FLAGS: u32 = 0x0004_0000;
+const ATTR_CMN_ERROR: u32 = 0x2000_0000;
+const ATTR_DIR_ENTRYCOUNT: u32 = 0x0000_0002;
+const ATTR_DIR_MOUNTSTATUS: u32 = 0x0000_0004;
+const ATTR_FILE_DATALENGTH: u32 = 0x0000_0200;
+
+// `FSOPT_NOFOLLOW`: do not follow a symbolic link. `sys/attr.h`.
+const FSOPT_NOFOLLOW: u64 = 0x0000_0001;
+
+// The mount-status bits of a directory. `sys/attr.h`.
+const DIR_MNTSTATUS_MNTPOINT: u32 = 0x0000_0001;
+const DIR_MNTSTATUS_TRIGGER: u32 = 0x0000_0002;
+
+// The file-status flags. `sys/stat.h`.
+const SF_FIRMLINK: u32 = 0x0080_0000;
+const UF_HIDDEN: u32 = 0x0000_8000;
+
+// The open(2) flags the walk asks for. `sys/fcntl.h`.
+const O_RDONLY: c_int = 0x0000;
+const O_DIRECTORY: c_int = 0x100000;
+const O_NOFOLLOW: c_int = 0x0100;
+const O_CLOEXEC: c_int = 0x1000000;
+
+// `RLIMIT_NOFILE`: how many descriptors the process may hold open.
+// `sys/resource.h`.
+const RLIMIT_NOFILE: c_int = 8;
+
+// `EPERM`: the refusal that means "no Full Disk Access". `sys/errno.h`.
+const EPERM: c_int = 1;
+
+/// The Darwin attrlist, as `sys/attr.h` declares it: how many attribute
+/// groups the list carries, a reserved word, and the five groups.
+#[repr(C)]
+struct Attrlist {
+    bitmapcount: u16,
+    reserved: u16,
+    commonattr: u32,
+    volattr: u32,
+    dirattr: u32,
+    fileattr: u32,
+    forkattr: u32,
+}
+
+/// The Darwin rlimit, as `sys/resource.h` declares it: two `rlim_t`, and
+/// `rlim_t` is 64 bits wide on every Darwin target.
+#[repr(C)]
+struct Rlimit {
+    rlim_cur: u64,
+    rlim_max: u64,
+}
+
+// The platform calls, declared here: the crate has no dependency to reach
+// the platform through, so they are written by hand — the way
+// `crates/discovery/src/file.rs` writes its own.
+unsafe extern "C" {
+    fn open(path: *const c_char, oflag: c_int, ...) -> c_int;
+    fn openat(dirfd: c_int, pathname: *const c_char, flags: c_int, ...) -> c_int;
+    fn close(fd: c_int) -> c_int;
+    // The BSD spelling of the errno accessor; the GNU one is
+    // `__errno_location`.
+    fn __error() -> *mut c_int;
+    fn getrlimit(resource: c_int, rlim: *mut Rlimit) -> c_int;
+    fn setrlimit(resource: c_int, rlim: *const Rlimit) -> c_int;
+    fn getattrlistat(
+        fd: c_int,
+        path: *const c_char,
+        attr_list: *mut Attrlist,
+        attr_buf: *mut c_void,
+        attr_buf_size: usize,
+        options: u64,
+    ) -> c_int;
+    fn getattrlistbulk(
+        dirfd: c_int,
+        attr_list: *mut Attrlist,
+        attr_buf: *mut c_void,
+        attr_buf_size: usize,
+        options: u64,
+    ) -> c_int;
+}
 
 /// Folders never to open: set when the daemon runs without Full Disk
 /// Access, where opening a consent-gated folder (Downloads, Desktop, ...)
@@ -52,10 +144,6 @@ pub fn blocked(path: &[u8]) -> bool {
             .any(|s| path.starts_with(s) && (path.len() == s.len() || path[s.len()] == b'/'))
     })
 }
-
-const ATTR_CMN_ERROR: u32 = 0x2000_0000;
-const DIR_MNTSTATUS_TRIGGER: u32 = 0x2;
-const SF_FIRMLINK: u32 = 0x0080_0000;
 
 // One vocabulary across backends: the block type the name index consumes
 // lives in the seam (rgy_discovery::walk) — this walk produces it.
@@ -112,7 +200,7 @@ struct Fd(i32);
 
 impl Drop for Fd {
     fn drop(&mut self) {
-        unsafe { libc::close(self.0) };
+        unsafe { close(self.0) };
     }
 }
 
@@ -180,10 +268,10 @@ pub fn scan(root: &[u8], threads: usize) -> Vec<Listing> {
 }
 
 fn raise_fd_limit() {
-    let mut r: libc::rlimit = unsafe { core::mem::zeroed() };
-    unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut r) };
+    let mut r: Rlimit = unsafe { core::mem::zeroed() };
+    unsafe { getrlimit(RLIMIT_NOFILE, &mut r) };
     r.rlim_cur = r.rlim_max.min(65536);
-    unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &r) };
+    unsafe { setrlimit(RLIMIT_NOFILE, &r) };
 }
 
 /// List a single directory (no recursion). Subdirectories come back with
@@ -206,7 +294,7 @@ pub fn list_one(path: &[u8]) -> Option<Listing> {
     Some(l)
 }
 
-const OPEN_DIR: i32 = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+const OPEN_DIR: c_int = O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC;
 
 /// The path of the root, when paths are tracked: they are only tracked
 /// when there is something to skip.
@@ -237,18 +325,18 @@ fn list_dir(work: Work, ctx: &Ctx, buf: &mut [u8]) {
 fn list_dir_inner(work: Work, ctx: &Ctx, buf: &mut [u8]) {
     let fd = match &work.parent {
         Some(parent) => unsafe {
-            libc::openat(
+            openat(
                 parent.0,
                 rgy_discovery::path::as_c_ptr(&work.name),
                 OPEN_DIR,
             )
         },
-        None => unsafe { libc::open(rgy_discovery::path::as_c_ptr(&work.name), OPEN_DIR) },
+        None => unsafe { open(rgy_discovery::path::as_c_ptr(&work.name), OPEN_DIR) },
     };
     if fd < 0 {
         // (With paths tracked, opening is how refusals get recorded.)
         if work.parent.is_some()
-            && unsafe { *libc::__error() } == libc::EPERM
+            && unsafe { *__error() } == EPERM
             && let Some(p) = &work.path
         {
             DENIED.lock().unwrap().push(p.clone());
@@ -322,18 +410,18 @@ fn list_dir_inner(work: Work, ctx: &Ctx, buf: &mut [u8]) {
 
 /// Entries in the directory `name` (in `dir`) resolves to.
 fn entry_count(dir: i32, name: &[u8]) -> Option<u32> {
-    let mut al: libc::attrlist = unsafe { core::mem::zeroed() };
-    al.bitmapcount = libc::ATTR_BIT_MAP_COUNT;
-    al.dirattr = libc::ATTR_DIR_ENTRYCOUNT;
+    let mut al: Attrlist = unsafe { core::mem::zeroed() };
+    al.bitmapcount = ATTR_BIT_MAP_COUNT;
+    al.dirattr = ATTR_DIR_ENTRYCOUNT;
     let mut b = [0u32; 2];
     let r = unsafe {
-        libc::getattrlistat(
+        getattrlistat(
             dir,
             rgy_discovery::path::as_c_ptr(name),
-            (&raw mut al).cast(),
+            &raw mut al,
             b.as_mut_ptr().cast(),
             8,
-            libc::FSOPT_NOFOLLOW as _,
+            FSOPT_NOFOLLOW,
         )
     };
     (r == 0).then_some(b[1])
@@ -364,37 +452,29 @@ fn list_into(path: &[u8], l: &mut Listing) -> bool {
     let Some(cpath) = rgy_discovery::path::cstring(path) else {
         return false;
     };
-    let fd = unsafe { libc::open(rgy_discovery::path::as_c_ptr(&cpath), OPEN_DIR) };
+    let fd = unsafe { open(rgy_discovery::path::as_c_ptr(&cpath), OPEN_DIR) };
     if fd < 0 {
         return false;
     }
     let mut buf = vec![0u8; BUF_SIZE];
     list_fd(fd, l, &mut buf);
-    unsafe { libc::close(fd) };
+    unsafe { close(fd) };
     true
 }
 
 fn list_fd(fd: i32, l: &mut Listing, buf: &mut [u8]) {
-    let mut al: libc::attrlist = unsafe { core::mem::zeroed() };
-    al.bitmapcount = libc::ATTR_BIT_MAP_COUNT;
-    al.commonattr = libc::ATTR_CMN_RETURNED_ATTRS
-        | libc::ATTR_CMN_NAME
+    let mut al: Attrlist = unsafe { core::mem::zeroed() };
+    al.bitmapcount = ATTR_BIT_MAP_COUNT;
+    al.commonattr = ATTR_CMN_RETURNED_ATTRS
+        | ATTR_CMN_NAME
         | ATTR_CMN_ERROR
-        | libc::ATTR_CMN_OBJTYPE
-        | libc::ATTR_CMN_MODTIME
-        | libc::ATTR_CMN_FLAGS;
-    al.dirattr = libc::ATTR_DIR_ENTRYCOUNT | libc::ATTR_DIR_MOUNTSTATUS;
-    al.fileattr = libc::ATTR_FILE_DATALENGTH;
+        | ATTR_CMN_OBJTYPE
+        | ATTR_CMN_MODTIME
+        | ATTR_CMN_FLAGS;
+    al.dirattr = ATTR_DIR_ENTRYCOUNT | ATTR_DIR_MOUNTSTATUS;
+    al.fileattr = ATTR_FILE_DATALENGTH;
     loop {
-        let n = unsafe {
-            libc::getattrlistbulk(
-                fd,
-                &mut al as *mut _ as *mut libc::c_void,
-                buf.as_mut_ptr() as *mut libc::c_void,
-                buf.len(),
-                0,
-            )
-        };
+        let n = unsafe { getattrlistbulk(fd, &mut al, buf.as_mut_ptr().cast(), buf.len(), 0) };
         if n <= 0 {
             break;
         }
@@ -407,7 +487,7 @@ fn list_fd(fd: i32, l: &mut Listing, buf: &mut [u8]) {
         let mut bytes = 0usize;
         for &(start, end) in &recs {
             let (b, common) = (&buf[start..end], rd32_at(buf, start + 4).unwrap_or(0));
-            if common & libc::ATTR_CMN_NAME != 0 {
+            if common & ATTR_CMN_NAME != 0 {
                 let f = if common & ATTR_CMN_ERROR != 0 { 28 } else { 24 };
                 if let Some(nlen) = rd32_at(b, f + 4) {
                     bytes += (nlen as usize).saturating_sub(1);
@@ -435,7 +515,7 @@ fn parse_entry(b: &[u8], l: &mut Listing) {
     if common & ATTR_CMN_ERROR != 0 {
         f += 4;
     }
-    if common & libc::ATTR_CMN_NAME == 0 {
+    if common & ATTR_CMN_NAME == 0 {
         return;
     }
     // The name offset is signed: the kernel writes it relative to the
@@ -462,7 +542,7 @@ fn parse_entry(b: &[u8], l: &mut Listing) {
     };
     f += 8;
     let mut kind = KIND_OTHER;
-    if common & libc::ATTR_CMN_OBJTYPE != 0 {
+    if common & ATTR_CMN_OBJTYPE != 0 {
         let Some(t) = rd32_at(b, f) else {
             return;
         };
@@ -475,7 +555,7 @@ fn parse_entry(b: &[u8], l: &mut Listing) {
         f += 4;
     }
     let mut mtime = 0u32;
-    if common & libc::ATTR_CMN_MODTIME != 0 {
+    if common & ATTR_CMN_MODTIME != 0 {
         let Some(t) = rd64_at(b, f) else {
             return;
         };
@@ -483,17 +563,17 @@ fn parse_entry(b: &[u8], l: &mut Listing) {
         f += 16;
     }
     let mut flags = 0;
-    if common & libc::ATTR_CMN_FLAGS != 0 {
+    if common & ATTR_CMN_FLAGS != 0 {
         let Some(fl) = rd32_at(b, f) else {
             return;
         };
         flags = fl;
-        if flags & libc::UF_HIDDEN != 0 {
+        if flags & UF_HIDDEN != 0 {
             kind |= FLAG_HIDDEN;
         }
         f += 4;
     }
-    if dirattr & libc::ATTR_DIR_ENTRYCOUNT != 0 {
+    if dirattr & ATTR_DIR_ENTRYCOUNT != 0 {
         let Some(count) = rd32_at(b, f) else {
             return;
         };
@@ -502,17 +582,17 @@ fn parse_entry(b: &[u8], l: &mut Listing) {
         }
         f += 4;
     }
-    if dirattr & libc::ATTR_DIR_MOUNTSTATUS != 0 {
+    if dirattr & ATTR_DIR_MOUNTSTATUS != 0 {
         let Some(mnt) = rd32_at(b, f) else {
             return;
         };
-        if mnt & (libc::DIR_MNTSTATUS_MNTPOINT | DIR_MNTSTATUS_TRIGGER) != 0 {
+        if mnt & (DIR_MNTSTATUS_MNTPOINT | DIR_MNTSTATUS_TRIGGER) != 0 {
             kind |= FLAG_MOUNT;
         }
         f += 4;
     }
     let mut size = 0u64;
-    if fileattr & libc::ATTR_FILE_DATALENGTH != 0 {
+    if fileattr & ATTR_FILE_DATALENGTH != 0 {
         let Some(s) = rd64_at(b, f) else {
             return;
         };

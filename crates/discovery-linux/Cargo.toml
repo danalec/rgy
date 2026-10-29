@@ -18,5 +18,7 @@ readme = "../../README.md"
 # nothing here can drag the standard library in through the door.
 rgy-discovery = { path = "../discovery", version = "0.1.0", default-features = false }
 
-[target.'cfg(target_os = "linux")'.dependencies]
-libc = "0.2"
+# The backend has no dependency of its own: the kernel is asked through
+# the calls declared by hand in `src/walk.rs` and `src/watch.rs`, and the
+# metadata of an entry is asked of the seam (`rgy_discovery::dir`), which
+# is where the platform's `stat` layout lives.

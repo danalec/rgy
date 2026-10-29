@@ -145,7 +145,6 @@ $knownExternal = @{
     'crossterm'         = 'the terminal UI of bins/search-ui: the raw mode, the cursor and the keys. No in-tree equivalent yet; the terminal backend would have to be written by hand'
     'hashbrown'         = 'the no_std hash map of crates/name-core (the maps of the query engine) and crates/discovery-windows; the query path wants the cheap hasher, and std::collections::HashMap is SipHash'
     'ignore'            = 'the pack-store builder walker of rgx-core, behind its tv-runtime feature; the portable walk of the seam (crates/discovery) has no gitignore semantics yet'
-    'memchr'            = 'the byte searches of rgx-core: the AVX2 kernels are upstream code, and so is the fallback for a CPU without AVX2'
     'mimalloc'          = 'the allocator of the three binaries; it measured 5-12% on the parallel walk on Windows'
     'regex'             = 'rgx ships its own engine (syntax + Thompson NFA + Pike VM) and that engine is the confirm in crates/name-core/src/content.rs. The product does not link the crate: a pattern the byte engine refuses is a refusal the search says. In rgx-core it is a dev-dependency only -- the oracle the capture groups are measured against (54/54 on the permanent corpus)'
     'rusqlite'          = 'upstream b01/io/binary/sqlite.rs + b02/sqlite/rusqlite_compat.rs'

@@ -1,0 +1,30 @@
+--- a/crates/rgx-core/Cargo.toml
++++ b/crates/rgx-core/Cargo.toml
+@@ -45,7 +45,7 @@ include = [
+ # flag, a core atomic, stays; and the JSON float parser becomes this crate's
+ # own, since `f64::from_str` is std-only.
+ default = ["std", "sha256-hw", "gzip", "zlib", "deflate", "bzip2", "lzma", "xz", "zstd", "snappy", "lz4", "blosc", "zip"]
+-std = ["dep:libc", "memchr/std"]
++std = ["memchr/std"]
+ # The Tesla Valve pack store's codec, query vocabulary and planner. The
+ # algorithmic half of `crates/rgx-tv`, held here so it can be `no_std` and so
+ # `rgx` can take it without taking the thread pool with it. `rgx-tv` turns
+@@ -119,13 +119,11 @@ sha256-hw = []
+ # still loaded by the archive adapter's test suite.
+ 
+ [dependencies]
+-# The `libc` constants and `mmap(2)` / `msync(2)` / `madvise(2)` syscall
+-# FFI the vendored `memmap2` module's Unix side uses. Gated on `std`
+-# because the module is -- `RawFd` and `mmap(2)` are `std`-only by
+-# Rust's design, and the `no_std` build does not compile the file at
+-# all. The dep is `no_std` itself, so this stays a no_std crate when
+-# `std` is off.
+-libc = { version = "0.2", default-features = false, optional = true }
++# The `memmap2` module's Unix side used to take its `mmap(2)` /
++# `msync(2)` / `madvise(2)` calls, and their `PROT_*` / `MAP_*` / `MS_*` /
++# `MADV_*` constants, from `libc`. They are declared by hand now, in the
++# module itself (`src/memmap2/platform`), so the crate carries no
++# dependency to make a syscall with.
+ # Byte scanning. `pub mod memchr;` in `lib.rs` re-exports the crate as
+ # an in-tree module so every call site keeps the same
+ # `rgx_core::memchr::*` path it has used since the in-house module
