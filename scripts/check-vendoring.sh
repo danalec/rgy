@@ -281,24 +281,14 @@ fi
 # separator because the notes are sentences, and splitting a list of
 # sentences on whitespace loses the sentences.
 known_external=$(printf '%s\t%s\n' \
-    'regex' 'rgx ships its own engine (syntax + Thompson NFA + Pike VM) and that engine is the confirm in crates/name-core/src/content.rs; the crate is the fallback for the patterns that engine refuses to parse, and in rgx-core a dev-dependency only -- the oracle the capture groups are measured against (54/54 on the permanent corpus)' \
+    'crossterm' 'the terminal UI of bins/search-ui: the raw mode, the cursor and the keys. No in-tree equivalent yet; the terminal backend would have to be written by hand' \
+    'hashbrown' 'the no_std hash map of crates/name-core (the maps of the query engine) and crates/discovery-windows; the query path wants the cheap hasher, and std::collections::HashMap is SipHash' \
     'ignore' 'the pack-store builder walker of rgx-core, behind its tv-runtime feature; the portable walk of the seam (crates/discovery) has no gitignore semantics yet' \
-    'brotli' 'NO REPLACEMENT: rgx has the RFC 7932 decoder in crates/rgx-adapters-archive/src/brotli/. See tests::oracle::vendored_brotli_does_not_decode_reference_streams' \
-    'xz2' 'upstream b02/compress/xz/ (RFC 8478 container + LZMA2)' \
-    'zstd' 'NOT YET: upstream b02/compress/zstd.rs was refused as not actually zstd' \
-    'bzip2-0_5-static' 'C binding, pulled in by the zip crate; rgx needs a zip without the bzip2 feature to remove it' \
+    'memchr' 'the byte searches of rgx-core: the AVX2 kernels are upstream code, and so is the fallback for a CPU without AVX2' \
+    'mimalloc' 'the allocator of the three binaries; it measured 5-12% on the parallel walk on Windows' \
+    'regex' 'rgx ships its own engine (syntax + Thompson NFA + Pike VM) and that engine is the confirm in crates/name-core/src/content.rs. The product does not link the crate: a pattern the byte engine refuses is a refusal the search says. In rgx-core it is a dev-dependency only -- the oracle the capture groups are measured against (54/54 on the permanent corpus)' \
     'rusqlite' 'upstream b01/io/binary/sqlite.rs + b02/sqlite/rusqlite_compat.rs' \
-    'kamadak-exif' 'upstream b01/io/image/exif/' \
-    'clap' 'argument parsing; no upstream equivalent identified yet' \
-    'memchr' 'crates/rgx-core/src/memchr.rs re-exports the external memchr 2.x crate and carries an in-house tree beside it: src/memchr/dispatch.rs picks the byte kernels with the CPU probe the crate writes itself (src/detect.rs), and src/memchr/memmem.rs is the substring search, because the upstream packed-pair kernel cannot be reached without std. The external crate stays as the fallback for a CPU without AVX2 and for the architectures whose vector width is decided at compile time.' \
-    'libc' 'the constants and `mmap(2)` / `msync(2)` / `madvise(2)` syscall FFI the vendored `memmap2` module (crates/rgx-core/src/memmap2) reaches for on Unix, and the `dirent` / `stat` layouts the portable reader of the seam (crates/discovery/src/dir.rs) reads on Unix. Both are gated on the target, not on the `std` feature, so the bare-metal build does not link it. Will go away when the `memmap2` module is rewritten in pure inline FFI (a follow-up) or when Linux / macOS gating moves to `std::sys::pal`.' \
-    'anyhow' 'rgx-core/src/error.rs is the in-house replacement; leftover entry' \
-    'ocrs' 'the OCR detection and recognition pipeline; no in-tree replacement yet' \
-    'rten' 'the OCR model file reader and tensor runtime; no in-tree replacement yet' \
-    'image' 'the OCR decode and preprocess step; upstream has the codecs' \
-    'flate2' 'dev-dependency for test fixtures' \
-    'zip' 'dev-dependency for test fixtures' \
-    'libfuzzer-sys' 'fuzz harness only; not part of a shipped build')
+    'windows' 'the Win32 API of crates/discovery-windows; the tree declares its own Windows FFI elsewhere (crates/discovery/src/file.rs, crates/launcher-windows), and this crate has not caught up')
 
 say_head "[4/5] no unexpected external crates"
 
@@ -329,7 +319,17 @@ known_desc() {
 # ".\crates\..." handed over that way arrives as ".crates..." with a warning
 # for every backslash.
 external=""
-for f in ${manifests[@]+"${manifests[@]}"}; do
+# The whole workspace, for this check only: the question is whether the
+# tree links a crate from outside it, and that is a question about every
+# crate in the tree. The scope above is what check 1 needs -- rgy's own
+# crates are not vendored from upstream -- and it is the wrong scope here:
+# the externals of rgy's own crates would not be seen at all.
+all_manifests=()
+while IFS= read -r f; do
+    all_manifests+=("$f")
+done < <(find_files Cargo.toml | walk_sort)
+
+for f in ${all_manifests[@]+"${all_manifests[@]}"}; do
     [ "${f##*/}" = "Cargo.toml" ] || continue
     rel=$(rel_path "$f")
     while IFS=$'\t' read -r line_no name; do
