@@ -305,7 +305,10 @@ $sums = Join-Path $out "SHA256SUMS"
 # The digests file is read by awk on the other platform, and one line
 # with every digest in it is a file nobody can read.
 $lines = @()
-if (Test-Path $sums) { $lines = @(Get-Content $sums) }
+# A file written by an older build carries a carriage return at the end of
+# each line, and a name with one is not the name: the line is trimmed on the
+# way in, so a file from the other platform reads the same as one from here.
+if (Test-Path $sums) { $lines = @(Get-Content $sums | ForEach-Object { $_.TrimEnd("`r") }) }
 $lines = @($lines | Where-Object { $_ -notmatch "  $([regex]::Escape($archiveName))$" })
 $sha = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLower()
 $lines += "$sha  $archiveName"
@@ -317,7 +320,11 @@ $deduped = $lines | Where-Object {
     $key = ($_ -split '\s+', 2)[1]
     if ($seen.ContainsKey($key)) { $false } else { $seen[$key] = $true; $true }
 }
-$deduped | Sort-Object { ($_ -split '\s+', 2)[1] } | Set-Content $sums -Encoding utf8
+# LF and no BOM: the file is read by awk on the other platform, and by
+# `sha256sum -c` everywhere. A carriage return at the end of a line is part
+# of the name awk reads, and the digest never matches.
+$text = (($deduped | Sort-Object { ($_ -split '\s+', 2)[1] }) -join "`n") + "`n"
+[System.IO.File]::WriteAllText($sums, $text, [System.Text.UTF8Encoding]::new($false))
 Write-Host "checksum: .dist/SHA256SUMS ($sha  $archiveName)"
 
 Write-Host ""

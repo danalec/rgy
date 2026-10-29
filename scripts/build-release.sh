@@ -283,11 +283,14 @@ sums="$out/SHA256SUMS"
 tmp="$sums.tmp"
 : > "$tmp"
 if [ -f "$sums" ]; then
-    grep -v "  $archive_name\$" "$sums" >> "$tmp" || true
+    # The carriage return: the file is shared with the Windows twin, and a
+    # line written there can end with one. The name is the second field, so
+    # the return would be part of it.
+    grep -v "  $archive_name[[:space:]]*\$" "$sums" | tr -d '\r' >> "$tmp" || true
 fi
 sha=$(sha256sum "$archive" | cut -d' ' -f1)
 printf '%s  %s\n' "$sha" "$archive_name" >> "$tmp"
-awk '!seen[$2]++' "$tmp" | sort -k2 > "$sums"
+awk '{ sub(/\r$/, "", $2) } !seen[$2]++' "$tmp" | sort -k2 > "$sums"
 rm -f "$tmp"
 echo "checksum: .dist/SHA256SUMS ($sha  $archive_name)"
 

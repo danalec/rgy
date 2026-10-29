@@ -109,8 +109,11 @@ if [ -f "$sums" ]; then
     for asset in $assets; do
         name=$(basename "$asset")
         [ "$name" = "SHA256SUMS" ] && continue
-        want=$(awk -v n="$name" '$2 == n { print $1; exit }' "$sums")
-        count=$(awk -v n="$name" '$2 == n { c++ } END { print c + 0 }' "$sums")
+        # The carriage return: the digests file is shared with the Windows
+        # twin, and a name that ends with one is not the name the digest is
+        # filed under.
+        want=$(awk -v n="$name" '{ sub(/\r$/, "", $2) } $2 == n { print $1; exit }' "$sums")
+        count=$(awk -v n="$name" '{ sub(/\r$/, "", $2) } $2 == n { c++ } END { print c + 0 }' "$sums")
         if [ "$count" -gt 1 ]; then
             echo "$name is named $count times in $sums: a digests file that names the same archive twice is a file nobody can read" >&2
             exit 1
