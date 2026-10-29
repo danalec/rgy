@@ -241,7 +241,7 @@ static UNSPELLABLE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUs
 /// the count is said out loud, because a path that cannot be spelled is
 /// a path the user has to know about.
 #[cfg(feature = "std")]
-pub fn spell(path: &[u8]) -> String {
+pub fn spell(path: &[u8]) -> alloc::string::String {
     match std::str::from_utf8(path) {
         Ok(text) => alloc::string::String::from(text),
         Err(_) => {
@@ -254,7 +254,7 @@ pub fn spell(path: &[u8]) -> String {
                     ),
                 );
             }
-            String::from_utf8_lossy(path).into_owned()
+            alloc::string::String::from_utf8_lossy(path).into_owned()
         }
     }
 }
