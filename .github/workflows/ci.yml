@@ -87,6 +87,14 @@ jobs:
           targets: x86_64-unknown-freebsd
       - uses: swatinem/rust-cache@v2
       - run: cargo check --workspace --target x86_64-unknown-freebsd --locked
+      # The lint of the FreeBSD half of the tree. The clippy job runs on
+      # ubuntu, where the FreeBSD backend is `#![cfg(target_os = "freebsd")]`
+      # and compiles empty: a lint in it, and in the FreeBSD blocks of the
+      # crates that are shared, is invisible to every gate there is. The
+      # target is installed here for the check above, and clippy reads the
+      # target's code the same way it reads the host's -- it does not link,
+      # so a FreeBSD binary is never needed.
+      - run: cargo clippy --workspace --target x86_64-unknown-freebsd --all-targets -- -D warnings
 
   no-std:
     name: "the engine builds without std"
@@ -125,13 +133,19 @@ jobs:
       # `#![no_std]` at the root of the crate is the proof: a `std::` path
       # in the body does not compile.
       #
-      # `rgx-adapters-docs` is not in the list, and cannot be: it is the
-      # upstream's crate, transported verbatim, and it spawns processes
-      # (soffice, tesseract), which is `std` by definition.
+      # Three crates are not in the list, and each one says why.
       #
-      # `rgy-adapters` is not in the list either, and for the same reason
-      # one step further: it orders the ten upstream families, and every
+      # `rgx-adapters-docs` is upstream's crate, transported verbatim, and
+      # it spawns processes (soffice, tesseract), which is `std` by
+      # definition.
+      #
+      # `rgy-adapters` is this repository's, and for the same reason one
+      # step further: it orders the ten upstream families, and every
       # format those families decode turns `std` on with it.
+      #
+      # `rgy-search-ui` is this repository's too: the terminal interface,
+      # which is a terminal. It reads the console and the files, and
+      # crossterm is `std` by definition.
       - run: cargo build --release --locked --no-default-features -p rgy-par -p rgy-discovery -p rgy-name-core -p rgy-proto -p rgy-engine -p rgy-discovery-dispatch -p rgy-autostart -p rgy-discovery-linux -p rgy-discovery-freebsd -p rgy-discovery-windows -p rgy-discovery-macos -p rgy-launcher -p rgy-pick -p rgy-launcher-windows --target x86_64-unknown-none
 
   freebsd-suite:
@@ -182,6 +196,16 @@ jobs:
       # repository does not describe.
       - run: cargo build --workspace --locked
       - run: cargo test --workspace --no-fail-fast --locked
+      # The lint of the half of the tree this runner is the only one to
+      # see. The clippy job runs on ubuntu, where the Windows and the
+      # macOS backends are `#![cfg(...)]` and compile empty: a lint in
+      # them, and in the platform blocks of the crates that are shared,
+      # was reported by nobody. The same command on the runner that has
+      # the platform is the same gate -- it just runs where the code is.
+      # Linux is left out: the clippy job is that runner.
+      - name: the Windows and macOS halves are linted on their own runner
+        if: runner.os != 'Linux'
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
   release:
     name: the release archive for ${{ matrix.asset }}
