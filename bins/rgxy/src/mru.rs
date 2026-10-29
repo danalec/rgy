@@ -26,8 +26,10 @@
 //! The path is **last**, because a path may carry a tab and the first two
 //! tabs are the only separators there are. A line that does not parse is
 //! a line that is skipped, and a file whose last line was cut short does
-//! not get that line at all: a store that cannot be read is no history,
-//! never an error that stops the launcher.
+//! not get that line at all. A store that cannot be **read** is another
+//! thing altogether: the launcher says so and carries on, because a
+//! memory that is silently not there is a memory the user believes in
+//! and the machine does not have.
 //!
 //! The path is the **daemon's** spelling of the path, and it is the
 //! spelling the history is looked up with: the launcher and the daemon
@@ -86,12 +88,32 @@ pub fn now() -> u64 {
         .unwrap_or(0)
 }
 
-/// Read the history. A file that cannot be read is no history.
-pub fn load(path: &Path) -> History {
+/// Read the history.
+///
+/// A file that is **not there** is no history, and not an error: a
+/// launcher that has never run has no memory, and that is the normal
+/// state of a new machine.
+///
+/// A file that is there and cannot be read is an error, and it is kept:
+/// the history is gone for this run, the ranking falls back to the
+/// daemon's order and the nudge does not come back — and the launcher
+/// has to say that much.
+pub fn load(path: &Path) -> Result<History, std::io::Error> {
     match std::fs::read_to_string(path) {
-        Ok(text) => parse(&text),
-        Err(_) => History::new(),
+        Ok(text) => Ok(parse(&text)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(History::new()),
+        Err(err) => Err(err),
     }
+}
+
+/// The sentence for a history that could not be read.
+///
+/// The file is the launcher's own memory, and a memory that could not
+/// be read is not the same thing as a daemon that is not there: the
+/// ranking falls back to the daemon's order and the nudge does not
+/// come back, and the two facts have to be told apart.
+pub fn read_error(err: &std::io::Error) -> String {
+    format!("o histórico não pôde ser lido: {err}")
 }
 
 /// The history the text of a store says.
@@ -176,8 +198,11 @@ pub fn save(path: &Path, history: &History) -> std::io::Result<()> {
     // writes a store that says nothing about what the first one did.
     let _lock = Lock::take(&lock_path(path))?;
     // The file says what it says now: another launcher may have written
-    // while this one was running.
-    let merged = merge(&load(path), history);
+    // while this one was running. A file that cannot be read is not a
+    // file with no history: the merge would throw away what is in it,
+    // and the write is refused rather than the history lost.
+    let on_disk = load(path)?;
+    let merged = merge(&on_disk, history);
     let id = TEMP_ID.fetch_add(1, Ordering::Relaxed);
     write_store(path, &merged, id)
 }
@@ -458,7 +483,7 @@ mod tests {
         save(&path, &history).expect("the store is written");
 
         // The restart: a history that knows nothing, reading the file.
-        let read = load(&path);
+        let read = load(&path).expect("the store is read");
         let entry = read
             .get("C:/Users/dana/notas.txt")
             .expect("the history is there");
@@ -471,7 +496,29 @@ mod tests {
     fn a_store_that_is_not_there_is_no_history() {
         let dir = scratch("mru-missing");
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(load(&dir.join("usage.tsv")).is_empty());
+        assert!(
+            load(&dir.join("usage.tsv"))
+                .expect("no history, and no error")
+                .is_empty()
+        );
+    }
+
+    /// A store that cannot be read is an error.
+    ///
+    /// The read used to be swallowed: a file that could not be read
+    /// became "no history", and the launcher said nothing — the
+    /// ranking fell back to the daemon's order, the nudge never came
+    /// back, and nobody knew why.
+    #[test]
+    fn a_store_that_cannot_be_read_is_an_error() {
+        let dir = scratch("mru-unreadable");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("the folder is there");
+        // The store's own path, taken by a directory: the read fails.
+        let path = dir.join("usage.tsv");
+        std::fs::create_dir_all(&path).expect("the store's path is taken");
+        assert!(load(&path).is_err(), "the store could not be read");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -533,7 +580,7 @@ mod tests {
         second.record("C:/Users/dana/outro.txt", 2_000);
         save(&path, &second).expect("the store is written again");
 
-        let read = load(&path);
+        let read = load(&path).expect("the store is read");
         assert!(
             read.get("C:/Users/dana/notas.txt").is_some(),
             "{:?}",
@@ -586,7 +633,7 @@ mod tests {
         }
         assert!(failures.is_empty(), "a writer's save failed: {failures:?}");
 
-        let read = load(&path);
+        let read = load(&path).expect("the store is read");
         assert!(
             read.get("/a/notas.txt").is_some(),
             "the first writer's entry is gone: {:?}",
@@ -778,7 +825,7 @@ mod tests {
 
         // The store holds every writer's entry: the write reads the file
         // again, so what one writer said is in what the next one wrote.
-        let read = load(&path);
+        let read = load(&path).expect("the store is read");
         assert_eq!(
             read.len(),
             WRITERS * ROUNDS,

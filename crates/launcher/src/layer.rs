@@ -242,6 +242,57 @@ impl<'a> Split<'a> {
     }
 }
 
+/// The two questions a query is.
+///
+/// The engine is asked the **name** part in the engine's own words, and
+/// the content layer is asked the **content** part as the user typed it.
+/// One query, two questions — and the split between them belongs to the
+/// model, so the window and the daemon's source cannot answer two
+/// different questions for the same words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Halves<'a> {
+    /// The split of the query: the names and the content.
+    pub split: Split<'a>,
+}
+
+impl<'a> Halves<'a> {
+    /// The engine's question: the name part, in the engine's words.
+    ///
+    /// The launcher's short words become the engine's words — `pic:` is
+    /// the launcher's and `type:image` is the engine's — and the content
+    /// part never reaches the engine: it is the second layer's question.
+    pub fn engine(&self) -> String {
+        scope_query(self.split.names)
+    }
+
+    /// The content layer's question: the content part, as it was typed.
+    ///
+    /// The prefix stays: the engine reads it, and the launcher does not
+    /// have a pattern language of its own.
+    pub fn content(&self) -> Option<&'a str> {
+        self.split.content
+    }
+
+    /// The layer the query is about.
+    pub fn layer(&self) -> Layer {
+        self.split.layer()
+    }
+
+    /// Whether the query asks for the content layer.
+    pub fn is_content(&self) -> bool {
+        self.split.is_content()
+    }
+
+    /// The content pattern, without its prefix.
+    ///
+    /// The prefix says the **mode** — literal, regular expression,
+    /// symbol — and the rest is the pattern itself. Empty while the user
+    /// is still typing it: the question has not been asked yet.
+    pub fn pattern(&self) -> &'a str {
+        self.split.pattern()
+    }
+}
+
 /// The prefix of a content part, and the pattern that follows it.
 ///
 /// The table is the vocabulary, and this is the one place it is read:
@@ -544,6 +595,22 @@ mod tests {
         let split = Split::of("ção");
         assert_eq!(split.layer(), Layer::Names);
         assert_eq!(split.names, "ção");
+    }
+
+    /// The two questions, in one answer.
+    ///
+    /// The engine's is the name part in the engine's words, and the
+    /// content layer's is the content part as it was typed.
+    #[test]
+    fn the_two_halves_are_the_engine_and_the_content() {
+        let halves = Halves {
+            split: Split::of("pic: invoice grep:total"),
+        };
+        assert_eq!(halves.engine(), "type:image invoice");
+        assert_eq!(halves.content(), Some("grep:total"));
+        assert_eq!(halves.layer(), Layer::Content);
+        assert!(halves.is_content());
+        assert_eq!(halves.pattern(), "total");
     }
 
     #[test]

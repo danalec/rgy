@@ -25,7 +25,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use rgy_launcher::usage::History;
-use rgy_launcher::{Action, Answer, App, Mode, Row, Source, Split, commands};
+use rgy_launcher::{Action, Answer, App, Layer, Mode, Row, Source, commands};
 use rgy_launcher_windows::actions;
 use rgy_launcher_windows::hook::Hook;
 use rgy_launcher_windows::window::{Control, Event, Key, View, Window};
@@ -147,10 +147,10 @@ struct State {
     usage_path: Option<std::path::PathBuf>,
     /// What the launcher has to say about the machine it is on.
     ///
-    /// The note is here and not in the warnings because an answer does
-    /// not make it go away: a refused hotkey is still refused when the
-    /// daemon answers.
-    note: Option<String>,
+    /// The notes are here and not in the warnings because an answer
+    /// does not make them go away: a refused hotkey is still refused
+    /// when the daemon answers.
+    notes: Vec<String>,
 }
 
 impl State {
@@ -166,7 +166,7 @@ impl State {
         let text = self.app.query().text();
         if text.is_empty() {
             Waiting::Idle
-        } else if Split::of(text).is_content() {
+        } else if self.app.layer() == Layer::Content {
             Waiting::Content
         } else {
             Waiting::Names
@@ -190,7 +190,7 @@ impl State {
         if let Err(reason) = written {
             let message = format!("o histórico não foi gravado: {reason}");
             eprintln!("rgxy: {message}");
-            self.note = Some(message);
+            self.notes.push(message);
         }
     }
 }
@@ -222,10 +222,26 @@ pub fn run(source: DaemonSource, options: &Options) -> Result<(), String> {
     // The memory is read once, when the launcher starts: the launcher is
     // resident, and the file is the memory of the last time it ran.
     let usage_path = mru::store_path();
-    let history = match &usage_path {
-        Some(path) => mru::load(path),
-        None => History::new(),
-    };
+    let (history, memory_note) = memory(usage_path.as_deref());
+
+    // What the launcher has to say about the machine it is on: a
+    // refused hotkey and a memory that could not be read are two
+    // facts, and the line under the field carries both of them.
+    let mut notes: Vec<String> = Vec::new();
+    // The window goes up when the launcher was asked to show itself, and
+    // also when the hotkey was refused: the hotkey is the only thing that
+    // raises the window, and a launcher that cannot be raised is a
+    // process the user has to kill. A memory that could not be read does
+    // not raise the window: the launcher is still resident, and the line
+    // says what happened when the user opens it.
+    let mut open_at_startup = options.show;
+    if let Some(message) = refused {
+        notes.push(message);
+        open_at_startup = true;
+    }
+    if let Some(message) = memory_note {
+        notes.push(message);
+    }
 
     let mut state = State {
         app: App::new(),
@@ -237,7 +253,7 @@ pub fn run(source: DaemonSource, options: &Options) -> Result<(), String> {
         ask_daemon: true,
         history,
         usage_path,
-        note: refused,
+        notes,
     };
 
     // The rows the screen has room for: the window is sized from them, and
@@ -251,7 +267,7 @@ pub fn run(source: DaemonSource, options: &Options) -> Result<(), String> {
     // also when the hotkey was refused: the hotkey is the only thing that
     // raises the window, and a launcher that cannot be raised is a
     // process the user has to kill.
-    if options.show || state.note.is_some() {
+    if open_at_startup {
         state.app.show();
         state.source.set_session(state.app.session());
         // The window goes up **now**: the launcher was asked to show
@@ -275,6 +291,33 @@ pub fn run(source: DaemonSource, options: &Options) -> Result<(), String> {
     // the user is a launcher that is late for both.
 
     window.pump(|event| handle(&mut state, event))
+}
+
+/// The launcher's memory, and what the launcher has to say about it.
+///
+/// The memory is read once, when the launcher starts: the launcher is
+/// resident, and the file is the memory of the last time it ran.
+///
+/// A file that is **not there** is not an error: a launcher that has
+/// never run has no history, and that is the normal state of a new
+/// machine. A file that is there and cannot be read is another thing
+/// altogether: the ranking falls back to the daemon's order, the nudge
+/// does not come back, and the user is told — the memory is gone for
+/// this run, and it is not the daemon's fault.
+fn memory(path: Option<&std::path::Path>) -> (History, Option<String>) {
+    let Some(path) = path else {
+        return (History::new(), None);
+    };
+    match mru::load(path) {
+        Ok(history) => (history, None),
+        Err(err) => {
+            let message = mru::read_error(&err);
+            // The stderr of a program started from a shortcut is
+            // nowhere: the line under the field says it as well.
+            eprintln!("rgxy: {message}");
+            (History::new(), Some(message))
+        }
+    }
 }
 
 /// One event, and what the window should do about it.
@@ -395,7 +438,22 @@ fn on_key(state: &mut State, key: Key) -> Control {
             state.app.hide();
             return Control::Hide;
         }
-        Key::Tab | Key::Delete | Key::Other => {}
+        Key::Delete => {
+            // The key deletes the character **at** the caret: `Delete` is
+            // the forward deletion and `Backspace` is the backward one,
+            // and a `Delete` that took the character before the caret
+            // would take the wrong one away from a user who is editing
+            // in the middle of the line. The model holds the text and the
+            // caret, and the deletion is the model's to make.
+            //
+            // The round-trip is owed only when the text really changed:
+            // a caret at the end of the field has nothing to delete, and
+            // the daemon is not asked a question nobody asked.
+            if !state.app.delete_forward() {
+                return paint(state);
+            }
+        }
+        Key::Tab | Key::Other => {}
     }
 
     // The query changed: the launcher asks its own question.
@@ -607,8 +665,7 @@ fn ask(state: &mut State) {
         cleared(state);
         return;
     }
-    let split = Split::of(&text);
-    if split.is_content() {
+    if state.app.layer() == Layer::Content {
         // The content layer reads files: it waits for the clock.
         state.waiting = Waiting::Content;
         return;
@@ -779,7 +836,7 @@ fn status_line(state: &State) -> String {
             parts.push(format!("{} ms", status.took_us / 1000));
         }
     }
-    if let Some(note) = &state.note {
+    for note in &state.notes {
         // The note is about the machine: it is true while the launcher
         // is the way it is, and an answer does not change it.
         parts.push(note.clone());
@@ -793,6 +850,11 @@ fn status_line(state: &State) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A directory of the test's own.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("rgy-rgxy-{name}-{}", std::process::id()))
+    }
 
     /// A state with no daemon and no results.
     fn empty() -> State {
@@ -813,7 +875,7 @@ mod tests {
             ask_daemon: false,
             history: History::new(),
             usage_path: None,
-            note: None,
+            notes: Vec::new(),
         }
     }
 
@@ -872,7 +934,7 @@ mod tests {
             ask_daemon: false,
             history: History::new(),
             usage_path: None,
-            note: None,
+            notes: Vec::new(),
         };
         (state, asked)
     }
@@ -1057,6 +1119,128 @@ mod tests {
         assert_eq!(view(&state).caret, 0, "the caret is at the start");
     }
 
+    /// The `Delete` key deletes the character at the caret.
+    ///
+    /// `Delete` is the **forward** deletion: the character under the
+    /// caret goes. The key used to fall into the arm that does nothing:
+    /// it deleted no character, it said nothing, and it still cost a
+    /// round-trip to the daemon.
+    #[test]
+    fn the_delete_key_deletes_the_character_at_the_caret() {
+        let mut state = empty();
+        for ch in "abc".chars() {
+            state.app.insert(ch);
+        }
+        state.app.move_home();
+        state.app.move_right();
+        assert_eq!(state.app.query().caret(), 1, "the caret is in the middle");
+        let _ = on_key(&mut state, Key::Delete);
+        assert_eq!(
+            state.app.query().text(),
+            "ac",
+            "the character under the caret went"
+        );
+        // The caret stays where it was: the character that came after it
+        // took its place, and the caret is still between the two.
+        assert_eq!(
+            state.app.query().caret(),
+            1,
+            "the caret is where the deletion happened"
+        );
+    }
+
+    /// `Delete` and `Backspace` are two keys and two deletions.
+    ///
+    /// `Delete` takes the character under the caret and `Backspace` the
+    /// one before it: a launcher that made the two the same would take
+    /// the wrong character away from a user who is editing in the middle
+    /// of the line.
+    #[test]
+    fn delete_and_backspace_are_two_deletions() {
+        let mut state = empty();
+        for ch in "abc".chars() {
+            state.app.insert(ch);
+        }
+        state.app.move_home();
+        state.app.move_right();
+        let _ = on_key(&mut state, Key::Delete);
+        assert_eq!(
+            state.app.query().text(),
+            "ac",
+            "the character under the caret went"
+        );
+        // And now the one before it: the caret is where it was, and the
+        // character in front of it is the one that goes.
+        let _ = on_key(&mut state, Key::Backspace);
+        assert_eq!(
+            state.app.query().text(),
+            "c",
+            "the character before the caret went"
+        );
+        assert_eq!(state.app.query().caret(), 0, "the caret walked back");
+    }
+
+    /// A `Delete` that deletes nothing costs no round-trip.
+    ///
+    /// The caret at the end of the field has nothing to delete, and the
+    /// daemon is not asked a question nobody asked.
+    #[test]
+    fn a_delete_that_deletes_nothing_costs_no_round_trip() {
+        let (mut state, asked) = recording();
+        state.app.insert('a');
+        let _ = on_key(&mut state, Key::Delete);
+        assert_eq!(state.app.query().text(), "a", "nothing was deleted");
+        assert_eq!(state.waiting, Waiting::Idle, "no question was armed");
+        let _ = handle(&mut state, Event::Tick);
+        assert!(asked.borrow().is_empty(), "the daemon was not asked");
+    }
+
+    /// A memory that could not be read is said out loud.
+    ///
+    /// The history is the launcher's own memory: a file that cannot be
+    /// read leaves the ranking on the daemon's order and the nudge
+    /// gone, and a launcher that says nothing about it is a launcher
+    /// whose memory the user believes in and the machine does not have.
+    #[test]
+    fn a_memory_that_cannot_be_read_is_said_out_loud() {
+        let dir = scratch("gui-memory");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("the folder is there");
+        // The store's own path, taken by a directory: the read fails,
+        // and it is not "there is no history" — it is a history that
+        // could not be read.
+        let path = dir.join("usage.tsv");
+        std::fs::create_dir_all(&path).expect("the store's path is taken");
+
+        let (history, note) = memory(Some(&path));
+        assert!(history.is_empty(), "there is no history to show");
+        let note = note.expect("the memory that could not be read is said");
+        assert!(note.contains("histórico"), "{note}");
+
+        // And the line under the field carries it.
+        let mut state = empty();
+        state.notes = vec![note];
+        let line = status_line(&state);
+        assert!(line.contains("histórico"), "{line}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A memory that is not there is not an error.
+    ///
+    /// A launcher that has never run has no history, and that is the
+    /// normal state of a new machine: there is nothing to say about
+    /// it.
+    #[test]
+    fn a_memory_that_is_not_there_is_not_an_error() {
+        let dir = scratch("gui-memory-absent");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("the folder is there");
+        let (history, note) = memory(Some(&dir.join("usage.tsv")));
+        assert!(history.is_empty(), "there is no history yet");
+        assert!(note.is_none(), "there is nothing to say: {note:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The note about the machine is in the line.
     ///
     /// A launcher that says nothing about a refused hotkey is a
@@ -1065,7 +1249,7 @@ mod tests {
     #[test]
     fn the_note_about_the_machine_is_in_the_line() {
         let mut state = empty();
-        state.note = Some("o atalho global não foi instalado: sem permissão".to_string());
+        state.notes = vec!["o atalho global não foi instalado: sem permissão".to_string()];
         let line = status_line(&state);
         assert!(line.contains("atalho global"), "{line}");
     }

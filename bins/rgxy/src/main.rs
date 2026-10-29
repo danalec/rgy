@@ -92,6 +92,7 @@ fn usage() -> String {
         "rgxy {version} — a janela de procura do daemon rgy.\n\
          \n\
          usage:\n  \
+           rgxy                    # o lançador residente: Control duas vezes abre a janela\n  \
            rgxy [--tui] [--query <texto>] [--limit <n>] [--endpoint <e>] [--no-hook] [--show]\n  \
                 [--pick] [--fzf-binary <p>] [--fzf-arg <arg>]\n\
          \n\
@@ -140,25 +141,46 @@ fn main() -> ExitCode {
     }
 }
 
+/// What the command line asked for.
+#[derive(Debug)]
+enum Request {
+    /// The text of the help.
+    Help,
+    /// The version.
+    Version,
+    /// The launcher, with the options the command line gave.
+    Run(Options),
+}
+
+/// Read the command line.
+///
+/// An **empty** command line is the launcher: the resident window with
+/// the hotkey, hidden until the hotkey says otherwise. The usage text
+/// is what `--help` asks for — the manual, the README and the login
+/// entry all say that a bare `rgxy` is the launcher, and a program that
+/// answers a question nobody asked is a program that says what it is
+/// not.
+fn request(argv: &[String]) -> Result<Request, String> {
+    match argv.first().map(String::as_str) {
+        Some("-h") | Some("--help") | Some("help") => Ok(Request::Help),
+        Some("-V") | Some("--version") => Ok(Request::Version),
+        _ => Ok(Request::Run(parse(argv)?)),
+    }
+}
+
 /// Run the command. `Err` is a sentence for stderr and exit code 1.
 fn run(argv: &[String]) -> Result<ExitCode, String> {
-    let Some(command) = argv.first() else {
-        println!("{}", usage());
-        return Ok(ExitCode::SUCCESS);
-    };
-    match command.as_str() {
-        "-h" | "--help" | "help" => {
+    let options = match request(argv)? {
+        Request::Help => {
             println!("{}", usage());
             return Ok(ExitCode::SUCCESS);
         }
-        "-V" | "--version" => {
+        Request::Version => {
             println!("rgxy {}", env!("CARGO_PKG_VERSION"));
             return Ok(ExitCode::SUCCESS);
         }
-        _ => {}
-    }
-
-    let options = parse(argv)?;
+        Request::Run(options) => options,
+    };
     if options.pick && options.query.is_none() {
         // A picker filters the results of a search: without a question
         // there is no list to filter.
@@ -280,18 +302,61 @@ fn endpoint_of(text: &str) -> Result<Endpoint, String> {
 fn one_shot(mut source: DaemonSource, query: &str, limit: usize) -> Result<ExitCode, String> {
     let answer = wait_for_daemon(&mut source, query, limit);
     let mut out = std::io::stdout();
-    for path in &answer.paths {
-        let _ = writeln!(out, "{path}");
-    }
-    let _ = out.flush();
+    let written = write_paths(&answer.paths, &mut out);
     for warning in source.status().borrow().warnings.clone() {
         eprintln!("rgxy: {warning}");
+    }
+    if let Err(err) = written {
+        // The paths did not reach the caller: the status says the
+        // output did not arrive, and it does not say success for
+        // output that never arrived.
+        return Ok(ExitCode::from(write_failure(&err)));
     }
     Ok(if answer.is_empty() {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
     })
+}
+
+/// The paths, one per line.
+///
+/// The write that fails is the failure: a path that did not reach the
+/// caller is a path the caller does not have, and a program that says
+/// it printed them anyway is a program that lies. The loop stops at
+/// the first failure — the reader is gone, and the rest of the paths
+/// would go into the same gone.
+fn write_paths(paths: &[String], out: &mut impl Write) -> std::io::Result<()> {
+    for path in paths {
+        writeln!(out, "{path}")?;
+    }
+    out.flush()
+}
+
+/// The exit status of an output that never arrived.
+///
+/// The launcher has three answers: 0 is a search with matches, 1 is a
+/// search without them, and this is the third — the search had its
+/// answer and the answer did not reach the caller.
+const OUTPUT_NOT_DELIVERED: u8 = 2;
+
+/// The exit status of a write that did not go through.
+///
+/// A **broken pipe** is the reader going away on purpose
+/// (`rgxy --query invoice | head -3`), and it is not a sentence on
+/// stderr: there is nobody there to read it. It is not success
+/// either: a status of 0 would say the paths were printed, and they
+/// were not — so the status is the third one, the one that says the
+/// output did not arrive.
+///
+/// Any other failure is the machine's own, and the user hears about
+/// it: a write that fails for a reason nobody knows about is a
+/// failure nobody can do anything about.
+fn write_failure(err: &std::io::Error) -> u8 {
+    if err.kind() != std::io::ErrorKind::BrokenPipe {
+        eprintln!("rgxy: a escrita falhou: {err}");
+    }
+    OUTPUT_NOT_DELIVERED
 }
 
 /// The results, through a picker.
@@ -313,7 +378,9 @@ fn one_shot(mut source: DaemonSource, query: &str, limit: usize) -> Result<ExitC
 /// The exit status is the picker's own, mapped the way `searchctl` maps
 /// it: 0 for a choice, 1 for no choice (the user dismissed the picker,
 /// or there was nothing to choose), and 2 for a picker that could not
-/// run — which is not a search with no matches, and says so.
+/// run — which is not a search with no matches, and says so. The choice
+/// that does not reach stdout is 2 as well: the output did not arrive,
+/// and that is not a choice either.
 fn pick(
     mut source: DaemonSource,
     query: &str,
@@ -361,7 +428,12 @@ fn pick(
     // The choice, one path per line: the same contract as `--query`, so
     // a script can read either.
     let mut out = std::io::stdout();
-    print_selection(&chosen, &mut out);
+    if let Err(err) = print_selection(&chosen, &mut out) {
+        // The choice did not reach the caller: the status says the
+        // output did not arrive, and it does not say success for
+        // output that never arrived.
+        return Ok(ExitCode::from(write_failure(&err)));
+    }
     Ok(ExitCode::from(u8::try_from(code).unwrap_or(1)))
 }
 
@@ -381,12 +453,15 @@ fn records(paths: &[String]) -> Vec<u8> {
 }
 
 /// Print what the picker chose, one path per line.
-fn print_selection(chosen: &[Vec<u8>], out: &mut impl Write) {
+///
+/// The write that fails is the failure: the choice the user made did
+/// not reach the caller, and a status of 0 would say it did.
+fn print_selection(chosen: &[Vec<u8>], out: &mut impl Write) -> std::io::Result<()> {
     for record in chosen {
-        let _ = out.write_all(record);
-        let _ = out.write_all(b"\n");
+        out.write_all(record)?;
+        out.write_all(b"\n")?;
     }
-    let _ = out.flush();
+    out.flush()
 }
 
 /// How long a one-shot query waits for a daemon that is still starting.
@@ -665,5 +740,153 @@ mod tests {
         // that never sees the results.
         assert!(text.contains("default: fzf ou sk no PATH"), "{text}");
         assert!(!text.contains("peco, fz no PATH"), "{text}");
+    }
+
+    /// A bare `rgxy` is the launcher.
+    ///
+    /// The manual, the README and the login entry all say that a bare
+    /// `rgxy` is the resident launcher, and the program used to print
+    /// its usage and leave: the help for a question nobody asked, and
+    /// an exit status of 0 for a launcher that never started.
+    #[test]
+    fn an_empty_command_line_is_the_launcher() {
+        let Request::Run(options) = request(&[]).expect("the command line reads") else {
+            panic!("an empty command line is the launcher, not the help");
+        };
+        assert!(options.hook, "the hotkey is installed");
+        assert!(!options.show, "the window waits for the hotkey");
+        assert!(!options.tui, "the window is the launcher");
+        assert!(options.query.is_none(), "no question was asked");
+    }
+
+    /// The usage text is what the help asks for.
+    ///
+    /// The help belongs to `--help`: a program that prints it when
+    /// nobody asked is a program that answers a question nobody made.
+    #[test]
+    fn the_help_is_only_what_the_help_asks_for() {
+        for flag in ["--help", "-h", "help"] {
+            let argv = vec![flag.to_string()];
+            assert!(
+                matches!(
+                    request(&argv).expect("the command line reads"),
+                    Request::Help
+                ),
+                "`{flag}` asks for the help"
+            );
+        }
+        let argv = vec!["-V".to_string()];
+        assert!(
+            matches!(
+                request(&argv).expect("the command line reads"),
+                Request::Version
+            ),
+            "`-V` asks for the version"
+        );
+    }
+
+    /// The help says what a bare `rgxy` does.
+    ///
+    /// The usage text is the program's own description of itself, and a
+    /// line that does not say that the launcher is the launcher is a
+    /// line that leaves the reader guessing.
+    #[test]
+    fn the_help_says_that_a_bare_rgxy_is_the_launcher() {
+        let text = usage();
+        assert!(text.contains("o lançador residente"), "{text}");
+    }
+
+    /// A write that fails is a failure.
+    ///
+    /// The paths that did not reach the caller are not a search with no
+    /// results: the loop stops at the first failure, and the status
+    /// says the output did not arrive.
+    #[test]
+    fn a_write_that_fails_is_not_a_success() {
+        let paths = vec![
+            "/a/one.txt".to_string(),
+            "/a/two.txt".to_string(),
+            "/a/three.txt".to_string(),
+        ];
+        // The writer takes the first path and refuses the second: the
+        // reader went away in the middle of the list.
+        let mut out = Refusing::new(b"two.txt");
+        assert!(write_paths(&paths, &mut out).is_err(), "the write fails");
+        let taken = String::from_utf8_lossy(&out.taken).into_owned();
+        assert!(taken.contains("one.txt"), "the first path went: {taken}");
+        assert!(
+            !taken.contains("two.txt"),
+            "the refused path did not go: {taken}"
+        );
+        assert!(
+            !taken.contains("three.txt"),
+            "the loop stopped at the first failure: {taken}"
+        );
+    }
+
+    /// The broken pipe is silent, and it is not a success.
+    ///
+    /// `rgxy --query invoice | head -3` is the reader going away on
+    /// purpose: there is nobody to read a sentence about it, and the
+    /// status must not say that the paths were printed.
+    #[test]
+    fn a_broken_pipe_is_silent_and_not_a_success() {
+        let err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "o leitor foi-se embora");
+        assert_eq!(write_failure(&err), OUTPUT_NOT_DELIVERED);
+        assert_ne!(write_failure(&err), 0, "success is for output that arrived");
+    }
+
+    /// The choice the user made has to reach the caller too.
+    #[test]
+    fn a_choice_that_cannot_be_printed_is_not_a_success() {
+        let chosen = vec![b"/a/one.txt".to_vec()];
+        let mut out = Refusing::new(b"one.txt");
+        assert!(
+            print_selection(&chosen, &mut out).is_err(),
+            "the write fails"
+        );
+    }
+
+    /// A writer that takes what it can and refuses the write that
+    /// carries the needle.
+    ///
+    /// The broken pipe of a reader that went away: the writes before
+    /// the needle go through, the one that carries it is refused, and
+    /// the bytes that went through are what the caller would have
+    /// read.
+    struct Refusing {
+        /// The bytes that make the write fail.
+        needle: &'static [u8],
+        /// The bytes that went through.
+        taken: Vec<u8>,
+    }
+
+    impl Refusing {
+        fn new(needle: &'static [u8]) -> Refusing {
+            Refusing {
+                needle,
+                taken: Vec::new(),
+            }
+        }
+    }
+
+    impl Write for Refusing {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if buf
+                .windows(self.needle.len())
+                .any(|window| window == self.needle)
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "o leitor foi-se embora",
+                ));
+            }
+            self.taken.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
 }

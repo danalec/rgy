@@ -152,6 +152,17 @@ impl Query {
         }
     }
 
+    /// The query, as the user typed it, from a text.
+    ///
+    /// The caret goes to the end: the text arrived from somewhere else —
+    /// a command line, a daemon's question — and there is no position in
+    /// it to be remembered.
+    pub fn of(text: &str) -> Query {
+        let mut query = Query::new();
+        query.set_text(String::from(text));
+        query
+    }
+
     /// The text, as the user typed it.
     pub fn text(&self) -> &str {
         &self.text
@@ -219,6 +230,25 @@ impl Query {
         }
         self.text.remove(cut);
         self.caret -= 1;
+        true
+    }
+
+    /// Delete the character at the caret.
+    ///
+    /// The **forward** deletion: `Delete` takes the character under the
+    /// caret and `Backspace` the one before it. The caret stays where it
+    /// is — the character that came after it took the place, and the caret
+    /// is still between the two.
+    ///
+    /// False when there was nothing to delete.
+    pub fn delete_forward(&mut self) -> bool {
+        let at = self.byte_offset(self.caret);
+        if at >= self.text.len() {
+            return false;
+        }
+        // The whole character: `remove` takes the one the caret is on, and
+        // half of an emoji is not a thing a person can undo.
+        self.text.remove(at);
         true
     }
 
@@ -305,6 +335,20 @@ impl Query {
     /// The two parts of the query: the names and the content.
     pub fn split(&self) -> crate::layer::Split<'_> {
         crate::layer::Split::of(&self.text)
+    }
+
+    /// The two questions the query is: the engine's and the content
+    /// layer's.
+    ///
+    /// The engine is asked the **name** part in the engine's own words,
+    /// and the content layer is asked the **content** part as the user
+    /// typed it. The split is the model's — one place to be wrong, and the
+    /// window and the daemon's source cannot answer two different
+    /// questions for the same words.
+    pub fn halves(&self) -> crate::layer::Halves<'_> {
+        crate::layer::Halves {
+            split: self.split(),
+        }
     }
 
     /// The short filters the text carries, in the order they appear.
@@ -601,6 +645,68 @@ mod tests {
         assert!(q.backspace());
         assert_eq!(q.text(), "ac");
         assert_eq!(q.caret(), 1);
+    }
+
+    #[test]
+    fn a_delete_deletes_at_the_caret() {
+        let mut q = Query::new();
+        q.set_text("abc".to_string());
+        q.home();
+        q.right();
+        assert!(q.delete_forward());
+        assert_eq!(q.text(), "ac");
+        assert_eq!(q.caret(), 1, "the caret stayed where it was");
+    }
+
+    #[test]
+    fn a_delete_at_the_end_of_the_text_deletes_nothing() {
+        let mut q = Query::new();
+        q.set_text("abc".to_string());
+        assert!(
+            !q.delete_forward(),
+            "the end of the text has nothing to delete"
+        );
+        assert_eq!(q.text(), "abc");
+    }
+
+    #[test]
+    fn a_delete_removes_a_character_and_not_a_byte() {
+        let mut q = Query::new();
+        q.set_text("a\u{1f600}b".to_string());
+        q.home();
+        q.right();
+        assert!(q.delete_forward());
+        assert_eq!(q.text(), "ab");
+        assert_eq!(q.caret(), 1);
+    }
+
+    /// The two questions the query is: the engine's and the content's.
+    ///
+    /// The engine is asked the **name** part in the engine's own words,
+    /// and the content layer is asked the **content** part as the user
+    /// typed it.
+    #[test]
+    fn the_two_halves_are_the_engines_words_and_the_content_part() {
+        let mut q = Query::new();
+        q.set_text("pic: invoice grep:total".to_string());
+        let halves = q.halves();
+        assert_eq!(halves.engine(), "type:image invoice");
+        assert_eq!(halves.content(), Some("grep:total"));
+        assert_eq!(halves.layer(), crate::layer::Layer::Content);
+        assert!(halves.is_content());
+        assert_eq!(halves.pattern(), "total");
+    }
+
+    /// A query without a prefix is the engine's alone.
+    #[test]
+    fn a_query_without_a_prefix_is_all_the_engines() {
+        let mut q = Query::new();
+        q.set_text("doc: invoice".to_string());
+        let halves = q.halves();
+        assert_eq!(halves.engine(), "type:doc invoice");
+        assert_eq!(halves.content(), None);
+        assert_eq!(halves.layer(), crate::layer::Layer::Names);
+        assert!(!halves.is_content());
     }
 
     #[test]

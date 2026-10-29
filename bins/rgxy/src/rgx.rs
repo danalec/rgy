@@ -273,6 +273,45 @@ fn read_matches(lines: impl Iterator<Item = String>) -> Vec<GrepFile> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A tree in the temporary directory that takes itself away.
+    ///
+    /// A test that leaves a folder behind is a test that fills the
+    /// temporary directory, and that directory is the one place every
+    /// test on the machine shares. The tree is removed when it is
+    /// dropped, so a test that panics takes its folder with it.
+    struct TempTree(std::path::PathBuf);
+
+    impl TempTree {
+        /// A tree of its own, named after what it is for.
+        fn new(tag: &str) -> TempTree {
+            let dir = std::env::temp_dir().join(format!(
+                "{tag}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            TempTree(dir)
+        }
+    }
+
+    impl std::ops::Deref for TempTree {
+        type Target = std::path::Path;
+
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempTree {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     use super::*;
 
     /// One record, the way rgx writes it.
@@ -393,8 +432,7 @@ mod tests {
             eprintln!("the rgx binary is not installed here; the fallback is not exercised");
             return;
         };
-        let dir = std::env::temp_dir().join(format!("rgy-rgxy-rgx-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = TempTree::new("rgy-rgxy-rgx");
         let file = dir.join("notes.txt");
         std::fs::write(&file, "draft with zebra marker\n").unwrap();
         let scope = vec![file.to_string_lossy().into_owned()];

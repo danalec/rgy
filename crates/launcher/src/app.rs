@@ -198,17 +198,17 @@ impl App {
         // The same string is the scope of a content search: the files the
         // content layer reads are the files the engine chose, and the
         // engine is asked for them in the engine's own words.
-        crate::layer::scope_query(self.query.split().names)
+        self.query.halves().engine()
     }
 
     /// The content pattern, when the query carries the prefix.
     pub fn content_query(&self) -> Option<&str> {
-        self.query.split().content
+        self.query.halves().content()
     }
 
     /// The layer the query is about.
     pub fn layer(&self) -> crate::layer::Layer {
-        self.query.split().layer()
+        self.query.halves().layer()
     }
 
     /// Type one character.
@@ -224,6 +224,17 @@ impl App {
     /// Delete the last character.
     pub fn backspace(&mut self) {
         self.query.backspace();
+    }
+
+    /// Delete the character at the caret.
+    ///
+    /// The **forward** deletion: `Delete` takes the character under the
+    /// caret, and `Backspace` the one before it.
+    ///
+    /// False when there was nothing to delete — the caret is at the end of
+    /// the field — and the caller has nothing to ask the daemon about.
+    pub fn delete_forward(&mut self) -> bool {
+        self.query.delete_forward()
     }
 
     /// Delete the word before the caret.
@@ -749,6 +760,45 @@ mod tests {
             crate::layer::scope_query(split.names),
             "the scope and the query are one string"
         );
+    }
+
+    #[test]
+    fn a_delete_deletes_at_the_caret() {
+        let mut app = App::new();
+        app.insert_str("abc");
+        app.move_left();
+        app.move_left();
+        assert!(app.delete_forward(), "the character under the caret went");
+        assert_eq!(app.query().text(), "ac");
+        assert_eq!(app.query().caret(), 1, "the caret stayed where it was");
+    }
+
+    #[test]
+    fn a_delete_at_the_end_of_the_field_deletes_nothing() {
+        let mut app = App::new();
+        app.insert_str("abc");
+        assert!(
+            !app.delete_forward(),
+            "the end of the field has nothing to delete"
+        );
+        assert_eq!(app.query().text(), "abc");
+    }
+
+    /// The app asks the two layers the two questions.
+    ///
+    /// The engine is asked the name part in the engine's words, and the
+    /// content layer is asked the content part as it was typed: the
+    /// launcher's `pic:` is the engine's `type:image`.
+    #[test]
+    fn the_app_asks_the_two_layers_the_two_questions() {
+        let mut app = App::new();
+        app.show();
+        for ch in "pic: invoice grep:total".chars() {
+            app.insert(ch);
+        }
+        assert_eq!(app.layer(), crate::layer::Layer::Content);
+        assert_eq!(app.engine_query(), "type:image invoice");
+        assert_eq!(app.content_query(), Some("grep:total"));
     }
 
     #[test]

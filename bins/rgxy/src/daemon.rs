@@ -30,7 +30,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use rgy_launcher::{Answer, Query, Source, Split};
+use rgy_launcher::{Answer, Query, Source};
 use rgy_proto::client::Client;
 use rgy_proto::endpoint::Endpoint;
 
@@ -357,7 +357,7 @@ impl DaemonSource {
     /// make the daemon re-rank the window's results against the scope.
     ///
     /// The argument is the query in the **engine's** words — the caller
-    /// rewrites it with `rgy_launcher::layer::scope_query` first. The
+    /// asks the model for it, and the model does the rewrite. The
     /// engine fails closed on a word it does not know, so a scope sent as
     /// `doc:` comes back empty and the content layer answers "nothing
     /// found" for a file that is on the disk.
@@ -439,9 +439,15 @@ impl DaemonSource {
     /// is warm and its scope is two hundred files, while the binary has to
     /// be started and has to walk what it is given.
     ///
-    /// `names` is the scope: empty means the **whole tree**, and the
-    /// daemon's own content engine answers that one — the pack store when
-    /// there is one, the trigram index when there is not.
+    /// `engine_names` is the scope: the **name** part of the query in the
+    /// **engine's** words, and empty means the **whole tree** — the
+    /// daemon's own content engine answers that one, the pack store when
+    /// there is one and the trigram index when there is not.
+    ///
+    /// The rewrite is the model's: the launcher's short words become the
+    /// engine's, and the engine fails closed on a word it does not know —
+    /// so a scope sent as `pic:` comes back empty and the content layer
+    /// answers "nothing found" for a file that is on the disk.
     ///
     /// `content` is the content part as the user typed it. It is rebuilt
     /// here, in the engine's words, before anything goes on the wire.
@@ -449,7 +455,7 @@ impl DaemonSource {
     /// The window is the budget of the **whole** answer: the scope, the
     /// files and the fallback share it, so the window never stops
     /// answering for longer than the window it was given.
-    fn search_content(&mut self, names: &str, content: &str, limit: usize) -> Answer {
+    fn search_content(&mut self, engine_names: &str, content: &str, limit: usize) -> Answer {
         // The daemon is asked in the **engine's** words: the canonical
         // prefix and the pattern as one unit. The engine's filter names
         // are exact and a word it does not know fails closed, and a
@@ -469,19 +475,16 @@ impl DaemonSource {
         // and the daemon may have come up since the last keystroke.
         let connected = self.client_mut().is_some();
         // The scope is the names part of the query, in the **engine's**
-        // words. `doc:` is the launcher's word and `type:doc` is the
-        // engine's, and the engine fails closed on a word it does not
-        // know — so a scope sent as the user typed it comes back empty
-        // and the content layer answers "nothing found" for a file that
-        // is on the disk.
+        // words: the model did the rewrite, and the engine fails closed
+        // on a word it does not know.
         //
         // The failure, when there is one, is the reason the content layer
         // has no answer: a daemon that stopped answering is not a daemon
         // that chose nothing.
         let mut failure: Option<Failure> = None;
         let mut scope = Vec::new();
-        if connected && !names.is_empty() {
-            match self.scope_paths(&rgy_launcher::layer::scope_query(names), left(deadline)) {
+        if connected && !engine_names.is_empty() {
+            match self.scope_paths(engine_names, left(deadline)) {
                 Ok(paths) => scope = paths,
                 Err(reason) => {
                     self.fail(&reason);
@@ -490,7 +493,7 @@ impl DaemonSource {
             }
         }
         if connected {
-            if names.is_empty() {
+            if engine_names.is_empty() {
                 // The whole tree: the daemon's own content engine.
                 match self.whole_tree_content(&content, limit, left(deadline)) {
                     Ok(answer) => return answer,
@@ -779,14 +782,18 @@ fn content_line(file: &rgy_proto::GrepFile) -> String {
 
 impl Source for DaemonSource {
     fn search(&mut self, query: &str, limit: usize) -> Answer {
-        let split = Split::of(query);
-        if !split.is_content() {
+        // The model owns the split: the source asks it for the two
+        // halves — the engine's question and the content layer's — and
+        // does not split the query a second time. A second split is a
+        // second place to be wrong, and the two places would answer
+        // different questions for the same words.
+        let model = Query::of(query);
+        let halves = model.halves();
+        if !halves.is_content() {
             // The launcher's own words become the engine's words.
-            let mut q = Query::new();
-            q.set_text(split.names.to_string());
-            return self.search_names(&q.engine_text(), limit);
+            return self.search_names(&halves.engine(), limit);
         }
-        if split.pattern().is_empty() {
+        if halves.pattern().is_empty() {
             // The prefix is being typed: the question has not been asked
             // yet, and the list keeps what it has.
             return self.last.clone();
@@ -797,7 +804,7 @@ impl Source for DaemonSource {
         // The prefix and the pattern are put in the engine's words on
         // the way down — the engine's filter names are exact, and a
         // filter takes one word of the query.
-        self.search_content(split.names, split.content.unwrap_or(""), limit)
+        self.search_content(&halves.engine(), halves.content().unwrap_or(""), limit)
     }
 }
 
@@ -1006,9 +1013,39 @@ mod tests {
         }
     }
 
+    /// A daemon that records what it was asked, and answers it.
+    ///
+    /// The names come back with one file in them, so the content layer
+    /// has a scope to read: the question that reaches the daemon is the
+    /// question the test is about.
+    fn records_the_requests(peer: Peer, requests: std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        let mut peer = peer;
+        while let Ok(request) = peer.read_line() {
+            if request.is_empty() {
+                break;
+            }
+            requests.lock().unwrap().push(request.clone());
+            if request.contains("\"op\":\"status\"") {
+                let _ = peer.send(
+                    b"{\"op\":\"status\",\"docs\":0,\"event_id\":0,\"catch_up\":\"replayed\",\"tv\":false}\n",
+                );
+            } else if request.contains("\"op\":\"grep-scoped\"") {
+                let _ = peer.send(
+                    b"{\"op\":\"grep-files\",\"files\":[{\"path\":\"/a/notes.txt\",\"lines\":[[1,\"total\"]]}],\"took_us\":1}\n",
+                );
+                let _ = peer.send(b"{\"op\":\"done\",\"count\":1}\n");
+            } else {
+                let _ = peer.send(
+                    b"{\"op\":\"hits\",\"hits\":[{\"path\":\"/a/notes.txt\",\"score\":1}],\"took_us\":1}\n",
+                );
+                let _ = peer.send(b"{\"op\":\"done\",\"count\":1}\n");
+            }
+        }
+    }
+
     /// A daemon that takes one client and does what the test says.
     #[cfg(unix)]
-    fn serve(script: fn(Peer)) -> Daemon {
+    fn serve(script: impl FnOnce(Peer) + Send + 'static) -> Daemon {
         let path = std::env::temp_dir().join(format!("{}.sock", unique()));
         let listener = std::os::unix::net::UnixListener::bind(&path).expect("the socket binds");
         let socket = path.clone();
@@ -1026,7 +1063,7 @@ mod tests {
 
     /// A daemon that takes one client and does what the test says.
     #[cfg(windows)]
-    fn serve(script: fn(Peer)) -> Daemon {
+    fn serve(script: impl FnOnce(Peer) + Send + 'static) -> Daemon {
         use std::os::windows::io::AsRawHandle;
         unsafe extern "system" {
             fn ConnectNamedPipe(
@@ -1085,6 +1122,42 @@ mod tests {
         // The file owns the handle: dropping it closes the pipe, which is
         // what tells the client the stream is over.
         unsafe { std::fs::File::from_raw_handle(handle) }
+    }
+
+    /// The source asks the model for the two halves.
+    ///
+    /// The split is the model's: the source asks it for the engine's
+    /// question and the content layer's, and does not split the query on
+    /// its own. A source that split it again would be a second place to
+    /// be wrong, and the two would answer different questions for the
+    /// same words.
+    #[test]
+    fn the_source_asks_the_model_for_the_two_halves() {
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = std::sync::Arc::clone(&requests);
+        let daemon = serve(move |peer| records_the_requests(peer, recorded));
+        let mut source = DaemonSource::new(daemon.endpoint.clone(), None);
+        assert!(source.connect(), "the daemon is there");
+        let _ = source.search("pic: invoice grep:total", 10);
+
+        // What the model says the two questions are.
+        let model = rgy_launcher::Query::of("pic: invoice grep:total");
+        let halves = model.halves();
+        assert_eq!(halves.engine(), "type:image invoice");
+        assert_eq!(halves.content(), Some("grep:total"));
+
+        // And what the daemon was asked.
+        let asked = requests.lock().unwrap().clone();
+        assert!(
+            asked
+                .iter()
+                .any(|r| r.contains(r#""q":"type:image invoice""#)),
+            "the engine was asked in its own words: {asked:?}"
+        );
+        assert!(
+            asked.iter().any(|r| r.contains(r#""q":"grep:total""#)),
+            "the content layer was asked with the content part: {asked:?}"
+        );
     }
 
     /// A daemon that chooses nothing is not a daemon that is down.
