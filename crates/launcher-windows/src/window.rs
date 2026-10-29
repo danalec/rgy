@@ -12,9 +12,17 @@
 //! | | |
 //! |---|---|
 //! | shape | a rounded rectangle, 12 px of radius |
-//! | backdrop | the Win11 host backdrop (acrylic), and a near-black tint over it |
+//! | backdrop | the window's own: a 32-bit premultiplied bitmap at ninety per cent opacity, so a tenth of the desktop shows through the near-black |
 //! | shadow | the system's own drop shadow |
-//! | type | Segoe UI Variable Text, and a lighter weight for the query |
+//! | type | Segoe UI Variable Text — Segoe UI where the platform has no variable face — and a heavier weight for the query |
+//!
+//! The backdrop is the window's own because the platform was asked and it
+//! has none to give here: the Win11 host backdrop comes back untinted and
+//! sharp, the blur-behind accent comes back ninety-six per cent opaque and
+//! breaks the text GDI draws, and `DwmEnableBlurBehindWindow` paints a
+//! white void. A window that believes in a blur that is not there is a
+//! window that shows the screen it was opened on, so the panel carries its
+//! own alpha — and the system's own shadow is left where it was.
 //!
 //! # How it behaves
 //!
@@ -176,6 +184,13 @@ struct State {
     /// client area alone where there is one — and where there is not,
     /// the window has to paint its own near-black.
     backdrop: bool,
+    /// The window's own pixels, when the platform gave no backdrop.
+    ///
+    /// The shadow is still the system's own: the window is created
+    /// without the layered style and made layered afterwards, and the
+    /// ring around it measures the same as it did when the window was
+    /// opaque.
+    layer: Option<Layer>,
     /// Whether the window hid itself.
     ///
     /// A window that hides itself makes the application inactive, and an
@@ -196,6 +211,326 @@ struct State {
     icons: Icons,
     /// The window's fonts, made once and deleted with the window.
     fonts: Fonts,
+}
+
+/// The window's own pixels, for a window that paints its own alpha.
+///
+/// A layered window is composited by itself: the desktop window manager
+/// does not paint behind it, and the window's own bitmap carries the
+/// alpha that the compositor uses. The bitmap is the panel and nothing
+/// else — the rounded corners are the region's own, and the shadow is
+/// the system's own — and the alpha of every pixel is worked out after
+/// the drawing, because GDI does not write the alpha channel of a
+/// 32-bit bitmap.
+///
+/// The platform's own backdrops are better when there are any — they
+/// come with the platform's blur — but on this host there are none, and
+/// a window that believes in a blur that is not there is a window that
+/// shows the screen it was opened on.
+struct Layer {
+    /// The context the panel is drawn into.
+    dc: HDC,
+    /// The bitmap that context holds.
+    bitmap: HANDLE,
+    /// The bitmap's pixels, in the order the platform stores them.
+    bits: *mut u8,
+    /// The panel's width.
+    width: i32,
+    /// The panel's height.
+    height: i32,
+}
+
+/// The panel's own alpha: ninety per cent.
+///
+/// Almost black and slightly transparent: a tenth of the desktop shows
+/// through, and the panel keeps its colour where the desktop is dark.
+/// It is the alpha that lets the desktop through where the panel draws
+/// nothing — the rounded corners are the region's own, and the shadow is
+/// the system's own, and the alpha is what is left of the panel.
+const PANEL_ALPHA: u8 = 230;
+
+/// How far a pixel may be from the panel's own colour and still be the
+/// panel's own colour.
+///
+/// The text is drawn with antialiasing, and its faintest edges are a
+/// step away from the panel's colour. They are the panel's colour, and
+/// they keep the panel's alpha: a text edge that is suddenly opaque
+/// draws a dark line around every letter.
+const PANEL_TOLERANCE: i32 = 8;
+
+/// The window composites itself: its own pixels carry their own alpha.
+const WS_EX_LAYERED: u32 = 0x0008_0000;
+
+/// The window's own styles.
+const GWL_EXSTYLE: i32 = -20;
+
+/// The bitmap's colours are the ones the platform writes.
+const DIB_RGB_COLORS: u32 = 0;
+
+/// The bitmap is not compressed.
+const BI_RGB: u32 = 0;
+
+/// The alpha of the window's own pixels is the alpha of the window.
+const AC_SRC_ALPHA: u8 = 1;
+
+/// The window is put on the screen with the alpha of its own pixels.
+const ULW_ALPHA: u32 = 0x0000_0002;
+
+impl Layer {
+    /// A layer for a panel of this size.
+    ///
+    /// The bitmap is the panel's own size: the rounded corners are the
+    /// region's, and the shadow is the system's, and the window's own
+    /// pixels are only the panel.
+    fn new(width: i32, height: i32) -> Option<Layer> {
+        unsafe {
+            let screen = GetDC(core::ptr::null_mut());
+            if screen.is_null() {
+                return None;
+            }
+            let dc = CreateCompatibleDC(screen);
+            ReleaseDC(core::ptr::null_mut(), screen);
+            if dc.is_null() {
+                return None;
+            }
+            let (bitmap, bits) = Layer::bitmap(dc, width, height);
+            if bitmap.is_null() {
+                DeleteDC(dc);
+                return None;
+            }
+            Some(Layer {
+                dc,
+                bitmap,
+                bits,
+                width,
+                height,
+            })
+        }
+    }
+
+    /// The bitmap the layer's context holds, for a panel of this size.
+    ///
+    /// The height is negative so that the first row of the bitmap is the
+    /// top of the panel: a bitmap that grows upwards would put the
+    /// panel's own picture upside down.
+    fn bitmap(dc: HDC, width: i32, height: i32) -> (HANDLE, *mut u8) {
+        let info = Layer::info(width, height);
+        let mut bits: *mut c_void = core::ptr::null_mut();
+        let bitmap = unsafe {
+            CreateDIBSection(
+                dc,
+                &info,
+                DIB_RGB_COLORS,
+                &mut bits,
+                core::ptr::null_mut(),
+                0,
+            )
+        };
+        if !bitmap.is_null() {
+            unsafe {
+                SelectObject(dc, bitmap);
+            }
+        }
+        (bitmap, bits.cast::<u8>())
+    }
+
+    /// The bitmap's own information: the header, and the room for the
+    /// colours that a 32-bit bitmap does not need.
+    fn info(width: i32, height: i32) -> BitmapInfo {
+        BitmapInfo {
+            header: BitmapInfoHeader {
+                size: core::mem::size_of::<BitmapInfoHeader>() as u32,
+                width,
+                height: -height,
+                planes: 1,
+                bits: 32,
+                compression: BI_RGB,
+                image_size: 0,
+                x_pixels_per_meter: 0,
+                y_pixels_per_meter: 0,
+                colors_used: 0,
+                colors_important: 0,
+            },
+            colors: [0; 1],
+        }
+    }
+
+    /// Give the layer a panel of another size.
+    ///
+    /// The bitmap is made again: the platform's bitmaps are of one size,
+    /// and a launcher that is resized is a launcher that is drawn
+    /// again.
+    fn resize(&mut self, width: i32, height: i32) {
+        if width == self.width && height == self.height {
+            return;
+        }
+        unsafe {
+            let (bitmap, bits) = Layer::bitmap(self.dc, width, height);
+            if bitmap.is_null() {
+                return;
+            }
+            // The old bitmap is given back only after the new one is in
+            // the context: a bitmap that is still selected cannot be
+            // deleted.
+            let old = core::mem::replace(&mut self.bitmap, bitmap);
+            DeleteObject(old);
+            self.bits = bits;
+        }
+        self.width = width;
+        self.height = height;
+    }
+
+    /// Put the window on the screen.
+    ///
+    /// The panel is drawn into the layer's own context, the alpha is
+    /// worked out from what was drawn, and the whole thing is handed to
+    /// the compositor: that is what a layered window is.
+    fn present(
+        &mut self,
+        hwnd: HWND,
+        view: &View,
+        painted: &mut (i32, i32),
+        icons: &mut Icons,
+        fonts: &Fonts,
+    ) {
+        unsafe {
+            // The panel's own near-black is what the desktop shows
+            // through.
+            paint::paint(self.dc, view, painted, false, icons, fonts);
+            // The alpha is worked out after the drawing: GDI writes the
+            // colour of a pixel and never its alpha.
+            self.compose();
+            let screen = GetDC(core::ptr::null_mut());
+            if screen.is_null() {
+                return;
+            }
+            let mut rect = RECT::default();
+            GetWindowRect(hwnd, &mut rect);
+            let dest = POINT {
+                x: rect.left,
+                y: rect.top,
+            };
+            let size = Size {
+                width: self.width,
+                height: self.height,
+            };
+            let source = POINT { x: 0, y: 0 };
+            let blend = BlendFunction {
+                operation: 0,
+                flags: 0,
+                constant_alpha: 255,
+                alpha_format: AC_SRC_ALPHA,
+            };
+            let _ = UpdateLayeredWindow(
+                hwnd, screen, &dest, &size, self.dc, &source, 0, &blend, ULW_ALPHA,
+            );
+            ReleaseDC(core::ptr::null_mut(), screen);
+        }
+    }
+
+    /// The alpha the window's own pixels carry.
+    ///
+    /// The panel's own near-black is nearly opaque and the desktop shows
+    /// through the rest of it; what the panel draws on it — the border,
+    /// the query, the rows — is opaque, so the text keeps its edges.
+    fn compose(&self) {
+        let width = self.width;
+        let height = self.height;
+        let stride = (width * 4) as usize;
+        unsafe {
+            for y in 0..height {
+                for x in 0..width {
+                    let at = (y as usize) * stride + (x as usize) * 4;
+                    let pixel = self.bits.add(at);
+                    if is_the_panel(*pixel, *pixel.add(1), *pixel.add(2)) {
+                        // The panel's own colour: nearly opaque, and the
+                        // colour it carries is the colour it has with
+                        // that alpha in it.
+                        *pixel = premultiplied(paint::colour::BLUE, PANEL_ALPHA);
+                        *pixel.add(1) = premultiplied(paint::colour::GREEN, PANEL_ALPHA);
+                        *pixel.add(2) = premultiplied(paint::colour::RED, PANEL_ALPHA);
+                        *pixel.add(3) = PANEL_ALPHA;
+                    } else {
+                        // What is drawn on the panel is opaque.
+                        *pixel.add(3) = 255;
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl Drop for Layer {
+    fn drop(&mut self) {
+        unsafe {
+            // The context holds the bitmap: the bitmap goes back first.
+            SelectObject(self.dc, core::ptr::null_mut());
+            DeleteObject(self.bitmap);
+            DeleteDC(self.dc);
+        }
+    }
+}
+
+/// Whether a pixel is the panel's own colour, or one step away from it.
+///
+/// The text's faintest edges are the panel's colour: they are the
+/// panel, and they keep the panel's alpha.
+fn is_the_panel(blue: u8, green: u8, red: u8) -> bool {
+    let near = |value: u8, panel: u8| (value as i32 - panel as i32).abs() <= PANEL_TOLERANCE;
+    near(blue, paint::colour::BLUE)
+        && near(green, paint::colour::GREEN)
+        && near(red, paint::colour::RED)
+}
+
+/// A colour with the alpha it carries already in it.
+///
+/// The compositor reads a layered window's bitmap as premultiplied: the
+/// colour of a pixel that is half transparent is half as bright.
+fn premultiplied(colour: u8, alpha: u8) -> u8 {
+    ((colour as u32 * alpha as u32) / 255) as u8
+}
+
+/// The bitmap's own header, as the platform writes it.
+///
+/// A struct the platform writes is the platform's struct, whole: the
+/// header is the size the platform expects, and the sizes are the
+/// platform's own.
+#[repr(C)]
+struct BitmapInfoHeader {
+    size: u32,
+    width: i32,
+    height: i32,
+    planes: u16,
+    bits: u16,
+    compression: u32,
+    image_size: u32,
+    x_pixels_per_meter: i32,
+    y_pixels_per_meter: i32,
+    colors_used: u32,
+    colors_important: u32,
+}
+
+/// The bitmap's information: the header, and the room for the colours.
+#[repr(C)]
+struct BitmapInfo {
+    header: BitmapInfoHeader,
+    colors: [u32; 1],
+}
+
+/// The blend the compositor uses for a layered window.
+#[repr(C)]
+struct BlendFunction {
+    operation: u8,
+    flags: u8,
+    constant_alpha: u8,
+    alpha_format: u8,
+}
+
+/// The size of a surface, in pixels.
+#[repr(C)]
+struct Size {
+    width: i32,
+    height: i32,
 }
 
 /// The window.
@@ -235,6 +570,7 @@ impl Window {
             },
             painted: (0, 0),
             backdrop: false,
+            layer: None,
             hiding: false,
             focus_lost: false,
             icons: Icons::new(),
@@ -290,8 +626,35 @@ impl Window {
             // client area is left alone for the blur to show through.
             let backdrop = w.apply_backdrop();
             w.state_mut().backdrop = backdrop;
+            if !backdrop {
+                // The platform gave the window no backdrop: the window
+                // paints its own alpha, and the desktop shows through it.
+                w.paint_its_own_alpha();
+            }
             w.apply_region();
             Ok(w)
+        }
+    }
+
+    /// Make the window composite itself.
+    ///
+    /// A window that paints its own alpha is composited by itself: the
+    /// desktop window manager does not paint behind it, and what the
+    /// user sees is the window's own pixels and the alpha they carry.
+    ///
+    /// The window is still hidden here: the question of a backdrop was
+    /// asked while it was, and the answer is what makes the window
+    /// layered or not.
+    fn paint_its_own_alpha(&mut self) {
+        // The layer comes first: a window that composites itself and has
+        // no pixels of its own is a window the user cannot see.
+        let Some(layer) = Layer::new(self.width, self.height) else {
+            return;
+        };
+        self.state_mut().layer = Some(layer);
+        unsafe {
+            let style = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE) as u32;
+            SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, (style | WS_EX_LAYERED) as isize);
         }
     }
 
@@ -386,6 +749,11 @@ impl Window {
             ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
             SetForegroundWindow(self.hwnd);
             SetFocus(self.hwnd);
+            // The window is invalidated before it is updated: a window
+            // that composites itself has no backing store for the
+            // system to mark as dirty, and a window that is never
+            // painted is a window the user cannot see.
+            InvalidateRect(self.hwnd, core::ptr::null_mut(), 0);
             UpdateWindow(self.hwnd);
             self.start_clock();
         }
@@ -480,6 +848,12 @@ impl Window {
         self.width = width;
         self.height = spot.height;
         self.apply_region();
+        // The layer is the panel's own bitmap: a panel of another size
+        // is a panel of another bitmap.
+        let (width, height) = (self.width, self.height);
+        if let Some(layer) = self.state_mut().layer.as_mut() {
+            layer.resize(width, height);
+        }
         unsafe {
             // The window stays where it is: it opened on the monitor the
             // user was looking at, and a window that moved to another
@@ -490,8 +864,8 @@ impl Window {
                 HWND_TOPMOST,
                 0,
                 0,
-                self.width,
-                self.height,
+                width,
+                height,
                 SWP_NOMOVE | SWP_NOACTIVATE,
             );
         }
@@ -502,8 +876,15 @@ impl Window {
     /// Win11's host backdrop is the blur behind the window, and the
     /// accent's gradient colour is the tint over it: 60% black, which is
     /// what "almost black, slightly transparent" is made of. On a platform
-    /// without it the window paints its own near-black, and the only
-    /// difference the user sees is that nothing moves behind it.
+    /// without it the window paints its own near-black — translucent, so
+    /// the desktop shows through — and the only difference the user sees
+    /// is that nothing moves behind it.
+    ///
+    /// The tint is asked for anyway: it costs nothing, and a platform
+    /// that honours it is the platform the window was written for. It was
+    /// measured on this one and it is ignored — the material comes back
+    /// untinted — which is one of the reasons the window does not lean
+    /// on it.
     ///
     /// The answer is whether the backdrop is really there, and the accent
     /// cannot answer it: the call is undocumented, the platform is free to
@@ -558,8 +939,11 @@ impl Window {
             // 0x99000000 is ABGR: 60% alpha, black. The tint over the blur.
             // The host backdrop is the Win11 one; the blur behind is the
             // Win10 one. The tint is 60% black either way, which is what
-            // "almost black, slightly transparent" is made of. The first
-            // policy the platform takes is the one it has.
+            // "almost black, slightly transparent" is made of.
+            //
+            // Both are tried, and the one that is accepted is the one
+            // the platform has — the answer is not a policy, it is what
+            // the platform says it can do.
             for state in [ACCENT_ENABLE_HOSTBACKDROP, ACCENT_ENABLE_BLURBEHIND] {
                 let mut accent = AccentPolicy {
                     accent_state: state,
@@ -575,12 +959,14 @@ impl Window {
                 if set(self.hwnd, &mut data) != 0 {
                     // The accent was accepted. That is not the same thing
                     // as a blur: the manager is asked what it gave.
-                    // The accent was accepted. That is not the same thing
-                    // as a blur: the manager is asked what it gave.
                     if self.has_backdrop() {
                         return true;
                     }
-                    break;
+                    // Accepted and nothing behind it: the other state is
+                    // tried as well, because a platform may have the one
+                    // and not the other — and the one it has is the one
+                    // that counts.
+                    continue;
                 }
             }
             // The accent was accepted and there is no backdrop behind it.
@@ -976,14 +1362,32 @@ unsafe extern "system" fn wnd_proc(
                 // lives as long as the window does.
                 unsafe {
                     let state = &mut *state;
-                    paint::paint(
-                        hdc,
-                        &state.view,
-                        &mut state.painted,
-                        state.backdrop,
-                        &mut state.icons,
-                        &state.fonts,
-                    );
+                    match state.layer.as_mut() {
+                        // The window paints its own alpha: the drawing
+                        // goes into the layer's own bitmap, and the layer
+                        // is what the compositor puts on the screen.
+                        Some(layer) => {
+                            layer.present(
+                                hwnd,
+                                &state.view,
+                                &mut state.painted,
+                                &mut state.icons,
+                                &state.fonts,
+                            );
+                        }
+                        // The platform's own backdrop is behind this
+                        // window, and the drawing leaves it alone.
+                        None => {
+                            paint::paint(
+                                hdc,
+                                &state.view,
+                                &mut state.painted,
+                                state.backdrop,
+                                &mut state.icons,
+                                &state.fonts,
+                            );
+                        }
+                    }
                 }
                 unsafe { EndPaint(hwnd, &ps) };
             }
@@ -1126,6 +1530,37 @@ unsafe extern "system" {
     fn GetKeyState(vKey: i32) -> i16;
     fn IsWindowVisible(hWnd: HWND) -> BOOL;
     fn InvalidateRect(hWnd: HWND, lpRect: *const RECT, bErase: BOOL) -> BOOL;
+    /// The window's own rectangle, in the process's own coordinates.
+    fn GetWindowRect(hWnd: HWND, lpRect: *mut RECT) -> BOOL;
+    /// The context of the whole screen.
+    fn GetDC(hWnd: HWND) -> HDC;
+    /// Give the context back.
+    fn ReleaseDC(hWnd: HWND, hDC: HDC) -> i32;
+    /// A context that draws into a bitmap of the window's own.
+    fn CreateCompatibleDC(hdc: HDC) -> HDC;
+    /// Give the context back.
+    fn DeleteDC(hdc: HDC) -> BOOL;
+    /// A bitmap the context can draw into, with the pixels of the panel.
+    fn CreateDIBSection(
+        hdc: HDC,
+        pbmi: *const BitmapInfo,
+        usage: u32,
+        ppvBits: *mut *mut c_void,
+        hSection: HANDLE,
+        offset: u32,
+    ) -> HANDLE;
+    /// Put the window's own pixels on the screen.
+    fn UpdateLayeredWindow(
+        hWnd: HWND,
+        hdcDst: HDC,
+        pptDst: *const POINT,
+        psize: *const Size,
+        hdcSrc: HDC,
+        pptSrc: *const POINT,
+        crKey: u32,
+        pblend: *const BlendFunction,
+        dwFlags: u32,
+    ) -> BOOL;
 }
 
 #[cfg(test)]

@@ -13,7 +13,7 @@
 //! with a match in the middle of it is drawn in pieces, each measured
 //! before it is placed.
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
@@ -30,7 +30,7 @@ use crate::win::*;
 ///
 /// GDI's colours are `0x00BBGGRR`, so the bytes are in the order the
 /// platform wants and not the order a person reads.
-mod colour {
+pub mod colour {
     /// The query, and a name: almost white, a touch warm.
     pub const TEXT: u32 = 0x00F5_F2F0;
     /// The context: the folder, the placeholder.
@@ -45,6 +45,18 @@ mod colour {
     pub const BACKDROP: u32 = 0x0018_1514;
     /// The border: a hairline, a little lighter than the background.
     pub const BORDER: u32 = 0x0042_3C3A;
+
+    /// The background's blue, on its own.
+    ///
+    /// The window that paints its own alpha has to know which pixels are
+    /// the panel's own colour and which are the drawing on it, and it
+    /// reads the bitmap — where the colours are in the order the
+    /// platform stores them.
+    pub const BLUE: u8 = 0x18;
+    /// The background's green, on its own.
+    pub const GREEN: u8 = 0x15;
+    /// The background's red, on its own.
+    pub const RED: u8 = 0x14;
 }
 
 const DT_LEFT: u32 = 0x0000_0000;
@@ -62,6 +74,18 @@ const ICON_SIZE: i32 = 16;
 /// same with an icon as without one.
 const GUTTER: i32 = ICON_SIZE + 8;
 
+/// How many icons the cache keeps.
+///
+/// The shell is asked about a name, and the names a search walks through
+/// are many: a hundred and twenty is more than a window shows at once,
+/// so the icon the user is looking at is never one that went away.
+const ICON_CACHE_LIMIT: usize = 128;
+
+/// The face Win11 has: the variable one.
+const VARIABLE_FACE: &str = "Segoe UI Variable Text";
+/// The face every Windows has.
+const FALLBACK_FACE: &str = "Segoe UI";
+
 /// The fonts the launcher draws with.
 ///
 /// The fonts belong to the window and not to the paint: GDI refuses to
@@ -70,9 +94,10 @@ const GUTTER: i32 = ICON_SIZE + 8;
 /// three handles per paint, on a launcher that paints on every
 /// keystroke.
 ///
-/// Segoe UI Variable Text is Win11's own; "Segoe UI" is the one every
-/// Windows has, and it is the fallback when the variable face is not
-/// there. The folder is a size smaller, and in the dimmer colour.
+/// The face is the platform's answer and not a constant: the variable
+/// face is Win11's own, "Segoe UI" is the one every Windows has, and a
+/// machine without the variable face draws with the other one. The
+/// folder is a size smaller, and in the dimmer colour.
 pub struct Fonts {
     field: HFONT,
     row: HFONT,
@@ -82,10 +107,11 @@ pub struct Fonts {
 impl Fonts {
     /// The window's fonts, made once.
     pub fn new() -> Fonts {
+        let face = face();
         Fonts {
-            field: font(17, FW_SEMIBOLD, "Segoe UI Variable Text"),
-            row: font(15, FW_NORMAL, "Segoe UI Variable Text"),
-            folder: font(13, FW_NORMAL, "Segoe UI Variable Text"),
+            field: font(17, FW_SEMIBOLD, face),
+            row: font(15, FW_NORMAL, face),
+            folder: font(13, FW_NORMAL, face),
         }
     }
 }
@@ -130,16 +156,102 @@ fn font(height: i32, weight: i32, face: &str) -> HFONT {
     }
 }
 
-/// The icons, one per type of file, resolved once.
+/// The face to ask for, given what the platform gave.
+///
+/// The variable face is Win11's own and the fallback is the one every
+/// Windows has. A face the machine does not have comes back as another
+/// one, and this is where the window picks the face it wants instead of
+/// the one it got.
+fn face_for(gave_the_variable_face: bool) -> &'static str {
+    if gave_the_variable_face {
+        VARIABLE_FACE
+    } else {
+        FALLBACK_FACE
+    }
+}
+
+/// The face the window draws with.
+///
+/// The platform is asked once, when the window is made: the font is made
+/// for the variable face, and `GetTextFaceW` answers with the face GDI
+/// really gave. A machine without the variable face gives another one,
+/// and the window takes the fallback — a window that asked for a face it
+/// does not have would draw in a face nobody chose.
+///
+/// A platform that cannot be asked keeps the face the window wants: a
+/// window that gave up its own face because it could not ask a question
+/// would draw in a face nobody chose either.
+fn face() -> &'static str {
+    match platform_face(VARIABLE_FACE) {
+        Some(given) => face_for(given.eq_ignore_ascii_case(VARIABLE_FACE)),
+        None => VARIABLE_FACE,
+    }
+}
+
+/// The face GDI gives for a face asked for.
+///
+/// The question is asked with a font made for the face and a context that
+/// has it selected, and a face the machine does not have comes back as
+/// another one. The font is made and given back — the window's own fonts
+/// are made after this one, with the face this one reported.
+fn platform_face(asked: &str) -> Option<String> {
+    let probe = font(15, FW_NORMAL, asked);
+    let given = face_of(probe);
+    unsafe {
+        DeleteObject(probe);
+    }
+    given
+}
+
+/// The face of a font, as the context that has it selected says it.
+///
+/// `GetTextFaceW` answers with the face that is really there: a font
+/// asked for by a name the machine does not have is given another one,
+/// and this is the only way to know which. The context is the screen's
+/// own — the window has none of its own until it paints — and the font
+/// that was there goes back in before the context is given back.
+fn face_of(font: HFONT) -> Option<String> {
+    unsafe {
+        let hdc = GetDC(core::ptr::null_mut());
+        if hdc.is_null() {
+            return None;
+        }
+        let stock = select(hdc, font);
+        let mut buf: [u16; 64] = [0; 64];
+        let got = GetTextFaceW(hdc, buf.as_mut_ptr(), buf.len() as i32);
+        select(hdc, stock);
+        ReleaseDC(core::ptr::null_mut(), hdc);
+        if got == 0 {
+            return None;
+        }
+        let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        Some(String::from_utf16_lossy(&buf[..len]))
+    }
+}
+
+/// The icons, one per name, resolved once.
 ///
 /// The shell answers with a copy of the icon and the copy is the
 /// caller's to destroy, so they are kept here and given back when the
-/// window goes away. One icon per **type** and not one per row: every
-/// `.pdf` on the disk has the same icon, and asking the shell is not
-/// free.
+/// window goes away.
+///
+/// The cache is keyed by the name the shell was asked about, because
+/// that is what the question was about — and it is bounded, because the
+/// names a search walks through are many.
 pub struct Icons {
-    /// The icons, by the key they were asked for.
+    /// The icons, by the name they were asked for.
+    ///
+    /// A name the shell has no icon for is kept as a "none": the answer
+    /// is the answer, and asking again would be asking the same
+    /// question twice.
     icons: BTreeMap<String, Option<HICON>>,
+    /// The names in the order they were asked for, so the oldest can go.
+    order: VecDeque<String>,
+    /// The icon of each kind, for the files the shell has none for.
+    ///
+    /// The kinds are few and the files are many: the icon of a kind is
+    /// asked once and given to every file of that kind.
+    kinds: BTreeMap<&'static str, Option<HICON>>,
 }
 
 impl Icons {
@@ -147,6 +259,8 @@ impl Icons {
     pub fn new() -> Icons {
         Icons {
             icons: BTreeMap::new(),
+            order: VecDeque::new(),
+            kinds: BTreeMap::new(),
         }
     }
 
@@ -161,11 +275,61 @@ impl Icons {
         let kind = row.icon();
         let source = icon_source_for(row);
         let key = source.key();
-        if let Some(icon) = self.icons.get(key.as_str()) {
-            return *icon;
+        if let Some(icon) = self.icons.get(key.as_str()).copied() {
+            // The name was asked before: the shell answered with the
+            // file's own icon, or with none at all.
+            return match icon {
+                Some(icon) => Some(icon),
+                None => self.kind_icon(kind),
+            };
         }
-        let icon = icon_for(&source, kind);
+        let icon = shell_icon(&source);
+        self.remember(key, icon);
+        match icon {
+            Some(icon) => Some(icon),
+            None => self.kind_icon(kind),
+        }
+    }
+
+    /// Keep the answer, and make room for it.
+    ///
+    /// The cache holds the names the window drew, and a search walks
+    /// through many of them: the limit is more than a window shows at
+    /// once, so the icon the user is looking at is never one that went
+    /// away. The icon that goes is given back — the shell's copy is the
+    /// caller's to destroy.
+    fn remember(&mut self, key: String, icon: Option<HICON>) {
+        if self.order.len() >= ICON_CACHE_LIMIT
+            && let Some(oldest) = self.order.pop_front()
+            && let Some(Some(icon)) = self.icons.remove(&oldest)
+        {
+            unsafe {
+                DestroyIcon(icon);
+            }
+        }
+        self.order.push_back(key.clone());
         self.icons.insert(key, icon);
+    }
+
+    /// The icon of a kind, for a file the shell has none for.
+    ///
+    /// The kinds are few and the files are many, so the icon of a kind
+    /// is asked once and given to every file of that kind. A folder has
+    /// no fallback: a folder with a file's icon is the wrong picture of
+    /// the thing.
+    fn kind_icon(&mut self, kind: IconKind) -> Option<HICON> {
+        if kind == IconKind::Folder {
+            return None;
+        }
+        let name = kind_name(kind);
+        if let Some(icon) = self.kinds.get(name).copied() {
+            return icon;
+        }
+        let icon = shell_icon(&IconSource {
+            name: name.to_string(),
+            attributes: FILE_ATTRIBUTE_NORMAL,
+        });
+        self.kinds.insert(name, icon);
         icon
     }
 }
@@ -179,6 +343,11 @@ impl Default for Icons {
 impl Drop for Icons {
     fn drop(&mut self) {
         for icon in self.icons.values().flatten() {
+            unsafe {
+                DestroyIcon(*icon);
+            }
+        }
+        for icon in self.kinds.values().flatten() {
             unsafe {
                 DestroyIcon(*icon);
             }
@@ -198,16 +367,14 @@ struct IconSource {
 impl IconSource {
     /// The key the icon is kept under.
     ///
-    /// The shell's answer is the icon of the **type**, not of the file:
-    /// two PDFs have the same icon, and the extension is what names the
-    /// type. So the cache is keyed by the extension, and a file with no
-    /// extension shares the one the shell gave for a file with no
-    /// extension.
+    /// The key is the name the shell was asked about: the cache answers
+    /// the question it was asked, and the question was about a name. The
+    /// shell is the one that decides what a name means — it looks at the
+    /// extension, and a name with no extension at all is a name of its
+    /// own — and a cache that answered with another name's icon would be
+    /// answering a question nobody asked.
     fn key(&self) -> String {
-        if self.attributes == FILE_ATTRIBUTE_DIRECTORY {
-            return FOLDER_NAME.to_string();
-        }
-        extension_of(&self.name).unwrap_or_default()
+        self.name.clone()
     }
 }
 
@@ -237,38 +404,6 @@ fn icon_source_for(row: &Row) -> IconSource {
         name: row.name().to_string(),
         attributes: FILE_ATTRIBUTE_NORMAL,
     }
-}
-
-/// The extension of a name, with the dot, in lower case.
-///
-/// A dot at the start of the name is part of the name (`.gitignore`),
-/// and a dot at the end is nothing at all — the rule the model's own
-/// `IconKind` follows, so that the two never disagree about what a name
-/// is.
-fn extension_of(name: &str) -> Option<String> {
-    match name.rfind('.') {
-        Some(i) if i > 0 && i + 1 < name.len() => {
-            Some(format!(".{}", name[i + 1..].to_ascii_lowercase()))
-        }
-        _ => None,
-    }
-}
-
-/// The shell's icon for a row: the file's own, and the kind's when the
-/// shell has none for it.
-fn icon_for(source: &IconSource, kind: IconKind) -> Option<HICON> {
-    if let Some(icon) = shell_icon(source) {
-        return Some(icon);
-    }
-    // The shell has no icon for this name: the kind's own spelling is the
-    // last resort, so that a row is never left without a picture.
-    if kind == IconKind::Folder {
-        return None;
-    }
-    shell_icon(&IconSource {
-        name: kind_name(kind).to_string(),
-        attributes: FILE_ATTRIBUTE_NORMAL,
-    })
 }
 
 /// The spelling the shell is asked about when it has no icon for the
@@ -561,11 +696,16 @@ fn draw_menu(hdc: HDC, fonts: &Fonts, view: &View, width: i32, height: i32) {
 
 /// The name, split into runs of matched and unmatched characters.
 ///
-/// The span is a list of byte offsets in the name, and a fuzzy match's
-/// characters are not next to each other — so the runs are what the eye
-/// sees as "the part that matched".
+/// The span is a list of character offsets in the name — the first
+/// character is 0 — and a fuzzy match's characters are not next to each
+/// other, so the runs are what the eye sees as "the part that matched".
+///
+/// The offsets count characters and not bytes: an accent is two bytes
+/// wide, and a mask of bytes picks out the wrong letters of every name
+/// that has one in front of the match.
 fn runs(name: &str, span: &[u32]) -> Vec<(String, bool)> {
-    let mut mask = vec![false; name.len()];
+    let chars: Vec<char> = name.chars().collect();
+    let mut mask = vec![false; chars.len()];
     for &p in span {
         if let Some(i) = usize::try_from(p).ok()
             && i < mask.len()
@@ -574,11 +714,10 @@ fn runs(name: &str, span: &[u32]) -> Vec<(String, bool)> {
         }
     }
     let mut out: Vec<(String, bool)> = Vec::new();
-    for (i, ch) in name.char_indices() {
-        let len = ch.len_utf8();
-        let matched = mask[i..i + len].iter().any(|&b| b);
+    for (i, ch) in chars.iter().enumerate() {
+        let matched = mask[i];
         match out.last_mut() {
-            Some(last) if last.1 == matched => last.0.push(ch),
+            Some(last) if last.1 == matched => last.0.push(*ch),
             _ => out.push((ch.to_string(), matched)),
         }
     }
@@ -681,6 +820,24 @@ fn shorten(s: &str, max: usize) -> String {
     format!("…{head}")
 }
 
+#[link(name = "user32")]
+unsafe extern "system" {
+    /// The device context of the whole screen.
+    ///
+    /// The face a font really has is only known to the context that has
+    /// it selected, and the window has no context of its own until it
+    /// paints.
+    fn GetDC(hWnd: HWND) -> HDC;
+    /// Give the context back.
+    fn ReleaseDC(hWnd: HWND, hDC: HDC) -> i32;
+}
+
+#[link(name = "gdi32")]
+unsafe extern "system" {
+    /// The face of the font the context has selected.
+    fn GetTextFaceW(hdc: HDC, lpszFace: *mut u16, cFace: i32) -> i32;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -714,13 +871,29 @@ mod tests {
 
     #[test]
     fn a_match_splits_the_name_in_two() {
-        // "rel" of "relatorio.txt" is the first three bytes.
+        // "rel" of "relatorio.txt" is the first three characters.
         let r = runs("relatorio.txt", &[0, 1, 2]);
         assert_eq!(r.len(), 2);
         assert_eq!(r[0].0, "rel");
         assert!(r[0].1);
         assert_eq!(r[1].0, "atorio.txt");
         assert!(!r[1].1);
+    }
+
+    /// The span counts characters, and an accent is two bytes wide.
+    ///
+    /// "Relatório.txt" is thirteen characters and fourteen bytes, so
+    /// the "txt" is at the characters 10, 11 and 12 — and at the bytes
+    /// 11, 12 and 13. The span the engine sends is the first one, and a
+    /// painter that counts bytes picks out ".tx" instead.
+    #[test]
+    fn a_match_after_an_accent_is_where_the_characters_are() {
+        let r = runs("Relatório.txt", &[10, 11, 12]);
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[0].0, "Relatório.");
+        assert!(!r[0].1);
+        assert_eq!(r[1].0, "txt");
+        assert!(r[1].1);
     }
 
     #[test]
@@ -766,37 +939,86 @@ mod tests {
         assert_eq!(source.attributes, FILE_ATTRIBUTE_DIRECTORY);
     }
 
+    /// The cache is keyed by the name the shell was asked about.
+    ///
+    /// The question is about the file's own name, so the answer is kept
+    /// under that name: two PDFs are two questions, and two files with
+    /// no extension at all are two questions as well. A cache keyed by
+    /// the extension gave every extension-less file the icon of the first
+    /// one that was asked about.
     #[test]
-    fn the_cache_is_keyed_by_the_type_and_not_by_the_file() {
-        // Two PDFs have the same icon, and the shell is not asked twice.
+    fn two_files_with_the_same_extension_do_not_share_one_icon() {
         let one = icon_source_for(&Row::new("C:/a/relatorio.pdf".to_string(), 0));
         let other = icon_source_for(&Row::new("C:/b/contrato.pdf".to_string(), 0));
-        assert_eq!(one.key(), other.key());
-        // And two types are two icons.
-        let doc = icon_source_for(&Row::new("C:/a/carta.docx".to_string(), 0));
-        assert_ne!(one.key(), doc.key());
+        assert_ne!(one.key(), other.key());
+        // And two files with no extension are two questions as well.
+        let readme = icon_source_for(&Row::new("C:/a/README".to_string(), 0));
+        let makefile = icon_source_for(&Row::new("C:/b/Makefile".to_string(), 0));
+        assert_ne!(readme.key(), makefile.key());
         // And a folder is not a file.
         let folder = icon_source_for(&Row::new("C:/a/Docs".to_string(), 0).with_folder(true));
         assert_ne!(one.key(), folder.key());
     }
 
+    /// The window falls back to the face every Windows has.
+    ///
+    /// The platform cannot be asked about a machine that is not this one,
+    /// so the decision is proved where it is made: the face the window
+    /// asks for is the face the platform gave, and a machine without the
+    /// variable face asks for the fallback.
     #[test]
-    fn the_key_is_the_extension_in_lower_case() {
-        // The shell answers the same for `Relatorio.PDF` and for
-        // `relatorio.pdf`, and the cache says so too.
-        let one = icon_source_for(&Row::new("C:/a/Relatorio.PDF".to_string(), 0));
-        let other = icon_source_for(&Row::new("C:/b/relatorio.pdf".to_string(), 0));
-        assert_eq!(one.key(), ".pdf");
-        assert_eq!(one.key(), other.key());
+    fn a_machine_without_the_variable_face_gets_the_fallback() {
+        assert_eq!(face_for(false), FALLBACK_FACE);
+        assert_eq!(face_for(true), VARIABLE_FACE);
+        assert_ne!(face_for(false), VARIABLE_FACE);
+    }
+
+    /// The face the window ends up with is the face it asked for.
+    ///
+    /// The platform cannot be asked in a test — GDI has no fonts to give
+    /// where the suite runs — so what is proved here is the decision:
+    /// the window asks for the variable face where the platform has it,
+    /// for the fallback where it does not, and for nothing else. Where
+    /// the platform does answer, the answer is the face the window
+    /// asks for.
+    #[test]
+    fn the_face_the_window_ends_up_with_is_the_face_it_asked_for() {
+        let asked = face();
+        match platform_face(VARIABLE_FACE) {
+            // The platform answered: the face the window asks for is the
+            // face the platform gave.
+            Some(given) => assert_eq!(asked, face_for(given.eq_ignore_ascii_case(VARIABLE_FACE))),
+            // The platform cannot be asked: the window keeps the face it
+            // wants, and says which one that is.
+            None => assert_eq!(asked, VARIABLE_FACE),
+        }
+    }
+
+    /// The cache does not grow without bound.
+    ///
+    /// The shell is asked about a name, and the names a search walks
+    /// through are many: the cache keeps a bounded number of them, and
+    /// the ones that go are given back.
+    #[test]
+    fn the_cache_does_not_grow_without_bound() {
+        let mut icons = Icons::new();
+        for i in 0..(ICON_CACHE_LIMIT + 10) {
+            let row = Row::new(format!("C:/a/file{i}.txt"), 0);
+            icons.get(&row);
+        }
+        assert!(
+            icons.icons.len() <= ICON_CACHE_LIMIT,
+            "the cache kept {} icons",
+            icons.icons.len()
+        );
     }
 
     #[test]
-    fn a_name_without_an_extension_is_a_file_of_its_own() {
-        // A dot at the start of the name is part of the name, and a dot
-        // at the end is nothing at all.
-        let hidden = icon_source_for(&Row::new("C:/a/.gitignore".to_string(), 0));
-        assert_eq!(hidden.key(), "");
-        let plain = icon_source_for(&Row::new("C:/a/README".to_string(), 0));
-        assert_eq!(plain.key(), "");
+    fn the_key_is_the_name_the_shell_was_asked_about() {
+        // The name is the question, and the case is part of it.
+        let one = icon_source_for(&Row::new("C:/a/Relatorio.PDF".to_string(), 0));
+        let other = icon_source_for(&Row::new("C:/b/relatorio.pdf".to_string(), 0));
+        assert_eq!(one.key(), "Relatorio.PDF");
+        assert_eq!(other.key(), "relatorio.pdf");
     }
 }
