@@ -62,9 +62,13 @@ pub fn unix_secs() -> u32 {
 
 /// The unix timespec, as the platform lays it out.
 ///
-/// `time_t` and `c_long` are 32 bits on a 32-bit unix and 64 on a 64-bit
-/// one, so the shape follows the platform instead of being one shape for
-/// all — the same rule the `mkfifo` declaration follows in `content.rs`.
+/// `time_t` and `c_long` are 64 bits on the unix the tree builds for, and
+/// the tree is a 64-bit unix tree: the unix reader of `rgy-discovery`
+/// refuses a 32-bit one with a `compile_error!`, because the structs it
+/// writes are the 64-bit ones and the same fields land somewhere else on
+/// a 32-bit target. So the shape here has one shape, and a second one for
+/// a platform the tree does not build for would be a shape no compiler
+/// ever reads -- and a mistake in it would never be caught.
 #[cfg(all(unix, target_pointer_width = "64"))]
 #[repr(C)]
 struct Timespec {
@@ -72,29 +76,15 @@ struct Timespec {
     tv_nsec: i64,
 }
 
-#[cfg(all(unix, target_pointer_width = "32"))]
-#[repr(C)]
-struct Timespec {
-    tv_sec: i32,
-    tv_nsec: i32,
-}
-
 /// The seconds and the nanoseconds, widened to what the callers read.
 ///
-/// The shape of the timespec is declared per pointer width above, so the
-/// widening belongs with the shape that needs it: the 32-bit one widens,
-/// the 64-bit one has nothing to widen.
+/// The shape of the timespec is declared above, and there is one shape, so
+/// there is nothing to widen: the fields are already what the callers
+/// read.
 #[cfg(all(unix, target_pointer_width = "64"))]
 impl Timespec {
     fn parts(&self) -> (i64, i64) {
         (self.tv_sec, self.tv_nsec)
-    }
-}
-
-#[cfg(all(unix, target_pointer_width = "32"))]
-impl Timespec {
-    fn parts(&self) -> (i64, i64) {
-        (self.tv_sec as i64, self.tv_nsec as i64)
     }
 }
 
