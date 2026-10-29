@@ -275,15 +275,14 @@ fi
 #
 # Known remaining dependencies are listed rather than simply forbidden, so
 # the count is a progress metric and nobody can add a new one by forgetting.
-# Each entry names what replaces it; the OCR stack is planned in
-# OCR-PLAN.md, the search engine in MUST-WRITE.md.
+# Each entry names what replaces it.
 #
 # The list is tab-separated: name, then what replaces it. A tab is the
 # separator because the notes are sentences, and splitting a list of
 # sentences on whitespace loses the sentences.
 known_external=$(printf '%s\t%s\n' \
-    'regex' 'K1 is built in upstream (b02/rgx: syntax + Thompson NFA + Pike VM, with capture groups agreeing 54/54 against the regex crate on the permanent corpus). Not yet wired here: rgx still matches through grep-regex. K2 is the blocker.' \
-    'ignore' 'MUST-WRITE K4 -- parallel walker with gitignore semantics' \
+    'regex' 'rgx ships its own engine (syntax + Thompson NFA + Pike VM) and that engine is the confirm in crates/name-core/src/content.rs; the crate is the fallback for the patterns that engine refuses to parse, and in rgx-core a dev-dependency only -- the oracle the capture groups are measured against (54/54 on the permanent corpus)' \
+    'ignore' 'the pack-store builder walker of rgx-core, behind its tv-runtime feature; the portable walk of the seam (crates/discovery) has no gitignore semantics yet' \
     'brotli' 'NO REPLACEMENT: rgx has the RFC 7932 decoder in crates/rgx-adapters-archive/src/brotli/. See tests::oracle::vendored_brotli_does_not_decode_reference_streams' \
     'xz2' 'upstream b02/compress/xz/ (RFC 8478 container + LZMA2)' \
     'zstd' 'NOT YET: upstream b02/compress/zstd.rs was refused as not actually zstd' \
@@ -294,9 +293,9 @@ known_external=$(printf '%s\t%s\n' \
     'memchr' 'crates/rgx-core/src/memchr.rs re-exports the external memchr 2.x crate and carries an in-house tree beside it: src/memchr/dispatch.rs picks the byte kernels with the CPU probe the crate writes itself (src/detect.rs), and src/memchr/memmem.rs is the substring search, because the upstream packed-pair kernel cannot be reached without std. The external crate stays as the fallback for a CPU without AVX2 and for the architectures whose vector width is decided at compile time.' \
     'libc' 'the constants and `mmap(2)` / `msync(2)` / `madvise(2)` syscall FFI the vendored `memmap2` module (crates/rgx-core/src/memmap2) reaches for on Unix, and the `dirent` / `stat` layouts the portable reader of the seam (crates/discovery/src/dir.rs) reads on Unix. Both are gated on the target, not on the `std` feature, so the bare-metal build does not link it. Will go away when the `memmap2` module is rewritten in pure inline FFI (a follow-up) or when Linux / macOS gating moves to `std::sys::pal`.' \
     'anyhow' 'rgx-core/src/error.rs is the in-house replacement; leftover entry' \
-    'ocrs' 'OCR-PLAN K11 -- detection and recognition pipeline' \
-    'rten' 'OCR-PLAN K8/K9 -- model file reader and tensor runtime' \
-    'image' 'OCR-PLAN K10 -- decode and preprocess; upstream has the codecs' \
+    'ocrs' 'the OCR detection and recognition pipeline; no in-tree replacement yet' \
+    'rten' 'the OCR model file reader and tensor runtime; no in-tree replacement yet' \
+    'image' 'the OCR decode and preprocess step; upstream has the codecs' \
     'flate2' 'dev-dependency for test fixtures' \
     'zip' 'dev-dependency for test fixtures' \
     'libfuzzer-sys' 'fuzz harness only; not part of a shipped build')
