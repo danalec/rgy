@@ -596,6 +596,7 @@ fn uninstall(options: &Options) -> Result<ExitCode, String> {
 /// for it.
 fn uninstall_windows(name: &str) -> Result<Removal, String> {
     let mut notes = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
     let mut removed = false;
     let mut mechanism = Mechanism::StartupTask;
 
@@ -608,7 +609,12 @@ fn uninstall_windows(name: &str) -> Result<Removal, String> {
                 format!("there was no startup task named `{name}`")
             });
         }
-        Err(reason) => notes.push(reason),
+        Err(reason) => {
+            // The task is still there: the uninstall did not do what it
+            // was asked to do.
+            failures.push(reason.clone());
+            notes.push(reason);
+        }
     }
 
     match windows::remove_run_value(name) {
@@ -625,7 +631,20 @@ fn uninstall_windows(name: &str) -> Result<Removal, String> {
                 notes.push(format!("there was no HKCU Run value named `{name}`"));
             }
         }
-        Err(reason) => notes.push(reason),
+        Err(reason) => {
+            failures.push(reason.clone());
+            notes.push(reason);
+        }
+    }
+
+    if !failures.is_empty() {
+        // The uninstall did not unregister: it says so, and it says so with
+        // the exit code, because a script that reads the exit code is the
+        // thing that notices.
+        return Err(format!(
+            "the entry `{name}` is still registered: {}",
+            failures.join("; ")
+        ));
     }
 
     Ok(Removal {
@@ -640,14 +659,20 @@ fn uninstall_linux(name: &str) -> Result<Removal, String> {
     let unit_name = unit_name(name);
     let home = linux::config_home();
     let mut notes = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
 
     match linux::disable(&unit_name) {
         Ok(_) => notes.push(format!(
             "the unit was stopped: systemctl --user disable --now {unit_name}"
         )),
-        Err(reason) => notes.push(format!(
-            "the unit could not be stopped through systemd ({reason}); the file is removed anyway"
-        )),
+        Err(reason) => {
+            // The file goes away, but a unit that is still loaded still
+            // runs: the uninstall did not unregister it.
+            failures.push(reason.clone());
+            notes.push(format!(
+                "the unit could not be stopped through systemd ({reason}); the file is removed anyway"
+            ));
+        }
     }
 
     let removed = linux::remove_unit(&home, &unit_name).map_err(|e| {
@@ -669,6 +694,13 @@ fn uninstall_linux(name: &str) -> Result<Removal, String> {
         )
     });
 
+    if !failures.is_empty() {
+        return Err(format!(
+            "the unit `{unit_name}` is still loaded: {}",
+            failures.join("; ")
+        ));
+    }
+
     Ok(Removal {
         mechanism: Mechanism::SystemdUserUnit,
         removed,
@@ -682,10 +714,16 @@ fn uninstall_macos(name: &str) -> Result<Removal, String> {
     let path = macos::plist_path_in(&home, name);
     let mut notes = Vec::new();
 
+    let mut failures: Vec<String> = Vec::new();
     match macos::unload(&path, name) {
         Ok(true) => notes.push("the agent was unloaded".to_string()),
         Ok(false) => notes.push("the agent was not loaded".to_string()),
-        Err(reason) => notes.push(reason),
+        Err(reason) => {
+            // The plist goes away, but an agent that is still loaded still
+            // starts with the session.
+            failures.push(reason.clone());
+            notes.push(reason);
+        }
     }
 
     let removed = macos::remove_plist(&home, name)
@@ -696,6 +734,13 @@ fn uninstall_macos(name: &str) -> Result<Removal, String> {
     } else {
         format!("there was no plist at {}", path.display())
     });
+
+    if !failures.is_empty() {
+        return Err(format!(
+            "the agent `{name}` is still loaded: {}",
+            failures.join("; ")
+        ));
+    }
 
     Ok(Removal {
         mechanism: Mechanism::LaunchdAgent,
