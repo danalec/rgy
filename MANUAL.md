@@ -620,6 +620,12 @@ a reader that cannot tell the halves apart opens nothing. The rule is the
 same for `--query` and for `--pick`, and it is the same shape as the rule
 the picker follows with the list it is handed.
 
+Every front-end that prints a path a script would read goes through it:
+`rgxy --query`, `rgxy --pick`, `searchctl --pick`, the list `searchctl`
+prints, the path the terminal interface prints when it is done, and the
+paths `zen-rs` lists. A path that cannot be one line is not half a path
+and not a rewritten one: it is left out, and the count says so.
+
 A path that carries the separator the picker reads cannot be carried: it
 is offered to the picker **whole**, or not at all, and never split in
 half — half of a path is a path that does not exist. The launcher says on
