@@ -1,0 +1,18 @@
+--- a/crates/rgx-core/src/djson/intern.rs
++++ b/crates/rgx-core/src/djson/intern.rs
+@@ -303,12 +303,11 @@
+     // The length goes in first, so that a key and the same key with a byte
+     // appended are two different keys.
+     let mut hash = MIX_A ^ (bytes.len() as u64).wrapping_mul(MIX_B);
+-    let mut chunks = bytes.chunks_exact(8);
+-    for chunk in &mut chunks {
+-        let word = u64::from_le_bytes(chunk.try_into().expect("8 bytes"));
++    let (chunks, rest) = bytes.as_chunks::<8>();
++    for chunk in chunks {
++        let word = u64::from_le_bytes(*chunk);
+         hash = mix(hash ^ word, MIX_B);
+     }
+-    let rest = chunks.remainder();
+     if !rest.is_empty() {
+         // The tail is mixed with its own length, so that "ab" and "ab\0"
+         // -- the same eight bytes once padded -- are two keys and not one.
