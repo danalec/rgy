@@ -13,10 +13,14 @@
 //! for the traits, so the selector that knows all of them cannot live
 //! there without a dependency cycle.
 //!
-//! It also holds the one place the catch-up rule lives: what a restart can
-//! do on each OS ([`catch_up_for`]). The Windows, macOS, Linux and FreeBSD
-//! paths cannot disagree about "replayed" vs "relisted", because there is
-//! only one function that answers it.
+//! It also states what each platform's change feed CAN do about a restart
+//! ([`catch_up_for`]): Windows and macOS keep a history to resume, Linux and
+//! FreeBSD keep none. That is the platform's capability, and it is not the
+//! daemon's answer -- the daemon reports what ONE restart did, and it
+//! reports it from its own observation of whether it resumed a journal at a
+//! saved watermark. The two are different facts and the daemon's is the one
+//! a reader sees, so the two can disagree: on macOS the platform could
+//! replay, and a daemon that starts without a saved watermark relists.
 //!
 //! # `no_std`
 //!
@@ -98,10 +102,10 @@ pub fn current_platform() -> Platform {
     }
 }
 
-/// How the index catches up after a restart, per platform.
+/// What the platform's change feed can do about a restart.
 ///
-/// This is the whole of the live-feed honesty rule,
-/// in one place:
+/// This is the CAPABILITY, in one place -- not the answer the daemon gives,
+/// which is an observation of one restart and lives with the daemon:
 ///
 /// * **Windows** (the USN journal) and **macOS** (the FSEvents event id)
 ///   keep the OS's history, so a restart can resume that journal at the
@@ -547,12 +551,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The catch-up rule: a platform whose
-    /// OS keeps a journal replays it, a platform whose OS keeps none
-    /// relists the tree. Asserted for every platform, so the rule is the
-    /// same on every host -- not only the one the test runs on.
+    /// The capability: a platform whose
+    /// OS keeps a journal can replay it, a platform whose OS keeps none
+    /// relists the tree. Asserted for every platform, so the capability is
+    /// the same on every host -- not only the one the test runs on.
     #[test]
-    fn the_catch_up_rule_is_the_one_the_design_doc_states() {
+    fn the_catch_up_capability_is_the_one_the_platform_has() {
         assert_eq!(catch_up_for(Platform::Windows), CatchUp::Replayed);
         assert_eq!(catch_up_for(Platform::MacOs), CatchUp::Replayed);
         assert_eq!(catch_up_for(Platform::Linux), CatchUp::Relisted);
@@ -561,8 +565,8 @@ mod tests {
         assert_eq!(catch_up_for(Platform::Other), CatchUp::Relisted);
     }
 
-    /// The rule is stated once, so the spelling cannot drift from it: the
-    /// two values the wire carries are the two the doc spells.
+    /// The capability is stated once, so the spelling cannot drift from it:
+    /// the two values the wire carries are the two the doc spells.
     #[test]
     fn the_catch_up_spellings_are_the_ones_the_doc_uses() {
         assert_eq!(CatchUp::Replayed.as_str(), "replayed");
