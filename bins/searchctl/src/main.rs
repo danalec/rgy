@@ -5,8 +5,9 @@
 //! fsearch one-shot ergonomics + zen-rs's filter vocabulary (see
 //! `rgy_name_core::name_query`), over the v2 name index. It enumerates a
 //! directory tree (`--root`, portable walk / no privileges); the Windows
-//! MFT fast path (`--volume`) and content `grep:` land with the engine and
-//! the content layer.
+//! MFT fast path (a `--root` that names the volume root, and a volume this
+//! process may open) and content `grep:` land with the engine and the
+//! content layer.
 //!
 //! With `--index`, a built index is reused across invocations: the walk and
 //! the build happen once, and later queries pay an mmap instead. The portable
