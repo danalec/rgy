@@ -1224,7 +1224,13 @@ fn run_app(mut app: App) -> Result<(), String> {
 
     drop(_guard);
     if let Some(path) = chosen {
-        rgy_engine::outln!("{path}");
+        // The path goes to stdout so it can be piped onward: one path,
+        // one line, and a path that carries a line break is not one line.
+        if rgy_pick::carries_line(path.as_bytes()) {
+            rgy_engine::outln!("{path}");
+        } else {
+            eprintln!("search-ui: {}", rgy_pick::uncarryable_paths(1));
+        }
     }
     Ok(())
 }

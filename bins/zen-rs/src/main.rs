@@ -374,8 +374,16 @@ fn cmd_search(source: &str, query_str: &str) -> Result<(), String> {
     let matches = search_paths(&Live::with_root(idx, root.as_bytes()), &root, query_str)?;
     let elapsed = start.elapsed();
 
+    let mut dropped = 0usize;
     for path in &matches {
-        println!("{path}");
+        if rgy_pick::carries_line(path.as_bytes()) {
+            println!("{path}");
+        } else {
+            dropped += 1;
+        }
+    }
+    if dropped > 0 {
+        eprintln!("{}", rgy_pick::uncarryable_paths(dropped));
     }
     eprintln!("\n{} path(s) matched in {:.2?}", matches.len(), elapsed);
     Ok(())
@@ -390,8 +398,16 @@ fn cmd_search_all(query_str: &str) -> Result<(), String> {
     for root in roots {
         eprintln!("\n# {root}");
         let (idx, r) = load_or_build(&root)?;
+        let mut dropped = 0usize;
         for path in search_paths(&Live::with_root(idx, r.as_bytes()), &r, query_str)? {
-            println!("{path}");
+            if rgy_pick::carries_line(path.as_bytes()) {
+                println!("{path}");
+            } else {
+                dropped += 1;
+            }
+        }
+        if dropped > 0 {
+            eprintln!("{}", rgy_pick::uncarryable_paths(dropped));
         }
     }
     Ok(())
@@ -413,6 +429,7 @@ fn cmd_list(source: &str, filter: Option<&str>) -> Result<(), String> {
     rows.sort_unstable();
 
     let mut shown = 0usize;
+    let mut dropped = 0usize;
     for path in rows {
         if needle
             .as_ref()
@@ -420,8 +437,15 @@ fn cmd_list(source: &str, filter: Option<&str>) -> Result<(), String> {
         {
             continue;
         }
-        println!("{path}");
-        shown += 1;
+        if rgy_pick::carries_line(path.as_bytes()) {
+            println!("{path}");
+            shown += 1;
+        } else {
+            dropped += 1;
+        }
+    }
+    if dropped > 0 {
+        eprintln!("{}", rgy_pick::uncarryable_paths(dropped));
     }
     eprintln!("\n{} path(s) shown", shown);
     Ok(())

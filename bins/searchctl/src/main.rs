@@ -602,6 +602,9 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
                 content_index.as_ref(),
                 limit,
             );
+            // The records that cannot be one line: the line is one path,
+            // and a path that carries a line break is not one line.
+            let mut dropped = 0usize;
             for f in &res.files {
                 let path = String::from_utf8_lossy(&f.path);
                 for (ln, text) in &f.lines {
@@ -613,10 +616,18 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
                             esc(&path),
                             esc(text)
                         );
-                    } else {
+                    } else if rgy_pick::carries_line(path.as_bytes()) {
                         rgy_engine::outln!("{path}:{ln}:{text}");
+                    } else {
+                        // The record cannot be one line: the path carries a
+                        // line break, and half of it is a path that does not
+                        // exist.
+                        dropped += 1;
                     }
                 }
+            }
+            if dropped > 0 {
+                eprintln!("searchctl: {}", rgy_pick::uncarryable_paths(dropped));
             }
         }
         if shown == 0 {
@@ -707,6 +718,9 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
     }
     let mut out = Vec::new();
     let root_disp = root.trim_end_matches(['/', '\\']);
+    // The paths that cannot be one line: the line is one path, and a
+    // path that carries a line break is not one line.
+    let mut dropped = 0usize;
     for h in &hits {
         // An overlay hit already carries its own path. Reading it back from
         // the index instead would index `parent[u32::MAX]` -- out of bounds --
@@ -759,10 +773,19 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
                 ),
                 None => rgy_engine::outln!("{{\"path\":\"{esc}\",\"score\":{}}}", h.score()),
             }
-        } else {
+        } else if rgy_pick::carries_line(path.as_bytes()) {
             rgy_engine::outln!("{path}");
+        } else {
+            // The path cannot be one line, and half of it is a path that
+            // does not exist.
+            dropped += 1;
         }
         out.clear();
+    }
+    if dropped > 0 {
+        // A path that is missing from the list is a path the user has to
+        // be told about.
+        eprintln!("searchctl: {}", rgy_pick::uncarryable_paths(dropped));
     }
     Ok(())
 }

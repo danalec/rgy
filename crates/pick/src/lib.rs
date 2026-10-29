@@ -527,17 +527,31 @@ pub fn pick(search: Search, req: &Request<'_>) -> Result<i32> {
 /// The picker speaks the separator it knows; the caller reads the one it
 /// asked for. The picker has the last word on the list, and the caller
 /// has the last word on what comes back.
+///
+/// A selection that is printed as lines has to be one line: a record
+/// that carries a line break would be two lines for whoever reads it
+/// back, and half of a path is a path that does not exist. Such a
+/// record is left out, and the count says how many were left out.
 #[cfg(feature = "std")]
 fn print_selection<W: std::io::Write>(
     records: &[Vec<u8>],
     req: &Request<'_>,
     out: &mut W,
 ) -> std::io::Result<()> {
+    let mut dropped = 0;
     for record in records {
+        if req.separator == Separator::Line && !carries_line(record) {
+            dropped += 1;
+            continue;
+        }
         out.write_all(record)?;
         out.write_all(&[req.separator.byte()])?;
     }
-    out.flush()
+    out.flush()?;
+    if dropped > 0 {
+        eprintln!("{}", uncarryable_paths(dropped));
+    }
+    Ok(())
 }
 
 /// The flags that carry the order, when the picker understands them.
@@ -805,6 +819,35 @@ mod tests {
     /// not on every machine. The script takes its instructions from its
     /// arguments — so the test can see that the arguments arrived — and it
     /// writes down what it read, so the test can see what the crate sent.
+    /// A selection that is printed as lines is one line per record.
+    ///
+    /// A record that carries a line break would be two lines for whoever
+    /// reads it back, and half of a path is a path that does not exist:
+    /// the record is left out, and the count says how many were left
+    /// out.
+    #[cfg(feature = "std")]
+    #[test]
+    fn a_selection_printed_as_lines_leaves_the_broken_records_out() {
+        let args: Vec<String> = Vec::new();
+        let mut req = Request::new(&args);
+        req.separator = Separator::Line;
+        let mut out = Vec::new();
+        print_selection(
+            &[b"a.txt".to_vec(), b"b\nc.txt".to_vec(), b"d.txt".to_vec()],
+            &req,
+            &mut out,
+        )
+        .expect("the selection is printed");
+        let text = String::from_utf8(out).expect("the output is text");
+        assert_eq!(
+            text.lines().count(),
+            2,
+            "one line for each record that fits: {text:?}"
+        );
+        assert!(text.contains("a.txt"), "{text:?}");
+        assert!(text.contains("d.txt"), "{text:?}");
+    }
+
     #[cfg(feature = "std")]
     #[cfg(any(windows, unix))]
     struct Fake {

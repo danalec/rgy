@@ -19,6 +19,9 @@ rgy-name-core = { path = "../../crates/name-core", version = "0.1.0" }
 rgy-launcher = { path = "../../crates/launcher", version = "0.1.0" }
 # The console's UTF-8 code page.
 rgy-engine = { path = "../../crates/engine", version = "0.1.0" }
+# The rule of the line format: a path that carries a line break is not
+# one line, and the ones left out are counted and said out loud.
+rgy-pick = { path = "../../crates/pick", version = "0.1.0" }
 crossterm = "0.28.1"
 
 [dev-dependencies]

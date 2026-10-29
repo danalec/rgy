@@ -634,6 +634,7 @@ dependencies = [
  "rgy-engine",
  "rgy-launcher",
  "rgy-name-core",
+ "rgy-pick",
 ]
 
 [[package]]
@@ -676,6 +677,7 @@ dependencies = [
  "rgy-discovery",
  "rgy-discovery-windows",
  "rgy-name-core",
+ "rgy-pick",
  "rgy-search-ui",
 ]
 
