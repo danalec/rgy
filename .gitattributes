@@ -22,11 +22,6 @@
 # adapter bail on its font tests. Git decides text-vs-binary by inspecting the
 # blob, and it happened to classify two of the seven PDFs correctly and five
 # of them as text -- so any rule has to name them, not ask git.
-**/testdata/** -text
-**/fixtures/** -text
-*.expected -text
-*.pdf -text
-
 # Text, LF in the index and on disk. Stated explicitly so the tree does not
 # depend on each developer's autocrlf setting -- which also keeps the shell
 # scripts runnable on a unix checkout, where a CRLF pgo.sh does not run at
@@ -57,6 +52,23 @@ LICENSE* text eol=lf
 *.yaml text eol=lf
 *.rb text eol=lf
 
+# The fixtures and the patches, byte for byte -- and THIS is where the rules
+# have to be.
+#
+# In gitattributes the LAST matching pattern wins, so a `-text` rule that
+# sits above a `text eol=lf` rule loses, and the fixture is rewritten
+# anyway. The order here is the rule, and it was the other way round until
+# the drift gate caught it: four testdata READMEs that upstream holds as
+# CRLF were committed as LF, because the `*.md text eol=lf` rule sat below
+# the `-text` rule and won. The working tree hid it -- `core.autocrlf`
+# turned the LF blobs back into CRLF on checkout, so the tree matched
+# upstream and the repository did not. A fresh clone showed the difference
+# the working tree had hidden, which is the whole failure the rules above
+# are written against.
+**/testdata/** -text
+**/fixtures/** -text
+*.expected -text
+*.pdf -text
 # The local patches, byte for byte. `git apply` matches the context lines of
 # a patch against the file it is applied to, and a checkout that rewrote the
 # line endings would leave every context line ending in a CR that the file
