@@ -109,7 +109,7 @@ mod tests {
     #[test]
     fn the_commands_are_the_actions_the_launcher_has() {
         // Every action the menu offers is a command...
-        for action in Action::menu() {
+        for action in Action::all() {
             assert!(
                 COMMANDS.iter().any(|c| c.action == *action),
                 "the menu offers an action that no command names: {action:?}"
@@ -121,7 +121,7 @@ mod tests {
             assert!(!c.name.is_empty());
             assert!(!c.label.is_empty());
             assert!(
-                c.action == Action::Menu || Action::menu().contains(&c.action),
+                c.action == Action::Menu || Action::all().contains(&c.action),
                 "the command >{} is not an action of the launcher",
                 c.name
             );

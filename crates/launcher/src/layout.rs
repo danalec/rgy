@@ -30,6 +30,31 @@ pub const BASE_DPI: u32 = 96;
 /// window two thirds of the size it was drawn for.
 pub const SCALE_PERCENT: u32 = 100;
 
+/// The width of the side bar, in the model's units.
+///
+/// The actions of the selected result are a column on the **right** of the
+/// window, and the column is this wide: enough for the longest label and
+/// its key, and not more. The window is six hundred units wide and the
+/// results need the rest — the side bar is inside the window, not beside
+/// it, because a window that grows when the actions open is a window that
+/// moves under the user's hands.
+pub const SIDE_BAR_WIDTH: u32 = 190;
+
+/// The gap between the results and the side bar, in the model's units.
+///
+/// The two are separate things and the gap says so: a column that touches
+/// the names reads as part of them.
+pub const SIDE_BAR_GAP: u32 = 12;
+
+/// The height of one entry of the side bar, in the model's units.
+pub const SIDE_BAR_ENTRY_HEIGHT: u32 = 30;
+
+/// The shortest an entry of the side bar may be, in the model's units.
+///
+/// An entry holds a line of text and the margin under it, and an entry
+/// shorter than that would cut the label in half.
+pub const SIDE_BAR_MINIMUM_ENTRY_HEIGHT: u32 = 24;
+
 /// One model unit, in the device pixels of a screen at this scale.
 ///
 /// The scale is in per cent (see [`SCALE_PERCENT`]). The answer is a
@@ -92,6 +117,17 @@ pub struct Layout {
     /// row is a result with an icon and a folder under it, and a panel
     /// measured in rows is a hundred units taller than its own text.
     pub preview_line_height: u32,
+    /// The width of the side bar, in the model's units.
+    ///
+    /// Zero when the actions are not shown. The side bar is the column of
+    /// actions on the right of the window, and the results are what is
+    /// left of the window's width once it is there.
+    pub side_bar: u32,
+    /// The gap between the results and the side bar, in the model's units.
+    ///
+    /// A field and not a constant: the gap is part of the picture, and a
+    /// picture is drawn at the screen's scale.
+    pub side_bar_gap: u32,
 }
 
 impl Default for Layout {
@@ -108,6 +144,8 @@ impl Default for Layout {
             preview_title_top: 5,
             preview_header_height: 34,
             preview_line_height: 18,
+            side_bar: 0,
+            side_bar_gap: SIDE_BAR_GAP,
         }
     }
 }
@@ -139,6 +177,8 @@ impl Layout {
             preview_title_top: device_pixels(self.preview_title_top, scale),
             preview_header_height: device_pixels(self.preview_header_height, scale),
             preview_line_height: device_pixels(self.preview_line_height, scale),
+            side_bar: device_pixels(self.side_bar, scale),
+            side_bar_gap: device_pixels(self.side_bar_gap, scale),
         }
     }
 
@@ -154,8 +194,33 @@ impl Layout {
     /// short list makes the window taller; a preview over a long one
     /// does not.
     pub fn height(&self) -> u32 {
-        let list = (self.rows * self.row_height).max(self.preview_height());
-        self.padding * 2 + self.input_height + list + self.border * 2
+        self.padding * 2 + self.input_height + self.list_height() + self.border * 2
+    }
+
+    /// The height the list has, in the model's units.
+    ///
+    /// The list is as tall as the taller of the results and the preview
+    /// panel, and the column of actions lives in it: the column takes
+    /// the room the results give up and the window does not grow.
+    pub fn list_height(&self) -> u32 {
+        (self.rows * self.row_height).max(self.preview_height())
+    }
+
+    /// Whether the column of actions has room in this window.
+    ///
+    /// The column lives in the room the results give up, and its entries
+    /// are as tall as they can be and no taller. A window with one result
+    /// is shorter than a column of four entries, and a column that does
+    /// not fit is not drawn half of itself.
+    ///
+    /// The rule is here and not in the two places that need it: the model
+    /// and the picture have to agree about the column, and two answers to
+    /// the same question are two answers.
+    pub fn column_fits(&self, entries: u32) -> bool {
+        if entries == 0 {
+            return false;
+        }
+        self.list_height() >= entries * SIDE_BAR_MINIMUM_ENTRY_HEIGHT
     }
 
     /// The height the preview panel needs, in the model's units.
@@ -194,6 +259,53 @@ impl Layout {
     /// The width the content has.
     pub fn content_width(&self) -> u32 {
         self.width.saturating_sub((self.border + self.padding) * 2)
+    }
+
+    /// The geometry with a side bar of this width.
+    ///
+    /// The width is the caller's: the model says whether the actions are
+    /// shown, and the geometry says how much room they take.
+    pub fn with_side_bar(mut self, width: u32) -> Layout {
+        self.side_bar = width;
+        self
+    }
+
+    /// The width of the side bar, in the model's units.
+    ///
+    /// Zero when the actions are not shown, and then the results have the
+    /// whole of the content's width.
+    pub fn side_bar_width(&self) -> u32 {
+        self.side_bar
+    }
+
+    /// The width the results have, in the model's units.
+    ///
+    /// The list is the content's width less the side bar and the gap
+    /// between them: the side bar is inside the window, so the results
+    /// give up the room and the window does not grow.
+    pub fn list_width(&self) -> u32 {
+        if self.side_bar == 0 {
+            // No column, no gap: the gap is between the names and the
+            // column, and there is no column.
+            return self.content_width();
+        }
+        self.content_width()
+            .saturating_sub(self.side_bar)
+            .saturating_sub(self.side_bar_gap)
+    }
+
+    /// The left edge of the side bar, in the model's units.
+    ///
+    /// The side bar ends at the window's own margin, so the column is
+    /// flush with the right of the content and the gap is on its left.
+    pub fn side_bar_left(&self) -> u32 {
+        self.width
+            .saturating_sub(self.border + self.padding + self.side_bar)
+    }
+
+    /// The right edge of the side bar, in the model's units.
+    pub fn side_bar_right(&self) -> u32 {
+        self.width.saturating_sub(self.border + self.padding)
     }
 }
 
@@ -331,6 +443,88 @@ mod tests {
         assert_eq!(device_pixels(600, SCALE_PERCENT), 600);
         assert_eq!(device_pixels(600, SCALE_PERCENT * 2), 1200);
         assert_eq!(model_pixels(1200, SCALE_PERCENT * 2), 600);
-        assert_eq!(model_pixels(600, SCALE_PERCENT), 600);
+        assert_eq!(model_pixels(600, SCALE_PERCENT * 2), 300);
+    }
+
+    /// Without the actions there is no side bar, and the results have the
+    /// whole of the content.
+    #[test]
+    fn a_window_without_the_actions_has_no_side_bar() {
+        let l = Layout::with_rows(4);
+        assert_eq!(l.side_bar_width(), 0);
+        assert_eq!(l.list_width(), l.content_width());
+    }
+
+    /// The side bar is inside the window: the results give up the room and
+    /// the window does not grow.
+    #[test]
+    fn the_side_bar_is_inside_the_window() {
+        let l = Layout::with_rows(4).with_side_bar(SIDE_BAR_WIDTH);
+        assert_eq!(l.width, 600, "the window did not grow");
+        assert_eq!(l.side_bar_width(), SIDE_BAR_WIDTH);
+        assert_eq!(
+            l.list_width(),
+            l.content_width() - SIDE_BAR_WIDTH - SIDE_BAR_GAP,
+            "the results gave up the room of the column"
+        );
+    }
+
+    /// The column ends at the window's own margin, and the gap is on its
+    /// left: a column that touches the names reads as part of them.
+    #[test]
+    fn the_column_is_flush_with_the_right_margin() {
+        let l = Layout::with_rows(4).with_side_bar(SIDE_BAR_WIDTH);
+        assert_eq!(l.side_bar_right(), l.width - l.border - l.padding);
+        assert_eq!(
+            l.side_bar_left() + SIDE_BAR_WIDTH,
+            l.side_bar_right(),
+            "the column is as wide as it says"
+        );
+        assert_eq!(
+            l.side_bar_left(),
+            l.content_left() + l.list_width() + l.side_bar_gap,
+            "the gap is between the names and the column"
+        );
+    }
+
+    /// A side bar wider than the window leaves the results nothing, and
+    /// nothing is not a negative width.
+    #[test]
+    fn a_side_bar_wider_than_the_window_leaves_nothing() {
+        let l = Layout::with_rows(4).with_side_bar(10_000);
+        assert_eq!(l.list_width(), 0, "the names have nowhere to be");
+        assert!(
+            l.side_bar_left() <= l.side_bar_right(),
+            "the column does not start after it ends"
+        );
+    }
+
+    /// The column needs room for its shortest entries, and it takes it
+    /// from the list.
+    #[test]
+    fn the_column_needs_room_for_its_shortest_entries() {
+        let one = Layout::with_rows(1);
+        assert!(
+            !one.column_fits(4),
+            "one result is not room for four entries"
+        );
+        let three = Layout::with_rows(3);
+        assert!(three.column_fits(4), "three results are");
+        assert!(three.column_fits(3), "and three entries are easier");
+    }
+
+    /// A column with no entries is not drawn at all.
+    #[test]
+    fn a_column_with_no_entries_is_not_drawn() {
+        assert!(!Layout::with_rows(10).column_fits(0));
+    }
+
+    /// The column is scaled like the window.
+    #[test]
+    fn the_column_is_scaled_like_the_window() {
+        let model = Layout::with_rows(4).with_side_bar(SIDE_BAR_WIDTH);
+        let twice = model.scaled(SCALE_PERCENT * 2);
+        assert_eq!(twice.side_bar, SIDE_BAR_WIDTH * 2);
+        assert_eq!(twice.list_width(), model.list_width() * 2);
     }
 }

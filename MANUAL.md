@@ -644,6 +644,20 @@ Some things are not searches. A line that starts with `>` is a command:
 | `>preview` | shows the beginning of the file |
 | `>menu` | the actions of the selected result |
 
+### The side bar
+
+The actions of the selected result are a **column on the right** of the
+window. The window does not grow for it: the results give up the room,
+and the names get narrower while the column is there. A window with one
+result is shorter than four actions, and the column says so instead of
+drawing half of itself.
+
+The column is the list of what the selected result can do, and it
+**follows the row**. A folder is not previewed, and neither is an image,
+a video, a sound file or a program: the preview is the head of a file as
+text, and for those the head is noise. `Control+P` on one of those says
+why it cannot, instead of failing in silence.
+
 ### The keys
 
 | key | what it does |
@@ -655,7 +669,7 @@ Some things are not searches. A line that starts with `>` is a command:
 | `Escape` | closes the preview, the menu, and then the window |
 | `Control+C` | copies the path |
 | `Control+V` | pastes the clipboard's text into the field |
-| `Control+P` | previews the file |
+| `Control+P` | previews the file, when its head is text |
 | `Control+K` | the actions |
 | `Control+W` | deletes the word |
 | `Control+U` | empties the field |

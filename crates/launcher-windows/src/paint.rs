@@ -19,9 +19,12 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
-use rgy_launcher::layout::{SCALE_PERCENT, device_pixels};
+use rgy_launcher::layout::{
+    SCALE_PERCENT, SIDE_BAR_ENTRY_HEIGHT, SIDE_BAR_MINIMUM_ENTRY_HEIGHT, SIDE_BAR_WIDTH,
+    device_pixels,
+};
 use rgy_launcher::results::IconKind;
-use rgy_launcher::{Layout, Mode, Preview, Row};
+use rgy_launcher::{Layout, Preview, Row};
 
 use crate::window::View;
 
@@ -528,6 +531,18 @@ pub unsafe fn paint(
     if let Some(preview) = &view.preview {
         model.preview = preview.lines.len() as u32 + 1;
     }
+    // The actions are a column on the right of the window: the results
+    // give up the room of it and the window does not grow — a window
+    // that grows when the actions open is a window that moves under the
+    // user's hands.
+    //
+    // The room is the geometry's rule and not the picture's: the model
+    // asked the same question when it sized the window, and the two have
+    // to answer it the same way or the column is drawn over the names.
+    let column = model.column_fits(view.menu.len() as u32);
+    if column {
+        model = model.with_side_bar(SIDE_BAR_WIDTH);
+    }
     // The picture is the window's own size: the window's size is the
     // model's size at this screen's scale, and the two have to be the
     // same number of pixels or the picture does not fill the window.
@@ -557,6 +572,13 @@ pub unsafe fn paint(
 
         let left = layout.content_left() as i32;
         let content = layout.content_width() as i32;
+        // The edge of the results' own area: the window's own edge, and
+        // the names' edge when the column took the right of the window.
+        let edge = if column {
+            results_right(&layout)
+        } else {
+            width
+        };
 
         // The field.
         let field_top = layout.input_top() as i32;
@@ -569,6 +591,7 @@ pub unsafe fn paint(
                 left,
                 field_top + px(scale, 14),
                 colour::DIM,
+                content,
             );
             let _ = w;
         } else {
@@ -578,7 +601,14 @@ pub unsafe fn paint(
             // the end puts the blinking line away from the text that
             // just arrived.
             let (before, after) = split_at_caret(&view.query, view.caret);
-            let w = draw_run(hdc, before, left, field_top + px(scale, 14), colour::TEXT);
+            let w = draw_run(
+                hdc,
+                before,
+                left,
+                field_top + px(scale, 14),
+                colour::TEXT,
+                content,
+            );
             // The caret: two pixels, two pixels after the text before it.
             fill(
                 hdc,
@@ -595,6 +625,7 @@ pub unsafe fn paint(
                 left + w + px(scale, 5),
                 field_top + px(scale, 14),
                 colour::TEXT,
+                content.saturating_sub(w + px(scale, 5)),
             );
         }
 
@@ -607,31 +638,35 @@ pub unsafe fn paint(
                 left,
                 field_top + field_h - px(scale, 6),
                 colour::DIM,
+                content,
             );
         }
 
         // The rows.
         let visible = view.rows.len();
+        // The names have the width the results have: the column took the
+        // right of the window, and the results gave up the room of it.
+        let names = results_width(&layout);
         for (i, row) in view.rows.iter().enumerate().take(visible) {
             let top = layout.row_top(i as u32) as i32;
             let row_h = layout.row_height as i32;
             if i == view.selected {
-                fill(hdc, 0, top, width, row_h, colour::SELECTED);
+                fill(hdc, 0, top, edge, row_h, colour::SELECTED);
                 // The accent bar on the left: the selection's own edge.
                 fill(hdc, 0, top, px(scale, 3), row_h, colour::ACCENT);
             }
-            draw_row(hdc, fonts, row, left, top, row_h, content, icons, scale);
+            draw_row(hdc, fonts, row, left, top, row_h, names, icons, scale);
         }
 
-        // The actions menu, over the rows.
-        if view.mode == Mode::Menu {
-            draw_menu(hdc, fonts, view, width, height, scale);
+        // The actions, in the column on the right of the window.
+        if column {
+            draw_column(hdc, fonts, view, &layout, height, scale);
         }
 
         // The preview panel, over everything the rows were.
         if let Some(preview) = &view.preview {
             let top = layout.list_top() as i32;
-            draw_preview(hdc, fonts, preview, left, top, width, height - top, &layout);
+            draw_preview(hdc, fonts, preview, left, top, edge, height - top, &layout);
         }
 
         // The context is left as it was found.
@@ -675,6 +710,7 @@ fn draw_preview(
         left,
         top + layout.preview_title_top as i32,
         colour::TEXT,
+        width.saturating_sub(left),
     );
     select(hdc, fonts.folder);
     let line_height = layout.preview_line_height as i32;
@@ -686,13 +722,17 @@ fn draw_preview(
         // The cut is in characters and not in pixels: it is a number of
         // letters, and a letter is a letter at any scale.
         let text = shorten(line, 90);
-        draw_run(hdc, &text, left, y, colour::DIM);
+        draw_run(hdc, &text, left, y, colour::DIM, width.saturating_sub(left));
         y += line_height;
     }
 }
 
 /// One row: the icon, the name with its match picked out, and the folder
 /// under it.
+///
+/// The width the row has is the width the results have: the column took
+/// the right of the window, and a name that does not fit is cut at the
+/// edge of the results and not drawn over the column.
 ///
 /// The geometry is four numbers and three words, and a struct would be a
 /// struct that only this function and its caller ever see.
@@ -704,7 +744,7 @@ fn draw_row(
     left: i32,
     top: i32,
     row_h: i32,
-    content: i32,
+    width: i32,
     icons: &mut Icons,
     scale: u32,
 ) {
@@ -716,15 +756,21 @@ fn draw_row(
     // The text, after the gutter.
     let gutter = px(scale, GUTTER);
     let text_left = left + gutter;
-    let text_width = content.saturating_sub(gutter);
+    let text_width = width.saturating_sub(gutter);
     {
         select(hdc, fonts.row);
         let name = row.name();
         let mut x = text_left;
         for (text, matched) in runs(name, row.matched()) {
+            // The run is cut at the room that is left: a name that does
+            // not fit ends at the edge of the results.
+            let room = text_width.saturating_sub((x - text_left).max(0));
+            if room <= 0 {
+                break;
+            }
             let colour = if matched { colour::MATCH } else { colour::TEXT };
-            x += draw_run(hdc, &text, x, top + px(scale, 5), colour);
-            if x - text_left > text_width {
+            x += draw_run(hdc, &text, x, top + px(scale, 5), colour, room);
+            if x - text_left >= text_width {
                 break;
             }
         }
@@ -742,132 +788,197 @@ fn draw_row(
                 text_left,
                 top + row_h - px(scale, 17),
                 colour::DIM,
+                text_width,
             );
         }
     }
 }
 
-/// The height of one entry of the actions menu, in the model's units.
-const MENU_ROW_HEIGHT: i32 = 30;
-
-/// The shortest an entry of the menu may be, in the model's units.
+/// A rectangle of the picture, in device pixels.
 ///
-/// An entry holds a line of text and the margin under it, and an entry
-/// shorter than that would cut the label in half.
-const MENU_ROW_MINIMUM: i32 = 24;
-
-/// The menu's own geometry.
-///
-/// The menu is a panel at the bottom of the window, and it is exactly as
-/// tall as its entries: a row that is reserved and not drawn is a band
-/// of nothing between the panel's edge and the first action, and it
-/// reads as a fault in the drawing.
+/// The drawing is a picture in pixels, and a rectangle is the piece of it
+/// that one thing is drawn on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Menu {
-    /// The top of the panel, in device pixels.
+struct Rect {
+    /// The rectangle's left edge.
+    left: i32,
+    /// The rectangle's top edge.
     top: i32,
-    /// The height of the panel, in device pixels.
+    /// The rectangle's width.
+    width: i32,
+    /// The rectangle's height.
     height: i32,
+}
+
+/// The column of actions: where it is and how tall its entries are.
+///
+/// The column is inside the window: the results gave up the room of it,
+/// and the window did not grow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Column {
+    /// The column's own rectangle.
+    rect: Rect,
     /// The height of one entry, in device pixels.
     row: i32,
 }
 
-impl Menu {
-    /// The menu's geometry, in a window of this height.
+impl Column {
+    /// The column in this room, with entries of this height.
     ///
-    /// The entries are as tall as they can be and no taller: a window
-    /// with one result is shorter than a menu of four entries at their
-    /// full height, and the entries shrink to fit it. Only a window that
-    /// cannot hold even the shortest entry has no menu to draw.
-    fn at(entries: usize, window_height: i32, row: i32, shortest: i32) -> Option<Menu> {
+    /// The entries are as tall as they can be and no taller: the room
+    /// they have is what the results gave up, and a short window shrinks
+    /// them. Only a window that cannot hold even the shortest entry has
+    /// no column to draw — and the window says so rather than drawing
+    /// half of the column.
+    fn at(rect: Rect, entries: usize, row: i32, shortest: i32) -> Option<Column> {
         if entries == 0 {
             return None;
         }
-        let row = (window_height / entries as i32).clamp(shortest, row);
-        let height = row * entries as i32;
-        if height > window_height {
-            // The window has no room for the menu.
+        let row = (rect.height / entries as i32).clamp(shortest, row);
+        if row * entries as i32 > rect.height {
+            // The window has no room for the column.
             return None;
         }
-        Some(Menu {
-            top: window_height - height,
-            height,
-            row,
-        })
+        Some(Column { rect, row })
     }
 
     /// The top of one entry, in device pixels.
     fn entry_top(&self, index: usize) -> i32 {
-        self.top + index as i32 * self.row
+        self.rect.top + index as i32 * self.row
     }
 }
 
-/// The actions menu, drawn over the results.
-fn draw_menu(hdc: HDC, fonts: &Fonts, view: &View, width: i32, height: i32, scale: u32) {
-    if view.menu.is_empty() {
-        return;
+/// The rectangle of the column, in device pixels.
+///
+/// The column starts at the top of the results and ends with the
+/// content: the window's own margin is not the column's, and the column
+/// is flush with the right of the content.
+fn column_rect(layout: &Layout, window_height: i32) -> Rect {
+    Rect {
+        left: layout.side_bar_left() as i32,
+        top: layout.list_top() as i32,
+        width: layout.side_bar_width() as i32,
+        height: (window_height - layout.border as i32 - layout.padding as i32)
+            .saturating_sub(layout.list_top() as i32),
     }
-    let row = px(scale, MENU_ROW_HEIGHT);
-    let Some(menu) = Menu::at(view.menu.len(), height, row, px(scale, MENU_ROW_MINIMUM)) else {
-        // The window has no room for the menu: the menu says so instead
-        // of drawing half of itself.
-        draw_too_short(hdc, fonts, width, height, scale);
+}
+
+/// The width the names have, in device pixels.
+///
+/// The results give up the room of the column: the window does not grow,
+/// so the names are what is left of the content.
+fn results_width(layout: &Layout) -> i32 {
+    layout.list_width() as i32
+}
+
+/// The right edge of the results, in device pixels.
+///
+/// The results end where the column's gap begins: a column that touches
+/// the names reads as part of them.
+fn results_right(layout: &Layout) -> i32 {
+    layout.content_left() as i32 + results_width(layout)
+}
+
+/// The column of actions, on the right of the window.
+///
+/// The column is the actions of the selected result, and it is where the
+/// results gave up the room: the window does not grow, so the names have
+/// less of it.
+///
+/// The column is the window's own colour — the panel's alpha is worked
+/// out from that colour, and a shade of its own would make the column
+/// opaque where the rest of the window is not — and the hairline on its
+/// left edge is what says that it is a separate thing.
+fn draw_column(
+    hdc: HDC,
+    fonts: &Fonts,
+    view: &View,
+    layout: &Layout,
+    window_height: i32,
+    scale: u32,
+) {
+    let rect = column_rect(layout, window_height);
+    let row = px(scale, SIDE_BAR_ENTRY_HEIGHT as i32);
+    let Some(column) = Column::at(
+        rect,
+        view.menu.len(),
+        row,
+        px(scale, SIDE_BAR_MINIMUM_ENTRY_HEIGHT as i32),
+    ) else {
+        // The window has no room for the column: the column says so
+        // instead of the window saying it over its own results.
+        draw_too_short(hdc, fonts, rect, scale);
         return;
     };
-    // The menu's own panel: a little darker than the window, so it
-    // reads as a layer above the results.
-    fill(hdc, 0, menu.top, width, menu.height, colour::BACKDROP);
-    frame(hdc, 0, menu.top, width, menu.height, colour::BORDER);
+    // The separator: a hairline on the column's left edge, the window's
+    // own border on the left of the names.
+    fill(
+        hdc,
+        rect.left,
+        rect.top,
+        px(scale, 1),
+        rect.height,
+        colour::BORDER,
+    );
+    // The room inside the column, once its own margins are taken.
+    let inner = (rect.width - px(scale, 12) * 2).max(0);
     for (i, action) in view.menu.iter().enumerate() {
-        let y = menu.entry_top(i);
-        let selected = i == view.menu_selected;
-        if selected {
-            fill(hdc, 0, y, width, menu.row, colour::SELECTED);
-            fill(hdc, 0, y, px(scale, 3), menu.row, colour::ACCENT);
+        let y = column.entry_top(i);
+        if i == view.menu_selected {
+            // The selected entry is marked the way the selected row is
+            // marked: the band, and the bar on its left.
+            fill(hdc, rect.left, y, rect.width, column.row, colour::SELECTED);
+            fill(hdc, rect.left, y, px(scale, 3), column.row, colour::ACCENT);
         }
+        // The shortcut is measured first: the label has what is left of
+        // the column's width, and a label that does not fit is cut and
+        // not drawn over the shortcut.
+        select(hdc, fonts.folder);
+        let shortcut = action.shortcut();
+        let shortcut_width = text_width(hdc, shortcut).min(inner);
         select(hdc, fonts.row);
         draw_run(
             hdc,
             action.label(),
-            px(scale, 16),
+            rect.left + px(scale, 12),
             y + px(scale, 6),
             colour::TEXT,
+            inner - shortcut_width,
         );
         select(hdc, fonts.folder);
         draw_run(
             hdc,
-            action.shortcut(),
-            width - px(scale, 90),
+            shortcut,
+            rect.left + rect.width - px(scale, 12) - shortcut_width,
             y + px(scale, 7),
             colour::DIM,
+            shortcut_width,
         );
-        select(hdc, fonts.row);
     }
 }
 
-/// What the menu says when the window is too short for it.
+/// What the column says when the window is too short for it.
 ///
-/// The menu is drawn over the results, and the window is as tall as the
-/// model asked for: a window with one result is shorter than a menu of
-/// four entries. A menu that cannot be drawn is not drawn half — it says
-/// so, in the language the window speaks, because the model cannot know
-/// how tall the window ended up.
-const TOO_SHORT: &str = "a janela é curta demais para o menu";
+/// The column is the actions of the selected result, and the window it
+/// is in can be shorter than the list: the screen is not tall enough for
+/// the column, and the column says so, in the language the window
+/// speaks, because the model cannot know how tall the window ended up.
+const TOO_SHORT: &str = "sem espaço para as ações";
 
-/// The menu that does not fit.
-fn draw_too_short(hdc: HDC, fonts: &Fonts, width: i32, height: i32, scale: u32) {
-    // The panel is the whole window: there is no room for a panel at the
-    // bottom, and a message without a panel reads as a line of the
-    // results.
-    fill(hdc, 0, 0, width, height, colour::BACKDROP);
-    frame(hdc, 0, 0, width, height, colour::BORDER);
+/// The column that does not fit.
+///
+/// The message is inside the column and not over the window: the results
+/// are the window's own business, and a window that says "too short" over
+/// its own results has thrown them away.
+fn draw_too_short(hdc: HDC, fonts: &Fonts, rect: Rect, scale: u32) {
     select(hdc, fonts.folder);
     draw_run(
         hdc,
         TOO_SHORT,
-        px(scale, 16),
-        height / 2 - px(scale, 9),
+        rect.left + px(scale, 12),
+        rect.top + px(scale, 4),
         colour::DIM,
+        rect.width.saturating_sub(px(scale, 24)),
     );
 }
 
@@ -916,19 +1027,23 @@ fn split_at_caret(query: &str, caret: usize) -> (&str, &str) {
 }
 
 /// Draw a run of text, and say how wide it was.
-fn draw_run(hdc: HDC, text: &str, x: i32, y: i32, colour: u32) -> i32 {
+///
+/// The text is cut at the width it is given: a run that does not fit is
+/// cut with an ellipsis, and not drawn over the thing next to it.
+fn draw_run(hdc: HDC, text: &str, x: i32, y: i32, colour: u32, max_width: i32) -> i32 {
     let w: Vec<u16> = text.encode_utf16().collect();
     if w.is_empty() {
         return 0;
     }
+    let size = text_extent(hdc, &w);
     unsafe {
-        let mut size = POINT { x: 0, y: 0 };
-        GetTextExtentPoint32W(hdc, w.as_ptr(), w.len() as i32, &mut size);
         SetTextColor(hdc, colour);
         let mut r = RECT {
             left: x,
             top: y,
-            right: x + size.x,
+            // The width the run has: a run that does not fit in it is
+            // cut, and the cut belongs to the run.
+            right: x + max_width.max(0),
             bottom: y + size.y,
         };
         DrawTextW(
@@ -938,8 +1053,34 @@ fn draw_run(hdc: HDC, text: &str, x: i32, y: i32, colour: u32) -> i32 {
             &mut r,
             DT_LEFT | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
         );
+    }
+    if max_width > 0 {
+        size.x.min(max_width)
+    } else {
         size.x
     }
+}
+
+/// The size of a run of text, in device pixels.
+fn text_extent(hdc: HDC, text: &[u16]) -> POINT {
+    let mut size = POINT { x: 0, y: 0 };
+    unsafe {
+        GetTextExtentPoint32W(hdc, text.as_ptr(), text.len() as i32, &mut size);
+    }
+    size
+}
+
+/// The width of a run of text, in device pixels.
+///
+/// The width is asked before the text is drawn: the shortcut of an entry
+/// sits on the right of the column, and the label has what is left of
+/// the column's width.
+fn text_width(hdc: HDC, text: &str) -> i32 {
+    let w: Vec<u16> = text.encode_utf16().collect();
+    if w.is_empty() {
+        return 0;
+    }
+    text_extent(hdc, &w).x
 }
 
 /// Fill a rectangle.
@@ -1309,15 +1450,121 @@ mod tests {
         assert_eq!(px(SCALE_PERCENT * 2, GUTTER), 48);
     }
 
-    /// The menu opens with its first entry.
+    /// The column is where the layout says it is.
     ///
-    /// The panel is exactly as tall as its entries, so the first row of
-    /// the panel is the first entry's own: a row that is reserved and
-    /// not drawn is a band of nothing between the panel's edge and the
-    /// first action, and it reads as a fault in the drawing.
+    /// The column is inside the window: it starts at the top of the
+    /// results and ends with the content, and the window's own margin is
+    /// not the column's.
     #[test]
-    fn the_menu_opens_with_its_first_entry() {
-        let Some(canvas) = Canvas::new(300, 200) else {
+    fn the_column_is_where_the_layout_says() {
+        let model = Layout::with_rows(4).with_side_bar(SIDE_BAR_WIDTH);
+        let layout = model.scaled(SCALE_PERCENT);
+        let height = device_pixels(model.height(), SCALE_PERCENT) as i32;
+        let rect = column_rect(&layout, height);
+        assert_eq!(rect.left, layout.side_bar_left() as i32);
+        assert_eq!(rect.width, layout.side_bar_width() as i32);
+        assert_eq!(
+            rect.left + rect.width,
+            layout.side_bar_right() as i32,
+            "the column is flush with the right margin"
+        );
+        assert_eq!(
+            rect.top,
+            layout.list_top() as i32,
+            "the column starts at the top of the results"
+        );
+    }
+
+    /// The results give up the room of the column.
+    ///
+    /// The window does not grow: the names are what is left of the
+    /// content, and the gap is between the names and the column.
+    #[test]
+    fn the_results_give_up_the_room_of_the_column() {
+        let model = Layout::with_rows(4).with_side_bar(SIDE_BAR_WIDTH);
+        let layout = model.scaled(SCALE_PERCENT);
+        assert_eq!(
+            results_width(&layout),
+            layout.content_width() as i32 - SIDE_BAR_WIDTH as i32 - layout.side_bar_gap as i32,
+            "the names have what is left of the content"
+        );
+        assert_eq!(
+            results_right(&layout) + layout.side_bar_gap as i32,
+            layout.side_bar_left() as i32,
+            "the gap is between the names and the column"
+        );
+    }
+
+    /// Without the actions there is no column, and the results have the
+    /// whole of the content.
+    #[test]
+    fn a_window_without_the_actions_has_the_whole_width() {
+        let layout = Layout::with_rows(4).scaled(SCALE_PERCENT);
+        assert_eq!(results_width(&layout), layout.content_width() as i32);
+    }
+
+    /// The column opens with its first entry.
+    ///
+    /// The entries are stacked from the top of the results, and the first
+    /// one is at the top: an entry that starts lower has a band of
+    /// nothing above it, and it reads as a fault in the drawing.
+    #[test]
+    fn the_column_opens_with_its_first_entry() {
+        let rect = Rect {
+            left: 395,
+            top: 61,
+            width: 190,
+            height: 120,
+        };
+        let column = Column::at(rect, 4, 30, 24).expect("the column fits");
+        assert_eq!(column.entry_top(0), rect.top, "the first entry is the top");
+        assert_eq!(column.entry_top(3), rect.top + 3 * 30);
+        assert_eq!(column.row, 30, "the entries are as tall as they can be");
+    }
+
+    /// A window with one result is shorter than a column of four entries,
+    /// and the entries shrink to fit it.
+    #[test]
+    fn the_column_shrinks_to_fit_a_short_window() {
+        let rect = Rect {
+            left: 395,
+            top: 61,
+            width: 190,
+            height: 110,
+        };
+        let column = Column::at(rect, 4, 30, 24).expect("the column still fits");
+        assert_eq!(column.row, 27);
+        assert!(
+            column.entry_top(3) + column.row <= rect.top + rect.height,
+            "the last entry ends inside the column"
+        );
+    }
+
+    /// A window with no room for the column has no column: the window
+    /// says so instead of drawing half of the column.
+    #[test]
+    fn a_window_with_no_room_for_the_column_has_no_column() {
+        let rect = Rect {
+            left: 395,
+            top: 61,
+            width: 190,
+            height: 80,
+        };
+        assert_eq!(Column::at(rect, 4, 30, 24), None);
+    }
+
+    /// The column is drawn where the layout says it is.
+    ///
+    /// The picture is what the user sees: a column that is drawn over
+    /// the names, or one that starts lower than the results, is a
+    /// picture the layout does not describe.
+    #[test]
+    fn the_column_is_drawn_where_the_layout_says() {
+        let model = Layout::with_rows(4).with_side_bar(SIDE_BAR_WIDTH);
+        let layout = model.scaled(SCALE_PERCENT);
+        let width = device_pixels(model.width, SCALE_PERCENT) as i32;
+        let height = device_pixels(model.height(), SCALE_PERCENT) as i32;
+        let Some(canvas) = Canvas::new(width, height) else {
             panic!("the platform gave no surface to draw on");
         };
         let fonts = Fonts::new(SCALE_PERCENT);
@@ -1331,17 +1578,23 @@ mod tests {
             menu_selected: 0,
             ..View::default()
         };
-        // The surface is the window's own colour, so the panel's edge
+        // The surface is the window's own colour, so the column's edge
         // is the first thing on it that is not.
-        fill(canvas.dc, 0, 0, 300, 200, colour::BACKDROP);
-        draw_menu(canvas.dc, &fonts, &view, 300, 200, SCALE_PERCENT);
-        let top = (0..200)
-            .find(|&y| canvas.pixel(10, y) != in_pixels(colour::BACKDROP))
-            .expect("the menu drew a panel");
+        fill(canvas.dc, 0, 0, width, height, colour::BACKDROP);
+        draw_column(canvas.dc, &fonts, &view, &layout, height, SCALE_PERCENT);
+        let x = layout.side_bar_left() as i32 + 10;
+        let top = (0..height)
+            .find(|&y| canvas.pixel(x, y) != in_pixels(colour::BACKDROP))
+            .expect("the column drew an entry");
         assert_eq!(
-            canvas.pixel(10, top),
+            top,
+            layout.list_top() as i32,
+            "the column opens with its first entry"
+        );
+        assert_eq!(
+            canvas.pixel(x, top),
             in_pixels(colour::SELECTED),
-            "the panel opens with its first entry"
+            "and the first entry is the selected one"
         );
         unsafe {
             // The font that is still selected cannot be deleted: the
@@ -1349,41 +1602,6 @@ mod tests {
             let stock = GetCurrentObject(canvas.dc, OBJ_FONT);
             SelectObject(canvas.dc, stock);
         }
-    }
-
-    /// The menu is exactly as tall as its entries.
-    ///
-    /// A row that is reserved and not drawn is a band of nothing between
-    /// the panel's edge and the first action, and it reads as a fault in
-    /// the drawing.
-    #[test]
-    fn the_menu_is_as_tall_as_its_entries() {
-        let menu = Menu::at(4, 300, 30, 24).expect("the menu fits");
-        assert_eq!(menu.height, 4 * 30);
-        assert_eq!(menu.top, 300 - 4 * 30);
-        assert_eq!(menu.entry_top(0), menu.top, "the first entry is the top");
-        assert_eq!(menu.entry_top(3), menu.top + 3 * 30);
-    }
-
-    /// A window with one result is shorter than a menu of four entries,
-    /// and the entries shrink to fit it.
-    #[test]
-    fn the_menu_shrinks_to_fit_a_short_window() {
-        let menu = Menu::at(4, 110, 30, 24).expect("the menu still fits");
-        assert!(menu.height <= 110, "the menu is inside the window");
-        assert_eq!(menu.row, 27);
-        assert_eq!(
-            menu.entry_top(3) + menu.row,
-            110,
-            "and the last entry ends at the bottom"
-        );
-    }
-
-    /// A window with no room for the menu has no menu: the menu says so
-    /// instead of drawing half of itself.
-    #[test]
-    fn a_window_with_no_room_for_the_menu_has_no_menu() {
-        assert_eq!(Menu::at(4, 80, 30, 24), None);
     }
 
     /// The preview's lines fit in the panel the window asked for.

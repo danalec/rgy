@@ -30,7 +30,7 @@ use alloc::vec::Vec;
 use crate::actions::Action;
 use crate::commands;
 use crate::hotkey::DoubleCtrl;
-use crate::layout::Layout;
+use crate::layout::{Layout, SIDE_BAR_WIDTH};
 use crate::query::Query;
 use crate::results::{Results, Row};
 
@@ -344,6 +344,18 @@ impl App {
         if let Some(preview) = &self.preview {
             layout.preview = preview.lines.len() as u32 + 1;
         }
+        // The column of actions is inside the window: the window does not
+        // grow for it, the results give up the room. The picture and the
+        // geometry have to agree — a window that draws a column the
+        // geometry does not know about draws it over the names.
+        //
+        // The room is the geometry's rule and not the model's: the picture
+        // asks the same question, and the two have to answer it the same
+        // way or the column is drawn over the names.
+        let entries = self.menu_actions().len() as u32;
+        if layout.column_fits(entries) {
+            layout = layout.with_side_bar(SIDE_BAR_WIDTH);
+        }
         layout
     }
 
@@ -362,36 +374,58 @@ impl App {
         true
     }
 
+    /// The actions the menu offers for the selected result.
+    ///
+    /// The list follows the row: a folder cannot be previewed and does
+    /// not get the preview in its list. It is empty when there is no
+    /// result, because there is nothing to act on.
+    pub fn menu_actions(&self) -> &'static [Action] {
+        match self.current() {
+            Some(row) => Action::for_kind(row.icon()),
+            None => &[],
+        }
+    }
+
     /// Which action of the menu is selected.
     pub fn menu_index(&self) -> usize {
-        self.menu_index
+        self.selected_index()
     }
 
     /// Select the next action of the menu.
     pub fn menu_next(&mut self) {
-        let count = Action::menu().len();
+        let count = self.menu_actions().len();
         if count == 0 {
             return;
         }
-        self.menu_index = (self.menu_index + 1) % count;
+        self.menu_index = (self.selected_index() + 1) % count;
     }
 
     /// Select the previous action of the menu.
     pub fn menu_previous(&mut self) {
-        let count = Action::menu().len();
+        let count = self.menu_actions().len();
         if count == 0 {
             return;
         }
-        self.menu_index = if self.menu_index == 0 {
-            count - 1
-        } else {
-            self.menu_index - 1
-        };
+        let index = self.selected_index();
+        self.menu_index = if index == 0 { count - 1 } else { index - 1 };
     }
 
     /// The action the menu has selected.
     pub fn menu_action(&self) -> Option<Action> {
-        Action::menu().get(self.menu_index).copied()
+        self.menu_actions().get(self.selected_index()).copied()
+    }
+
+    /// The index of the selected action, inside the list that is offered.
+    ///
+    /// The list follows the row, and the row can change while the menu
+    /// is open — an answer that lands replaces the results. The index is
+    /// clamped so that it always names an action that is on the screen.
+    fn selected_index(&self) -> usize {
+        let count = self.menu_actions().len();
+        if count == 0 {
+            return 0;
+        }
+        self.menu_index.min(count - 1)
     }
 
     /// Close the actions.
@@ -817,8 +851,94 @@ mod tests {
         app.menu_previous();
         assert_eq!(
             app.menu_action(),
-            Action::menu().last().copied(),
+            app.menu_actions().last().copied(),
             "the selection went round"
+        );
+    }
+
+    /// The menu lists the actions of the selected row.
+    ///
+    /// The list follows the row: a folder is not offered the preview and
+    /// a document is. What the keyboard walks is what the menu shows,
+    /// and what it shows depends on what is selected.
+    #[test]
+    fn the_menu_lists_the_actions_of_the_selected_row() {
+        let mut app = App::new();
+        app.show();
+        app.set_results(vec![
+            Row::new("/a/pasta".to_string(), 0).with_folder(true),
+            Row::new("/a/notas.txt".to_string(), 1),
+        ]);
+        assert!(
+            !app.menu_actions().contains(&Action::Preview),
+            "a folder is not previewed"
+        );
+        app.select_next();
+        assert!(
+            app.menu_actions().contains(&Action::Preview),
+            "a document is"
+        );
+        // And with no row there is nothing to act on.
+        app.set_results(Vec::new());
+        assert!(app.menu_actions().is_empty());
+    }
+
+    /// The keyboard walks the actions that are offered.
+    ///
+    /// The circle the menu walks is the list the row offers: a folder's
+    /// list has three entries and a document's has four, and the walk
+    /// never lands on an action that is not there.
+    #[test]
+    fn the_menu_walks_the_actions_that_are_offered() {
+        let mut app = App::new();
+        app.show();
+        app.set_results(vec![Row::new("/a/pasta".to_string(), 0).with_folder(true)]);
+        app.open_menu();
+        assert_eq!(app.menu_action(), Some(Action::Open));
+        app.menu_next();
+        assert_eq!(app.menu_action(), Some(Action::OpenFolder));
+        app.menu_next();
+        assert_eq!(app.menu_action(), Some(Action::CopyPath));
+        // And the circle closes on the first one: there is no preview to
+        // walk to.
+        app.menu_next();
+        assert_eq!(app.menu_action(), Some(Action::Open));
+        assert_eq!(app.menu_index(), 0);
+    }
+
+    /// The window carries the column of actions when the results give it
+    /// room.
+    ///
+    /// The column is inside the window: the results give up the room and
+    /// the window does not grow — a window that moved under the user's
+    /// hands every time the actions opened is a window they fight. A
+    /// window with one result is shorter than the column, and a column
+    /// that does not fit is not drawn half of itself.
+    #[test]
+    fn the_layout_carries_the_column_when_the_results_give_it_room() {
+        let mut app = App::new();
+        app.show();
+        app.set_results(vec![row(0)]);
+        let short = app.layout();
+        assert_eq!(
+            short.side_bar_width(),
+            0,
+            "one result is not room for the column"
+        );
+        app.set_results(vec![row(0), row(1), row(2), row(3)]);
+        let open = app.layout();
+        assert_eq!(open.side_bar_width(), SIDE_BAR_WIDTH);
+        assert_eq!(open.width, short.width, "the window did not grow");
+        assert!(
+            open.list_width() < short.list_width(),
+            "the results gave up the room of the column"
+        );
+        // The column lives in the room the results give up: the window
+        // is as tall as the results and not a unit more.
+        assert_eq!(
+            open.height(),
+            Layout::with_rows(4).height(),
+            "the column did not make the window taller"
         );
     }
 }

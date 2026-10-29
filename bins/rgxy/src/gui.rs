@@ -931,6 +931,15 @@ fn run_action(state: &mut State, action: Action) -> Control {
             .set_warnings(vec!["nenhum resultado selecionado".to_string()]);
         return paint(state);
     };
+    // The action has to fit the row: the preview reads the head of a
+    // file as text, and for a folder, an image, a video, a sound or a
+    // program that head is noise. The refusal says why, in the user's
+    // language — a key that was pressed and refused in silence is a key
+    // the user presses again.
+    if let Some(reason) = action.refusal(row.icon()) {
+        state.app.set_warnings(vec![reason]);
+        return paint(state);
+    }
     match action {
         Action::Open => {
             // The answer first: the use is recorded after the open, not
@@ -1172,7 +1181,7 @@ fn view(state: &State) -> View {
         selected: selected.saturating_sub(top),
         top,
         mode: app.mode(),
-        menu: Action::menu().to_vec(),
+        menu: app.menu_actions().to_vec(),
         menu_selected: app.menu_index(),
         warnings: app.warnings().to_vec(),
         status: status_line(state),
@@ -2336,5 +2345,47 @@ mod tests {
         assert!(note.contains("histórico"), "{note}");
         drop(held);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The view shows the actions of the selected row.
+    ///
+    /// The column on the screen is the list the row offers, and a folder
+    /// is not previewed: a column that offers the preview for a folder
+    /// offers a key that fails.
+    #[test]
+    fn the_view_shows_the_actions_of_the_selected_row() {
+        let mut state = empty();
+        state
+            .app
+            .set_results(vec![Row::new("C:/a/foto.png".to_string(), 0)]);
+        let shown = view(&state);
+        assert!(!shown.menu.contains(&Action::Preview), "{:?}", shown.menu);
+        state
+            .app
+            .set_results(vec![Row::new("C:/a/notas.txt".to_string(), 0)]);
+        let shown = view(&state);
+        assert!(shown.menu.contains(&Action::Preview), "{:?}", shown.menu);
+    }
+
+    /// The preview key on a folder says why.
+    ///
+    /// The key used to open a preview of a folder, and the preview is the
+    /// head of a file as text — a folder has no head. The refusal is in
+    /// the line under the field, and no panel opens.
+    #[test]
+    fn the_preview_key_on_a_folder_says_why() {
+        let mut state = empty();
+        state.app.set_results(vec![
+            Row::new("C:/a/pasta".to_string(), 0).with_folder(true),
+        ]);
+        let _ = on_key(&mut state, Key::CtrlP);
+        let line = status_line(&state);
+        assert!(line.contains("pasta"), "{line}");
+        assert!(line.contains("pré-visualização"), "{line}");
+        assert!(state.app.preview().is_none(), "no preview was opened");
+        assert!(
+            state.preview_pending.is_none(),
+            "and no file was sent to be read"
+        );
     }
 }
