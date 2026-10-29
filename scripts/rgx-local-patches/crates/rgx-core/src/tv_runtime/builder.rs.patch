@@ -1,0 +1,18 @@
+--- a/crates/rgx-core/src/tv_runtime/builder.rs
++++ b/crates/rgx-core/src/tv_runtime/builder.rs
+@@ -38,8 +38,13 @@
+     /// `--max-depth`. The direct walker applies it; a build that did not
+     /// would ingest the whole tree under a flag that says otherwise.
+     pub max_depth: Option<usize>,
+-    /// `-g` globs, gitignore-style: a pattern that does not start with `!`
+-    /// excludes, and one that does is a whitelist.
++    /// `-g` globs, the way the pack store reads them: a pattern that does
++    /// not start with `!` is a whitelist -- only the files it matches are
++    /// in the corpus -- and one that does start with `!` excludes.
++    ///
++    /// The polarity is the opposite of what "gitignore-style" suggests,
++    /// and it is deliberate: an override says what to keep, so a pattern
++    /// that does not negate keeps, and one that does negate drops.
+     pub globs: Vec<String>,
+     /// Compact the store after a successful update, reclaiming the payloads
+     /// that append-only updates supersede.

@@ -77,6 +77,28 @@ jobs:
         shell: pwsh
         run: ./scripts/check-vendoring.ps1
 
+  tv-runtime:
+    name: the pack-store builder compiles
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: swatinem/rust-cache@v2
+      # The pack-store builder lives behind rgx-core's `tv-runtime`
+      # feature, and the default build does not compile it: the `rgx-tv`
+      # binary that carries it asks for the feature, so a default build
+      # leaves the whole builder -- and the crate it walks a tree with --
+      # outside every gate there is.
+      #
+      # A feature nobody builds is a feature nobody breaks, until the day
+      # somebody turns it on. This job is where that code is compiled,
+      # linted and tested.
+      - run: cargo build --workspace --features rgx-core/tv-runtime --locked
+      - run: cargo clippy --workspace --all-targets --features rgx-core/tv-runtime --locked -- -D warnings
+      - run: cargo test --workspace --no-fail-fast --features rgx-core/tv-runtime --locked
+
   freebsd-check:
     name: "floor: cargo check for FreeBSD"
     runs-on: ubuntu-24.04
