@@ -664,7 +664,8 @@ impl Response {
                                 let n = pair
                                     .first()
                                     .and_then(|n| n.as_num())
-                                    .ok_or(LineError::NotAnAnswer)? as usize;
+                                    .ok_or(LineError::NotAnAnswer)?
+                                    as usize;
                                 let t = pair
                                     .get(1)
                                     .and_then(|t| t.as_str())
@@ -1720,7 +1721,9 @@ mod tests {
         );
         // A hit whose path is not a string.
         assert_eq!(
-            Response::from_json_checked(r#"{"op":"hits","hits":[{"path":7,"score":5}],"took_us":6}"#),
+            Response::from_json_checked(
+                r#"{"op":"hits","hits":[{"path":7,"score":5}],"took_us":6}"#
+            ),
             Err(LineError::NotAnAnswer)
         );
         // And the good line still reads.

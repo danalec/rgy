@@ -865,13 +865,9 @@ mod tests {
             out.finish().unwrap();
             out.dropped()
         };
+        assert_eq!(dropped, 1, "the record the picker cannot carry is counted");
         assert_eq!(
-            dropped, 1,
-            "the record the picker cannot carry is counted"
-        );
-        assert_eq!(
-            buf,
-            b"src/a.txt\nsrc/c.txt\n",
+            buf, b"src/a.txt\nsrc/c.txt\n",
             "and it is not offered, not even in halves"
         );
     }

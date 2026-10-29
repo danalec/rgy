@@ -249,9 +249,7 @@ fn every_source_file_carries_the_licence_its_tree_is_licensed_under() {
             // A Rust file in a tree that no list names. The lists are the
             // rule, and a file that is in none of them is a hole in the
             // rule: nobody has said what that tree's licence is.
-            wrong.push(format!(
-                "{rel}: no list says what this tree's licence is"
-            ));
+            wrong.push(format!("{rel}: no list says what this tree's licence is"));
             continue;
         } else {
             // The tooling under scripts/, tools/ and benchmark/ carries no
