@@ -42,6 +42,13 @@ pub fn bin(name: &str) -> PathBuf {
 /// binary that is newer than the bin's own sources and older than the code
 /// it was built from. Comparing only the bin's own sources is how the
 /// harness ends up exercising yesterday's code and reporting green.
+///
+/// The crates it links are read out of cargo's own dep-info — the file
+/// next to the binary that names every file the compiler read for it. The
+/// whole tree would be simpler, and it would be wrong: cargo relinks only
+/// what changed, so a change in a crate the bin does not link leaves the
+/// binary older than the tree for good, and "build first" would not fix it.
+/// The dep-info is the exact answer to "what this binary is made of".
 fn assert_up_to_date(name: &str, exe: &Path) {
     let built = match exe.metadata().and_then(|m| m.modified()) {
         Ok(t) => t,
@@ -56,16 +63,36 @@ fn assert_up_to_date(name: &str, exe: &Path) {
     // bin's own sources is how the harness ends up exercising yesterday's
     // code and reporting green.
     let mut newest = newest_source(&src.join("src"));
-    if let Some(crates) = newest_source(&root.join("crates")) {
-        if newest.as_ref().map(|n| crates.0 > n.0).unwrap_or(true) {
-            newest = Some(crates);
+    match dep_info_sources(exe) {
+        Some(sources) => {
+            for path in sources {
+                let meta = match path.metadata() {
+                    Ok(meta) => meta,
+                    Err(_) => continue,
+                };
+                let modified = match meta.modified() {
+                    Ok(modified) => modified,
+                    Err(_) => continue,
+                };
+                if newest.as_ref().map(|n| modified > n.0).unwrap_or(true) {
+                    newest = Some((modified, path));
+                }
+            }
+        }
+        // No dep-info: the binary was not built here, so the tree is all
+        // the guard knows, and the tree is the conservative answer.
+        None => {
+            if let Some(crates) = newest_source(&root.join("crates")) {
+                if newest.as_ref().map(|n| crates.0 > n.0).unwrap_or(true) {
+                    newest = Some(crates);
+                }
+            }
         }
     }
     if let Some((newest, path)) = newest {
         // The path is in the message on purpose. The guard compares the bin
-        // against every crate in the tree, so a change in one crate makes
-        // the other bins stale as well -- and a message that names only a
-        // time leaves the reader to guess which file moved.
+        // against the sources it was built from, so a message that names
+        // only a time leaves the reader to guess which file moved.
         let rel = path.strip_prefix(&root).unwrap_or(&path);
         assert!(
             built >= newest,
@@ -80,6 +107,47 @@ fn assert_up_to_date(name: &str, exe: &Path) {
             newest
         );
     }
+}
+
+/// The files the binary was built from, as cargo recorded them.
+///
+/// Cargo writes a dep-info file next to every artifact: the output and
+/// every file the compiler read for it, one per line, Makefile-style. It
+/// names the bin's own sources and the crates it links — and nothing else,
+/// which is the point.
+///
+/// A path with a space in it is written with the space escaped, so the
+/// fragments come apart and have to be put back: the file that exists is
+/// the one with the space in it.
+fn dep_info_sources(exe: &Path) -> Option<Vec<PathBuf>> {
+    let stem = exe.file_stem()?.to_str()?;
+    let text = std::fs::read_to_string(exe.with_file_name(format!("{stem}.d"))).ok()?;
+    // The line is "<output>: <inputs>". The separator is the first colon
+    // followed by a space: a drive letter's colon is followed by a
+    // backslash.
+    let (_, inputs) = text.split_once(": ")?;
+    let mut out = Vec::new();
+    let mut buffer = String::new();
+    for fragment in inputs.split_whitespace() {
+        if buffer.is_empty() {
+            buffer.push_str(fragment);
+            continue;
+        }
+        let joined = format!("{buffer} {fragment}");
+        if Path::new(&joined).exists() {
+            buffer = joined;
+            continue;
+        }
+        if Path::new(&buffer).exists() {
+            out.push(PathBuf::from(&buffer));
+        }
+        buffer.clear();
+        buffer.push_str(fragment);
+    }
+    if !buffer.is_empty() && Path::new(&buffer).exists() {
+        out.push(PathBuf::from(&buffer));
+    }
+    Some(out)
 }
 
 /// The newest source under `dir`: its modification time, and the path of
@@ -399,4 +467,74 @@ pub fn run_stdin(exe: &Path, args: &[&str], input: &str) -> (i32, String, String
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The dep-info names the files the binary was built from.
+    ///
+    /// The guard reads it instead of walking the tree, so a parser that
+    /// reads it wrong makes the guard wrong: too few files and it misses a
+    /// stale binary, too many and it fails on a binary that is current.
+    #[test]
+    fn the_dep_info_names_the_sources_the_binary_was_built_from() {
+        let dir = TempDir::new("dep-info");
+        let one = dir.path().join("one.rs");
+        let two = dir.path().join("two.rs");
+        std::fs::write(&one, "fn one() {}").expect("write one");
+        std::fs::write(&two, "fn two() {}").expect("write two");
+
+        let exe = dir.path().join("fake.exe");
+        std::fs::write(&exe, b"").expect("write exe");
+        std::fs::write(
+            dir.path().join("fake.d"),
+            format!("{}: {} {}\n", exe.display(), one.display(), two.display()),
+        )
+        .expect("write dep-info");
+
+        let sources = dep_info_sources(&exe).expect("the dep-info is read");
+        assert!(
+            sources.contains(&one) && sources.contains(&two),
+            "the two sources are named: {sources:?}"
+        );
+        assert_eq!(sources.len(), 2, "and nothing else is: {sources:?}");
+    }
+
+    /// A path with a space in it is written escaped, so the fragments come
+    /// apart and have to be put back.
+    #[test]
+    fn a_source_with_a_space_in_its_path_is_put_back_together() {
+        let dir = TempDir::new("dep-info-space");
+        let spaced = dir.path().join("a file.rs");
+        std::fs::write(&spaced, "fn spaced() {}").expect("write the source");
+
+        let exe = dir.path().join("fake.exe");
+        std::fs::write(&exe, b"").expect("write exe");
+        std::fs::write(
+            dir.path().join("fake.d"),
+            format!("{}: {}\n", exe.display(), spaced.display()),
+        )
+        .expect("write dep-info");
+
+        let sources = dep_info_sources(&exe).expect("the dep-info is read");
+        assert!(
+            sources.contains(&spaced),
+            "the path with the space in it is one path again: {sources:?}"
+        );
+    }
+
+    /// A binary with no dep-info beside it was not built here: the guard
+    /// has no record of its sources and falls back to the whole tree.
+    #[test]
+    fn a_binary_without_a_dep_info_has_no_record() {
+        let dir = TempDir::new("dep-info-missing");
+        let exe = dir.path().join("fake.exe");
+        std::fs::write(&exe, b"").expect("write exe");
+        assert!(
+            dep_info_sources(&exe).is_none(),
+            "there is no dep-info, so there is no record"
+        );
+    }
 }
