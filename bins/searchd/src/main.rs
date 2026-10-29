@@ -1865,6 +1865,44 @@ fn now_secs() -> u32 {
 
 #[cfg(test)]
 mod tests {
+
+    /// A tree in the temporary directory that takes itself away.
+    ///
+    /// A test that leaves a folder behind is a test that fills the
+    /// temporary directory, and that directory is the one place every
+    /// test on the machine shares. The tree is removed when it is
+    /// dropped, so a test that panics takes its folder with it.
+    struct TempTree(std::path::PathBuf);
+
+    impl TempTree {
+        /// A tree of its own, named after what it is for.
+        fn new(tag: &str) -> TempTree {
+            let dir = std::env::temp_dir().join(format!(
+                "{tag}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            TempTree(dir)
+        }
+    }
+
+    impl std::ops::Deref for TempTree {
+        type Target = std::path::Path;
+
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempTree {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
     use super::*;
     use rgy_discovery::Source;
 
@@ -2102,15 +2140,7 @@ mod tests {
     /// the worst thing a search can do.
     #[test]
     fn a_live_change_is_answered_from_the_overlay() {
-        let dir = std::env::temp_dir().join(format!(
-            "rgy-searchd-live-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = TempTree::new("rgy-searchd-live");
         std::fs::write(dir.join("hello.txt"), b"hello\n").unwrap();
         let root = dir.as_os_str().as_encoded_bytes().to_vec();
 
@@ -2173,14 +2203,7 @@ mod tests {
     /// a guess about the spelling.
     #[test]
     fn a_folder_is_a_folder_on_the_wire() {
-        let dir = std::env::temp_dir().join(format!(
-            "rgy-searchd-folder-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let dir = TempTree::new("rgy-searchd-folder");
         std::fs::create_dir_all(dir.join("docs")).unwrap();
         std::fs::write(dir.join("docs/notes.txt"), b"notes\n").unwrap();
         std::fs::write(dir.join("top.txt"), b"top\n").unwrap();
@@ -2315,15 +2338,7 @@ mod tests {
     /// nothing to collapse.
     #[test]
     fn every_live_change_is_answered() {
-        let dir = std::env::temp_dir().join(format!(
-            "rgy-searchd-live-many-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = TempTree::new("rgy-searchd-live-many");
         std::fs::write(dir.join("hello.txt"), b"hello\n").unwrap();
         let root = dir.as_os_str().as_encoded_bytes().to_vec();
 

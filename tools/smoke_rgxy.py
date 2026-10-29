@@ -10,6 +10,7 @@ reinterpret.
 """
 
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -63,3 +64,6 @@ finally:
         server.wait(timeout=10)
     except subprocess.TimeoutExpired:
         server.kill()
+    # The folder is the test's, and the test takes it with it: a test that
+    # leaves a folder behind is a test that fills the temporary folder.
+    shutil.rmtree(root, ignore_errors=True)

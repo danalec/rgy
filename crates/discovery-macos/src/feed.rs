@@ -301,6 +301,44 @@ fn working_directory() -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A tree in the temporary directory that takes itself away.
+    ///
+    /// A test that leaves a folder behind is a test that fills the
+    /// temporary directory, and that directory is the one place every
+    /// test on the machine shares. The tree is removed when it is
+    /// dropped, so a test that panics takes its folder with it.
+    struct TempTree(std::path::PathBuf);
+
+    impl TempTree {
+        /// A tree of its own, named after what it is for.
+        fn new(tag: &str) -> TempTree {
+            let dir = std::env::temp_dir().join(format!(
+                "{tag}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            TempTree(dir)
+        }
+    }
+
+    impl std::ops::Deref for TempTree {
+        type Target = std::path::Path;
+
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempTree {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
     use super::*;
     use alloc::sync::Arc;
     use core::sync::atomic::{AtomicBool, Ordering};
@@ -495,18 +533,13 @@ mod tests {
 
     // --- the events reach the index -----------------------------------------
 
-    /// A temp tree to index.
-    fn fixture_dir(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "rgy-macos-feed-{tag}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    /// A temp tree to index, which takes itself away when it is dropped.
+    ///
+    /// A test that leaves a folder behind is a test that fills the
+    /// temporary directory, and that directory is the one place every
+    /// test on the machine shares.
+    fn fixture_dir(tag: &str) -> TempTree {
+        TempTree::new(&format!("rgy-macos-feed-{tag}"))
     }
 
     /// A path as the feed spells it: `/` separated, the way macOS spells
