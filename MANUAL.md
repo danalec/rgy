@@ -460,7 +460,7 @@ A path the index does not have is an error, not a wrong answer.
 up after the last restart:
 
 ```json
-{"op":"status","docs":128,"event_id":0,"catch_up":"relisted"}
+{"op":"status","docs":128,"event_id":0,"catch_up":"relisted","tv":false,"feed":"live"}
 ```
 
 `catch_up` is what this process did, not what the platform could do:
@@ -470,6 +470,26 @@ again instead. That is the answer on Linux and FreeBSD, where no journal
 exists — and also on a Windows machine where the journal is there and this
 process was not allowed to open it. The field is additive: a reader that
 does not know it keeps working.
+
+`feed` says whether the tree is still being followed: `live` while the
+feed runs, `gone` when it died — the daemon answers on a snapshot from
+then on — and `none` when there is no feed. `tv` says whether the daemon
+has a pack store, which is the corpus packed once and mmapped. Both are
+additive, and a reader that does not know them reads the status as it
+was before they existed.
+
+A content search answers with the files it read and says whether it read
+all of them:
+
+```json
+{"op":"grep-files","files":[{"path":"/home/you/notes.txt","lines":[[12,"invoice"]]}],"took_us":1234,"complete":true,"skipped":0}
+```
+
+`complete` says the search read every candidate it was given, and
+`skipped` says how many files it did not read. A truncated search and a
+whole one are different answers, and the difference used to be invisible.
+The two fields are additive: a reader that does not know them sees the
+files and the time, exactly as before.
 
 It can also listen on a socket instead of stdin:
 
