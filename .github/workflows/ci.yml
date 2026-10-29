@@ -87,14 +87,25 @@ jobs:
           components: rustfmt, clippy
       - uses: swatinem/rust-cache@v2
       # The pack-store builder lives behind rgx-core's `tv-runtime`
-      # feature, and the default build does not compile it: the `rgx-tv`
-      # binary that carries it asks for the feature, so a default build
-      # leaves the whole builder -- and the walker it walks a tree with --
-      # outside every gate there is.
+      # feature, and the `rgx-tv` binary that carries it asks for the
+      # feature.
       #
-      # A feature nobody builds is a feature nobody breaks, until the day
-      # somebody turns it on. This job is where that code is compiled,
-      # linted and tested.
+      # The default build compiles it. `rgy-engine`'s own `std` feature --
+      # its default -- asks for `rgx-core/tv-runtime`, so every workspace
+      # build carries the builder and builds the binary. (The notes said
+      # otherwise until 2026-10-30: the manifest is the truth, and it says
+      # this. A gate that is described by a claim about the tree is a gate
+      # whose description can go stale without anybody noticing.)
+      #
+      # So this job is not the gate that keeps the builder alive -- the
+      # `suite` job is, through that feature. It is the gate that keeps it
+      # alive if the link is ever cut: the feature is named here, so a
+      # change in the engine's manifest cannot take the builder out of
+      # every gate there is without this job going red first.
+      #
+      # The half of the pack store that no build carries is the `no_std`
+      # one -- `rgx-core/tv` without `tv-runtime` -- and the bare-metal
+      # job below is where that one is compiled.
       - run: cargo build --workspace --features rgx-core/tv-runtime --locked
       - run: cargo clippy --workspace --all-targets --features rgx-core/tv-runtime --locked -- -D warnings
       - run: cargo test --workspace --no-fail-fast --features rgx-core/tv-runtime --locked
@@ -116,7 +127,7 @@ jobs:
       # target is installed here for the check above, and clippy reads the
       # target's code the same way it reads the host's -- it does not link,
       # so a FreeBSD binary is never needed.
-      - run: cargo clippy --workspace --target x86_64-unknown-freebsd --all-targets -- -D warnings
+      - run: cargo clippy --workspace --target x86_64-unknown-freebsd --all-targets --locked -- -D warnings
 
   no-std:
     name: "the engine builds without std"
@@ -168,7 +179,24 @@ jobs:
       # `rgy-search-ui` is this repository's too: the terminal interface,
       # which is a terminal. It reads the console and the files, and
       # crossterm is `std` by definition.
-      - run: cargo build --release --locked --no-default-features -p rgy-par -p rgy-discovery -p rgy-name-core -p rgy-proto -p rgy-engine -p rgy-discovery-dispatch -p rgy-autostart -p rgy-discovery-linux -p rgy-discovery-freebsd -p rgy-discovery-windows -p rgy-discovery-macos -p rgy-launcher -p rgy-pick -p rgy-launcher-windows --target x86_64-unknown-none
+      #
+      # `--features rgx-core/tv` is the pack store's `no_std` half: the
+      # query engine and the reader, without the `std` half on top of it
+      # (`tv-runtime`). Without the feature, `rgx-core` enters this job
+      # with no features at all and the `tv` module is not even compiled
+      # -- so the half of the pack store that can be linked into an
+      # embedded search box was in no build in the tree. With it, that
+      # half is compiled on a target that has no filesystem to reach for.
+      - run: cargo build --release --locked --no-default-features -p rgy-par -p rgy-discovery -p rgy-name-core -p rgy-proto -p rgy-engine -p rgy-discovery-dispatch -p rgy-autostart -p rgy-discovery-linux -p rgy-discovery-freebsd -p rgy-discovery-windows -p rgy-discovery-macos -p rgy-launcher -p rgy-pick -p rgy-launcher-windows --features rgx-core/tv --target x86_64-unknown-none
+      # The lint of the same tree. A build that prints a warning is a
+      # warning somebody has to read, and the code that only exists
+      # without `std` -- the `not(feature = "std")` arms of `par`,
+      # `name-core` and `rgx-core` -- is compiled by no other gate at
+      # all: the host build has `std`, and the lint that runs there never
+      # sees those arms. Clippy reads a target's code the way it reads
+      # the host's -- it does not link, so a bare-metal binary is never
+      # needed.
+      - run: cargo clippy --release --locked --no-default-features -p rgy-par -p rgy-discovery -p rgy-name-core -p rgy-proto -p rgy-engine -p rgy-discovery-dispatch -p rgy-autostart -p rgy-discovery-linux -p rgy-discovery-freebsd -p rgy-discovery-windows -p rgy-discovery-macos -p rgy-launcher -p rgy-pick -p rgy-launcher-windows --features rgx-core/tv --target x86_64-unknown-none -- -D warnings
 
   freebsd-suite:
     name: "bar: full suite on a FreeBSD kernel"
