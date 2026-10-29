@@ -504,9 +504,7 @@ impl Journal {
         if self.code != 0 {
             note.push_str(&format!(" (win32 error {})", self.code));
         }
-        note.push_str(
-            ", so the changes made since then are not in it and the daemon does not follow the tree while it runs",
-        );
+        note.push_str(", so the changes made since the index was built are not in it");
         note
     }
 }
@@ -1501,6 +1499,16 @@ fn serve_end(
 
 // --- transports -----------------------------------------------------------
 
+/// A live-change feed, and the name of the platform it comes from.
+///
+/// The name is for the daemon's own line: a reader who watches the index
+/// change wants to know what is watching it, and a silent thread says
+/// nothing.
+struct Feed {
+    name: &'static str,
+    watch: Box<dyn rgy_discovery::Watch>,
+}
+
 /// The platform live-change feed for the tree at `root`, or `None` where none
 /// is available (unsupported OS, or the volume/journal could not be opened).
 /// See the note on `Ctx::live` for the Windows chain and its lifetime.
@@ -1511,11 +1519,7 @@ fn serve_end(
 /// delivered instead of being missed. It is 0 when the index carries no
 /// position, and the feed then starts at the journal's head.
 #[cfg(windows)]
-fn open_watch(
-    root: &[u8],
-    journal: &Journal,
-    watermark: u64,
-) -> Option<Box<dyn rgy_discovery::Watch>> {
+fn open_watch(root: &[u8], journal: &Journal, watermark: u64) -> Option<Feed> {
     let path = std::str::from_utf8(root).ok()?;
     let vol_root = std::path::Path::new(path).ancestors().last()?.to_str()?;
     // The volume lives for the process; leak it so the UsnWatch owns a
@@ -1532,18 +1536,21 @@ fn open_watch(
         // instead of reading the new journal as if it were the old one.
         watch.journal_id = journal.id;
     }
-    Some(Box::new(watch))
+    Some(Feed {
+        name: "the USN journal",
+        watch: Box::new(watch),
+    })
 }
 
 #[cfg(target_os = "linux")]
-fn open_watch(
-    root: &[u8],
-    _journal: &Journal,
-    _watermark: u64,
-) -> Option<Box<dyn rgy_discovery::Watch>> {
+fn open_watch(root: &[u8], _journal: &Journal, _watermark: u64) -> Option<Feed> {
     // The root is the bytes the filesystem gave, and the watch takes them
     // the same way: a Unix path is not a UTF-8 string.
-    Some(Box::new(rgy_discovery_linux::InotifyWatch::new(root).ok()?))
+    let watch = rgy_discovery_linux::InotifyWatch::new(root).ok()?;
+    Some(Feed {
+        name: "inotify",
+        watch: Box::new(watch),
+    })
 }
 
 /// The macOS feed: FSEvents, pulled.
@@ -1559,11 +1566,7 @@ fn open_watch(
 /// and the live overlay re-lists that folder — re-listing its parent would
 /// see only the folder's own mtime and miss the edit inside.
 #[cfg(target_os = "macos")]
-fn open_watch(
-    root: &[u8],
-    _journal: &Journal,
-    watermark: u64,
-) -> Option<Box<dyn rgy_discovery::Watch>> {
+fn open_watch(root: &[u8], _journal: &Journal, watermark: u64) -> Option<Feed> {
     // Start where the index stands, and from now otherwise: an event id of
     // zero asks the framework for the whole history it still keeps, which
     // is a flood of folders to re-list at startup.
@@ -1572,11 +1575,11 @@ fn open_watch(
     } else {
         rgy_discovery_macos::current_id()
     };
-    Some(Box::new(rgy_discovery_macos::FseventsWatch::open(
-        root,
-        since,
-        FSEVENTS_LATENCY,
-    )))
+    let watch = rgy_discovery_macos::FseventsWatch::open(root, since, FSEVENTS_LATENCY);
+    Some(Feed {
+        name: "FSEvents",
+        watch: Box::new(watch),
+    })
 }
 
 /// How long FSEvents may wait to coalesce events into one batch.
@@ -1594,11 +1597,7 @@ const FSEVENTS_LATENCY: f64 = 0.5;
 /// so FreeBSD joins it until the seam grows a directory-level event. The
 /// daemon answers on its snapshot rather than failing to start.
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
-fn open_watch(
-    _root: &[u8],
-    _journal: &Journal,
-    _watermark: u64,
-) -> Option<Box<dyn rgy_discovery::Watch>> {
+fn open_watch(_root: &[u8], _journal: &Journal, _watermark: u64) -> Option<Feed> {
     None
 }
 
@@ -1744,9 +1743,14 @@ fn spawn_watch(ctx: &std::sync::Arc<Ctx>, journal: &Journal, watermark: u64) {
     let _ = std::thread::Builder::new()
         .name("searchd-watch".into())
         .spawn(move || {
-            let Some(mut watch) = open_watch(&root, &journal, watermark) else {
+            let Some(feed) = open_watch(&root, &journal, watermark) else {
+                rgy_engine::errln!(
+                    "searchd: no live feed for this tree: the index is a snapshot until the next rebuild"
+                );
                 return;
             };
+            rgy_engine::errln!("searchd: following the tree with {}", feed.name);
+            let mut watch = feed.watch;
             loop {
                 match watch.next_batch() {
                     Ok(rgy_discovery::ChangeBatch::Events(events)) => {
