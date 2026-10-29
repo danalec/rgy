@@ -1086,6 +1086,11 @@ mod tests {
     /// A daemon that sends a line that never ends.
     fn says_too_much(peer: Peer) {
         let mut peer = peer;
+        // The request is read first: a daemon that answers without
+        // reading can close the connection under the client's own write,
+        // and the client then fails on the write and never sees the line
+        // that never ends.
+        let _ = peer.read_request();
         let chunk = vec![b'x'; CHUNK];
         for _ in 0..(MAX_LINE / CHUNK + 2) {
             if peer.send(&chunk).is_err() {
@@ -1100,6 +1105,7 @@ mod tests {
     /// allows.
     fn says_too_deep(peer: Peer) {
         let mut peer = peer;
+        let _ = peer.read_request();
         let deep = format!("{}{}", "[".repeat(500), "]".repeat(500));
         let _ = peer.send(deep.as_bytes());
         let _ = peer.send(b"\n");
@@ -1108,6 +1114,7 @@ mod tests {
     /// A daemon that answers in another protocol.
     fn says_something_else(peer: Peer) {
         let mut peer = peer;
+        let _ = peer.read_request();
         let _ = peer.send(b"{\"op\":\"rgx\",\"ready\":true}\n");
     }
 
