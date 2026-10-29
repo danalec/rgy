@@ -353,18 +353,24 @@ impl DaemonSource {
                 st.tv = status.tv;
             }
             Err(e) => {
-                // The daemon took the connection and did not answer in
-                // the window: it is up and slow, and the line says that
-                // — a daemon that is slow is not a daemon that is gone.
-                //
                 // The connection is dropped: the answer may still be on
                 // its way, and a late answer would be read as the answer
                 // to the next question.
                 self.client = None;
                 let mut st = self.status.borrow_mut();
                 st.asked = true;
-                st.connected = true;
-                st.warnings = vec![format!("o daemon não respondeu a tempo: {e}")];
+                // Three facts and not two. The daemon that took the
+                // connection and said nothing in the window is up and
+                // slow, and the daemon whose connection broke is gone: a
+                // launcher that says "up and slow" about a daemon that is
+                // not there hides the daemon the user has to start.
+                let presence = presence(&e);
+                st.connected = presence != Presence::Gone;
+                st.warnings = vec![match presence {
+                    Presence::Gone => format!("{}: {e}", rgy_launcher::tools::NO_DAEMON),
+                    Presence::Slow => format!("o daemon não respondeu a tempo: {e}"),
+                    Presence::Answered => format!("o daemon respondeu mal: {e}"),
+                }];
             }
         }
         true
@@ -560,12 +566,17 @@ impl DaemonSource {
         // that chose nothing.
         let mut failure: Option<Failure> = None;
         let mut scope = Vec::new();
+        // The scope that failed is not a scope with nothing in it: the
+        // daemon died while choosing it, and the fallback has the last
+        // one to work on.
+        let mut scope_failed = false;
         if connected && !engine_names.is_empty() {
             match self.scope_paths(engine_names, left(deadline)) {
                 Ok(paths) => scope = paths,
                 Err(reason) => {
                     self.fail(&reason);
                     failure = Some(reason);
+                    scope_failed = true;
                 }
             }
         }
@@ -604,7 +615,7 @@ impl DaemonSource {
         // It is not the whole tree either: a content search over a tree is
         // a walk, and a launcher that blocks the window for minutes is a
         // launcher nobody uses.
-        let scope = if connected {
+        let scope = if connected && !scope_failed {
             scope
         } else {
             self.last_scope.clone()

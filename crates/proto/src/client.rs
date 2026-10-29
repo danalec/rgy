@@ -164,13 +164,18 @@ impl Client {
         let mut out = Vec::new();
         loop {
             let Some(raw) = self.read_line(deadline)? else {
-                // The daemon closed the connection before the end of the
-                // answer. A half answer is not an answer: a caller that
-                // showed it would show "no results" for a daemon that died
-                // mid-sentence.
+                // The daemon closed the connection between two answers: it
+                // hung up, and it is not there. The kind says so, because
+                // the kind is what the caller reads: a caller that says
+                // "the daemon answered badly" about a daemon that is gone
+                // hides the daemon the user has to start.
+                //
+                // A half answer is a different thing, and it is a different
+                // kind: a caller that showed it would show "no results" for
+                // a daemon that died mid-sentence.
                 return Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "the daemon closed the connection before the end of the answer",
+                    std::io::ErrorKind::ConnectionAborted,
+                    "the daemon closed the connection before the answer",
                 ));
             };
             let line = raw.trim_end_matches(['\r']);
@@ -1070,6 +1075,14 @@ mod tests {
         std::thread::sleep(Duration::from_millis(1000));
     }
 
+    /// A daemon that hangs up.
+    fn hangs_up(peer: Peer) {
+        let mut peer = peer;
+        // The request is read first, and then nothing: the peer is
+        // dropped and the connection closes between two answers.
+        let _ = peer.read_request();
+    }
+
     /// A daemon that dies in the middle of the answer.
     fn says_half(peer: Peer) {
         let mut peer = peer;
@@ -1271,6 +1284,26 @@ mod tests {
         assert!(
             err.to_string().contains("in the middle of the answer"),
             "the reason says what happened: {err}"
+        );
+        server.join();
+    }
+
+    /// A daemon that hangs up is a daemon that is gone.
+    ///
+    /// The connection closed between two answers: the daemon is not
+    /// there. The kind says so, because the launcher reads the kind to
+    /// know whether to say "no daemon" or "the daemon answered badly".
+    #[test]
+    fn a_daemon_that_hangs_up_is_a_daemon_that_is_gone() {
+        let server = serve(hangs_up);
+        let mut client = Client::connect(&server.endpoint).expect("the client connects");
+        let err = client
+            .request_within(&Request::Status, SHORT)
+            .expect_err("there is no answer");
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::ConnectionAborted,
+            "the daemon hung up: {err}"
         );
         server.join();
     }
