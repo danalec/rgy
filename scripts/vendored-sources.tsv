@@ -26,20 +26,38 @@
 # harnesses and its fuzzing crate, which rgy does not run. The
 # exclusion is in the sync script, so the paths cannot come back.
 
-# The upstream commit the copy was taken from: 4d35a02e7938f65c0d2cce5dd705749605552272
+# The upstream commit the copy was taken from: c76a9248b538ed4de21188b034ff5ec26ce31f5f
 
-crates/rgx-core	crates/rgx-core	4d35a02e7938f65c0d2cce5dd705749605552272	tree	upstream rgx's crate, transported verbatim except the paths the copy excludes
-crates/rar-codec	crates/rar-codec	4d35a02e7938f65c0d2cce5dd705749605552272	tree	upstream rgx's crate, transported verbatim except the paths the copy excludes
-crates/rgx-adapters-archive	crates/rgx-adapters-archive	4d35a02e7938f65c0d2cce5dd705749605552272	tree	upstream rgx's crate, transported verbatim except the paths the copy excludes
-crates/rgx-adapters-docs	crates/rgx-adapters-docs	4d35a02e7938f65c0d2cce5dd705749605552272	tree	upstream rgx's crate, transported verbatim
-crates/rgx-adapters-inspect	crates/rgx-adapters-inspect	4d35a02e7938f65c0d2cce5dd705749605552272	tree	upstream rgx's crate, transported verbatim
-crates/rgx-adapters-llm	crates/rgx-adapters-llm	4d35a02e7938f65c0d2cce5dd705749605552272	tree	upstream rgx's crate, transported verbatim
-crates/rgx-adapters-mail	crates/rgx-adapters-mail	4d35a02e7938f65c0d2cce5dd705749605552272	tree	upstream rgx's crate, transported verbatim
-crates/rgx-adapters-media	crates/rgx-adapters-media	4d35a02e7938f65c0d2cce5dd705749605552272	tree	upstream rgx's crate, transported verbatim
-crates/rgx-adapters-office	crates/rgx-adapters-office	4d35a02e7938f65c0d2cce5dd705749605552272	tree	upstream rgx's crate, transported verbatim
-crates/rgx-adapters-pdf	crates/rgx-adapters-pdf	4d35a02e7938f65c0d2cce5dd705749605552272	tree	upstream rgx's crate, transported verbatim
-crates/rgx-adapters-tabular	crates/rgx-adapters-tabular	4d35a02e7938f65c0d2cce5dd705749605552272	tree	upstream rgx's crate, transported verbatim
-crates/rgx-adapters-threed	crates/rgx-adapters-threed	4d35a02e7938f65c0d2cce5dd705749605552272	tree	upstream rgx's crate, transported verbatim
-scripts/rgx-local-patches/crates/rgx-adapters-archive/Cargo.toml.patch	crates/rgx-adapters-archive/Cargo.toml	4d35a02e7938f65c0d2cce5dd705749605552272	patch	a divergence from upstream: the patch is applied on top of the copy
-scripts/rgx-local-patches/crates/rgx-adapters-archive/src/images.rs.patch	crates/rgx-adapters-archive/src/images.rs	4d35a02e7938f65c0d2cce5dd705749605552272	patch	a divergence from upstream: the patch is applied on top of the copy
-scripts/rgx-local-patches/crates/rgx-adapters-inspect/src/firebird.rs.patch	crates/rgx-adapters-inspect/src/firebird.rs	4d35a02e7938f65c0d2cce5dd705749605552272	patch	a divergence from upstream: the patch is applied on top of the copy
+crates/rgx-core	crates/rgx-core	c76a9248b538ed4de21188b034ff5ec26ce31f5f	tree	upstream rgx's crate, transported verbatim except the paths the copy excludes
+crates/rar-codec	crates/rar-codec	c76a9248b538ed4de21188b034ff5ec26ce31f5f	tree	upstream rgx's crate, transported verbatim except the paths the copy excludes
+crates/rgx-adapters-archive	crates/rgx-adapters-archive	c76a9248b538ed4de21188b034ff5ec26ce31f5f	tree	upstream rgx's crate, transported verbatim except the paths the copy excludes
+crates/rgx-adapters-docs	crates/rgx-adapters-docs	c76a9248b538ed4de21188b034ff5ec26ce31f5f	tree	upstream rgx's crate, transported verbatim
+crates/rgx-adapters-inspect	crates/rgx-adapters-inspect	c76a9248b538ed4de21188b034ff5ec26ce31f5f	tree	upstream rgx's crate, transported verbatim
+crates/rgx-adapters-llm	crates/rgx-adapters-llm	c76a9248b538ed4de21188b034ff5ec26ce31f5f	tree	upstream rgx's crate, transported verbatim
+crates/rgx-adapters-mail	crates/rgx-adapters-mail	c76a9248b538ed4de21188b034ff5ec26ce31f5f	tree	upstream rgx's crate, transported verbatim
+crates/rgx-adapters-media	crates/rgx-adapters-media	c76a9248b538ed4de21188b034ff5ec26ce31f5f	tree	upstream rgx's crate, transported verbatim
+crates/rgx-adapters-office	crates/rgx-adapters-office	c76a9248b538ed4de21188b034ff5ec26ce31f5f	tree	upstream rgx's crate, transported verbatim
+crates/rgx-adapters-pdf	crates/rgx-adapters-pdf	c76a9248b538ed4de21188b034ff5ec26ce31f5f	tree	upstream rgx's crate, transported verbatim
+crates/rgx-adapters-tabular	crates/rgx-adapters-tabular	c76a9248b538ed4de21188b034ff5ec26ce31f5f	tree	upstream rgx's crate, transported verbatim
+crates/rgx-adapters-threed	crates/rgx-adapters-threed	c76a9248b538ed4de21188b034ff5ec26ce31f5f	tree	upstream rgx's crate, transported verbatim
+scripts/rgx-local-patches/crates/rgx-adapters-archive/Cargo.toml.patch	crates/rgx-adapters-archive/Cargo.toml	c76a9248b538ed4de21188b034ff5ec26ce31f5f	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-adapters-archive/README.md.patch	crates/rgx-adapters-archive/README.md	c76a9248b538ed4de21188b034ff5ec26ce31f5f	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-adapters-archive/src/images.rs.patch	crates/rgx-adapters-archive/src/images.rs	c76a9248b538ed4de21188b034ff5ec26ce31f5f	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-adapters-archive/src/lib.rs.patch	crates/rgx-adapters-archive/src/lib.rs	c76a9248b538ed4de21188b034ff5ec26ce31f5f	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-adapters-inspect/src/firebird.rs.patch	crates/rgx-adapters-inspect/src/firebird.rs	c76a9248b538ed4de21188b034ff5ec26ce31f5f	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-adapters-tabular/Cargo.toml.patch	crates/rgx-adapters-tabular/Cargo.toml	c76a9248b538ed4de21188b034ff5ec26ce31f5f	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-adapters-tabular/src/lib.rs.patch	crates/rgx-adapters-tabular/src/lib.rs	c76a9248b538ed4de21188b034ff5ec26ce31f5f	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-adapters-tabular/src/sqlite.rs.patch	crates/rgx-adapters-tabular/src/sqlite.rs	c76a9248b538ed4de21188b034ff5ec26ce31f5f	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-adapters-tabular/src/sqlite_oracle.rs.patch	crates/rgx-adapters-tabular/src/sqlite_oracle.rs	c76a9248b538ed4de21188b034ff5ec26ce31f5f	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-core/Cargo.toml.patch	crates/rgx-core/Cargo.toml	c76a9248b538ed4de21188b034ff5ec26ce31f5f	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-core/src/lib.rs.patch	crates/rgx-core/src/lib.rs	c76a9248b538ed4de21188b034ff5ec26ce31f5f	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-core/src/memchr.rs.patch	crates/rgx-core/src/memchr.rs	c76a9248b538ed4de21188b034ff5ec26ce31f5f	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-core/src/memchr/dispatch.rs.patch	crates/rgx-core/src/memchr/dispatch.rs	c76a9248b538ed4de21188b034ff5ec26ce31f5f	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-core/src/memchr/memmem.rs.patch	crates/rgx-core/src/memchr/memmem.rs	c76a9248b538ed4de21188b034ff5ec26ce31f5f	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-core/src/memmap2/advice.rs.patch	crates/rgx-core/src/memmap2/advice.rs	c76a9248b538ed4de21188b034ff5ec26ce31f5f	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-core/src/memmap2/mmap.rs.patch	crates/rgx-core/src/memmap2/mmap.rs	c76a9248b538ed4de21188b034ff5ec26ce31f5f	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-core/src/memmap2/mmap_mut.rs.patch	crates/rgx-core/src/memmap2/mmap_mut.rs	c76a9248b538ed4de21188b034ff5ec26ce31f5f	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-core/src/memmap2/platform/freebsd.rs.patch	crates/rgx-core/src/memmap2/platform/freebsd.rs	c76a9248b538ed4de21188b034ff5ec26ce31f5f	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-core/src/memmap2/platform/linux.rs.patch	crates/rgx-core/src/memmap2/platform/linux.rs	c76a9248b538ed4de21188b034ff5ec26ce31f5f	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-core/src/memmap2/platform/macos.rs.patch	crates/rgx-core/src/memmap2/platform/macos.rs	c76a9248b538ed4de21188b034ff5ec26ce31f5f	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-core/src/memmap2/platform/mod.rs.patch	crates/rgx-core/src/memmap2/platform/mod.rs	c76a9248b538ed4de21188b034ff5ec26ce31f5f	patch	a divergence from upstream: the patch is applied on top of the copy

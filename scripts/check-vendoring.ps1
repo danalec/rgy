@@ -147,7 +147,7 @@ $knownExternal = @{
     'ignore'            = 'the pack-store builder walker of rgx-core, behind its tv-runtime feature; the portable walk of the seam (crates/discovery) has no gitignore semantics yet'
     'mimalloc'          = 'the allocator of the three binaries; it measured 5-12% on the parallel walk on Windows'
     'regex'             = 'rgx ships its own engine (syntax + Thompson NFA + Pike VM) and that engine is the confirm in crates/name-core/src/content.rs. The product does not link the crate: a pattern the byte engine refuses is a refusal the search says. In rgx-core it is a dev-dependency only -- the oracle the capture groups are measured against (54/54 on the permanent corpus)'
-    'rusqlite'          = 'upstream b01/io/binary/sqlite.rs + b02/sqlite/rusqlite_compat.rs'
+    'rusqlite'          = 'the SQLite adapter of rgx-adapters-tabular reads the file format itself; the crate is a dev-dependency only -- the oracle the in-house reader is measured against, over a corpus of real databases'
     'windows'           = 'the Win32 API of crates/discovery-windows; the tree declares its own Windows FFI elsewhere (crates/discovery/src/file.rs, crates/launcher-windows), and this crate has not caught up'
 }
 

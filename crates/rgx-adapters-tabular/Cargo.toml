@@ -32,10 +32,11 @@ include = [
 # One feature per format, in the order `adapters()` lists them, so a
 # binary can name the formats it reads and leave the rest out.
 #
-# The SQLite adapter drives rusqlite (which is std-only) and the DuckDB
+# The SQLite adapter reads the file format itself -- bytes in, bytes out
+# -- so it needs no filesystem and no standard library: it stays no_std +
+# alloc, like the hand-rolled readers for the other formats. The DuckDB
 # and Zarr readers write into a `Vec<u8>` or walk the filesystem, so
-# those three need `std`. The hand-rolled readers for the other formats
-# are pure byte slicing and stay no_std + alloc.
+# those two need `std`.
 #
 # `default` turns every format on, so the default build still reads every
 # format this crate knows.
@@ -63,8 +64,8 @@ default = [
     "leveldb",
     "zarr",
 ]
-std = ["dep:rusqlite"]
-sqlite = ["std"]
+std = []
+sqlite = []
 duckdb = ["std"]
 foxpro = []
 dbf = []
@@ -89,7 +90,13 @@ leveldb = ["rgx-core/snappy"]
 zarr = ["std", "rgx-core/blosc", "rgx-core/bzip2", "rgx-core/gzip", "rgx-core/zlib", "rgx-core/zstd"]
 [dependencies]
 rgx-core = { path = "../rgx-core", version = "0.1.1", default-features = false, features = ["std", "sha256-hw"] }
-rusqlite = { version = "0.40", features = ["bundled", "serialize"], optional = true }
+
+[dev-dependencies]
+# SQLite itself, as the oracle the in-house reader is held to: the
+# differential test reads a corpus of real databases through both and
+# compares what they answer. A dev-dependency does not enter the
+# shipped crate -- the reader that ships is the one this crate wrote.
+rusqlite = { version = "0.40", features = ["bundled", "serialize"] }
 
 # Parquet is covered by a hand-rolled Thrift-compact footer reader above —
 # no arrow/parquet stack, keeping with the "fast and extremely light" rule.
