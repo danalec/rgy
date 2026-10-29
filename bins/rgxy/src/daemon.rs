@@ -257,10 +257,9 @@ impl DaemonSource {
     /// The window is a property of the caller, and the caller that sets
     /// it is the one that reads it.
     ///
-    /// The window is the only reader outside a test, and the platforms
-    /// that have no window do not compile the module that reads it: a
-    /// reader that is not there is a warning the gate fails on.
-    #[cfg(any(windows, test))]
+    /// The wait for a daemon that is still starting reads it on every
+    /// platform: a wait that does not know what its own budget is cannot
+    /// give the daemon what is left of it.
     pub fn window(&self) -> Duration {
         self.window
     }
@@ -351,6 +350,10 @@ impl DaemonSource {
                 st.asked = true;
                 st.connected = true;
                 st.tv = status.tv;
+                // The warning of the failure that is over: a daemon that
+                // is there does not carry the sentence that said it was
+                // not.
+                st.warnings.clear();
             }
             Err(e) => {
                 // The connection is dropped: the answer may still be on
@@ -388,6 +391,15 @@ impl DaemonSource {
         } else {
             vec![self.no_daemon_message()]
         }
+    }
+
+    /// The window, for the searches that follow.
+    ///
+    /// The caller's own budget: a wait that has less than a window left
+    /// gives the daemon what is left of it, so the wait is bounded by the
+    /// deadline and not by the deadline plus one more search.
+    pub(crate) fn set_window(&mut self, window: Duration) {
+        self.window = window;
     }
 
     /// The connection, made on demand.

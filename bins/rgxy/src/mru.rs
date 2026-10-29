@@ -283,20 +283,25 @@ fn quarantine(path: &Path, cause: std::io::Error) -> std::io::Result<()> {
 ///
 /// The counts are not added. The caller's history was read from the
 /// file, so its counts already say what the file said, and a sum would
-/// count the same use twice. The more recent word about a path wins —
-/// the one with the later use — and when the two words are about the
-/// same moment, the one that saw more uses wins.
+/// count the same use twice.
+///
+/// Each field is taken at its largest: the count is the bigger of the two
+/// counts, and the time is the later of the two times. Taking one entry
+/// whole threw a use away — a file written by another launcher with a
+/// later time and a smaller count replaced the count the caller knew, and
+/// the history went backwards.
 fn merge(on_disk: &History, caller: &History) -> History {
     let mut merged = on_disk.clone();
     for entry in caller.entries() {
-        let newer = match merged.get(&entry.path) {
+        match merged.get(&entry.path) {
             Some(known) => {
-                entry.last > known.last || (entry.last == known.last && entry.uses > known.uses)
+                let uses = known.uses.max(entry.uses);
+                let last = known.last.max(entry.last);
+                merged.insert(&entry.path, uses, last);
             }
-            None => true,
-        };
-        if newer {
-            merged.insert(&entry.path, entry.uses, entry.last);
+            None => {
+                merged.insert(&entry.path, entry.uses, entry.last);
+            }
         }
     }
     merged
@@ -734,6 +739,23 @@ mod tests {
             read.entries()
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The merge does not lose a use.
+    ///
+    /// Another launcher wrote the file with a later time and a smaller
+    /// count: taking its entry whole threw the caller's count away, and
+    /// the history went backwards. Each field is taken at its largest.
+    #[test]
+    fn the_merge_does_not_lose_a_use() {
+        let mut on_disk = History::new();
+        on_disk.insert("/tmp/notes.txt", 3, 200);
+        let mut caller = History::new();
+        caller.insert("/tmp/notes.txt", 7, 100);
+        let merged = merge(&on_disk, &caller);
+        let entry = merged.get("/tmp/notes.txt").expect("the entry is there");
+        assert_eq!(entry.uses, 7, "the count went backwards");
+        assert_eq!(entry.last, 200, "the later time was lost");
     }
 
     /// Two launchers, one store, and no entry lost.

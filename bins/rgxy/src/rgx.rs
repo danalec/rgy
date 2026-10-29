@@ -125,10 +125,15 @@ pub fn grep(
     // does not come back.
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
+        // The bytes are decoded with a replacement and not refused. A
+        // line that is not UTF-8 used to end the answer there, and every
+        // match after it was lost without a word; the stream is still an
+        // answer, and the bytes it carries are the answer.
         let files = read_matches(
             std::io::BufReader::new(stdout)
-                .lines()
-                .map_while(Result::ok),
+                .split(b'\n')
+                .map_while(Result::ok)
+                .map(|line| String::from_utf8_lossy(&line).into_owned()),
         );
         let _ = tx.send(files);
     });

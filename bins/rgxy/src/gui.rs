@@ -835,10 +835,19 @@ fn changed(state: &mut State) -> Control {
 }
 
 /// The field is empty: the list is empty too.
+///
+/// The line under the field goes with it. It said "37 resultados" and
+/// "conteúdo" about an answer that was no longer on the screen, and a line
+/// that describes another answer describes a question the user is not
+/// asking.
 fn cleared(state: &mut State) {
     state.app.set_results(Vec::new());
     state.app.set_warnings(Vec::new());
     state.rows_query = None;
+    state.status.matches = 0;
+    state.status.layer = "";
+    state.status.backend.clear();
+    state.status.took_us = 0;
 }
 
 /// The clipboard's text, into the query.
@@ -1954,6 +1963,30 @@ mod tests {
         assert!(line.contains("conteúdo"), "{line}");
         assert!(line.contains("rgx"), "{line}");
         assert!(line.contains("1 ms"), "{line}");
+    }
+
+    /// The line under the field describes the rows that are on the screen.
+    ///
+    /// The field is emptied: the list goes with it, and so does the line.
+    /// A line that says "37 resultados" over an empty list is a line about
+    /// another answer.
+    #[test]
+    fn the_line_does_not_describe_an_answer_that_is_gone() {
+        let (mut state, _) = recording();
+        {
+            let st = &mut state.status;
+            st.matches = 37;
+            st.layer = "conteúdo";
+            st.backend = "rgx".to_string();
+            st.took_us = 1500;
+        }
+        cleared(&mut state);
+        let line = status_line(&state);
+        assert!(line.contains("0 resultados"), "{line}");
+        assert!(!line.contains("37"), "{line}");
+        assert!(!line.contains("conteúdo"), "{line}");
+        assert!(!line.contains("rgx"), "{line}");
+        assert!(!line.contains("1 ms"), "{line}");
     }
 
     /// The line does not say the daemon is not there before it was asked.

@@ -521,8 +521,16 @@ const DAEMON_WAIT: Duration = Duration::from_secs(2);
 /// be a launcher that hangs.
 fn wait_for_daemon(source: &mut DaemonSource, query: &str, limit: usize) -> Answer {
     let deadline = Instant::now() + DAEMON_WAIT;
+    let window = source.window();
     loop {
+        // The wait is bounded by the deadline AND by the searches it
+        // starts: a search that begins with a second left and takes two
+        // answers after the wait is over. So the daemon gets what is left
+        // of the wait, and never more.
+        let left = deadline.saturating_duration_since(Instant::now());
+        source.set_window(left.min(window));
         let answer = source.search(query, limit);
+        source.set_window(window);
         let connected = source.status().borrow().connected;
         // An answer is an answer, whatever produced it: the `rgx` fallback
         // answers the content layer with the daemon away.
