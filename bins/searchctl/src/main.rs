@@ -443,12 +443,12 @@ fn run_pick(opts: &Opts, query: &str) -> Result<i32, String> {
                 let owned;
                 let rel: &str = match &h.over {
                     Some(p) => {
-                        owned = String::from_utf8_lossy(p).into_owned();
+                        owned = rgy_engine::console::spell(p);
                         &owned
                     }
                     None => {
                         searcher.live.base.path(h.idx as usize, &mut buf);
-                        owned = String::from_utf8_lossy(&buf).into_owned();
+                        owned = rgy_engine::console::spell(&buf);
                         &owned
                     }
                 };
@@ -606,7 +606,7 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
             // and a path that carries a line break is not one line.
             let mut dropped = 0usize;
             for f in &res.files {
-                let path = String::from_utf8_lossy(&f.path);
+                let path = rgy_engine::console::spell(&f.path);
                 for (ln, text) in &f.lines {
                     shown += 1;
                     if json {
@@ -728,12 +728,12 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
         let owned;
         let rel: &str = match &h.over {
             Some(p) => {
-                owned = String::from_utf8_lossy(p).into_owned();
+                owned = rgy_engine::console::spell(p);
                 &owned
             }
             None => {
                 searcher.live.base.path(h.idx as usize, &mut out);
-                owned = String::from_utf8_lossy(&out).into_owned();
+                owned = rgy_engine::console::spell(&out);
                 &owned
             }
         };

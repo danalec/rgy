@@ -676,6 +676,7 @@ dependencies = [
  "mimalloc",
  "rgy-discovery",
  "rgy-discovery-windows",
+ "rgy-engine",
  "rgy-name-core",
  "rgy-pick",
  "rgy-search-ui",

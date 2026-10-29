@@ -90,10 +90,12 @@ fn search_paths(live: &Live, root: &str, query_str: &str) -> Result<Vec<String>,
             // base would index `parent[u32::MAX]` -- out of bounds -- and
             // panic. The path is the index's internal form (`/`); the
             // answer is the platform's.
-            Some(path) => String::from_utf8_lossy(path).replace('/', std::path::MAIN_SEPARATOR_STR),
+            Some(path) => {
+                rgy_engine::console::spell(path).replace('/', std::path::MAIN_SEPARATOR_STR)
+            }
             None => {
                 live.base.path(h.idx as usize, &mut buf);
-                let rel = String::from_utf8_lossy(&buf).into_owned();
+                let rel = rgy_engine::console::spell(&buf);
                 buf.clear();
                 full_path(root, &rel)
             }
@@ -423,7 +425,7 @@ fn cmd_list(source: &str, filter: Option<&str>) -> Result<(), String> {
     let mut buf = Vec::new();
     for i in 1..idx.n {
         idx.path(i, &mut buf);
-        rows.push(full_path(&root, &String::from_utf8_lossy(&buf)));
+        rows.push(full_path(&root, &rgy_engine::console::spell(&buf)));
         buf.clear();
     }
     rows.sort_unstable();
@@ -664,7 +666,7 @@ mod tests {
             usn: 0,
             reason: 0,
             file_attributes: rgy_discovery::FILE_ATTRIBUTE_DIRECTORY,
-            name: String::from_utf8_lossy(&root_bytes).into_owned(),
+            name: rgy_engine::console::spell(&root_bytes),
         }]);
 
         // The display root carries its trailing separator: the index's own

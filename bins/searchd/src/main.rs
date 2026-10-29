@@ -992,7 +992,7 @@ fn scoped_content(q: &str, paths: &[String], limit: usize, ctx: &Ctx) -> Vec<Res
         if files.len() >= limit {
             break;
         }
-        let as_text = String::from_utf8_lossy(p).into_owned();
+        let as_text = rgy_engine::console::spell(p);
         if reg.may_claim_for_path(&as_text) {
             let Some(data) = read_for_adapter(p) else {
                 continue;
@@ -1028,7 +1028,7 @@ fn scoped_content(q: &str, paths: &[String], limit: usize, ctx: &Ctx) -> Vec<Res
         let res = content::verify_paths(&g, &plain, limit.saturating_sub(files.len()));
         for f in res.files {
             files.push(GrepFile {
-                path: String::from_utf8_lossy(&f.path).into_owned(),
+                path: rgy_engine::console::spell(&f.path),
                 lines: f.lines,
             });
         }
@@ -1053,7 +1053,7 @@ fn same_path(a: &[u8], b: &[u8]) -> bool {
         return true;
     }
     let norm = |p: &[u8]| {
-        let s = String::from_utf8_lossy(p).replace('\\', "/");
+        let s = rgy_engine::console::spell(p).replace('\\', "/");
         let s = s.trim_start_matches("./").trim_end_matches('/');
         // The case is folded only where the filesystem folds it: two names
         // that differ in case are two files on Linux and macOS, and one file
@@ -1114,7 +1114,7 @@ fn resolve(path: &str, ctx: &Ctx) -> Response {
         }
     };
     Response::Resolved {
-        path: String::from_utf8_lossy(&lookup.file_path(entry)).into_owned(),
+        path: rgy_engine::console::spell(&lookup.file_path(entry)),
         folder,
         backend,
     }
@@ -1230,7 +1230,7 @@ fn grep(q: &str, limit: usize, ctx: &Ctx) -> Vec<Response> {
                 r.complete = r.files.len() < limit && rest.complete;
                 for f in r.files {
                     files.push(GrepFile {
-                        path: String::from_utf8_lossy(&f.path).into_owned(),
+                        path: rgy_engine::console::spell(&f.path),
                         lines: f.lines,
                     });
                 }
@@ -1367,7 +1367,7 @@ fn serve_stream(mut input: impl BufRead, mut out: impl Write, ctx: &Ctx) {
             let res = content::verify(&g, &paths, 100);
             for f in &res.files {
                 matched = true;
-                serve_file(&mut out, &String::from_utf8_lossy(&f.path), &f.lines);
+                serve_file(&mut out, &rgy_engine::console::spell(&f.path), &f.lines);
             }
         }
         serve_end(
@@ -2160,7 +2160,7 @@ mod tests {
             usn: 0,
             reason: 0,
             file_attributes: rgy_discovery::FILE_ATTRIBUTE_DIRECTORY,
-            name: String::from_utf8_lossy(&root).into_owned(),
+            name: rgy_engine::console::spell(&root),
         }]);
 
         let ctx = std::sync::Arc::new(Ctx {
@@ -2359,7 +2359,7 @@ mod tests {
             usn: 0,
             reason: 0,
             file_attributes: rgy_discovery::FILE_ATTRIBUTE_DIRECTORY,
-            name: String::from_utf8_lossy(&root).into_owned(),
+            name: rgy_engine::console::spell(&root),
         }]);
 
         let ctx = std::sync::Arc::new(Ctx {

@@ -226,6 +226,39 @@ pub fn stderr() -> Console<std::io::Stderr> {
     Console::new(std::io::stderr(), state().stderr, handle)
 }
 
+/// How many paths could not be spelled.
+#[cfg(feature = "std")]
+static UNSPELLABLE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The path as text.
+///
+/// The console and the wire carry UTF-8, and a path that is not UTF-8
+/// cannot be spelled on either: the answer carries a replacement
+/// character, and the file the user opens is not the file the search
+/// found. A path that cannot be spelled cannot be opened either.
+///
+/// The path is written anyway — it is the only spelling there is — and
+/// the count is said out loud, because a path that cannot be spelled is
+/// a path the user has to know about.
+#[cfg(feature = "std")]
+pub fn spell(path: &[u8]) -> String {
+    match std::str::from_utf8(path) {
+        Ok(text) => alloc::string::String::from(text),
+        Err(_) => {
+            let count = UNSPELLABLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            if count == 1 || count.is_multiple_of(1000) {
+                let _ = std::io::Write::write_fmt(
+                    &mut stderr(),
+                    format_args!(
+                        "rgy: {count} path(s) are not valid UTF-8 and are written with a replacement character\n"
+                    ),
+                );
+            }
+            String::from_utf8_lossy(path).into_owned()
+        }
+    }
+}
+
 /// Print to standard output the way the console can render it.
 ///
 /// The counterpart of `println!` for a program whose output may land on a
@@ -395,6 +428,23 @@ mod tests {
     use super::*;
     use alloc::vec;
     use alloc::vec::Vec;
+
+    /// A path that cannot be spelled is written and said.
+    ///
+    /// The console and the wire carry UTF-8, and a path that is not
+    /// UTF-8 cannot be spelled on either. The path is written anyway --
+    /// it is the only spelling there is -- and the count is said, so
+    /// that a path the user cannot open is a path they were told about.
+    #[test]
+    fn a_path_that_cannot_be_spelled_is_written_and_said() {
+        assert_eq!(spell(b"C:/a/notas.txt"), "C:/a/notas.txt");
+        // The bytes of a latin-1 name: they are not UTF-8.
+        let spelled = spell(b"caf\xe9.txt");
+        assert!(
+            spelled.contains('\u{FFFD}'),
+            "the replacement character is there: {spelled}"
+        );
+    }
 
     #[test]
     fn a_pipe_keeps_its_bytes() {

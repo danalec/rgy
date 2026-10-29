@@ -497,8 +497,7 @@ impl App {
             // than a counter checked inside the loop.
             for i in 1..live.base.n.min(MAX_RESULTS + 1) {
                 live.base.path(i, &mut out);
-                self.results
-                    .push(String::from_utf8_lossy(&out).into_owned());
+                self.results.push(rgy_engine::console::spell(&out));
             }
             self.selected = 0;
             self.top = 0;
@@ -533,10 +532,10 @@ impl App {
             .iter()
             .map(|h| {
                 if let Some(p) = h.over.clone() {
-                    return String::from_utf8_lossy(&p).into_owned();
+                    return rgy_engine::console::spell(&p);
                 }
                 live.base.path(h.idx as usize, &mut out);
-                String::from_utf8_lossy(&out).into_owned()
+                rgy_engine::console::spell(&out)
             })
             .collect();
         // The characters each result matched, so the row can show the span.
