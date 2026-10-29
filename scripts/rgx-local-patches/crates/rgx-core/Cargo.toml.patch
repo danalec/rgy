@@ -1,15 +1,15 @@
 --- a/crates/rgx-core/Cargo.toml
 +++ b/crates/rgx-core/Cargo.toml
-@@ -45,7 +45,7 @@ include = [
+@@ -45,7 +45,7 @@
  # flag, a core atomic, stays; and the JSON float parser becomes this crate's
  # own, since `f64::from_str` is std-only.
  default = ["std", "sha256-hw", "gzip", "zlib", "deflate", "bzip2", "lzma", "xz", "zstd", "snappy", "lz4", "blosc", "zip"]
 -std = ["dep:libc", "memchr/std"]
-+std = ["memchr/std"]
++std = []
  # The Tesla Valve pack store's codec, query vocabulary and planner. The
  # algorithmic half of `crates/rgx-tv`, held here so it can be `no_std` and so
  # `rgx` can take it without taking the thread pool with it. `rgx-tv` turns
-@@ -119,13 +119,11 @@ sha256-hw = []
+@@ -119,25 +119,19 @@
  # still loaded by the archive adapter's test suite.
  
  [dependencies]
@@ -20,11 +20,31 @@
 -# all. The dep is `no_std` itself, so this stays a no_std crate when
 -# `std` is off.
 -libc = { version = "0.2", default-features = false, optional = true }
+-# Byte scanning. `pub mod memchr;` in `lib.rs` re-exports the crate as
+-# an in-tree module so every call site keeps the same
+-# `rgx_core::memchr::*` path it has used since the in-house module
+-# was deleted. `default-features = false` keeps `rgx-core`
+-# `no_std + alloc` when the `std` feature is off, and `memchr/std` is
+-# what the `std` feature turns on.
+-#
+-# The dispatch inside memchr is chosen at COMPILE time -- its SSE2 and
+-# AVX2 paths are `target_feature` gates, and it carries no runtime CPU
+-# probe -- so the feature buys the std-linked build of the dependency,
+-# not a runtime detection that this crate would have to pay for.
+-memchr = { version = "2", default-features = false }
 +# The `memmap2` module's Unix side used to take its `mmap(2)` /
 +# `msync(2)` / `madvise(2)` calls, and their `PROT_*` / `MAP_*` / `MS_*` /
 +# `MADV_*` constants, from `libc`. They are declared by hand now, in the
 +# module itself (`src/memmap2/platform`), so the crate carries no
 +# dependency to make a syscall with.
- # Byte scanning. `pub mod memchr;` in `lib.rs` re-exports the crate as
- # an in-tree module so every call site keeps the same
- # `rgx_core::memchr::*` path it has used since the in-house module
++# Byte scanning. The searches are this crate's own: `pub mod memchr;` is
++# an in-house module, not a re-export of a crate, and every call site keeps
++# the `rgx_core::memchr::*` path it has used all along. The vector kernels
++# are written with the `core::arch` intrinsics and are picked at RUNTIME by
++# the CPU probe this crate already has (`src/detect.rs`), so the `std` build
++# and the `no_std` build reach the same kernel on the same machine; the
++# portable path is a word-at-a-time scan; and the substring search is
++# Boyer-Moore-Horspool with this crate's own rare-byte prefilter.
+ # Filesystem walker for the pack-store builder. Gated on the
+ # `tv-runtime` feature because the builder is the only consumer and
+ # the builder is std-bound. `default-features = false` keeps the
