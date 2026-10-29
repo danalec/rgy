@@ -224,8 +224,27 @@ pub fn command_words(command: &str) -> Vec<String> {
     let mut current = String::new();
     let mut quoted = false;
     let mut started = false;
+    let mut escaped = false;
     for ch in command.chars() {
+        if escaped {
+            // The two escapes that exist in practice are the backslash and
+            // the quote. Every other backslash is a backslash: a Windows
+            // path is full of them, and eating them would name a different
+            // tree than the one the daemon walks.
+            if ch == '"' || ch == '\\' {
+                current.push(ch);
+            } else {
+                current.push('\\');
+                current.push(ch);
+            }
+            escaped = false;
+            started = true;
+            continue;
+        }
         match ch {
+            '\\' if quoted => {
+                escaped = true;
+            }
             '"' => {
                 quoted = !quoted;
                 started = true;
@@ -241,6 +260,10 @@ pub fn command_words(command: &str) -> Vec<String> {
                 started = true;
             }
         }
+    }
+    if escaped {
+        // A trailing backslash is a backslash.
+        current.push('\\');
     }
     if started {
         words.push(current);

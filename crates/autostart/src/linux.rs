@@ -102,7 +102,12 @@ pub fn registered_command(config_home: &Path, unit_name: &str) -> Option<String>
         .trim_start()
         .trim_start_matches("ExecStart=")
         .trim();
-    Some(unquote_systemd(line))
+    // The line as the unit spells it, quotes and all. The quoting is what
+    // keeps a path with a space in it one word, so it has to survive to
+    // whoever reads it: stripping the quotes here turned
+    // `"/home/Ana Maria"` into two words, and the doctor then reported the
+    // root as `/home/Ana`.
+    Some(line.to_string())
 }
 
 /// Arm the unit: reload the manager, then enable and start it.
@@ -197,31 +202,6 @@ fn systemctl(args: &[&str]) -> Result<String, String> {
             }
         ))
     }
-}
-
-/// The systemd word, unquoted.
-fn unquote_systemd(word: &str) -> String {
-    let mut out = String::with_capacity(word.len());
-    let mut chars = word.chars().peekable();
-    // The opening quote is a delimiter, not part of the word: it is
-    // looked at before it is consumed, so an unquoted word keeps its
-    // first character.
-    let quoted = matches!(chars.peek(), Some('"'));
-    if quoted {
-        chars.next();
-    }
-    while let Some(ch) = chars.next() {
-        match ch {
-            '\\' => {
-                if let Some(next) = chars.next() {
-                    out.push(next);
-                }
-            }
-            '"' if quoted => {}
-            c => out.push(c),
-        }
-    }
-    out
 }
 
 #[cfg(test)]
@@ -339,16 +319,44 @@ mod tests {
         let name = "rgy-searchd.service";
         write_unit(&home, name, &binary, &["--json".to_string()]).expect("the unit is written");
         let command = registered_command(&home, name).expect("the command is there");
-        assert_eq!(command, "/opt/rgy/bin/searchd --json");
+        // The command as the unit spells it: the quoting is what keeps a
+        // path with a space in it one word.
+        assert_eq!(command, r#""/opt/rgy/bin/searchd" "--json""#);
         let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
-    fn a_quoted_word_comes_back_unquoted() {
+    fn the_root_the_doctor_reports_is_the_root_the_daemon_walks() {
+        let home = temp_dir("linux-read-back-root");
+        let binary = PathBuf::from("/opt/rgy/bin/searchd");
+        let name = "rgy-searchd.service";
+        write_unit(
+            &home,
+            name,
+            &binary,
+            &["--root".to_string(), "/home/Ana Maria".to_string()],
+        )
+        .expect("the unit is written");
+        let command = registered_command(&home, name).expect("the command is there");
         assert_eq!(
-            unquote_systemd(r#""/opt/rgy tools/searchd""#),
-            "/opt/rgy tools/searchd"
+            crate::root_of(&command),
+            Some("/home/Ana Maria".to_string()),
+            "the root was truncated at the space"
         );
-        assert_eq!(unquote_systemd("/opt/rgy/searchd"), "/opt/rgy/searchd");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_quoted_word_comes_back_as_one_word() {
+        // The quoting is not decoration: it is what keeps a path with a
+        // space in it one word, and the doctor reads the root out of it.
+        assert_eq!(
+            crate::command_words(r#""/opt/rgy tools/searchd""#),
+            ["/opt/rgy tools/searchd".to_string()]
+        );
+        assert_eq!(
+            crate::command_words("/opt/rgy/searchd"),
+            ["/opt/rgy/searchd".to_string()]
+        );
     }
 }

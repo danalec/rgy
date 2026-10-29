@@ -95,7 +95,16 @@ pub fn registered_command(home: &Path, label: &str) -> Option<String> {
     if words.is_empty() {
         None
     } else {
-        Some(words.join(" "))
+        // The words, quoted the way a command line spells them. The plist
+        // holds them exactly, and the doctor reads them back through the
+        // same tokenizer the other platforms use -- so a path with a space
+        // in it has to arrive quoted, or it arrives as two words and the
+        // root is truncated at the space.
+        let quoted: Vec<String> = words
+            .iter()
+            .map(|w| format!("\"{}\"", w.replace('\\', "\\\\").replace('"', "\\\"")))
+            .collect();
+        Some(quoted.join(" "))
     }
 }
 
@@ -311,7 +320,31 @@ mod tests {
         let label = "com.rgy.searchd";
         write_plist(&home, label, &binary, &["--json".to_string()]).expect("the plist is written");
         let command = registered_command(&home, label).expect("the command is there");
-        assert_eq!(command, "/opt/rgy/bin/searchd --json");
+        // The command as a command line spells it: the plist holds the
+        // words exactly, and the doctor reads them back through the same
+        // tokenizer the other platforms use.
+        assert_eq!(command, r#""/opt/rgy/bin/searchd" "--json""#);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn the_root_the_doctor_reports_is_the_root_the_daemon_walks() {
+        let home = temp_dir("macos-read-back-root");
+        let binary = PathBuf::from("/opt/rgy/bin/searchd");
+        let label = "com.rgy.searchd";
+        write_plist(
+            &home,
+            label,
+            &binary,
+            &["--root".to_string(), "/Users/Ana Maria".to_string()],
+        )
+        .expect("the plist is written");
+        let command = registered_command(&home, label).expect("the command is there");
+        assert_eq!(
+            crate::root_of(&command),
+            Some("/Users/Ana Maria".to_string()),
+            "the root was truncated at the space"
+        );
         let _ = std::fs::remove_dir_all(&home);
     }
 
