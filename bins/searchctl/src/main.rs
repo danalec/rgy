@@ -476,10 +476,24 @@ fn run_pick(opts: &Opts, query: &str) -> Result<i32, String> {
 ///
 /// The path, and not the record: the record is a path, and a picker that
 /// chose one has chosen a path.
+///
+/// The line is one path, and a path that carries a line break cannot be
+/// one line: it is left out, and the count says how many were left out.
+/// Half of a path is a path that does not exist.
 fn print_selection(records: &[Vec<u8>]) {
     use std::io::Write;
+    let dropped = records
+        .iter()
+        .filter(|record| !rgy_pick::carries_line(record))
+        .count();
+    if dropped > 0 {
+        eprintln!("searchctl: {}", rgy_pick::uncarryable_paths(dropped));
+    }
     let mut out = std::io::stdout();
     for record in records {
+        if !rgy_pick::carries_line(record) {
+            continue;
+        }
         let _ = out.write_all(record);
         let _ = out.write_all(b"\n");
     }

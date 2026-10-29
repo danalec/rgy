@@ -472,6 +472,38 @@ fn uncarryable(dropped: usize, to: Separator) -> String {
     }
 }
 
+/// Whether the record can be one line.
+///
+/// The line is a separator a path can carry — on unix a name may hold a
+/// newline — and half of a path is a path that does not exist. So a
+/// record that carries a line break is **not carried**: it is offered
+/// whole, or not at all.
+///
+/// The carriage return is in the rule for the same reason the newline
+/// is: a reader that splits on the newline strips the carriage return
+/// that ends the line, and a path that ends in one comes back without
+/// it.
+pub fn carries_line(record: &[u8]) -> bool {
+    !record.contains(&b'\n') && !record.contains(&b'\r')
+}
+
+/// The warning for the paths that could not be carried as lines.
+///
+/// A path that is missing from the list is a path the user has to be
+/// told about: the line is one path, and a path that carries a line
+/// break is not one line.
+pub fn uncarryable_paths(dropped: usize) -> alloc::string::String {
+    if dropped == 1 {
+        alloc::string::String::from(
+            "1 path was left out: it carries a line break, and the output is one path per line",
+        )
+    } else {
+        alloc::format!(
+            "{dropped} paths were left out: they carry a line break, and the output is one path per line"
+        )
+    }
+}
+
 /// Runs `search` with its output on the picker's stdin, prints what the
 /// picker returns, and yields the process exit status.
 ///
@@ -712,6 +744,24 @@ mod tests {
         // What the picker reads is two whole records: the one that cannot
         // be carried is not there, and it is not there in halves either.
         assert_eq!(buf, b"src/a.txt\nsrc/c.txt\n");
+    }
+
+    /// A record that carries a line break is not one line.
+    ///
+    /// The line is a separator a path can carry, and half of a path is a
+    /// path that does not exist: the record is not carried, and the
+    /// caller is told how many were left out.
+    #[test]
+    fn a_record_that_carries_a_line_break_is_not_one_line() {
+        assert!(carries_line(b"src/a.txt"), "a plain path is one line");
+        assert!(carries_line(b"src/a b.txt"), "a space is not a break");
+        assert!(!carries_line(b"src/has\nnewline.txt"), "the newline");
+        assert!(!carries_line(b"src/has\rreturn.txt"), "the carriage return");
+        // And the warning says what is missing and why.
+        let warning = uncarryable_paths(2);
+        assert!(warning.contains("2 paths"), "{warning}");
+        assert!(warning.contains("line break"), "{warning}");
+        assert!(warning.contains("one path per line"), "{warning}");
     }
 
     #[cfg(feature = "std")]

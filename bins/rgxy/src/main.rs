@@ -115,6 +115,10 @@ fn usage() -> String {
          Com --pick, os resultados vão para um picker e a escolha sai na\n\
          stdout, um caminho por linha — o mesmo contrato de --query.\n\
          \n\
+         Os caminhos saem um por linha. Um caminho que carregue uma
+         quebra de linha não cabe numa linha: ele fica de fora, e o
+         rgxy diz no stderr quantos ficaram.\n\
+         \n\
          O picker por omissão é o fzf ou o sk: só eles leem a lista\n\
          separada por NUL. Um picker nomeado que não a leia — o peco, o\n\
          fz — recebe a lista com um caminho por linha.\n\
@@ -321,13 +325,36 @@ fn one_shot(mut source: DaemonSource, query: &str, limit: usize) -> Result<ExitC
 
 /// The paths, one per line.
 ///
+/// The line is one path, and a path that carries a line break cannot be
+/// one line: it is left out, and the launcher says on stderr how many
+/// were left out. Half of a path is a path that does not exist, and a
+/// reader that cannot tell the halves apart opens nothing.
+///
 /// The write that fails is the failure: a path that did not reach the
 /// caller is a path the caller does not have, and a program that says
 /// it printed them anyway is a program that lies. The loop stops at
 /// the first failure — the reader is gone, and the rest of the paths
 /// would go into the same gone.
 fn write_paths(paths: &[String], out: &mut impl Write) -> std::io::Result<()> {
+    // The line format: one path per line, and the paths that cannot be
+    // one line are left out. The count is said before the first write,
+    // so a reader that goes away in the middle does not take the
+    // sentence with it.
+    let dropped = paths
+        .iter()
+        .filter(|path| !rgy_pick::carries_line(path.as_bytes()))
+        .count();
+    if dropped > 0 {
+        // A path that is missing from the list is a path the user has to
+        // be told about.
+        eprintln!("rgxy: {}", rgy_pick::uncarryable_paths(dropped));
+    }
     for path in paths {
+        if !rgy_pick::carries_line(path.as_bytes()) {
+            // The path cannot be one line, and half of it is a path that
+            // does not exist.
+            continue;
+        }
         writeln!(out, "{path}")?;
     }
     out.flush()
@@ -454,10 +481,25 @@ fn records(paths: &[String]) -> Vec<u8> {
 
 /// Print what the picker chose, one path per line.
 ///
+/// The line format is the one of `--query`: a script that reads either
+/// reads them the same way.
+///
 /// The write that fails is the failure: the choice the user made did
 /// not reach the caller, and a status of 0 would say it did.
 fn print_selection(chosen: &[Vec<u8>], out: &mut impl Write) -> std::io::Result<()> {
+    // The same line format as `--query`: the choice is one path per
+    // line, and a choice that cannot be one line is left out.
+    let dropped = chosen
+        .iter()
+        .filter(|record| !rgy_pick::carries_line(record))
+        .count();
+    if dropped > 0 {
+        eprintln!("rgxy: {}", rgy_pick::uncarryable_paths(dropped));
+    }
     for record in chosen {
+        if !rgy_pick::carries_line(record) {
+            continue;
+        }
         out.write_all(record)?;
         out.write_all(b"\n")?;
     }
@@ -888,5 +930,65 @@ mod tests {
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
+    }
+
+    /// A path that carries a line break is not carried.
+    ///
+    /// The line is one path, and a path with a newline in it would be
+    /// two: half of a path is a path that does not exist, and a reader
+    /// that cannot tell the halves apart opens nothing.
+    #[test]
+    fn a_path_that_carries_a_line_break_is_not_carried() {
+        let paths = vec![
+            "/home/dana/notas\nde marco.txt".to_string(),
+            "/home/dana/final\raso.txt".to_string(),
+            "/home/dana/other.txt".to_string(),
+        ];
+        let mut out = Vec::new();
+        write_paths(&paths, &mut out).expect("the write");
+        let text = String::from_utf8(out).expect("the output is text");
+        assert_eq!(
+            text.lines().count(),
+            1,
+            "the paths that carry a line break are not lines: {text:?}"
+        );
+        assert!(
+            text.contains("other.txt"),
+            "the other path is there: {text:?}"
+        );
+    }
+
+    /// A path with a percent sign is the path.
+    ///
+    /// The line format does not rewrite a path: a `%` is a `%`, and the
+    /// path the reader gets is the path the daemon found.
+    #[test]
+    fn a_path_with_a_percent_sign_is_the_path() {
+        let paths = vec!["/home/dana/100%done.txt".to_string()];
+        let mut out = Vec::new();
+        write_paths(&paths, &mut out).expect("the write");
+        let text = String::from_utf8(out).expect("the output is text");
+        assert_eq!(
+            text.trim_end(),
+            "/home/dana/100%done.txt",
+            "the path is the path: {text:?}"
+        );
+    }
+
+    /// A Windows path is not rewritten.
+    ///
+    /// The separator of a Windows path is a backslash, and a path that is
+    /// rewritten is a path that does not exist.
+    #[test]
+    fn a_windows_path_is_not_rewritten() {
+        let paths = vec![r"C:\Users\dana\notas.txt".to_string()];
+        let mut out = Vec::new();
+        write_paths(&paths, &mut out).expect("the write");
+        let text = String::from_utf8(out).expect("the output is text");
+        assert_eq!(
+            text.trim_end(),
+            r"C:\Users\dana\notas.txt",
+            "the path is the path: {text:?}"
+        );
     }
 }

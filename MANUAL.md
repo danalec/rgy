@@ -613,6 +613,13 @@ by NUL, and a path with a newline in it is no trouble to them. A picker
 you name yourself and that cannot read one — `peco`, `fz` — gets the list
 one path per line.
 
+The line is one path, and a path that carries a line break cannot be one
+line: it is **left out** of the output, and the launcher says on stderr
+how many were left out. Half of a path is a path that does not exist, and
+a reader that cannot tell the halves apart opens nothing. The rule is the
+same for `--query` and for `--pick`, and it is the same shape as the rule
+the picker follows with the list it is handed.
+
 A path that carries the separator the picker reads cannot be carried: it
 is offered to the picker **whole**, or not at all, and never split in
 half — half of a path is a path that does not exist. The launcher says on
