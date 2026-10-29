@@ -42,6 +42,13 @@
 //! taking them; and the standard input has neither, so its bytes arrive on
 //! a thread.
 //!
+//! The window covers the **question** as well as the answer. A daemon that
+//! takes the connection and then stops reading fills the pipe, and a write
+//! that waits for that pipe is a write that never ends — so the question
+//! goes out under the same window, and the two share it: the deadline is
+//! computed once, and a caller that asks for two seconds waits two seconds
+//! and not four.
+//!
 //! # The limits
 //!
 //! A line is bounded, and a document is bounded in its nesting. The peer is
@@ -92,11 +99,23 @@ const CHUNK: usize = 16 * 1024;
 ///
 /// The client owns both halves of the stream, because the protocol is a
 /// conversation and a half-open one is a client that blocks forever.
+///
+/// The write is under the caller's window and not only the read: a daemon
+/// that takes the connection and then stops reading fills the pipe, and
+/// the write is what waits for it.
 pub struct Client {
     /// The bytes the daemon answers with.
     transport: Box<dyn Transport + Send>,
     /// Where the questions go.
-    writer: Box<dyn Write + Send>,
+    writer: Box<dyn Writer + Send>,
+    /// Whether the connection is still good.
+    ///
+    /// A question that ran out of time on the way out leaves the
+    /// connection in an unknown state — some of the bytes may have gone
+    /// out — and a client that wrote another question into it would be
+    /// talking into a request the daemon never got whole. The client
+    /// says so instead of writing.
+    broken: bool,
     /// The session id the client sends, when it has one.
     ///
     /// The daemon keys its incremental-search sessions on this, and a
@@ -109,15 +128,22 @@ pub struct Client {
 impl Client {
     /// Connect to a daemon listening on `endpoint`.
     pub fn connect(endpoint: &Endpoint) -> std::io::Result<Client> {
-        let (transport, writer): (Box<dyn Transport + Send>, Box<dyn Write + Send>) = match endpoint
-        {
-            Endpoint::Stdio => (Box::new(StdioTransport::new()), Box::new(std::io::stdout())),
-            Endpoint::Socket(path) => socket_transport(path)?,
-            Endpoint::Pipe(name) => pipe_transport(name)?,
-        };
+        let (transport, writer): (Box<dyn Transport + Send>, Box<dyn Writer + Send>) =
+            match endpoint {
+                // The standard output is the caller's own stream, and the
+                // platform has no write timeout for it: the write goes on a
+                // thread of its own, so that the caller can give up on it.
+                Endpoint::Stdio => (
+                    Box::new(StdioTransport::new()),
+                    Box::new(ThreadWriter::new(Box::new(std::io::stdout()))),
+                ),
+                Endpoint::Socket(path) => socket_transport(path)?,
+                Endpoint::Pipe(name) => pipe_transport(name)?,
+            };
         Ok(Client {
             transport,
             writer,
+            broken: false,
             session: None,
         })
     }
@@ -155,12 +181,14 @@ impl Client {
         req: &Request,
         window: Duration,
     ) -> std::io::Result<Vec<Response>> {
-        let line = req.to_json();
-        self.writer.write_all(line.as_bytes())?;
-        self.writer.write_all(b"\n")?;
-        self.writer.flush()?;
-
+        // The deadline is computed once, and the question and the answer
+        // share it: a caller that asks for two seconds waits two seconds
+        // and not four.
         let deadline = Instant::now() + window;
+        let mut line = req.to_json();
+        line.push('\n');
+        self.write_question(line.as_bytes(), deadline)?;
+
         let mut out = Vec::new();
         loop {
             let Some(raw) = self.read_line(deadline)? else {
@@ -190,6 +218,39 @@ impl Client {
             }
         }
         Ok(out)
+    }
+
+    /// Put the question on the wire, under the window.
+    ///
+    /// A write that runs out of time is a timeout and not a broken
+    /// connection: the daemon took the connection and did not read it,
+    /// which is the same fact as a daemon that did not answer — the
+    /// daemon is there, and it is slow. A caller that says "the daemon is
+    /// gone" about a daemon that is up hides the daemon the user has to
+    /// start.
+    ///
+    /// The connection is spent after that: some of the question may have
+    /// gone out, and the answer the daemon sends would be the answer to a
+    /// question it never got whole.
+    fn write_question(&mut self, bytes: &[u8], deadline: Instant) -> std::io::Result<()> {
+        if self.broken {
+            // The kind is the timeout's own, because the fact it reports
+            // is the same fact: the daemon is there and did not take the
+            // question. A kind that says "the daemon is gone" would be a
+            // lie about a daemon that is up.
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "the daemon did not take the question in time, and the connection cannot be used again",
+            ));
+        }
+        match self.writer.write_until(bytes, deadline) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                self.broken = true;
+                Err(e)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Read one line, without its newline.
@@ -608,17 +669,20 @@ impl Transport for SocketTransport {
 #[cfg(unix)]
 fn socket_transport(
     path: &std::path::Path,
-) -> std::io::Result<(Box<dyn Transport + Send>, Box<dyn Write + Send>)> {
+) -> std::io::Result<(Box<dyn Transport + Send>, Box<dyn Writer + Send>)> {
     let stream = std::os::unix::net::UnixStream::connect(path)?;
     let write = stream.try_clone()?;
-    Ok((Box::new(SocketTransport::new(stream)), Box::new(write)))
+    Ok((
+        Box::new(SocketTransport::new(stream)),
+        Box::new(SocketWriter::new(write)),
+    ))
 }
 
 /// The unix socket is not a transport everywhere.
 #[cfg(not(unix))]
 fn socket_transport(
     path: &std::path::Path,
-) -> std::io::Result<(Box<dyn Transport + Send>, Box<dyn Write + Send>)> {
+) -> std::io::Result<(Box<dyn Transport + Send>, Box<dyn Writer + Send>)> {
     let _ = path;
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
@@ -689,20 +753,28 @@ impl Transport for PipeTransport {
 }
 
 /// The named pipe, and the half that writes to it.
+///
+/// A pipe that nobody reads fills up, and the write that fills it waits,
+/// and the wait has no timeout: a pipe opened without
+/// `FILE_FLAG_OVERLAPPED` cannot be given one. The write goes on a thread
+/// of its own, and the thread is stopped when the client gives up on it.
 #[cfg(windows)]
 fn pipe_transport(
     name: &str,
-) -> std::io::Result<(Box<dyn Transport + Send>, Box<dyn Write + Send>)> {
+) -> std::io::Result<(Box<dyn Transport + Send>, Box<dyn Writer + Send>)> {
     let file = open_pipe(name)?;
     let write = file.try_clone()?;
-    Ok((Box::new(PipeTransport::new(file)), Box::new(write)))
+    Ok((
+        Box::new(PipeTransport::new(file)),
+        Box::new(ThreadWriter::new(Box::new(write))),
+    ))
 }
 
 /// The named pipe is not a transport everywhere.
 #[cfg(not(windows))]
 fn pipe_transport(
     name: &str,
-) -> std::io::Result<(Box<dyn Transport + Send>, Box<dyn Write + Send>)> {
+) -> std::io::Result<(Box<dyn Transport + Send>, Box<dyn Writer + Send>)> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         format!("named pipes are not available on this platform: {name}"),
@@ -872,6 +944,228 @@ fn open_pipe(name: &str) -> std::io::Result<std::fs::File> {
     Err(last.unwrap_or_else(|| std::io::Error::other("the named pipe stayed busy")))
 }
 
+// --- the write ----------------------------------------------------------------
+
+/// The half that writes the question to the daemon.
+///
+/// The write has a deadline of its own, and the reason is the read's: a
+/// daemon that takes the connection and then stops reading fills the
+/// pipe, and a write that waits for that pipe is a write that never
+/// ends. The window the caller asks for is the window the write is
+/// measured against.
+trait Writer: Send {
+    /// The bytes go out, and the call gives up at the deadline.
+    ///
+    /// A write that runs out of time is `ErrorKind::TimedOut`: the
+    /// daemon is there and did not take the question.
+    fn write_until(&mut self, bytes: &[u8], deadline: Instant) -> std::io::Result<()>;
+}
+
+/// The sentence a write that ran out of time gets.
+///
+/// It says that the daemon did not take the question, and not that it did
+/// not answer: the daemon took the connection — it is there — and the two
+/// are different facts. The kind says the same: a timeout is a daemon that
+/// is up and slow, and a connection error is a daemon that is gone.
+fn write_timeout() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        "the daemon did not take the question in time",
+    )
+}
+
+/// The sentence a connection that is closed gets.
+fn closed_connection() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::BrokenPipe,
+        "the connection to the daemon is closed",
+    )
+}
+
+/// The unix socket, and the half that writes to it.
+///
+/// The socket has a write timeout of its own, and the deadline is that
+/// timeout: the write waits for what is left of the window and gives up
+/// when the window is over — the same shape as the read's.
+#[cfg(unix)]
+struct SocketWriter {
+    stream: std::os::unix::net::UnixStream,
+}
+
+#[cfg(unix)]
+impl SocketWriter {
+    /// The writer over an open socket.
+    fn new(stream: std::os::unix::net::UnixStream) -> SocketWriter {
+        SocketWriter { stream }
+    }
+}
+
+#[cfg(unix)]
+impl Writer for SocketWriter {
+    fn write_until(&mut self, bytes: &[u8], deadline: Instant) -> std::io::Result<()> {
+        // The question goes out in pieces, and each piece is given what
+        // is left of the window: the socket's own timeout is the rest of
+        // it, and the rest is what is left of it. A write that was given
+        // the whole window on every piece would take as many windows as
+        // it has pieces, and the client would wait longer than it asked
+        // for — long enough for the daemon to close the connection under
+        // a write that was only late.
+        let mut sent = 0;
+        while sent < bytes.len() {
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(write_timeout());
+            }
+            // The timeout is rounded up to the millisecond: a timeout of
+            // zero is not "no time left" on a socket, it is "wait
+            // forever".
+            let left = (deadline - now).max(Duration::from_millis(1));
+            self.stream.set_write_timeout(Some(left))?;
+            match self.stream.write(&bytes[sent..]) {
+                Ok(0) => return Err(closed_connection()),
+                Ok(n) => sent += n,
+                // The socket's timeout fired: the daemon is there and is
+                // not reading.
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    return Err(write_timeout());
+                }
+                // The write was interrupted and nothing went out: it goes
+                // on.
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The write that goes on a thread of its own.
+///
+/// A write that blocks cannot be stopped from the thread that made it:
+/// the write is inside a syscall, and the thread is inside the write. The
+/// write goes somewhere else and the client waits for the word, under the
+/// window — and when the window runs out, the write is given up on and the
+/// thread ends with the connection.
+struct ThreadWriter {
+    /// Where the question goes.
+    ///
+    /// It is gone once the writer gave up: the thread's wait for the next
+    /// question ends with it.
+    tx: Option<std::sync::mpsc::Sender<Vec<u8>>>,
+    /// Where the word about the write comes back.
+    rx: std::sync::mpsc::Receiver<std::io::Result<()>>,
+    /// The thread that owns the write half.
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ThreadWriter {
+    /// The writer over a stream, on a thread of its own.
+    fn new(mut stream: Box<dyn Write + Send>) -> ThreadWriter {
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let (word_tx, word_rx) = std::sync::mpsc::channel::<std::io::Result<()>>();
+        let thread = std::thread::spawn(move || {
+            while let Ok(bytes) = rx.recv() {
+                let written = stream.write_all(&bytes).and_then(|()| stream.flush());
+                let failed = written.is_err();
+                // The word goes back even when the write failed: the
+                // client is waiting for it, and a client that waits for a
+                // word that never comes waits for the window instead of
+                // the answer.
+                if word_tx.send(written).is_err() {
+                    break;
+                }
+                if failed {
+                    break;
+                }
+            }
+        });
+        ThreadWriter {
+            tx: Some(tx),
+            rx: word_rx,
+            thread: Some(thread),
+        }
+    }
+
+    /// Give up on a write that is stuck.
+    ///
+    /// The thread's write is stopped — the platform's way of saying
+    /// "stop" — and the channel goes with it, so that the thread's wait
+    /// for the next question ends too. A thread that waits for a pipe
+    /// nobody reads is a thread that never ends.
+    fn give_up(&mut self) {
+        stop_the_write(self.thread.as_ref());
+        self.tx = None;
+    }
+}
+
+impl Writer for ThreadWriter {
+    fn write_until(&mut self, bytes: &[u8], deadline: Instant) -> std::io::Result<()> {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(write_timeout());
+        }
+        let Some(tx) = self.tx.as_ref() else {
+            return Err(closed_connection());
+        };
+        if tx.send(bytes.to_vec()).is_err() {
+            // The thread is gone: the connection is closed.
+            return Err(closed_connection());
+        }
+        match self.rx.recv_timeout(left) {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(e),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // The daemon took the connection and is not reading it.
+                self.give_up();
+                Err(write_timeout())
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(closed_connection()),
+        }
+    }
+}
+
+impl Drop for ThreadWriter {
+    fn drop(&mut self) {
+        // The connection is dropped: the thread that writes to it ends
+        // with it, and a write that is still inside a syscall is stopped
+        // so that the thread does not outlive the connection.
+        self.give_up();
+    }
+}
+
+/// Stop a write that is stuck, on a thread of its own.
+///
+/// Windows has one way of saying "stop": `CancelSynchronousIo` cancels
+/// the pending I/O of the thread that issued it, and the write comes
+/// back with an error. The write is synchronous — a pipe opened without
+/// `FILE_FLAG_OVERLAPPED` — which is the only kind a pipe that is read
+/// with a peek can be.
+#[cfg(windows)]
+fn stop_the_write(thread: Option<&std::thread::JoinHandle<()>>) {
+    use std::os::windows::io::AsRawHandle;
+    unsafe extern "system" {
+        fn CancelSynchronousIo(thread: *mut core::ffi::c_void) -> i32;
+    }
+    let Some(thread) = thread else {
+        return;
+    };
+    // A thread that is not writing has nothing to cancel, and the
+    // platform says so with a failure that is not an error here.
+    unsafe { CancelSynchronousIo(thread.as_raw_handle()) };
+}
+
+/// Stop a write that is stuck, on a thread of its own.
+///
+/// A unix socket does not need this: the socket's own write timeout ends
+/// the write. A standard output cannot be stopped at all — the platform
+/// has no way to interrupt a write that is inside a syscall — and the
+/// thread ends when the write does.
+#[cfg(not(windows))]
+fn stop_the_write(_thread: Option<&std::thread::JoinHandle<()>>) {}
+
 /// The window the client waits for, named so the caller can read it.
 pub fn read_timeout() -> Duration {
     READ_TIMEOUT
@@ -971,6 +1265,28 @@ mod tests {
                 }
             }
         }
+
+        /// Read what is left of the connection, and say whether it ended.
+        ///
+        /// The end is what the client dropping the connection looks like:
+        /// the read comes back empty, or with an error, once the bytes
+        /// that were on their way are gone.
+        fn read_to_the_end(&mut self) -> bool {
+            let mut chunk = [0u8; 4096];
+            loop {
+                let read = match self {
+                    #[cfg(unix)]
+                    Peer::Socket(s) => s.read(&mut chunk),
+                    #[cfg(windows)]
+                    Peer::Pipe(f) => f.read(&mut chunk),
+                };
+                match read {
+                    Ok(0) => return true,
+                    Ok(_) => continue,
+                    Err(_) => return true,
+                }
+            }
+        }
     }
 
     /// A daemon of the test's own, on an endpoint of the test's own.
@@ -988,7 +1304,7 @@ mod tests {
 
     /// A server that takes one client and does what the test says.
     #[cfg(unix)]
-    fn serve(script: fn(Peer)) -> Server {
+    fn serve(script: impl FnOnce(Peer) + Send + 'static) -> Server {
         let path = std::env::temp_dir().join(format!("{}.sock", unique()));
         let listener = std::os::unix::net::UnixListener::bind(&path).expect("the socket binds");
         let socket = path.clone();
@@ -1006,7 +1322,7 @@ mod tests {
 
     /// A server that takes one client and does what the test says.
     #[cfg(windows)]
-    fn serve(script: fn(Peer)) -> Server {
+    fn serve(script: impl FnOnce(Peer) + Send + 'static) -> Server {
         use std::os::windows::io::AsRawHandle;
         unsafe extern "system" {
             fn ConnectNamedPipe(
@@ -1073,6 +1389,33 @@ mod tests {
         // that is not coming, and that is the case under test.
         let _peer = peer;
         std::thread::sleep(Duration::from_millis(1000));
+    }
+
+    /// A daemon that takes the connection and never reads it.
+    ///
+    /// The pipe fills and the client's write waits for it: this is the
+    /// case the write's window is for.
+    fn never_reads(peer: Peer) {
+        // The connection stays open: a daemon that hung up would break
+        // the write instead of filling it, and the client would fail on
+        // a broken pipe instead of on the window.
+        let _peer = peer;
+        std::thread::sleep(Duration::from_millis(1000));
+    }
+
+    /// A question big enough to fill the pipe.
+    ///
+    /// The write under test has to block, and a pipe only blocks when it
+    /// is full: a question of a few bytes goes into the buffer and the
+    /// client learns nothing. A megabyte of question fills the pipe on
+    /// every platform — the socket's buffer and the pipe's buffer are
+    /// both smaller than that.
+    fn big_request() -> Request {
+        Request::Search {
+            q: "x".repeat(1024 * 1024),
+            limit: 10,
+            session: None,
+        }
     }
 
     /// A daemon that hangs up.
@@ -1374,6 +1717,12 @@ mod tests {
     #[test]
     fn the_daemons_own_answers_are_read() {
         let server = serve(|mut peer: Peer| {
+            // The request is read first, like every other daemon in this
+            // file: a daemon that answers without reading can close the
+            // connection under the client's own write, and the client
+            // then fails on the write instead of on the answer it was
+            // reading.
+            let _ = peer.read_request();
             let _ = peer
                 .send(b"{\"op\":\"hits\",\"hits\":[{\"path\":\"a\",\"score\":1}],\"took_us\":2}\n");
             let _ = peer.send(b"{\"op\":\"done\",\"count\":1}\n");
@@ -1383,5 +1732,119 @@ mod tests {
         assert_eq!(out.hits.len(), 1);
         assert_eq!(out.hits[0].path, "a");
         server.join();
+    }
+
+    // --- the daemon that does not read ------------------------------------
+
+    /// A daemon that takes the connection and never reads it: the
+    /// question does not go out, and the client gives up on it under the
+    /// window.
+    ///
+    /// The daemon is there — it took the connection — so the failure is a
+    /// timeout and not a broken connection: a caller that says "the
+    /// daemon is gone" about a daemon that is up hides the daemon the
+    /// user has to start.
+    #[test]
+    fn a_daemon_that_never_reads_times_the_write_out() {
+        let server = serve(never_reads);
+        let mut client = Client::connect(&server.endpoint).expect("the client connects");
+        let started = Instant::now();
+        let err = client
+            .request_within(&big_request(), SHORT)
+            .expect_err("a daemon that never reads has no answer");
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::TimedOut,
+            "the write ran out: {err}"
+        );
+        assert!(
+            err.to_string().contains("did not take the question"),
+            "the reason says what happened: {err}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the client waited for the window, not forever"
+        );
+        drop(client);
+        server.join();
+    }
+
+    /// A client whose write ran out of time cannot be used again.
+    ///
+    /// Some of the question may have gone out, and the answer the daemon
+    /// sends would be the answer to a question it never got whole. The
+    /// client refuses the next question at once, and says why.
+    #[test]
+    fn a_client_that_timed_out_on_the_write_refuses_the_next_question() {
+        let server = serve(never_reads);
+        let mut client = Client::connect(&server.endpoint).expect("the client connects");
+        let err = client
+            .request_within(&big_request(), SHORT)
+            .expect_err("the write runs out");
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::TimedOut,
+            "the write ran out: {err}"
+        );
+        // The next question is refused at once: the connection is spent.
+        // The refusal carries the timeout's kind, because it reports the
+        // same fact — the daemon is there and did not take the question.
+        let started = Instant::now();
+        let err = client
+            .request_within(&Request::Status, SHORT)
+            .expect_err("a spent connection is refused");
+        assert!(
+            started.elapsed() < SHORT / 2,
+            "the client refused at once, not after a window: {started:?}"
+        );
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::TimedOut,
+            "the refusal is the same fact: {err}"
+        );
+        assert!(
+            err.to_string().contains("cannot be used again"),
+            "the reason says what happened: {err}"
+        );
+        drop(client);
+        server.join();
+    }
+
+    /// The write that gave up does not outlive the connection.
+    ///
+    /// The thread that writes to the pipe is stopped with the
+    /// connection: a thread that waits for a pipe nobody reads is a
+    /// thread that never ends, and a client that gave up must not leave
+    /// one behind.
+    #[test]
+    fn a_write_that_gave_up_does_not_outlive_the_connection() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let server = serve(move |mut peer: Peer| {
+            // The read comes after the client's window: a daemon that
+            // read during the write would drain the pipe and the write
+            // would go through, and the case under test would not be the
+            // case under test.
+            std::thread::sleep(Duration::from_millis(1500));
+            let _ = tx.send(peer.read_to_the_end());
+        });
+        {
+            let mut client = Client::connect(&server.endpoint).expect("the client connects");
+            let err = client
+                .request_within(&big_request(), SHORT)
+                .expect_err("the write runs out");
+            assert_eq!(
+                err.kind(),
+                std::io::ErrorKind::TimedOut,
+                "the write ran out: {err}"
+            );
+            // The client is dropped here: the connection ends with it.
+        }
+        match rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(ended) => {
+                assert!(ended, "the connection ended with the client");
+                server.join();
+            }
+            Err(_) => panic!("the daemon was still waiting: the write outlived the connection"),
+        }
     }
 }
