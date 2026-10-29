@@ -35,28 +35,36 @@ pub fn bin(name: &str) -> PathBuf {
     exe
 }
 
-/// Panics when `exe` predates the sources of the crate that builds it.
+/// Panics when `exe` predates the sources it is built from.
+///
+/// The bin's own sources AND the crates it links: the harness resolves the
+/// bin by path, so cargo never rebuilds it, and a change in a crate leaves a
+/// binary that is newer than the bin's own sources and older than the code
+/// it was built from. Comparing only the bin's own sources is how the
+/// harness ends up exercising yesterday's code and reporting green.
 fn assert_up_to_date(name: &str, exe: &Path) {
     let built = match exe.metadata().and_then(|m| m.modified()) {
         Ok(t) => t,
         Err(_) => return, // no binary yet: let the spawn fail loudly instead
     };
-    let src = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("bins")
-        .join(name);
-    let newest = std::fs::read_dir(src.join("src"))
-        .ok()
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|e| e.metadata().ok())
-        .filter_map(|m| m.modified().ok())
-        .max();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let src = root.join("bins").join(name);
+    // The bin's own sources AND the crates it is built from: the harness
+    // resolves the bin by path, so cargo never rebuilds it, and a change in
+    // `crates/name-core` leaves a binary that is newer than the bin's own
+    // sources and older than the code it was built from. Comparing only the
+    // bin's own sources is how the harness ends up exercising yesterday's
+    // code and reporting green.
+    let mut newest = newest_source(&src.join("src"));
+    if let Some(crates) = newest_source(&root.join("crates")) {
+        if newest.map(|n| crates > n).unwrap_or(true) {
+            newest = Some(crates);
+        }
+    }
     if let Some(newest) = newest {
         assert!(
             built >= newest,
-            "{name} at {} is older than its sources (newest source modified {:?}). \
+            "{name} at {} is older than the sources it is built from (newest source modified {:?}). \
              The e2e harness resolves bins by path, so `cargo test -p rgy-e2e-tests` \
              does not rebuild them - build first (`cargo build --workspace`), or \
              this run would test stale code. (`cargo test --workspace` alone is \
@@ -66,6 +74,29 @@ fn assert_up_to_date(name: &str, exe: &Path) {
             newest
         );
     }
+}
+
+/// The newest modification time under `dir`, if there is a file under it.
+fn newest_source(dir: &Path) -> Option<std::time::SystemTime> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    let mut newest = None;
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else { continue };
+        if meta.is_dir() {
+            if let Some(inner) = newest_source(&entry.path()) {
+                if newest.map(|n| inner > n).unwrap_or(true) {
+                    newest = Some(inner);
+                }
+            }
+            continue;
+        }
+        if let Ok(modified) = meta.modified() {
+            if newest.map(|n| modified > n).unwrap_or(true) {
+                newest = Some(modified);
+            }
+        }
+    }
+    newest
 }
 
 /// A directory in the temp folder that takes itself away.

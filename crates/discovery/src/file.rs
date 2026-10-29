@@ -379,6 +379,7 @@ mod imp {
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
+    use alloc::format;
     use alloc::vec::Vec;
 
     /// A path in the temporary folder, with a name nobody else is using.
@@ -391,6 +392,11 @@ mod tests {
         p.push(b'/');
         p.extend_from_slice(b"rgy-file-");
         p.extend_from_slice(tag.as_bytes());
+        // The process id, like the folder fixture in `dir.rs`: two runs of
+        // the same test binary write the same name, and the read-back can
+        // read the other run's bytes.
+        p.push(b'-');
+        p.extend_from_slice(format!("{}", std::process::id()).as_bytes());
         p.extend_from_slice(b".bin");
         p
     }
