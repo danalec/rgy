@@ -1088,6 +1088,18 @@ fn tick(state: &mut State) -> Control {
         state.in_flight = true;
         return paint(state);
     }
+    // The daemon is not there: the launcher asks again on the clock, and
+    // the line says so until it is. The daemon is a program that can
+    // start after the window opened, and a launcher that says "sem
+    // ligacao ao daemon" about a daemon that is there is a launcher
+    // that lies.
+    if state.status.asked && !state.status.connected {
+        if !state.source.ask_who() {
+            return worker_gone(state);
+        }
+        state.in_flight = true;
+        return paint(state);
+    }
     Control::None
 }
 
@@ -2244,6 +2256,45 @@ mod tests {
         }
         assert!(landed, "the preview landed");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The launcher asks again while the daemon is away.
+    ///
+    /// The daemon comes up after the window opened: the launcher has to
+    /// notice, because the line that says the daemon is not there is a
+    /// line about the daemon that is not there.
+    #[test]
+    fn the_launcher_asks_again_while_the_daemon_is_away() {
+        let (mut state, _asked) = recording();
+        // The daemon was asked and it was not there.
+        state.status.asked = true;
+        state.status.connected = false;
+        // The window is up, and there is no question to ask.
+        state.ask_daemon = false;
+        state.waiting = Waiting::Idle;
+
+        let _ = handle(&mut state, Event::Tick);
+        assert!(
+            state.in_flight,
+            "the launcher asks again: the daemon may have come up"
+        );
+    }
+
+    /// The launcher does not keep asking a daemon that is there.
+    ///
+    /// The question is asked when there is one: a launcher that asks
+    /// the daemon about itself every 120 ms is a launcher that burns a
+    /// machine that is answering.
+    #[test]
+    fn the_launcher_does_not_keep_asking_a_daemon_that_is_there() {
+        let (mut state, _asked) = recording();
+        state.status.asked = true;
+        state.status.connected = true;
+        state.ask_daemon = false;
+        state.waiting = Waiting::Idle;
+
+        let _ = handle(&mut state, Event::Tick);
+        assert!(!state.in_flight, "the launcher is not asking again");
     }
 
     /// The window does not wait for the store.
