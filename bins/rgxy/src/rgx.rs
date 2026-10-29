@@ -37,7 +37,7 @@
 use std::io::BufRead;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rgy_launcher::layer::{ContentMode, content_mode, engine_pattern};
 use rgy_proto::GrepFile;
@@ -59,7 +59,25 @@ pub fn grep(
     paths: &[String],
     window: Duration,
 ) -> Result<Vec<GrepFile>, String> {
-    let scope = only_files(paths);
+    // The window is the budget of the **whole** answer: the scope, the
+    // process and the reading of its output share it. A fallback that
+    // spends the window on the scope is a fallback that answers late.
+    let deadline = Instant::now() + window;
+    let scope = only_files(paths, deadline)?;
+    if Instant::now() >= deadline {
+        // The window is gone before the process even starts: the
+        // fallback gives up rather than answer with what it did not have
+        // the time to look at. A scope that is empty because the window
+        // ran out is not a scope with nothing in it.
+        //
+        // The scope was ready — it was the window that ran out, and the
+        // sentence says so: a fallback that says the scope was not ready
+        // when it was points at the wrong thing.
+        return Err(format!(
+            "o escopo ficou pronto tarde demais: a janela é de {}",
+            said(window)
+        ));
+    }
     if scope.is_empty() {
         return Ok(Vec::new());
     }
@@ -115,7 +133,10 @@ pub fn grep(
         let _ = tx.send(files);
     });
 
-    let files = match within(&rx, window) {
+    // The process is read with what is left of the window: the scope
+    // spent some of it, and the answer is the whole of it.
+    let left = deadline.saturating_duration_since(Instant::now());
+    let files = match within(&rx, left) {
         Ok(files) => files,
         Err(reason) => {
             // The binary is still reading: it is not going to answer, and
@@ -148,16 +169,20 @@ fn within(rx: &mpsc::Receiver<Vec<GrepFile>>, window: Duration) -> Result<Vec<Gr
     match rx.recv_timeout(window) {
         Ok(files) => Ok(files),
         Err(mpsc::RecvTimeoutError::Timeout) => {
-            let said = if window.as_secs() == 0 {
-                format!("{} ms", window.as_millis())
-            } else {
-                format!("{} s", window.as_secs())
-            };
-            Err(format!("o rgx não respondeu em {said}"))
+            Err(format!("o rgx não respondeu em {}", said(window)))
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => {
             Err("o rgx terminou sem responder".to_string())
         }
+    }
+}
+
+/// The window, in a sentence.
+fn said(window: Duration) -> String {
+    if window.as_secs() == 0 {
+        format!("{} ms", window.as_millis())
+    } else {
+        format!("{} s", window.as_secs())
     }
 }
 
@@ -171,12 +196,53 @@ fn within(rx: &mpsc::Receiver<Vec<GrepFile>>, window: Duration) -> Result<Vec<Gr
 ///
 /// A path that is not there any more is dropped for the same reason: the
 /// file it named is gone, and reading it would fail.
-fn only_files(paths: &[String]) -> Vec<String> {
-    paths
-        .iter()
-        .filter(|path| std::fs::metadata(path).is_ok_and(|meta| meta.is_file()))
-        .cloned()
-        .collect()
+///
+/// The stats are the fallback's own deadline: the stat of a path on a
+/// disconnected network drive blocks for the SMB timeout, and a fallback
+/// that waits for it is a fallback that answers late. So the stats run on
+/// their own thread — the caller waits for them within the window that is
+/// left, and a worker that is still blocked when the window is gone is
+/// left behind.
+fn only_files(paths: &[String], deadline: Instant) -> Result<Vec<String>, String> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let started = Instant::now();
+    let (tx, rx) = mpsc::channel();
+    let scope: Vec<String> = paths.to_vec();
+    std::thread::spawn(move || {
+        let _ = tx.send(stat_files(&scope, deadline));
+    });
+    let left = deadline.saturating_duration_since(Instant::now());
+    match rx.recv_timeout(left) {
+        Ok(scope) => Ok(scope),
+        // The stats are still running and the window is gone: the
+        // fallback gives up instead of waiting for a stat that is not
+        // coming back.
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(format!(
+            "o escopo não ficou pronto em {}",
+            said(deadline.saturating_duration_since(started))
+        )),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err("o escopo não ficou pronto".to_string()),
+    }
+}
+
+/// The files of the scope, and the folders left out.
+///
+/// The deadline is checked before every stat: a stat is a call to the
+/// filesystem that cannot be interrupted, and the next one does not start
+/// when the window is gone. The rest of the scope is dropped.
+fn stat_files(paths: &[String], deadline: Instant) -> Vec<String> {
+    let mut scope = Vec::new();
+    for path in paths {
+        if Instant::now() >= deadline {
+            break;
+        }
+        if std::fs::metadata(path).is_ok_and(|meta| meta.is_file()) {
+            scope.push(path.clone());
+        }
+    }
+    scope
 }
 
 /// The pattern, and what it asks for.
@@ -409,9 +475,56 @@ mod tests {
             dir.to_string_lossy().into_owned(),
             file.to_string_lossy().into_owned(),
         ];
-        let kept = only_files(&scope);
+        let kept = only_files(&scope, Instant::now() + Duration::from_secs(5))
+            .expect("the scope resolves");
         assert_eq!(kept.len(), 1, "only the file is kept: {kept:?}");
         assert!(kept[0].ends_with("notes.txt"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The stats of the scope do not outlive the deadline.
+    ///
+    /// The stat of a path on a disconnected network drive blocks for the
+    /// SMB timeout, and the budget of the answer is gone before the grep
+    /// even starts. So the deadline is checked before every stat, and a
+    /// scope whose deadline is gone is not stat'ed at all.
+    #[test]
+    fn the_scope_stats_stop_at_the_deadline() {
+        let dir = std::env::temp_dir().join(format!("rgy-rgxy-deadline-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("notes.txt");
+        std::fs::write(&file, "zebra\n").unwrap();
+        let scope = vec![file.to_string_lossy().into_owned()];
+
+        let gone = Instant::now() - Duration::from_millis(1);
+        let kept = stat_files(&scope, gone);
+        assert!(
+            kept.is_empty(),
+            "the stats do not start after the deadline: {kept:?}"
+        );
+
+        // And the caller does not wait for a stat that is not coming back.
+        let err = only_files(&scope, gone).expect_err("the window is gone");
+        assert!(err.contains("escopo"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The fallback gives up rather than answer late.
+    ///
+    /// A window of nothing is a window that cannot be met: the fallback
+    /// says so instead of answering with what it did not have the time to
+    /// look at.
+    #[test]
+    fn the_fallback_gives_up_when_the_window_is_gone() {
+        let dir = std::env::temp_dir().join(format!("rgy-rgxy-nowindow-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("notes.txt");
+        std::fs::write(&file, "zebra\n").unwrap();
+        let scope = vec![file.to_string_lossy().into_owned()];
+
+        let err = grep("rgx", "grep:zebra", &scope, Duration::ZERO)
+            .expect_err("there was no time to answer");
+        assert!(err.contains("escopo"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
