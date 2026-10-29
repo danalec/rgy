@@ -1941,7 +1941,9 @@ impl Content {
                 out.lock().unwrap().push(c);
             }
         };
-        run_lanes((docs / 25_000).clamp(1, 8), &work);
+        // A lane that panicked here lost its share of the postings; the
+        // index is read from the disk again on the next sync.
+        let _ = run_lanes((docs / 25_000).clamp(1, 8), &work);
         let per = out.into_inner().unwrap();
         let dense = dense.into_inner().map_or(Vec::new(), |d| d.into_iter().map(|w| w.into_inner()).collect());
         Found { per, total: total.into_inner(), dense }
@@ -2227,7 +2229,7 @@ fn par_claim<T: Sync, R: Send>(items: &[T], lanes: usize, f: impl Fn(&T) -> R + 
     use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
     let next = AtomicUsize::new(0);
     let out = std::sync::Mutex::new(Vec::with_capacity(items.len()));
-    run_lanes(lanes, &|| {
+    let _ = run_lanes(lanes, &|| {
         let mut mine = Vec::new();
         loop {
             let i = next.fetch_add(1, Relaxed);
@@ -2314,10 +2316,17 @@ fn helpers() -> &'static Helpers {
 /// when all are done. A lane goes to whichever thread claims it first, so
 /// this never waits on a helper still waking up (~0.1 ms when they sleep):
 /// one that wakes late finds no lane left.
-fn run_lanes(n: usize, job: &(dyn Fn() + Sync)) {
+///
+/// Whether a lane panicked is returned, not asserted. The panic is caught
+/// where it happens — the lane's share of the work is lost — and the caller
+/// has to say so in the answer: the assert that used to be here re-raised a
+/// panic that had already been caught, in the caller's thread, and a daemon
+/// that answers on its main thread took the whole process down with it.
+fn run_lanes(n: usize, job: &(dyn Fn() + Sync)) -> bool {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::*};
     if n <= 1 {
-        return job();
+        // One lane: the panic is caught here too, and the answer says so.
+        return std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)).is_err();
     }
     let h = helpers();
     let job: *const (dyn Fn() + Sync + '_) = job;
@@ -2336,7 +2345,7 @@ fn run_lanes(n: usize, job: &(dyn Fn() + Sync)) {
     while lanes.done.load(Acquire) < n {
         std::thread::yield_now();
     }
-    assert!(!lanes.panicked.load(Relaxed), "a search lane panicked");
+    lanes.panicked.load(Relaxed)
 }
 
 /// Take the `FIRST` best-ranked candidates out of the segments', in order.
@@ -2694,6 +2703,14 @@ pub struct GrepResult {
     pub complete: bool,
     /// The files that were not read, and why.
     pub skipped: Vec<Skipped>,
+    /// Why the search failed, when it failed.
+    ///
+    /// A lane that panicked is caught where it happens — the lane's share
+    /// of the work is lost — and the answer says so here: a search that
+    /// lost a lane is not the search that was asked for, and the reader
+    /// has to know which one it got. The panic used to be re-raised in
+    /// the caller's thread, and the daemon answers on its main thread.
+    pub error: Option<String>,
 }
 
 /// A file the search did not read, and why.
@@ -2895,7 +2912,7 @@ fn verify_from<'a>(
             }
         });
     };
-    without_materializing(|| run_lanes(readers, &work));
+    let panicked = without_materializing(|| run_lanes(readers, &work));
     let mut hits = hits.into_inner().unwrap();
     // The candidates come in rank order and the documents of one candidate
     // come in the order the adapter produced them, so the path breaks the
@@ -2909,7 +2926,10 @@ fn verify_from<'a>(
     skipped.sort_by(|a, b| a.path.cmp(&b.path));
     let done = next.into_inner().min(n);
     let complete = done == n || hits.len() >= limit;
-    (GrepResult { files: hits.into_iter().map(|h| h.1).collect(), candidates: n, read: read.into_inner(), complete, skipped }, done)
+    // A lane that panicked lost its share of the reads: the answer is
+    // what the other lanes found, and the answer says so.
+    let error = panicked.then(|| "a search lane panicked: the answer is what the other lanes found".to_string());
+    (GrepResult { files: hits.into_iter().map(|h| h.1).collect(), candidates: n, read: read.into_inner(), complete, skipped, error }, done)
 }
 
 std::thread_local! {
@@ -3656,6 +3676,18 @@ fn regex_plan(a: &Ast) -> TQ {
     info(a).query()
 }
 
+/// The most candidates a scan names, whatever the request asked for.
+const MAX_CANDIDATES: usize = 200_000;
+
+/// How many candidates a file of the answer is worth.
+///
+/// The limit is how many files the answer carries; the candidates are the
+/// files that might carry them, and most of them do not. Without a factor
+/// the scan would read exactly as many candidates as the answer has files
+/// and answer with the one that matched — a different answer from "ten
+/// files, one of which matches".
+const CANDIDATES_PER_FILE: usize = 16;
+
 /// Files to grep where the content index does not reach (e.g. `in:/etc`),
 /// picked from the name index instead of crawling, newest first. `q` is the
 /// name query restricted to the files worth reading.
@@ -3665,7 +3697,19 @@ fn regex_plan(a: &Ast) -> TQ {
 /// to become openable filesystem paths. Overlay paths are already real.
 pub fn scan_paths(root: &[u8], live: &Live, mut q: Query) -> Vec<Vec<u8>> {
     q.kind = Some(KIND_FILE);
-    q.limit = 200_000;
+    // The candidates the request's limit buys, and no more.
+    //
+    // The limit is how many files the answer carries; the candidates are
+    // the files that might carry them, and most of them do not. The hard
+    // cap is the ceiling and not the floor: the scan used to name two
+    // hundred thousand paths for a request that asked for ten files,
+    // which is tens of megabytes and a full pass over the index to
+    // answer ten.
+    q.limit = q
+        .limit
+        .max(1)
+        .saturating_mul(CANDIDATES_PER_FILE)
+        .min(MAX_CANDIDATES);
     q.size = (q.size.0, q.size.1.min(MAX_FILE));
     let mut files: Vec<(Vec<u8>, u32)> = (crate::name_query::Searcher { live }.search(&q).into_iter())
         .map(|h| match h.over {

@@ -55,6 +55,15 @@ const REPORT_EVERY: Duration = Duration::from_millis(500);
 const CATCH_UP_REPLAYED: u8 = 0;
 const CATCH_UP_RELISTED: u8 = 1;
 
+/// How long the startup waits for the live feed to be armed.
+///
+/// The feed has to be armed before the tree is walked again — a change that
+/// happens while the walk runs must not be missed by both — and the status
+/// answer has to know whether the tree is followed. The wait is bounded: a
+/// feed that takes this long to open is a platform that is slow, and the
+/// daemon answers rather than waits for it.
+const FEED_ARM_WAIT: Duration = Duration::from_secs(5);
+
 struct Ctx {
     root: Vec<u8>,
     home: String,
@@ -102,6 +111,19 @@ struct Ctx {
     /// watch thread corrects it to "relisted" when the feed loses its
     /// history, because then nothing was replayed.
     catch_up: std::sync::atomic::AtomicU8,
+    /// The state of the live-change feed, as the status answer reports it.
+    ///
+    /// The protocol's status shape has no room for it, and a daemon whose
+    /// feed died answers on a frozen index: a reader that is not told that
+    /// the tree is no longer followed is told a tree that is.
+    feed: std::sync::atomic::AtomicU8,
+    /// The bell the content thread waits on.
+    ///
+    /// The content thread used to re-diff the whole index twenty times a
+    /// second; the tree does not change twenty times a second. It waits
+    /// here instead, and the watch thread rings the bell when the overlay
+    /// moved.
+    changed: Changed,
     /// The content index, when the daemon has built one.
     ///
     /// The trigram postings are what let a `grep:` rule most files out
@@ -153,6 +175,21 @@ impl Ctx {
     /// tree was walked again and the answer has to change with it.
     fn set_relisted(&self) {
         self.catch_up.store(CATCH_UP_RELISTED, Ordering::Relaxed);
+    }
+
+    /// The feed's state, as the status answer reports it.
+    fn feed_state(&self) -> rgy_proto::Feed {
+        match self.feed.load(Ordering::Relaxed) {
+            FEED_LIVE => rgy_proto::Feed::Live,
+            FEED_GONE => rgy_proto::Feed::Gone,
+            _ => rgy_proto::Feed::None,
+        }
+    }
+
+    /// The feed died: the tree is not followed any more, and the answer
+    /// has to say so.
+    fn set_feed_gone(&self) {
+        self.feed.store(FEED_GONE, Ordering::Relaxed);
     }
 
     /// Search the alternatives through the client's session.
@@ -209,6 +246,112 @@ impl Ctx {
         let mut sessions = self.sessions.lock().unwrap();
         sessions.retain(|_, s| !s.idle_for(idle));
     }
+}
+
+/// The feed's state, as the status answer reports it.
+///
+/// The protocol's status shape has no room for it, and a daemon whose
+/// feed died answers on a frozen index: a reader that is not told that
+/// the tree is no longer followed is told a tree that is.
+const FEED_NONE: u8 = 0;
+/// The feed runs: the tree is followed.
+const FEED_LIVE: u8 = 1;
+/// The feed died: the index is a snapshot from here on.
+const FEED_GONE: u8 = 2;
+
+/// The bell the content thread waits on.
+///
+/// The content thread used to re-diff the whole index twenty times a
+/// second — a full pass over every path, a `Vec` per file and a sort —
+/// and the tree does not change twenty times a second. It waits here
+/// instead: the watch thread rings the bell when the overlay moved (the
+/// feed's position and the overlay's own revision both move with the
+/// tree), and the thread wakes for that and for nothing else.
+struct Changed {
+    /// How many times the tree has moved.
+    times: std::sync::Mutex<u64>,
+    /// Woken when it has.
+    bell: std::sync::Condvar,
+}
+
+impl Changed {
+    const fn new() -> Changed {
+        Changed {
+            times: std::sync::Mutex::new(0),
+            bell: std::sync::Condvar::new(),
+        }
+    }
+
+    /// The tree moved: wake the thread that waits for it.
+    fn ring(&self) {
+        let mut times = self.times.lock().unwrap();
+        *times += 1;
+        self.bell.notify_all();
+    }
+
+    /// How many times the tree has moved so far.
+    fn count(&self) -> u64 {
+        *self.times.lock().unwrap()
+    }
+
+    /// Wait until the tree has moved more than `after` times.
+    fn wait(&self, after: u64) -> u64 {
+        let mut times = self.times.lock().unwrap();
+        while *times <= after {
+            times = self.bell.wait(times).unwrap();
+        }
+        *times
+    }
+}
+
+/// What the daemon answers with.
+///
+/// The frames of the protocol, and the one the daemon writes itself: the
+/// status frame carries a fact the protocol's status shape has no room
+/// for — whether the tree is still being followed — and the field is
+/// additive, so a reader that does not know it reads the status as it
+/// was before it existed.
+#[derive(Debug)]
+enum Answer {
+    /// A frame of the protocol.
+    Frame(Response),
+    /// A line the daemon wrote.
+    Line(String),
+}
+
+impl Answer {
+    /// The line this answer is written as.
+    fn to_json(&self) -> String {
+        match self {
+            Answer::Frame(r) => r.to_json(),
+            Answer::Line(l) => l.clone(),
+        }
+    }
+}
+
+/// The status answer: the protocol's frame with the feed's state added.
+///
+/// The protocol's status shape is four fields, and the daemon knows a
+/// fifth one: whether the tree is still being followed. The four fields
+/// are the protocol's, byte for byte — the frame is the protocol's own —
+/// and the fifth is added to it. The field is additive: a reader that
+/// does not know it reads the status as it was before it existed.
+fn status_frame(ctx: &Ctx) -> String {
+    let live = ctx.live.read().unwrap();
+    Response::Status {
+        docs: live.base.n - live.dead_count + live.over.len(),
+        event_id: live.event_id,
+        catch_up: ctx.catch_up(),
+        // Whether the content layer is answered by the pack store
+        // or by a walk. A client that knows the difference can say
+        // which one it is getting.
+        tv: ctx.tv_dir.is_some(),
+        // Whether the tree is still being followed. The field is the
+        // protocol's: the daemon says what the feed is doing, and the
+        // wire is where the things that go on it are spelled.
+        feed: ctx.feed_state(),
+    }
+    .to_json()
 }
 
 /// Print usage and leave. `code` is the exit status: 0 when the user asked
@@ -353,17 +496,20 @@ fn main() {
         };
         base.with_extension("content")
     };
+    let live = Live::with_root(startup.index, root.as_bytes());
     let ctx = std::sync::Arc::new(Ctx {
         root: root.as_bytes().to_vec(),
         home: std::env::var("USERPROFILE")
             .or_else(|_| std::env::var("HOME"))
             .unwrap_or_default(),
         tv_dir,
-        live: std::sync::RwLock::new(Live::with_root(startup.index, root.as_bytes())),
+        live: std::sync::RwLock::new(live),
         catch_up: std::sync::atomic::AtomicU8::new(match startup.catch_up {
             CatchUp::Replayed => CATCH_UP_REPLAYED,
             CatchUp::Relisted => CATCH_UP_RELISTED,
         }),
+        feed: std::sync::atomic::AtomicU8::new(FEED_NONE),
+        changed: Changed::new(),
         content: std::sync::Mutex::new(None),
         wants_content: std::sync::atomic::AtomicBool::new(false),
         sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -371,7 +517,33 @@ fn main() {
 
     // Keep the index fresh as the tree changes (the Watch thread); queries
     // keep answering on the last state while an apply is in flight.
-    spawn_watch(&ctx, &startup.journal, startup.watermark);
+    //
+    // The feed is armed before the tree is walked again: a change that
+    // happens while the walk runs must not be missed by both.
+    let armed = spawn_watch(&ctx, &startup.journal, startup.watermark);
+    // The feed is armed before the daemon answers: the tree may be walked
+    // again (a change that happens while the walk runs must not be missed by
+    // both), and the status answer says whether the tree is followed.
+    if armed.recv_timeout(FEED_ARM_WAIT).is_err() {
+        rgy_engine::errln!(
+            "searchd: the live feed is not armed yet: a change may be missed while it opens"
+        );
+    }
+    if startup.relist {
+        // The tree is walked again and diffed, so "relisted" means what the
+        // protocol says it means. The walk happens before the first answer:
+        // a daemon that said "relisted" without having walked would be
+        // answering on a snapshot and saying it had not.
+        let listed = {
+            let live = ctx.live.read().unwrap();
+            list_all(&live, root.as_bytes())
+        };
+        {
+            let mut live = ctx.live.write().unwrap();
+            apply_all(&mut live, listed);
+        }
+        rgy_engine::errln!("searchd: the tree was walked again and diffed");
+    }
 
     // Give the query cache back while nobody is typing (the trim thread).
     spawn_trim(&ctx);
@@ -416,6 +588,13 @@ struct Ready {
     index: Index,
     /// How this process caught up.
     catch_up: CatchUp,
+    /// Whether the tree has to be walked again before the daemon answers.
+    ///
+    /// "Relisted" is the protocol's word for a tree that was walked again
+    /// and diffed, so a daemon that says it has to have done it. A saved
+    /// index is a snapshot: the files created since it was built are not
+    /// in it, and the answer would be missing them.
+    relist: bool,
     /// The platform's change journal, when there is one.
     journal: Journal,
     /// The change-feed position the index is current as of (0: none).
@@ -677,6 +856,10 @@ fn open_index(
                         return Ready {
                             index: idx,
                             catch_up: CatchUp::Replayed,
+                            // The journal is resumed: the backlog it
+                            // delivers is the gap, and nothing has to be
+                            // walked.
+                            relist: false,
                             journal,
                             watermark: at,
                         };
@@ -693,6 +876,12 @@ fn open_index(
                         return Ready {
                             index: idx,
                             catch_up: CatchUp::Relisted,
+                            // The tree is walked again: the saved index is
+                            // a snapshot, and the files created since it
+                            // was built are not in it. "Relisted" means the
+                            // tree was walked again and diffed, so the walk
+                            // has to happen before the daemon answers.
+                            relist: true,
                             journal,
                             watermark: 0,
                         };
@@ -714,6 +903,15 @@ fn open_index(
     // The platform walk where one exists,
     // the portable walk where none does or where the native one refuses.
     let source = rgy_discovery_dispatch::source_for(root.as_bytes().to_vec(), threads);
+    // Which backend walks the tree: the MFT where the platform has one,
+    // the portable walk where it does not or where the native one
+    // refuses. The pick is the dispatch crate's whole reason to exist,
+    // and a reader that cannot see it cannot tell a fast walk from a
+    // slow one.
+    rgy_engine::errln!(
+        "searchd: walking the tree with the {} backend",
+        source.backend_name()
+    );
     // The first thing a daemon does is walk a tree it was pointed at, and
     // that is the longest silent stretch in the program. Report it, and let
     // Ctrl-C stop it cleanly instead of killing the daemon mid-build.
@@ -771,6 +969,8 @@ fn open_index(
     Ready {
         index: idx,
         catch_up: CatchUp::Relisted,
+        // The tree was just walked: there is nothing left to walk.
+        relist: false,
         journal,
         watermark,
     }
@@ -791,9 +991,9 @@ fn run_stream(input: impl BufRead, mut out: impl Write, ctx: &std::sync::Arc<Ctx
             continue;
         }
         let responses = match Request::from_json(line) {
-            None => vec![Response::Error {
+            None => vec![Answer::Frame(Response::Error {
                 message: "malformed request".into(),
-            }],
+            })],
             Some(req) => handle(req, ctx),
         };
         for r in responses {
@@ -803,7 +1003,7 @@ fn run_stream(input: impl BufRead, mut out: impl Write, ctx: &std::sync::Arc<Ctx
     }
 }
 
-fn handle(req: Request, ctx: &Ctx) -> Vec<Response> {
+fn handle(req: Request, ctx: &Ctx) -> Vec<Answer> {
     keep_warm(Duration::from_millis(250));
     // `keep_warm` only sets two atomics and unparks the spinner, so starting
     // the clock here measures the request and not the warm window. This used
@@ -814,22 +1014,17 @@ fn handle(req: Request, ctx: &Ctx) -> Vec<Response> {
         Request::Status => {
             // The live index, not the snapshot it was built from: a reader
             // asking how big the index is wants the answer as it stands.
-            let live = ctx.live.read().unwrap();
-            responses.push(Response::Status {
-                docs: live.base.n - live.dead_count + live.over.len(),
-                event_id: live.event_id,
-                catch_up: ctx.catch_up(),
-                // Whether the content layer is answered by the pack store
-                // or by a walk. A client that knows the difference can say
-                // which one it is getting.
-                tv: ctx.tv_dir.is_some(),
-            });
+            //
+            // The frame is the daemon's own: the protocol's status shape
+            // has no room for the feed's state, and a daemon whose feed
+            // died answers on a frozen index.
+            responses.push(Answer::Line(status_frame(ctx)));
         }
         Request::Search { q, limit, session } => match Alternatives::parse(&q, &ctx.home) {
-            Err(e) => responses.push(Response::Error { message: e }),
+            Err(e) => responses.push(Answer::Frame(Response::Error { message: e })),
             Ok(alts) => {
                 for w in &alts.warnings {
-                    responses.push(Response::Warning { message: w.clone() });
+                    responses.push(Answer::Frame(Response::Warning { message: w.clone() }));
                 }
                 let live_guard = ctx.live.read().unwrap();
                 let searcher = Searcher { live: &live_guard };
@@ -870,18 +1065,22 @@ fn handle(req: Request, ctx: &Ctx) -> Vec<Response> {
                             // The overlay's paths are the index's internal
                             // form (`/`); the answer is the platform's.
                             Some(path) => {
-                                let text = String::from_utf8_lossy(path).into_owned();
+                                // The path is spelled the way the tree spells it,
+                                // and a path that is not UTF-8 is spelled with a
+                                // replacement character — and the count of those
+                                // is said out loud (console::spell).
+                                let text = rgy_engine::console::spell(path);
                                 let name =
                                     text.rsplit(['/', '\\']).next().unwrap_or(&text).to_string();
                                 (text.replace('/', std::path::MAIN_SEPARATOR_STR), name)
                             }
                             None => {
                                 live_guard.base.path(h.idx as usize, &mut buf);
-                                let rel = String::from_utf8_lossy(&buf).into_owned();
+                                let rel = rgy_engine::console::spell(&buf);
                                 buf.clear();
                                 let name =
                                     rel.rsplit(['/', '\\']).next().unwrap_or(&rel).to_string();
-                                let mut full = String::from_utf8_lossy(&ctx.root).into_owned();
+                                let mut full = rgy_engine::console::spell(&ctx.root);
                                 let rel = rel.trim_start_matches(['/', '\\']);
                                 if !rel.is_empty() {
                                     full.push(std::path::MAIN_SEPARATOR);
@@ -923,11 +1122,11 @@ fn handle(req: Request, ctx: &Ctx) -> Vec<Response> {
                     .collect();
                 let count = wire.len();
                 let took = t0.elapsed().as_micros() as u64;
-                responses.push(Response::Hits {
+                responses.push(Answer::Frame(Response::Hits {
                     hits: wire,
                     took_us: took,
-                });
-                responses.push(Response::Done { count });
+                }));
+                responses.push(Answer::Frame(Response::Done { count }));
             }
         },
         Request::Grep { q, limit } => responses.extend(grep(&q, limit, ctx)),
@@ -962,19 +1161,19 @@ fn handle(req: Request, ctx: &Ctx) -> Vec<Response> {
 /// The pattern is the query language's: `grep:` is literal and `regex:` is
 /// a regex, and a bare word is literal — the same words the rest of rgy
 /// answers with, so the second layer speaks the first layer's language.
-fn scoped_content(q: &str, paths: &[String], limit: usize, ctx: &Ctx) -> Vec<Response> {
+fn scoped_content(q: &str, paths: &[String], limit: usize, ctx: &Ctx) -> Vec<Answer> {
     let t0 = Instant::now();
     let home = ctx.home.clone();
     let alts = match Alternatives::parse(q, &home) {
         Ok(a) => a,
-        Err(e) => return vec![Response::Error { message: e }],
+        Err(e) => return vec![Answer::Frame(Response::Error { message: e })],
     };
     // The warnings travel with the answer: a query that failed closed is
     // part of what the client has to show.
-    let mut out: Vec<Response> = alts
+    let mut out: Vec<Answer> = alts
         .warnings
         .iter()
-        .map(|w| Response::Warning { message: w.clone() })
+        .map(|w| Answer::Frame(Response::Warning { message: w.clone() }))
         .collect();
     // The pattern and its mode, from the first alternative that carries
     // one. A bare word is a literal, and `regex:` asks for the engine.
@@ -987,11 +1186,14 @@ fn scoped_content(q: &str, paths: &[String], limit: usize, ctx: &Ctx) -> Vec<Res
     // The scope, in the bytes the filesystem speaks.
     let scope: Vec<Vec<u8>> = paths.iter().map(|p| p.as_bytes().to_vec()).collect();
     if scope.is_empty() {
-        out.push(Response::GrepFiles {
+        out.push(Answer::Frame(Response::GrepFiles {
             files: Vec::new(),
             took_us: t0.elapsed().as_micros() as u64,
-        });
-        out.push(Response::Done { count: 0 });
+            // Nothing was to be read, and nothing was left out.
+            complete: true,
+            skipped: 0,
+        }));
+        out.push(Answer::Frame(Response::Done { count: 0 }));
         return out;
     }
 
@@ -1008,22 +1210,27 @@ fn scoped_content(q: &str, paths: &[String], limit: usize, ctx: &Ctx) -> Vec<Res
                     })
                     .collect();
                 let count = files.len();
-                out.push(Response::GrepFiles {
+                out.push(Answer::Frame(Response::GrepFiles {
                     files,
                     took_us: t0.elapsed().as_micros() as u64,
-                });
-                out.push(Response::Done { count });
+                    // The store searched the corpus whole, and the scope
+                    // is what its answer was filtered by: every file in
+                    // the scope was read.
+                    complete: true,
+                    skipped: 0,
+                }));
+                out.push(Answer::Frame(Response::Done { count }));
                 out
             }
-            Err(e) => vec![Response::Error {
+            Err(e) => vec![Answer::Frame(Response::Error {
                 message: format!("tv store: {e}"),
-            }],
+            })],
         };
     }
 
     let g = match Grep::new(&pattern, mode) {
         Ok(g) => g,
-        Err(e) => return vec![Response::Error { message: e }],
+        Err(e) => return vec![Answer::Frame(Response::Error { message: e })],
     };
 
     // 2. The files: the ones the adapters claim are read through them, and
@@ -1034,6 +1241,15 @@ fn scoped_content(q: &str, paths: &[String], limit: usize, ctx: &Ctx) -> Vec<Res
     // and building it again for every keystroke of the second layer would
     // cost more than the search it serves.
     let res = content::verify_paths_with(&g, &scope, limit, Some(&rgy_adapters::Adapters));
+    if let Some(why) = res.error.clone() {
+        // A lane panicked: the answer is what the other lanes found, and it
+        // says so rather than pretending.
+        return vec![Answer::Frame(Response::Error { message: why })];
+    }
+    // What the search did not read, said on the wire: a truncated search
+    // and a complete one are different answers.
+    let complete = res.complete;
+    let skipped = res.skipped.len();
     let mut files: Vec<GrepFile> = Vec::new();
     for f in res.files {
         files.push(GrepFile {
@@ -1043,11 +1259,13 @@ fn scoped_content(q: &str, paths: &[String], limit: usize, ctx: &Ctx) -> Vec<Res
     }
 
     let count = files.len();
-    out.push(Response::GrepFiles {
+    out.push(Answer::Frame(Response::GrepFiles {
         files,
         took_us: t0.elapsed().as_micros() as u64,
-    });
-    out.push(Response::Done { count });
+        complete,
+        skipped,
+    }));
+    out.push(Answer::Frame(Response::Done { count }));
     out
 }
 
@@ -1080,14 +1298,14 @@ fn same_path(a: &[u8], b: &[u8]) -> bool {
 /// The five indexes answer it: the `file_path` and `folder_path` indexes
 /// give the path of the entry, and the `folder_backend` index the volume
 /// that owns the folder.
-fn resolve(path: &str, ctx: &Ctx) -> Response {
+fn resolve(path: &str, ctx: &Ctx) -> Answer {
     let live_guard = ctx.live.read().unwrap();
     let index = &live_guard.base;
     let lookup = rgy_name_core::lookup::Lookup::new(index);
     let Some(entry) = index.lookup(path.as_bytes()) else {
-        return Response::Error {
+        return Answer::Frame(Response::Error {
             message: format!("no entry at {path}"),
-        };
+        });
     };
     let kind = index.kind()[entry as usize] & 3;
     let folder = kind == rgy_discovery::walk::KIND_DIR;
@@ -1104,14 +1322,14 @@ fn resolve(path: &str, ctx: &Ctx) -> Response {
                 .map_or(0, |b| b.id()),
         }
     };
-    Response::Resolved {
+    Answer::Frame(Response::Resolved {
         path: rgy_engine::console::spell(&lookup.file_path(entry)),
         folder,
         backend,
-    }
+    })
 }
 
-fn grep(q: &str, limit: usize, ctx: &Ctx) -> Vec<Response> {
+fn grep(q: &str, limit: usize, ctx: &Ctx) -> Vec<Answer> {
     let t0 = Instant::now();
     let mut files: Vec<GrepFile> = Vec::new();
     // TV pack store answers when the daemon was given one: the corpus
@@ -1145,34 +1363,36 @@ fn grep(q: &str, limit: usize, ctx: &Ctx) -> Vec<Response> {
                             }
                         }
                         Err(e) => {
-                            return vec![Response::Error {
+                            return vec![Answer::Frame(Response::Error {
                                 message: format!("tv store: {e}"),
-                            }];
+                            })];
                         }
                     }
                 }
             }
-            Err(e) => return vec![Response::Error { message: e }],
+            Err(e) => return vec![Answer::Frame(Response::Error { message: e })],
         }
         let count = files.len();
         let took = t0.elapsed().as_micros() as u64;
         return vec![
-            Response::GrepFiles {
+            Answer::Frame(Response::GrepFiles {
                 files,
                 took_us: took,
-            },
-            Response::Done { count },
+                // The store searched the corpus whole; the limit is what
+                // can cut the answer short.
+                complete: count < limit,
+                skipped: 0,
+            }),
+            Answer::Frame(Response::Done { count }),
         ];
     }
     match Alternatives::parse(q, &ctx.home) {
-        Err(e) => vec![Response::Error { message: e }],
+        Err(e) => vec![Answer::Frame(Response::Error { message: e })],
         Ok(alts) => {
             let mut out = Vec::new();
             for w in &alts.warnings {
-                out.push(Response::Warning { message: w.clone() });
+                out.push(Answer::Frame(Response::Warning { message: w.clone() }));
             }
-            let live_guard = ctx.live.read().unwrap();
-            let searcher = Searcher { live: &live_guard };
             let mut jobs: Vec<(String, rgy_name_core::name_query::GrepMode, Query)> = Vec::new();
             for alt in &alts.alts {
                 match &alt.grep {
@@ -1184,10 +1404,22 @@ fn grep(q: &str, limit: usize, ctx: &Ctx) -> Vec<Response> {
                     )),
                 }
             }
-            for (pat, mode, filt) in jobs {
+            // What the search did not read, said on the wire: the facts
+            // of every alternative are the facts of the answer.
+            let mut complete = true;
+            let mut skipped = 0usize;
+            for (pat, mode, mut filt) in jobs {
                 let Ok(g) = Grep::new(&pat, mode) else {
                     continue;
                 };
+                // The request's limit is the limit. The candidates the scan
+                // names and the files the index found are both counted
+                // against it, so a query with three alternatives answers
+                // with the limit and not three times the limit: the name
+                // path merges its alternatives and truncates
+                // (name_query::merge_hits), and the content path has to say
+                // the same thing.
+                filt.limit = limit;
                 // The content index, when the daemon has one: the postings
                 // rule most files out before they are read, and the files
                 // the index cannot vouch for are read anyway. The union is
@@ -1197,36 +1429,47 @@ fn grep(q: &str, limit: usize, ctx: &Ctx) -> Vec<Response> {
                 // thread that builds it starts then, and a daemon that is
                 // never asked to grep never pays for one.
                 ctx.wants_content.store(true, Ordering::Relaxed);
-                // The index is behind a lock the builder also wants, and
-                // reading a file is I/O the builder must not wait for: the
-                // lock covers the plan (what the index covers and what it
-                // found) and not the reads.
+                // The plan is the only part that needs the live index: it
+                // says which candidates there are. The reads below are I/O
+                // — up to the whole budget — and the feed's writer must not
+                // be held off for them, so the lock covers the plan and not
+                // the reads.
                 let (covered, bare, mut r) = {
                     let index = ctx.content.lock().unwrap();
+                    let live = ctx.live.read().unwrap();
                     content::plan(
                         &g,
                         &filt,
                         &ctx.root,
-                        searcher.live,
+                        &live,
                         ctx.home.as_bytes(),
                         index.as_ref(),
                     )
                 };
                 r.files.retain(|f| covered.contains(&f.path));
+                // The room the answer has left, across the alternatives.
+                let room = limit.saturating_sub(files.len() + r.files.len());
                 // The same reader the scoped route uses: a file the
                 // adapters claim is read through them, whichever route the
                 // query took.
                 let rest = content::verify_paths_with(
                     &g,
                     &bare,
-                    limit.saturating_sub(r.files.len()),
+                    room,
                     Some(&rgy_adapters::Adapters),
                 );
+                if let Some(why) = r.error.clone().or_else(|| rest.error.clone()) {
+                    // A lane panicked: the answer is what the other lanes
+                    // found, and it says so rather than pretending.
+                    return vec![Answer::Frame(Response::Error { message: why })];
+                }
                 r.files.extend(rest.files);
                 r.read += rest.read;
                 r.skipped.extend(rest.skipped);
                 r.candidates = covered.len() + bare.len();
                 r.complete = r.files.len() < limit && rest.complete;
+                complete = complete && r.complete;
+                skipped += r.skipped.len();
                 for f in r.files {
                     files.push(GrepFile {
                         path: rgy_engine::console::spell(&f.path),
@@ -1234,19 +1477,29 @@ fn grep(q: &str, limit: usize, ctx: &Ctx) -> Vec<Response> {
                     });
                 }
             }
+            // The limit is the limit, across the alternatives: the request
+            // asked for ten files and ten files is what it gets. The room
+            // above keeps the reads inside it; this keeps the index's own
+            // matches inside it too.
+            files.truncate(limit);
             let count = files.len();
             let took = t0.elapsed().as_micros() as u64;
-            out.push(Response::GrepFiles {
+            out.push(Answer::Frame(Response::GrepFiles {
                 files,
                 took_us: took,
-            });
-            out.push(Response::Done { count });
+                complete,
+                skipped,
+            }));
+            out.push(Answer::Frame(Response::Done { count }));
             out
         }
     }
 }
 
 // --- the rgx --serve compatibility front -----------------------------------
+
+/// How many files the compatibility front answers with.
+const SERVE_LIMIT: usize = 100;
 
 fn serve_stream(mut input: impl BufRead, mut out: impl Write, ctx: &Ctx) {
     use rgx_core::djson;
@@ -1359,11 +1612,24 @@ fn serve_stream(mut input: impl BufRead, mut out: impl Write, ctx: &Ctx) {
             // pay for a tree it did not ask about — that is the difference
             // between a search and a walk.
             let paths: Vec<Vec<u8>> = if scope.is_empty() {
-                content::scan_paths(&ctx.root, searcher.live, Query::default())
+                // The candidates the scan names are the request's limit
+                // worth, and the hard cap is the ceiling: the whole tree is
+                // not enumerated to answer a hundred files.
+                let q = Query {
+                    limit: SERVE_LIMIT,
+                    ..Default::default()
+                };
+                content::scan_paths(&ctx.root, searcher.live, q)
             } else {
                 scope.iter().map(|p| p.as_bytes().to_vec()).collect()
             };
-            let res = content::verify(&g, &paths, 100);
+            let res = content::verify(&g, &paths, SERVE_LIMIT);
+            if let Some(why) = res.error.clone() {
+                // A lane panicked: the answer is what the other lanes found,
+                // and it says so rather than pretending.
+                serve_end(&mut out, seq, &tag, 2, false, Some(&why));
+                continue;
+            }
             for f in &res.files {
                 matched = true;
                 serve_file(&mut out, &rgy_engine::console::spell(&f.path), &f.lines);
@@ -1619,7 +1885,7 @@ fn spawn_trim(ctx: &std::sync::Arc<Ctx>) {
 fn spawn_content(ctx: &std::sync::Arc<Ctx>, dir: std::path::PathBuf) {
     /// How many files a batch indexes.
     const BATCH: usize = 512;
-    /// How long the thread waits between batches.
+    /// How long the thread waits for a content search to ask for an index.
     const TICK: std::time::Duration = std::time::Duration::from_millis(50);
 
     let ctx = ctx.clone();
@@ -1630,11 +1896,16 @@ fn spawn_content(ctx: &std::sync::Arc<Ctx>, dir: std::path::PathBuf) {
             while !ctx.wants_content.load(Ordering::Relaxed) {
                 std::thread::sleep(TICK);
             }
-            loop {
-                let live = match ctx.live.read() {
-                    Ok(l) => l,
-                    Err(_) => break,
-                };
+            // The diff: what should be indexed there, against what is indexed
+            // now.
+            //
+            // It is the expensive half — it walks the whole index, rebuilds
+            // every path and sorts them — and the tree does not change twenty
+            // times a second. So it runs when the tree moved, and the build
+            // works through what it returned instead of asking again after
+            // every batch.
+            let diff = || {
+                let live = ctx.live.read().unwrap();
                 // What should be indexed there: the cheap half,
                 // over the metadata the live index already holds.
                 // The root's tree, so a file that appeared while
@@ -1647,26 +1918,55 @@ fn spawn_content(ctx: &std::sync::Arc<Ctx>, dir: std::path::PathBuf) {
                     &ctx.root,
                 );
                 drop(live);
-                let todo = {
+                let mut g = ctx.content.lock().unwrap();
+                let c = g.get_or_insert_with(|| content::Content::open(dir.clone()));
+                c.diff(wants)
+            };
+            // The docs to index, and how far the build got through them.
+            // `None` until the first diff: the content index is empty then,
+            // and everything in the tree is missing from it.
+            let mut todo: Option<content::Docs> = None;
+            let mut at = 0usize;
+            // The tree as it was when the todo was made.
+            let mut seen = ctx.changed.count();
+            loop {
+                let done = match &todo {
+                    None => true,
+                    Some(docs) => at >= docs.len(),
+                };
+                if done {
+                    if todo.is_some() {
+                        // Nothing left to build: wait for the tree to move.
+                        // The watch thread rings the bell when the overlay
+                        // moved, and the tree does not move on its own.
+                        seen = ctx.changed.wait(seen);
+                    }
+                    todo = Some(diff());
+                    at = 0;
+                    continue;
+                }
+                if ctx.changed.count() != seen {
+                    // The tree moved while the batch was being built: the diff
+                    // runs again, so the build works on what the tree holds
+                    // now.
+                    seen = ctx.changed.count();
+                    todo = Some(diff());
+                    at = 0;
+                    continue;
+                }
+                let Some(docs) = todo.as_ref() else { continue };
+                let n = (docs.len() - at).min(BATCH);
+                // Each batch is a segment of its own, and the segment's id
+                // comes from the index that will hold it.
+                let id = {
                     let mut g = ctx.content.lock().unwrap();
                     let c = g.get_or_insert_with(|| content::Content::open(dir.clone()));
-                    let todo = c.diff(wants);
-                    let n = todo.len().min(BATCH);
-                    if n == 0 {
-                        None
-                    } else {
-                        let id = c.alloc_id();
-                        Some((todo, id, n))
-                    }
-                };
-                let Some((todo, id, n)) = todo else {
-                    std::thread::sleep(TICK);
-                    continue;
+                    c.alloc_id()
                 };
                 // The build reads the files, so it happens with
                 // the lock released: a search that runs beside it
                 // must not wait for a read of the whole batch.
-                if let Some(seg) = content::build_segment(&dir, id, &todo, 0..n) {
+                if let Some(seg) = content::build_segment(&dir, id, docs, at..at + n) {
                     // The segments pile up: a batch of files is a
                     // segment, and a thousand batches are a
                     // thousand segments to read on every query. The
@@ -1695,16 +1995,29 @@ fn spawn_content(ctx: &std::sync::Arc<Ctx>, dir: std::path::PathBuf) {
                         }
                     }
                 }
+                at += n;
             }
         });
 }
 
-/// Spawn the live-update thread: build the platform `Watch` for `ctx.root` and
-/// apply its change batches to `ctx.live`, taking the write lock *per batch*
-/// so queries interleave (holding it across the feed would block them all).
-/// If no feed opens, the thread just stops -- the daemon answers on its
-/// snapshot rather than refusing to start.
-fn spawn_watch(ctx: &std::sync::Arc<Ctx>, journal: &Journal, watermark: u64) {
+/// Spawn the live-update thread: apply the platform `Watch`'s change batches
+/// to `ctx.live`, taking the write lock *per batch* so queries interleave
+/// (holding it across the feed would block them all).
+///
+/// The feed is opened before the thread starts: the tree is walked again
+/// after that, and a change that happens during the walk must not be missed
+/// by both. If there is no feed, the thread just stops -- the daemon answers
+/// on its snapshot rather than refusing to start.
+fn spawn_watch(
+    ctx: &std::sync::Arc<Ctx>,
+    journal: &Journal,
+    watermark: u64,
+) -> std::sync::mpsc::Receiver<()> {
+    // The feed is armed in this thread and not in the caller: the watch is
+    // not `Send`, and the caller has to know when the feed is armed anyway.
+    // The receiver is the signal, and it is sent once the feed is open (or
+    // once it is known that there is none).
+    let (armed, signal) = std::sync::mpsc::sync_channel(1);
     let ctx = ctx.clone();
     let root = ctx.root.clone();
     let journal = *journal;
@@ -1715,33 +2028,124 @@ fn spawn_watch(ctx: &std::sync::Arc<Ctx>, journal: &Journal, watermark: u64) {
                 rgy_engine::errln!(
                     "searchd: no live feed for this tree: the index is a snapshot until the next rebuild"
                 );
+                // The tree is not followed, and the startup has to know it:
+                // the walk that may follow has no feed to cover it.
+                let _ = armed.send(());
                 return;
             };
+            ctx.feed.store(FEED_LIVE, Ordering::Relaxed);
             rgy_engine::errln!("searchd: following the tree with {}", feed.name);
+            // The feed is armed: the tree may be walked again now, and a
+            // change that happens during the walk is the feed's to deliver.
+            let _ = armed.send(());
             let mut watch = feed.watch;
             loop {
                 match watch.next_batch() {
                     Ok(rgy_discovery::ChangeBatch::Events(events)) => {
-                        let mut live = ctx.live.write().unwrap();
-                        live.apply_events(&events);
-                        // The feed's position is the watermark the index is
-                        // current as of: it is what the next start resumes
-                        // the journal from.
-                        if let Some(pos) = watch.position() {
-                            live.event_id = pos;
+                        {
+                            let mut live = ctx.live.write().unwrap();
+                            live.apply_events(&events);
+                            // The feed's position is the watermark the index is
+                            // current as of: it is what the next start resumes
+                            // the journal from.
+                            if let Some(pos) = watch.position() {
+                                live.event_id = pos;
+                            }
                         }
+                        // The tree moved: the content index has to be diffed
+                        // against it again.
+                        ctx.changed.ring();
                     }
                     Ok(rgy_discovery::ChangeBatch::Rescan) => {
-                        ctx.live.write().unwrap().apply_dir(&root, true);
                         // The feed lost its history, so nothing was replayed:
-                        // the tree was walked again instead. The platform's
-                        // usual answer no longer describes this index.
+                        // the tree is walked again and diffed. The daemon
+                        // does the walk itself: the overlay's own re-list of
+                        // the root says "rebuild" for a root that is the whole
+                        // disk and leaves the tree alone, which is a silent
+                        // no-op.
+                        let listed = {
+                            let live = ctx.live.read().unwrap();
+                            list_all(&live, &root)
+                        };
+                        {
+                            let mut live = ctx.live.write().unwrap();
+                            apply_all(&mut live, listed);
+                        }
+                        // The platform's usual answer no longer describes
+                        // this index.
                         ctx.set_relisted();
+                        ctx.changed.ring();
                     }
-                    Err(_) => break,
+                    Err(e) => {
+                        // The feed died, and its cause is the only thing that
+                        // says why: the daemon keeps answering from the index
+                        // it has, and a reader that is not told the tree is no
+                        // longer followed is told a tree that is.
+                        rgy_engine::errln!(
+                            "searchd: the live feed stopped: {e} — the index is a snapshot from here on"
+                        );
+                        ctx.set_feed_gone();
+                        break;
+                    }
                 }
             }
         });
+    signal
+}
+
+/// The tree, walked again: every folder of the index listed from the disk.
+///
+/// The listing is the slow half and it only reads, so it is done on its
+/// own: the queries keep answering while the disk is read, and only the
+/// diff waits for the write lock.
+fn list_all(live: &Live, root: &[u8]) -> Vec<rgy_name_core::live::Fetched> {
+    folders_of(&live.base, root)
+        .iter()
+        .map(|f| live.fetch(f, false))
+        .collect()
+}
+
+/// The diff: what the listing says, applied to the index.
+///
+/// The listing is the tree as it is now and the index is the tree as it
+/// was; what changed lands in the overlay and the base keeps the shape the
+/// search is fast on. A folder the index does not have is found through its
+/// parent — the parent's listing names it, and the new folder is added with
+/// its subtree — so the walk reaches the whole tree.
+fn apply_all(live: &mut Live, listed: Vec<rgy_name_core::live::Fetched>) {
+    for f in listed {
+        live.apply(f);
+    }
+}
+
+/// The folders the index holds, as the disk spells them.
+///
+/// The index holds the tree's paths relative to its root ("/a/b") and the
+/// disk spells them from the root down ("<root>/a/b"): one crossing, and the
+/// daemon needs it to name the folders it walks.
+fn folders_of(base: &Index, root: &[u8]) -> Vec<Vec<u8>> {
+    let mut buf = Vec::new();
+    let mut out = Vec::with_capacity(base.d);
+    for &entry in base.dir_entry() {
+        base.path(entry as usize, &mut buf);
+        out.push(on_disk(root, &buf));
+    }
+    out
+}
+
+/// The path on the disk of a path of the index.
+///
+/// The index's paths are relative to its root and the disk's are not, and the
+/// separators are the index's (`/`): the disk spells a path with `\` on
+/// Windows and this tree speaks `/` everywhere.
+fn on_disk(root: &[u8], rel: &[u8]) -> Vec<u8> {
+    let mut full: Vec<u8> = root.iter().map(|&b| if b == b'\\' { b'/' } else { b }).collect();
+    let rel = rel.strip_prefix(b"/").unwrap_or(rel);
+    if !full.is_empty() && !full.ends_with(b"/") && !rel.is_empty() {
+        full.push(b'/');
+    }
+    full.extend_from_slice(rel);
+    full
 }
 
 #[cfg(unix)]
@@ -2090,6 +2494,8 @@ mod tests {
             tv_dir: None,
             live: std::sync::RwLock::new(Live::new(Index::build(Vec::new(), 0, 0, b"/"))),
             catch_up: std::sync::atomic::AtomicU8::new(CATCH_UP_REPLAYED),
+            feed: std::sync::atomic::AtomicU8::new(FEED_NONE),
+            changed: Changed::new(),
             content: std::sync::Mutex::new(None),
             wants_content: std::sync::atomic::AtomicBool::new(false),
             sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -2127,6 +2533,8 @@ mod tests {
             tv_dir: None,
             live: std::sync::RwLock::new(live),
             catch_up: std::sync::atomic::AtomicU8::new(CATCH_UP_RELISTED),
+            feed: std::sync::atomic::AtomicU8::new(FEED_NONE),
+            changed: Changed::new(),
             content: std::sync::Mutex::new(None),
             wants_content: std::sync::atomic::AtomicBool::new(false),
             sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -2140,11 +2548,11 @@ mod tests {
             &ctx,
         );
         let r = responses.iter().find_map(|r| match r {
-            Response::Resolved {
+            Answer::Frame(Response::Resolved {
                 path,
                 folder,
                 backend,
-            } => Some((path.clone(), *folder, *backend)),
+            }) => Some((path.clone(), *folder, *backend)),
             _ => None,
         });
         assert!(r.is_some(), "the path resolves: {responses:?}");
@@ -2164,7 +2572,7 @@ mod tests {
             &ctx,
         );
         let folder = responses.iter().find_map(|r| match r {
-            Response::Resolved { folder, .. } => Some(*folder),
+            Answer::Frame(Response::Resolved { folder, .. }) => Some(*folder),
             _ => None,
         });
         assert_eq!(folder, Some(true), "the folder is a folder");
@@ -2179,7 +2587,7 @@ mod tests {
         assert!(
             responses
                 .iter()
-                .any(|r| matches!(r, Response::Error { .. })),
+                .any(|r| matches!(r, Answer::Frame(Response::Error { .. }))),
             "a path that is not there is an error"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -2226,6 +2634,8 @@ mod tests {
             tv_dir: None,
             live: std::sync::RwLock::new(live),
             catch_up: std::sync::atomic::AtomicU8::new(CATCH_UP_RELISTED),
+            feed: std::sync::atomic::AtomicU8::new(FEED_NONE),
+            changed: Changed::new(),
             content: std::sync::Mutex::new(None),
             wants_content: std::sync::atomic::AtomicBool::new(false),
             sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -2242,7 +2652,7 @@ mod tests {
         let hits = responses
             .iter()
             .find_map(|r| match r {
-                Response::Hits { hits, .. } => Some(hits),
+                Answer::Frame(Response::Hits { hits, .. }) => Some(hits),
                 _ => None,
             })
             .expect("a hits frame");
@@ -2277,6 +2687,8 @@ mod tests {
             tv_dir: None,
             live: std::sync::RwLock::new(live),
             catch_up: std::sync::atomic::AtomicU8::new(CATCH_UP_RELISTED),
+            feed: std::sync::atomic::AtomicU8::new(FEED_NONE),
+            changed: Changed::new(),
             content: std::sync::Mutex::new(None),
             wants_content: std::sync::atomic::AtomicBool::new(false),
             sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -2294,7 +2706,7 @@ mod tests {
             responses
                 .iter()
                 .find_map(|r| match r {
-                    Response::Hits { hits, .. } => Some(hits.clone()),
+                    Answer::Frame(Response::Hits { hits, .. }) => Some(hits.clone()),
                     _ => None,
                 })
                 .expect("a hits frame")
@@ -2339,14 +2751,16 @@ mod tests {
             tv_dir: None,
             live: std::sync::RwLock::new(live),
             catch_up: std::sync::atomic::AtomicU8::new(CATCH_UP_RELISTED),
+            feed: std::sync::atomic::AtomicU8::new(FEED_NONE),
+            changed: Changed::new(),
             content: std::sync::Mutex::new(None),
             wants_content: std::sync::atomic::AtomicBool::new(false),
             sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
         });
-        let names = |rs: Vec<Response>| -> Vec<String> {
+        let names = |rs: Vec<Answer>| -> Vec<String> {
             rs.iter()
                 .filter_map(|r| match r {
-                    Response::GrepFiles { files, .. } => {
+                    Answer::Frame(Response::GrepFiles { files, .. }) => {
                         Some(files.iter().map(|f| f.path.clone()).collect::<Vec<_>>())
                     }
                     _ => None,
@@ -2380,6 +2794,98 @@ mod tests {
             "the index changes what is read, not what is answered"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The tree, walked again: a file the index does not have is found.
+    ///
+    /// A saved index is a snapshot, and "relisted" is the protocol's word for
+    /// a tree that was walked again and diffed — so the walk has to reach the
+    /// file the snapshot does not have. A daemon that says "relisted"
+    /// without having walked answers "no such file" for a file that exists,
+    /// which is the worst thing a search can do.
+    #[test]
+    fn the_relist_finds_a_file_the_index_does_not_have() {
+        let dir = TempTree::new("rgy-searchd-relist");
+        std::fs::write(dir.join("old.txt"), b"old\n").unwrap();
+        let root = dir.as_os_str().as_encoded_bytes().to_vec();
+
+        // The index as it was before the file appeared.
+        let source = PortableSource::new(root.clone(), 2);
+        let mut live = Live::with_root(
+            Index::build(source.enumerate().expect("the walk"), 0, 1, b"/"),
+            &root,
+        );
+
+        // The file appears while the daemon is off, and the tree is walked
+        // again and diffed.
+        std::fs::write(dir.join("new.txt"), b"new\n").unwrap();
+        let listed = list_all(&live, &root);
+        apply_all(&mut live, listed);
+
+        // The answer names it.
+        let searcher = Searcher { live: &live };
+        let q = Query::parse("new", "").expect("the query parses");
+        let hits = searcher.search_alternatives(&[q], 10);
+        assert!(
+            hits.iter().any(|h| h
+                .over
+                .as_ref()
+                .is_some_and(|p| p.ends_with(b"new.txt"))),
+            "the file the index did not have is in the answer; {} hits",
+            hits.len()
+        );
+    }
+
+    /// The limit is the limit, across the alternatives.
+    ///
+    /// A query with two alternatives used to answer with two times the limit:
+    /// each alternative read its own limit and the answers were
+    /// concatenated. The name path merges its alternatives and truncates
+    /// (name_query::merge_hits), and the content path has to say the same
+    /// thing.
+    #[test]
+    fn the_limit_is_the_limit_across_the_alternatives() {
+        let dir = TempTree::new("rgy-searchd-limit");
+        for i in 0..4 {
+            std::fs::write(dir.join(format!("alpha{i}.txt")), b"alpha alpha\n").unwrap();
+            std::fs::write(dir.join(format!("multi{i}.txt")), b"multi multi\n").unwrap();
+        }
+        let root = dir.as_os_str().as_encoded_bytes().to_vec();
+        let source = PortableSource::new(root.clone(), 2);
+        let live = Live::with_root(
+            Index::build(source.enumerate().expect("the walk"), 0, 1, b"/"),
+            &root,
+        );
+        let ctx = std::sync::Arc::new(Ctx {
+            root: root.clone(),
+            home: String::new(),
+            tv_dir: None,
+            live: std::sync::RwLock::new(live),
+            catch_up: std::sync::atomic::AtomicU8::new(CATCH_UP_RELISTED),
+            feed: std::sync::atomic::AtomicU8::new(FEED_NONE),
+            changed: Changed::new(),
+            content: std::sync::Mutex::new(None),
+            wants_content: std::sync::atomic::AtomicBool::new(false),
+            sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
+        });
+
+        let count = |q: &str, limit: usize| {
+            grep(q, limit, &ctx)
+                .iter()
+                .filter_map(|r| match r {
+                    Answer::Frame(Response::GrepFiles { files, .. }) => Some(files.len()),
+                    _ => None,
+                })
+                .sum::<usize>()
+        };
+        // Two alternatives and a limit of two: two files, not four.
+        assert_eq!(
+            count("grep:alpha|grep:multi", 2),
+            2,
+            "the limit is the limit, across the alternatives"
+        );
+        // Eight files match, and a limit of ten keeps all eight.
+        assert_eq!(count("grep:alpha|grep:multi", 10), 8, "every match is answered");
     }
 
     /// Two files that appear after the daemon started both have to be
@@ -2425,6 +2931,8 @@ mod tests {
             tv_dir: None,
             live: std::sync::RwLock::new(live),
             catch_up: std::sync::atomic::AtomicU8::new(CATCH_UP_RELISTED),
+            feed: std::sync::atomic::AtomicU8::new(FEED_NONE),
+            changed: Changed::new(),
             content: std::sync::Mutex::new(None),
             wants_content: std::sync::atomic::AtomicBool::new(false),
             sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -2441,7 +2949,7 @@ mod tests {
         let hits = responses
             .iter()
             .find_map(|r| match r {
-                Response::Hits { hits, .. } => Some(hits),
+                Answer::Frame(Response::Hits { hits, .. }) => Some(hits),
                 _ => None,
             })
             .expect("a hits frame");
