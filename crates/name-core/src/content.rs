@@ -1961,7 +1961,8 @@ impl Content {
         // rank those first, and the rest only if reading gets that far.
         let t = std::time::Instant::now();
         let best = take_best(&mut per);
-        let (mut r, done) = verify_from(g, best.len(), filt.limit, READERS, t, |i| path(&best[i]), &placeholder::attributes);
+        let (mut r, done) =
+            verify_from(g, best.len(), filt.limit, READERS, t, |i| path(&best[i]), |p| match_file(g, p, &placeholder::attributes, None));
         if r.files.len() < filt.limit && done == best.len() && best.len() < total {
             // Then the next best few thousand, and the others only if
             // reading gets past those too.
@@ -1979,8 +1980,15 @@ impl Content {
                 if at > 0 {
                     rgy_par::sort_unstable(&mut rest[at..]);
                 }
-                let (more, done) =
-                    verify_from(g, end - at, filt.limit - r.files.len(), READERS, t, |i| path(&rest[at + i]), &placeholder::attributes);
+                let (more, done) = verify_from(
+                    g,
+                    end - at,
+                    filt.limit - r.files.len(),
+                    READERS,
+                    t,
+                    |i| path(&rest[at + i]),
+                    |p| match_file(g, p, &placeholder::attributes, None),
+                );
                 r.files.extend(more.files);
                 r.read += more.read;
                 r.skipped.extend(more.skipped);
@@ -2769,6 +2777,35 @@ pub struct FileMatches {
     pub lines: Vec<(usize, String)>,
 }
 
+/// One document an adapter rendered for a file.
+///
+/// An archive holds more than one document: its members are documents of
+/// their own, and each carries its own path -- `archive.zip!inner.txt` --
+/// because that is the path a query asks about.
+pub struct Rendered {
+    /// The path of the document: the file itself, or a member inside it.
+    pub path: Vec<u8>,
+    /// The bytes the adapter produced.
+    pub bytes: Vec<u8>,
+}
+
+/// The reader for the files the plain path cannot read.
+///
+/// The content path reads a file's own bytes. A file the format adapters
+/// claim has to be read through the adapter that claims it -- a PDF's words,
+/// an archive member's content -- and the adapters are `std` while this
+/// crate is `no_std`, so the caller supplies the seam and this crate stays
+/// where it is.
+///
+/// The confirmation over the rendered bytes is this crate's: [`Grep::lines_in`]
+/// is the same matcher, the same line numbering and the same cap the file
+/// path uses, so an adapter's rendering is searched exactly like a file.
+pub trait AdapterReader: Send + Sync {
+    /// The documents the adapters rendered for `path`, or an empty vector
+    /// when no adapter claims it: the plain path reads the file then.
+    fn rendered(&self, path: &[u8]) -> Vec<Rendered>;
+}
+
 /// Read candidates in rank order until `limit` files have matched or the
 /// time budget is spent (best-ranked results first, so a cut-short search
 /// still returns the ones you most likely wanted). Each read thread claims
@@ -2789,7 +2826,26 @@ pub fn verify(g: &Grep, paths: &[impl AsRef<[u8]> + Sync], limit: usize) -> Grep
 /// Public because the daemon reads the files itself, with the content
 /// index's lock released (`plan` then this).
 pub fn verify_paths(g: &Grep, paths: &[impl AsRef<[u8]> + Sync], limit: usize) -> GrepResult {
-    verify_from(g, paths.len(), limit, SCAN_READERS, std::time::Instant::now(), |i| Some(paths[i].as_ref()), &placeholder::attributes).0
+    verify_paths_with(g, paths, limit, None)
+}
+
+/// `verify_paths` with a reader for the files the adapters claim.
+///
+/// The files the reader renders are searched as the adapter left them; the
+/// rest are read as bytes. The two sets partition the candidates, so the
+/// answer is the plain scan's answer with the formats the plain scan cannot
+/// read included.
+pub fn verify_paths_with(g: &Grep, paths: &[impl AsRef<[u8]> + Sync], limit: usize, adapter: Option<&dyn AdapterReader>) -> GrepResult {
+    verify_from(
+        g,
+        paths.len(),
+        limit,
+        SCAN_READERS,
+        std::time::Instant::now(),
+        |i| Some(paths[i].as_ref()),
+        |p| match_file(g, p, &placeholder::attributes, adapter),
+    )
+    .0
 }
 
 /// `verify` over `n` candidates with `readers` threads, `path(i)` giving the
@@ -2804,7 +2860,7 @@ fn verify_from<'a>(
     readers: usize,
     t: std::time::Instant,
     path: impl Fn(usize) -> Option<&'a [u8]> + Sync,
-    attrs: &Attrs<'_>,
+    read_one: impl Fn(&[u8]) -> Outcome + Sync,
 ) -> (GrepResult, usize) {
     use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
     let (next, found, read) = (AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0));
@@ -2818,10 +2874,12 @@ fn verify_from<'a>(
             }
             let Some(p) = path(i) else { continue };
             read.fetch_add(1, Relaxed);
-            match match_file(g, p, attrs) {
-                Outcome::Match(m) => {
-                    found.fetch_add(1, Relaxed);
-                    hits.lock().unwrap().push((i, m));
+            match read_one(p) {
+                Outcome::Matches(ms) => {
+                    found.fetch_add(ms.len(), Relaxed);
+                    for m in ms {
+                        hits.lock().unwrap().push((i, m));
+                    }
                 }
                 Outcome::NoMatch => {}
                 // Not on this disk: it is reported, never read.
@@ -2839,7 +2897,11 @@ fn verify_from<'a>(
     };
     without_materializing(|| run_lanes(readers, &work));
     let mut hits = hits.into_inner().unwrap();
-    hits.sort_unstable_by_key(|h| h.0);
+    // The candidates come in rank order and the documents of one candidate
+    // come in the order the adapter produced them, so the path breaks the
+    // tie: an archive's members are listed by name, not by whichever thread
+    // got there first.
+    hits.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.path.cmp(&b.1.path)));
     hits.truncate(limit);
     let mut skipped = skipped.into_inner().unwrap();
     // The lanes finish in whatever order they finish in; the report is
@@ -2859,8 +2921,9 @@ std::thread_local! {
 
 /// What reading one candidate came to.
 enum Outcome {
-    /// It holds a match.
-    Match(FileMatches),
+    /// It holds matches: a file holds one, and an archive holds one per
+    /// member that matched.
+    Matches(Vec<FileMatches>),
     /// It was read, and it holds none.
     NoMatch,
     /// It was not read: it is a cloud placeholder, and reading it would
@@ -2868,7 +2931,23 @@ enum Outcome {
     Placeholder,
 }
 
-fn match_file(g: &Grep, path: &[u8], attrs: &Attrs<'_>) -> Outcome {
+fn match_file(g: &Grep, path: &[u8], attrs: &Attrs<'_>, adapter: Option<&dyn AdapterReader>) -> Outcome {
+    // The adapter first: a file it claims is read through it, and the bytes
+    // it renders are text where the file's own bytes are not -- a PDF's
+    // words, an archive member's content.
+    if let Some(adapter) = adapter {
+        let rendered = adapter.rendered(path);
+        if !rendered.is_empty() {
+            let mut out = Vec::new();
+            for doc in rendered {
+                let lines = g.lines_in(&doc.bytes);
+                if !lines.is_empty() {
+                    out.push(FileMatches { path: doc.path, lines });
+                }
+            }
+            return if out.is_empty() { Outcome::NoMatch } else { Outcome::Matches(out) };
+        }
+    }
     READ_BUF.with_borrow_mut(|buf| {
         use std::io::Read;
         buf.clear();
@@ -2888,7 +2967,7 @@ fn match_file(g: &Grep, path: &[u8], attrs: &Attrs<'_>) -> Outcome {
             Some(l) => lines_at(g, buf, l.starts(buf)),
             None => lines_at(g, buf, g.re().starts(buf).into_iter()),
         };
-        if lines.is_empty() { Outcome::NoMatch } else { Outcome::Match(FileMatches { path: path.to_vec(), lines }) }
+        if lines.is_empty() { Outcome::NoMatch } else { Outcome::Matches(vec![FileMatches { path: path.to_vec(), lines }]) }
     })
 }
 
@@ -3616,6 +3695,36 @@ pub fn scan_paths(root: &[u8], live: &Live, mut q: Query) -> Vec<Vec<u8>> {
 /// partition the universe, so the reads never overlap and their union is
 /// the scan's exact answer; the index is only a way to read less to get it.
 pub fn answer(g: &Grep, q: &Query, root: &[u8], live: &Live, home: &[u8], index: Option<&Content>, limit: usize) -> GrepResult {
+    answer_with(g, q, Scope { root, live, home, index, adapter: None }, limit)
+}
+
+/// The world a content search runs in.
+///
+/// The tree it scans, the overlay that holds the changes made since the
+/// index was built, the home the content index is keyed by, the index
+/// itself, and the reader for the files the format adapters claim. They are
+/// one fact -- where the search runs -- and they travel as one.
+pub struct Scope<'a> {
+    /// The tree to scan.
+    pub root: &'a [u8],
+    /// The live overlay: the changes the tree made since the index was built.
+    pub live: &'a Live,
+    /// The home directory, which the content index is keyed by.
+    pub home: &'a [u8],
+    /// The content index, when there is one.
+    pub index: Option<&'a Content>,
+    /// The reader for the files the adapters claim, when the caller has one.
+    pub adapter: Option<&'a dyn AdapterReader>,
+}
+
+/// `answer` with a reader for the files the adapters claim.
+///
+/// The same search, with the formats the plain path cannot read included: a
+/// PDF's words and an archive member's content are searched like any other
+/// file's bytes, and the file itself is left alone -- an adapter that claims
+/// a file has already said what the file says.
+pub fn answer_with(g: &Grep, q: &Query, scope: Scope<'_>, limit: usize) -> GrepResult {
+    let Scope { root, live, home, index, adapter } = scope;
     let (covered, bare, mut r) = plan(g, q, root, live, home, index);
     // `search`'s files are the covered ones that matched (its grams ruled
     // out the others); keep only those this scan's universe named, so an
@@ -3623,7 +3732,7 @@ pub fn answer(g: &Grep, q: &Query, root: &[u8], live: &Live, home: &[u8], index:
     r.files.retain(|f| covered.contains(&f.path));
     // `verify_paths`, not `verify`: the note belongs to this search, which
     // owns both halves of it, so it is written once and says everything.
-    let rest = verify_paths(g, &bare, limit.saturating_sub(r.files.len()));
+    let rest = verify_paths_with(g, &bare, limit.saturating_sub(r.files.len()), adapter);
     r.files.extend(rest.files);
     r.read += rest.read;
     r.skipped.extend(rest.skipped);
@@ -3834,9 +3943,63 @@ mod open_flags_tests {
 /// filter driver sets them, and a program may not -- so the file on disk
 /// here is an ordinary one and the attributes come from a stand-in. What
 /// is under test is the refusal and the report, not the filesystem.
+/// The seam's own test: the file the adapters claim, and the file they do
+/// not.
+#[cfg(test)]
+mod adapter_tests {
+    use super::{AdapterReader, Grep, Rendered, verify_paths, verify_paths_with};
+    use crate::name_query::GrepMode;
+    use alloc::string::ToString;
+    use alloc::vec::Vec;
+
+    /// A reader that claims one file and renders text for it.
+    ///
+    /// The stand-in for the format adapters: the caller owns the decoding,
+    /// and this crate asks it per file.
+    struct OneAdapter;
+
+    impl AdapterReader for OneAdapter {
+        fn rendered(&self, path: &[u8]) -> Vec<Rendered> {
+            if !path.ends_with(b"rendered.bin") {
+                return Vec::new();
+            }
+            vec![Rendered { path: path.to_vec(), bytes: b"the rendered words\n".to_vec() }]
+        }
+    }
+
+    /// A file the plain path refuses is read through the adapter.
+    ///
+    /// The file's own bytes are binary -- the plain path refuses a file with
+    /// a NUL in its first kilobyte -- and the words are in the rendering, so
+    /// a match can only have come from the adapter.
+    #[test]
+    fn a_file_the_adapters_claim_is_read_through_them() {
+        let dir = std::env::temp_dir().join(format!("rgy_adapter_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("rendered.bin");
+        std::fs::write(&p, b"\x00\x01\x02 binary \xff bytes").unwrap();
+        let path = p.to_string_lossy().into_owned().into_bytes();
+
+        let g = Grep::new("rendered", GrepMode::Literal).unwrap();
+
+        // Without the adapter the file is refused: it is binary.
+        let plain = verify_paths(&g, std::slice::from_ref(&path), 10);
+        assert!(plain.files.is_empty(), "the plain path read a binary file");
+
+        // With it, the rendering is searched.
+        let rendered = verify_paths_with(&g, std::slice::from_ref(&path), 10, Some(&OneAdapter));
+        assert_eq!(rendered.files.len(), 1, "the rendering was not searched");
+        assert_eq!(rendered.files[0].path, path);
+        assert_eq!(rendered.files[0].lines, vec![(1, "the rendered words".to_string())]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 #[cfg(test)]
 mod placeholder_tests {
-    use super::{Grep, Open, open_ahead_with, open_sized, open_sized_with, placeholder, verify_from};
+    use super::{Grep, Open, match_file, open_ahead_with, open_sized, open_sized_with, placeholder, verify_from};
     use crate::name_query::GrepMode;
     use alloc::vec::Vec;
 
@@ -3879,7 +4042,7 @@ mod placeholder_tests {
     fn a_placeholder_is_skipped_and_the_skip_says_why() {
         let (dir, p) = temp_file("skip");
         let g = Grep::new("needle", GrepMode::Literal).unwrap();
-        let (r, _) = verify_from(&g, 1, 10, 1, std::time::Instant::now(), |_| Some(&p[..]), &recall());
+        let (r, _) = verify_from(&g, 1, 10, 1, std::time::Instant::now(), |_| Some(&p[..]), |q| match_file(&g, q, &recall(), None));
         assert!(r.files.is_empty(), "the file was not read, so it cannot have matched");
         assert_eq!(r.skipped.len(), 1, "the skip must be reported, not swallowed");
         assert_eq!(r.skipped[0].path, p, "the skip must name the file");
@@ -3893,7 +4056,7 @@ mod placeholder_tests {
     fn an_ordinary_file_is_read_and_matched_as_before() {
         let (dir, p) = temp_file("normal");
         let g = Grep::new("needle", GrepMode::Literal).unwrap();
-        let (r, _) = verify_from(&g, 1, 10, 1, std::time::Instant::now(), |_| Some(&p[..]), &placeholder::attributes);
+        let (r, _) = verify_from(&g, 1, 10, 1, std::time::Instant::now(), |_| Some(&p[..]), |q| match_file(&g, q, &placeholder::attributes, None));
         assert_eq!(r.files.len(), 1, "an ordinary file is still read, and still matches");
         assert!(r.skipped.is_empty(), "an ordinary file is not skipped");
         let _ = std::fs::remove_dir_all(&dir);
