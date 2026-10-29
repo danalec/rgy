@@ -369,6 +369,7 @@ impl Client {
                 event_id,
                 catch_up,
                 tv,
+                feed,
             } = r
             {
                 return Ok(DaemonStatus {
@@ -376,6 +377,7 @@ impl Client {
                     event_id,
                     catch_up: catch_up.as_str().to_string(),
                     tv,
+                    feed: feed.as_str().to_string(),
                 });
             }
             if let Response::Error { message } = r {
@@ -460,9 +462,16 @@ impl Client {
         let mut out = GrepOutcome::default();
         for r in responses {
             match r {
-                Response::GrepFiles { files, took_us } => {
+                Response::GrepFiles {
+                    files,
+                    took_us,
+                    complete,
+                    skipped,
+                } => {
                     out.files = files;
                     out.took_us = took_us;
+                    out.complete = complete;
+                    out.skipped = skipped;
                 }
                 Response::Warning { message } => out.warnings.push(message),
                 Response::Error { message } => return Err(std::io::Error::other(message)),
@@ -487,6 +496,14 @@ pub struct GrepOutcome {
     pub files: Vec<crate::GrepFile>,
     pub took_us: u64,
     pub warnings: Vec<String>,
+    /// Whether the search read every candidate it was given.
+    ///
+    /// The answer is `false` until a daemon says otherwise: a search
+    /// that does not say it read everything did not say it read
+    /// everything.
+    pub complete: bool,
+    /// How many files the search did not read.
+    pub skipped: usize,
 }
 
 /// What the daemon says about itself.
@@ -500,6 +517,11 @@ pub struct DaemonStatus {
     /// Whether the daemon has a pack store (`--tv-dir`) — the corpus packed
     /// once and mmapped, which is the fastest content answer there is.
     pub tv: bool,
+    /// Whether the tree is still being followed: `live`, `gone` or `none`.
+    ///
+    /// A feed that died leaves the daemon answering on a snapshot, and the
+    /// reader has to know which of the two it is looking at.
+    pub feed: String,
 }
 
 /// The response that ends the answer to `req`.

@@ -58,7 +58,12 @@ pub enum Request {
         limit: usize,
         session: Option<u64>,
     },
-    /// Content grep: `{"op":"grep","q":…,"limit":…}` (Phase 4 engine).
+    /// Content grep over the **whole tree**: `{"op":"grep","q":…,"limit":…}`
+    /// (Phase 4 engine).
+    ///
+    /// The scoped content search is [`Request::Content`], and its op is
+    /// `"content"`: the two are different questions, and a request that
+    /// says `"content"` is the scoped one.
     Grep { q: String, limit: usize },
     /// Content search **over a scope**: `{"op":"content","q":…,"paths":[…]}`.
     ///
@@ -71,6 +76,13 @@ pub enum Request {
     /// tree reads the whole tree; a content search over two hundred chosen
     /// files reads two hundred files, and the daemon's content index rules
     /// most of them out before a byte is read.
+    ///
+    /// `"grep-scoped"` is the same request under the name it had before,
+    /// and it is the name the crate writes: a daemon that predates the
+    /// fix reads `"content"` as a whole-tree search, and a scope that is
+    /// dropped is a search that answers with the whole tree. Both names
+    /// are read — and a request that names a scope it does not carry is
+    /// refused, never widened into one.
     Content {
         q: String,
         paths: Vec<String>,
@@ -125,6 +137,32 @@ impl CatchUp {
     }
 }
 
+/// Whether the tree is still being followed.
+///
+/// Three values, and the difference is the point: a daemon whose feed died
+/// answers on a snapshot of the tree, and a reader that is not told that
+/// the tree is no longer followed is told a tree that is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Feed {
+    /// The feed runs: the tree is followed.
+    Live,
+    /// The feed died: the index is a snapshot from here on.
+    Gone,
+    /// There is no feed: nothing follows the tree.
+    None,
+}
+
+impl Feed {
+    /// The wire spelling. These three strings are the contract.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Feed::Live => "live",
+            Feed::Gone => "gone",
+            Feed::None => "none",
+        }
+    }
+}
+
 /// A response line.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Response {
@@ -147,11 +185,38 @@ pub enum Response {
         docs: usize,
         event_id: u64,
         catch_up: CatchUp,
+        /// Whether the tree is still being followed.
+        ///
+        /// Three values: `live` (the feed runs), `gone` (the feed died and
+        /// the index is a snapshot from here on) and `none` (there is no
+        /// feed). A daemon whose feed died answers on a frozen index, and a
+        /// reader that is not told that the tree is no longer followed is
+        /// told a tree that is.
+        ///
+        /// The field is additive in the same way `tv` is: a reader that does
+        /// not know it reads the status as it was before it existed.
+        feed: Feed,
         /// Whether the daemon has a pack store (`--tv-dir`).
         tv: bool,
     },
-    /// `{"op":"grep-files","files":[…],"took_us":…}` — content matches.
-    GrepFiles { files: Vec<GrepFile>, took_us: u64 },
+    /// `{"op":"grep-files","files":[…],"took_us":…,"complete":…,"skipped":…}`
+    /// — content matches.
+    ///
+    /// `complete` says the search read every candidate it was given, and
+    /// `skipped` says how many files it did not read. A truncated search
+    /// and a complete one are different answers, and the difference is
+    /// on the wire: the two fields are additive, so a reader that does
+    /// not know them keeps working — and a line without them is a line
+    /// from a daemon that does not say, which reads as "not complete",
+    /// the answer that promises the least.
+    GrepFiles {
+        files: Vec<GrepFile>,
+        took_us: u64,
+        /// Whether the search read every candidate it was given.
+        complete: bool,
+        /// How many files the search did not read.
+        skipped: usize,
+    },
     /// `{"op":"resolved","path":…,"folder":…,"backend":…}` — the answer of
     /// a `resolve` request.
     ///
@@ -245,17 +310,21 @@ impl Request {
                     .and_then(|s| s.as_num())
                     .map(|n| n as u64),
             }),
-            "grep" | "content" => Some(Request::Grep {
+            "grep" => Some(Request::Grep {
                 q: obj.get("q")?.as_str()?.to_string(),
                 limit,
             }),
-            "grep-scoped" => {
-                let paths = obj
-                    .get("paths")?
-                    .as_array()?
-                    .iter()
-                    .filter_map(|p| p.as_str().map(|s| s.to_string()))
-                    .collect();
+            // The scoped request, under both of its names. The scope is
+            // read as it is written: a path that is not a string fails
+            // the whole request, because a scope that is quietly
+            // narrowed is a scope the caller believes it set and did
+            // not — and a request that names no scope at all is
+            // refused, never widened into a search of the whole tree.
+            "content" | "grep-scoped" => {
+                let mut paths = Vec::new();
+                for p in obj.get("paths")?.as_array()? {
+                    paths.push(p.as_str()?.to_string());
+                }
                 Some(Request::Content {
                     q: obj.get("q")?.as_str()?.to_string(),
                     paths,
@@ -310,6 +379,11 @@ impl Request {
                     .iter()
                     .map(|p| format!("\"{}\"", escape_json_string(p)))
                     .collect();
+                // The older spelling goes on the wire, and it is the one
+                // every daemon has read: a daemon that predates the fix
+                // reads "content" as a whole-tree search, and the scope
+                // it drops is a search that answers with the whole tree.
+                // The reader takes both.
                 match session {
                     Some(s) => format!(
                         r#"{{"op":"grep-scoped","q":"{}","paths":[{}],"limit":{},"session":{}}}"#,
@@ -401,13 +475,20 @@ impl Response {
                 event_id,
                 catch_up,
                 tv,
+                feed,
             } => {
                 format!(
-                    r#"{{"op":"status","docs":{docs},"event_id":{event_id},"catch_up":"{}","tv":{tv}}}"#,
-                    catch_up.as_str()
+                    r#"{{"op":"status","docs":{docs},"event_id":{event_id},"catch_up":"{}","tv":{tv},"feed":"{}"}}"#,
+                    catch_up.as_str(),
+                    feed.as_str()
                 )
             }
-            Response::GrepFiles { files, took_us } => {
+            Response::GrepFiles {
+                files,
+                took_us,
+                complete,
+                skipped,
+            } => {
                 let items: Vec<String> = files
                     .iter()
                     .map(|f| {
@@ -424,9 +505,11 @@ impl Response {
                     })
                     .collect();
                 format!(
-                    r#"{{"op":"grep-files","files":[{}],"took_us":{}}}"#,
+                    r#"{{"op":"grep-files","files":[{}],"took_us":{},"complete":{},"skipped":{}}}"#,
                     items.join(","),
-                    took_us
+                    took_us,
+                    complete,
+                    skipped
                 )
             }
             Response::Resolved {
@@ -481,35 +564,45 @@ impl Response {
             .ok_or(LineError::NotAnAnswer)?;
         Ok(match op {
             "hits" => {
-                let hits = obj
+                let mut hits = Vec::new();
+                for it in obj
                     .get("hits")
                     .and_then(|h| h.as_array())
                     .ok_or(LineError::NotAnAnswer)?
-                    .iter()
-                    .filter_map(|it| {
-                        let o = it.as_object()?;
-                        let path = o.get("path")?.as_str()?.to_string();
-                        let score = o.get("score").and_then(|n| n.as_num()).unwrap_or(0.0) as i32;
-                        let span = match o.get("span").and_then(|s| s.as_array()) {
-                            Some(items) => items
-                                .iter()
-                                .filter_map(|n| n.as_num())
-                                .map(|n| n as u32)
-                                .collect(),
-                            None => Vec::new(),
-                        };
-                        // The folder flag is additive: an older daemon's
-                        // hit has no field, and a hit with no field is a
-                        // file.
-                        let folder = o.get("folder").and_then(|f| f.as_bool()).unwrap_or(false);
-                        Some(Hit {
-                            path,
-                            score,
-                            span,
-                            folder,
-                        })
-                    })
-                    .collect();
+                {
+                    // A hit the protocol cannot read is not a hit that is
+                    // quietly left out: the count the client shows is
+                    // the count of what came back, and a hit that
+                    // vanished makes that count a lie.
+                    let o = it.as_object().ok_or(LineError::NotAnAnswer)?;
+                    let path = o
+                        .get("path")
+                        .and_then(|p| p.as_str())
+                        .ok_or(LineError::NotAnAnswer)?
+                        .to_string();
+                    let score = o.get("score").and_then(|n| n.as_num()).unwrap_or(0.0) as i32;
+                    // The span is optional, and it is all of it or none
+                    // of it: a span that guessed would be a lie in the
+                    // place the user looks first.
+                    let span = match o.get("span").and_then(|s| s.as_array()) {
+                        Some(items) => items
+                            .iter()
+                            .map(|n| n.as_num().map(|n| n as u32))
+                            .collect::<Option<Vec<u32>>>()
+                            .unwrap_or_default(),
+                        None => Vec::new(),
+                    };
+                    // The folder flag is additive: an older daemon's
+                    // hit has no field, and a hit with no field is a
+                    // file.
+                    let folder = o.get("folder").and_then(|f| f.as_bool()).unwrap_or(false);
+                    hits.push(Hit {
+                        path,
+                        score,
+                        span,
+                        folder,
+                    });
+                }
                 let took_us = obj.get("took_us").and_then(|n| n.as_num()).unwrap_or(0.0) as u64;
                 Response::Hits { hits, took_us }
             }
@@ -524,6 +617,14 @@ impl Response {
                     Some("replayed") => CatchUp::Replayed,
                     _ => CatchUp::Relisted,
                 };
+                // A daemon that does not say is a daemon whose feed nobody
+                // knows: the conservative answer is the one that says
+                // there is no feed.
+                let feed = match obj.get("feed").and_then(|s| s.as_str()) {
+                    Some("live") => Feed::Live,
+                    Some("gone") => Feed::Gone,
+                    _ => Feed::None,
+                };
                 // A status line without the field is a status line from a
                 // daemon that has no pack store — which is the answer that
                 // does not promise anything.
@@ -536,34 +637,61 @@ impl Response {
                     event_id,
                     catch_up,
                     tv,
+                    feed,
                 }
             }
             "grep-files" => {
-                let files = obj
+                let mut files = Vec::new();
+                for it in obj
                     .get("files")
                     .and_then(|f| f.as_array())
                     .ok_or(LineError::NotAnAnswer)?
-                    .iter()
-                    .filter_map(|it| {
-                        let o = it.as_object()?;
-                        let path = o.get("path")?.as_str()?.to_string();
-                        let lines = match o.get("lines").and_then(|l| l.as_array()) {
-                            Some(ls) => ls
-                                .iter()
-                                .filter_map(|l| {
-                                    let pair = l.as_array()?;
-                                    let n = pair.first()?.as_num()? as usize;
-                                    let t = pair.get(1)?.as_str()?.to_string();
-                                    Some((n, t))
-                                })
-                                .collect(),
-                            None => Vec::new(),
-                        };
-                        Some(GrepFile { path, lines })
-                    })
-                    .collect();
+                {
+                    // The same rule as the hits: a file the protocol
+                    // cannot read is not a file that is quietly left
+                    // out.
+                    let o = it.as_object().ok_or(LineError::NotAnAnswer)?;
+                    let path = o
+                        .get("path")
+                        .and_then(|p| p.as_str())
+                        .ok_or(LineError::NotAnAnswer)?
+                        .to_string();
+                    let lines = match o.get("lines").and_then(|l| l.as_array()) {
+                        Some(ls) => {
+                            let mut lines = Vec::with_capacity(ls.len());
+                            for l in ls {
+                                let pair = l.as_array().ok_or(LineError::NotAnAnswer)?;
+                                let n = pair
+                                    .first()
+                                    .and_then(|n| n.as_num())
+                                    .ok_or(LineError::NotAnAnswer)? as usize;
+                                let t = pair
+                                    .get(1)
+                                    .and_then(|t| t.as_str())
+                                    .ok_or(LineError::NotAnAnswer)?
+                                    .to_string();
+                                lines.push((n, t));
+                            }
+                            lines
+                        }
+                        None => Vec::new(),
+                    };
+                    files.push(GrepFile { path, lines });
+                }
                 let took_us = obj.get("took_us").and_then(|n| n.as_num()).unwrap_or(0.0) as u64;
-                Response::GrepFiles { files, took_us }
+                // The two facts are additive: a line from a daemon that
+                // does not say is a line that promises the least.
+                let complete = match obj.get("complete") {
+                    Some(Json::Bool(b)) => *b,
+                    _ => false,
+                };
+                let skipped = obj.get("skipped").and_then(|n| n.as_num()).unwrap_or(0.0) as usize;
+                Response::GrepFiles {
+                    files,
+                    took_us,
+                    complete,
+                    skipped,
+                }
             }
             "resolved" => {
                 let path = obj
@@ -1095,9 +1223,10 @@ mod tests {
                 event_id: 9,
                 catch_up: CatchUp::Relisted,
                 tv: false,
+                feed: Feed::Live,
             }
             .to_json(),
-            r#"{"op":"status","docs":3,"event_id":9,"catch_up":"relisted","tv":false}"#
+            r#"{"op":"status","docs":3,"event_id":9,"catch_up":"relisted","tv":false,"feed":"live"}"#
         );
         // The other value, spelled the way the rules spells it.
         assert_eq!(
@@ -1106,9 +1235,10 @@ mod tests {
                 event_id: 9,
                 catch_up: CatchUp::Replayed,
                 tv: false,
+                feed: Feed::None,
             }
             .to_json(),
-            r#"{"op":"status","docs":3,"event_id":9,"catch_up":"replayed","tv":false}"#
+            r#"{"op":"status","docs":3,"event_id":9,"catch_up":"replayed","tv":false,"feed":"none"}"#
         );
         assert_eq!(
             Response::GrepFiles {
@@ -1117,9 +1247,11 @@ mod tests {
                     lines: vec![(1, "t".into())]
                 }],
                 took_us: 8,
+                complete: true,
+                skipped: 0,
             }
             .to_json(),
-            r#"{"op":"grep-files","files":[{"path":"f","lines":[[1,"t"]]}],"took_us":8}"#
+            r#"{"op":"grep-files","files":[{"path":"f","lines":[[1,"t"]]}],"took_us":8,"complete":true,"skipped":0}"#
         );
         assert_eq!(
             Response::Error {
@@ -1225,13 +1357,15 @@ mod tests {
                 lines: vec![(1, "a\tb\nc\u{0001}d".into())],
             }],
             took_us: 3,
+            complete: true,
+            skipped: 0,
         }
         .to_json();
         assert!(!line.contains('\n'), "the line carries a newline: {line:?}");
         assert!(!line.contains('\t'), "the line carries a tab: {line:?}");
         assert_eq!(
             line,
-            r#"{"op":"grep-files","files":[{"path":"C:\\dir\there","lines":[[1,"a\tb\nc\u0001d"]]}],"took_us":3}"#
+            r#"{"op":"grep-files","files":[{"path":"C:\\dir\there","lines":[[1,"a\tb\nc\u0001d"]]}],"took_us":3,"complete":true,"skipped":0}"#
         );
     }
 
@@ -1411,6 +1545,7 @@ mod tests {
                 event_id: 5,
                 catch_up: CatchUp::Replayed,
                 tv: true,
+                feed: Feed::Live,
             },
             Response::GrepFiles {
                 files: vec![GrepFile {
@@ -1418,6 +1553,8 @@ mod tests {
                     lines: vec![(7, "line".into())],
                 }],
                 took_us: 8,
+                complete: true,
+                skipped: 2,
             },
             Response::Resolved {
                 path: "p".into(),
@@ -1450,6 +1587,7 @@ mod tests {
                 event_id: 2,
                 catch_up: CatchUp::Relisted,
                 tv: false,
+                feed: Feed::None,
             }
         );
     }
@@ -1490,11 +1628,143 @@ mod tests {
         };
         assert_eq!(Request::from_json(&req.to_json()), Some(req));
         assert_eq!(
-            Request::from_json(r#"{"op":"content","q":"x","limit":1}"#),
+            Request::from_json(r#"{"op":"grep","q":"x","limit":1}"#),
             Some(Request::Grep {
                 q: "x".to_string(),
                 limit: 1
             })
+        );
+    }
+
+    /// The scoped request, spelled the way the documentation spells it.
+    ///
+    /// The spelling is the contract: a peer that follows the docs and
+    /// says `"content"` must get the scoped answer — and not the whole
+    /// tree with its scope quietly dropped.
+    #[test]
+    fn a_scoped_request_spelled_the_way_the_documentation_spells_it_keeps_its_scope() {
+        let line = r#"{"op":"content","q":"tesla","paths":["C:/a.txt","C:/b.txt"],"limit":10}"#;
+        assert_eq!(
+            Request::from_json(line),
+            Some(Request::Content {
+                q: "tesla".to_string(),
+                paths: vec!["C:/a.txt".to_string(), "C:/b.txt".to_string()],
+                limit: 10,
+                session: None,
+            })
+        );
+    }
+
+    /// The older spelling is the same request.
+    #[test]
+    fn the_older_spelling_of_the_scoped_request_is_the_same_request() {
+        let line = r#"{"op":"grep-scoped","q":"tesla","paths":["C:/a.txt"],"limit":10}"#;
+        assert_eq!(
+            Request::from_json(line),
+            Some(Request::Content {
+                q: "tesla".to_string(),
+                paths: vec!["C:/a.txt".to_string()],
+                limit: 10,
+                session: None,
+            })
+        );
+    }
+
+    /// A scoped request that carries no scope is refused, and never
+    /// widened into a search of the whole tree.
+    ///
+    /// The whole-tree grep is `"grep"`. A request that says `"content"`
+    /// and names no paths is a request the daemon cannot honour, and the
+    /// honest answer to it is an error, not a search of everything.
+    #[test]
+    fn a_scoped_request_without_a_scope_is_refused_and_not_widened() {
+        assert_eq!(
+            Request::from_json(r#"{"op":"content","q":"x","limit":1}"#),
+            None
+        );
+        assert_eq!(
+            Request::from_json(r#"{"op":"grep-scoped","q":"x","limit":1}"#),
+            None
+        );
+    }
+
+    /// A scope that cannot be read fails the request.
+    ///
+    /// A path that is not a string is not a path the daemon can read,
+    /// and a scope that is quietly narrowed is a scope the caller
+    /// believes it set and did not.
+    #[test]
+    fn a_scope_that_cannot_be_read_fails_the_request() {
+        assert_eq!(
+            Request::from_json(r#"{"op":"content","q":"x","paths":["C:/a.txt",7],"limit":1}"#),
+            None
+        );
+        assert_eq!(
+            Request::from_json(r#"{"op":"content","q":"x","paths":"C:/a.txt","limit":1}"#),
+            None
+        );
+    }
+
+    /// A hit the protocol cannot read fails the line.
+    ///
+    /// The count the client shows is the count of what came back, and a
+    /// hit that vanishes makes that count a lie: a reader that says
+    /// "nothing" about a broken line is a reader that turns a broken
+    /// daemon into an empty one.
+    #[test]
+    fn a_hit_the_protocol_cannot_read_fails_the_line() {
+        // A hit with no path.
+        assert_eq!(
+            Response::from_json_checked(r#"{"op":"hits","hits":[{"score":5}],"took_us":6}"#),
+            Err(LineError::NotAnAnswer)
+        );
+        // A hit whose path is not a string.
+        assert_eq!(
+            Response::from_json_checked(r#"{"op":"hits","hits":[{"path":7,"score":5}],"took_us":6}"#),
+            Err(LineError::NotAnAnswer)
+        );
+        // And the good line still reads.
+        let good = Response::from_json_checked(
+            r#"{"op":"hits","hits":[{"path":"p","score":5}],"took_us":6}"#,
+        );
+        assert!(good.is_ok(), "the good line reads: {good:?}");
+    }
+
+    /// The content answer says what it did not read.
+    ///
+    /// A truncated search and a complete one are different answers, and
+    /// the difference is on the wire: the two fields are additive, so a
+    /// reader that does not know them keeps working.
+    #[test]
+    fn the_content_answer_says_what_it_did_not_read() {
+        let r = Response::GrepFiles {
+            files: vec![GrepFile {
+                path: "f".into(),
+                lines: vec![(1, "t".into())],
+            }],
+            took_us: 8,
+            complete: false,
+            skipped: 3,
+        };
+        let line = r.to_json();
+        assert!(line.contains(r#""complete":false"#), "the flag: {line}");
+        assert!(line.contains(r#""skipped":3"#), "the count: {line}");
+        assert_eq!(Response::from_json(&line), Some(r));
+    }
+
+    /// A daemon that does not say is a daemon that promises the least.
+    #[test]
+    fn a_grep_files_line_without_the_two_facts_does_not_promise_completeness() {
+        let back = Response::from_json(r#"{"op":"grep-files","files":[],"took_us":8}"#)
+            .expect("the line reads back");
+        assert_eq!(
+            back,
+            Response::GrepFiles {
+                files: Vec::new(),
+                took_us: 8,
+                complete: false,
+                skipped: 0,
+            }
         );
     }
 

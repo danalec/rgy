@@ -334,7 +334,18 @@ fn run(search: Search, req: &Request<'_>, plan: &Plan) -> Result<(i32, Vec<Vec<u
     }
     let code = wait(&mut child);
     let (searched, finished, dropped) = rx.recv().unwrap_or((Ok(false), Ok(()), 0));
-    let _ = writer.join();
+    let joined = writer.join();
+    // A panic in the caller's search is not a search that found nothing:
+    // the thread died, and the answer it was going to give is not there.
+    // The exit status of a search-shaped tool is the whole contract — a
+    // search that matched nothing is one, and a search that fell over is
+    // two — so the panic is an error and says what it was.
+    if let Err(payload) = joined {
+        return Err(alloc::format!(
+            "the search panicked: {}",
+            panic_message(payload)
+        ));
+    }
 
     searched?;
     finished.map_err(|e| alloc::format!("the picker stopped reading the list: {e}"))?;
@@ -359,6 +370,11 @@ fn run(search: Search, req: &Request<'_>, plan: &Plan) -> Result<(i32, Vec<Vec<u
 /// picker separates on is not offered at all: half of it is a path that
 /// does not exist. The crate counts what it left out, so the user can be
 /// told.
+///
+/// When the two separators are the same there is nothing to translate,
+/// and the rule still holds: the record is checked before it is handed
+/// over, so a record the picker cannot read whole is left out and
+/// counted whichever separator the caller asked for.
 #[cfg(feature = "std")]
 struct Reflow<W> {
     inner: W,
@@ -388,7 +404,7 @@ impl<W: std::io::Write> Reflow<W> {
 
     /// The record ends here: it is offered whole, or not at all.
     fn end_record(&mut self) -> std::io::Result<()> {
-        if self.poisoned {
+        if self.poisoned || !self.carryable() {
             self.dropped += 1;
         } else {
             self.inner.write_all(&self.record)?;
@@ -402,7 +418,7 @@ impl<W: std::io::Write> Reflow<W> {
     /// The stream ends: a record the caller did not end with a separator
     /// is still a record, and it is offered whole or not at all.
     fn finish(&mut self) -> std::io::Result<()> {
-        if self.poisoned {
+        if self.poisoned || !self.carryable() {
             self.dropped += 1;
         } else if !self.record.is_empty() {
             self.inner.write_all(&self.record)?;
@@ -410,6 +426,19 @@ impl<W: std::io::Write> Reflow<W> {
         self.record.clear();
         self.poisoned = false;
         Ok(())
+    }
+
+    /// Whether the picker can read this record whole.
+    ///
+    /// A record that carries the byte the picker separates on is one the
+    /// picker cannot read whole, and half of a path is a path that does
+    /// not exist. A line reader strips the carriage return that ends a
+    /// line too, so a record that carries one is not a line either.
+    fn carryable(&self) -> bool {
+        match self.to {
+            Separator::Line => carries_line(&self.record),
+            Separator::Nul => !self.record.contains(&0),
+        }
     }
 
     /// How many records the picker could not be handed.
@@ -421,13 +450,17 @@ impl<W: std::io::Write> Reflow<W> {
 #[cfg(feature = "std")]
 impl<W: std::io::Write> std::io::Write for Reflow<W> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        if self.from == self.to {
-            return self.inner.write(buf);
-        }
         // A record never carries the byte it is separated by, so the
         // separator is the only byte that changes — and a record that
         // carries the byte the PICKER separates on is one the picker
         // cannot read whole.
+        //
+        // The two separators are often the same — a caller that asked
+        // for the picker's own separator needs no translation — and the
+        // rule holds then too: the record is read, checked and handed
+        // over on the same path, so a record the picker cannot read is
+        // left out and counted whichever separator the caller asked
+        // for.
         let from = self.from.byte();
         let to = self.to.byte();
         for &byte in buf {
@@ -447,6 +480,22 @@ impl<W: std::io::Write> std::io::Write for Reflow<W> {
 
     fn flush(&mut self) -> std::io::Result<()> {
         self.inner.flush()
+    }
+}
+
+/// The sentence a panic in the caller's search gets.
+///
+/// The panic's own words are kept: they say what went wrong, and a
+/// sentence that says only that something panicked says nothing a
+/// reader can act on.
+#[cfg(feature = "std")]
+fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    match payload.downcast::<String>() {
+        Ok(text) => *text,
+        Err(payload) => match payload.downcast::<&str>() {
+            Ok(text) => (*text).to_string(),
+            Err(_) => "the reason was not a string".to_string(),
+        },
     }
 }
 
@@ -796,6 +845,37 @@ mod tests {
         assert!(warning.contains("one record per line"), "{warning}");
     }
 
+    /// A record the picker cannot read whole is not offered at all — and
+    /// the rule holds when the separator is the picker's own.
+    ///
+    /// A carriage return is in the rule for the same reason the newline
+    /// is: a reader that splits on the newline strips the carriage
+    /// return that ends the line, and a path that ends in one comes back
+    /// without it. The caller asked for the lines and the picker reads
+    /// the lines, and there is nothing to translate between them — and
+    /// the record that cannot be carried is still not offered.
+    #[cfg(feature = "std")]
+    #[test]
+    fn a_record_the_line_picker_cannot_carry_is_not_offered_at_all() {
+        let mut buf: Vec<u8> = Vec::new();
+        let dropped = {
+            let mut out = Reflow::new(&mut buf, Separator::Line, Separator::Line);
+            out.write_all(b"src/a.txt\nsrc/has\rreturn.txt\nsrc/c.txt\n")
+                .unwrap();
+            out.finish().unwrap();
+            out.dropped()
+        };
+        assert_eq!(
+            dropped, 1,
+            "the record the picker cannot carry is counted"
+        );
+        assert_eq!(
+            buf,
+            b"src/a.txt\nsrc/c.txt\n",
+            "and it is not offered, not even in halves"
+        );
+    }
+
     #[cfg(feature = "std")]
     #[test]
     fn the_selection_is_printed_in_the_separator_the_caller_asked_for() {
@@ -1040,6 +1120,38 @@ exit "$1"
         // run is not a search with no matches.
         let reason = pick_records(search, &req).expect_err("a picker that cannot run is an error");
         assert!(reason.contains("cannot run"), "{reason}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A search that fell over is an error, and not an empty answer.
+    ///
+    /// The exit status of a search-shaped tool is the whole contract: a
+    /// search that matched nothing is one, and a search that broke is
+    /// two. A panic reported as "nothing matched" is a lie about what
+    /// happened, and it sends the user looking for an answer that was
+    /// never there.
+    #[cfg(feature = "std")]
+    #[cfg(any(windows, unix))]
+    #[test]
+    fn a_search_that_panics_is_an_error_and_not_an_empty_answer() {
+        let dir = std::env::temp_dir().join(format!("rgy-pick-panic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let fake = Fake::new(&dir);
+        let args = fake.args(0, &[]);
+        let req = Request {
+            args: &args,
+            binary: Some(&fake.binary),
+            separator: Separator::Nul,
+            order: Order::Sort,
+        };
+        let search: Search = Box::new(
+            |_out: &mut (dyn std::io::Write + Send + 'static)| -> Result<bool> {
+                panic!("the search fell over");
+            },
+        );
+        let reason = pick_records(search, &req).expect_err("a panic is an error");
+        assert!(reason.contains("panicked"), "{reason}");
+        assert!(reason.contains("the search fell over"), "{reason}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
