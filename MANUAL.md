@@ -637,6 +637,11 @@ Some things are not searches. A line that starts with `>` is a command:
 | `Control+W` | deletes the word |
 | `Control+U` | empties the field |
 
+These are the **window's** keys. The terminal has the same ones with one
+exception: `Control+C` is how a user quits a terminal, so it quits
+there — and the copy is the `>copy` command, because a terminal has no
+clipboard to put the path in.
+
 A paste inside the **actions** menu is the field's: the menu closes and
 the text lands in the field, with the field's own words for a clipboard
 that cannot be pasted. A key that does nothing and says nothing is a
@@ -654,6 +659,17 @@ the same answers — in a terminal. The terminal says the same sentence the
 window says when the daemon is not there: the two are the same interface
 over the same source, and the one that keeps quiet is the one the user
 cannot trust.
+
+The terminal knows the commands and the keys as well — `>open`, `>folder`,
+`>copy`, `>preview`, `>menu`, and `Control+P`, `Control+K` — and what it
+cannot do, it says. It has no window to open a file in, so `>open` prints
+the path, which is what `Enter` does there, and `>folder` prints the
+folder that holds it; it owns no clipboard, so `>copy` prints the path
+and says that there is no clipboard to put it in. `Control+C` is the one
+key that is not the launcher's there: in a terminal it is how a user
+quits, so it quits the session. The list moves with the arrows and with
+`Control+N`: `Control+P` previews the file in the terminal as in the
+window.
 
 The window itself is a Windows thing for now. The double-`Control`
 hotkey is a low-level keyboard hook, and the hook this repository has is

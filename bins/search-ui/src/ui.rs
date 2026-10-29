@@ -8,13 +8,26 @@
 //! the prompt and the footer carries a first/p50/p90 plus a sparkline of the
 //! last few dozen queries, so a scan that quietly got slower is visible while
 //! typing rather than after the fact.
+//!
+//! The commands are the launcher's, and the terminal knows them: a line
+//! that starts with `>` is a command and not a query, and the terminal
+//! takes it before the daemon sees it — the daemon would look for the
+//! literal text of the line and answer nothing. What the terminal
+//! cannot do, it says: it has no window to open a file in and owns no
+//! clipboard.
+//!
+//! The keys are the launcher's too, with one of its own: `Control+C` is
+//! how a user leaves a terminal, so it leaves this one, and the copy is
+//! the `>copy` command.
 
 use crate::latency::LatencyMeter;
+use crate::preview;
 use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::style::{Print, ResetColor, SetBackgroundColor, Stylize};
 use crossterm::terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen};
+use rgy_launcher::Action as LauncherAction;
 use rgy_name_core::live::Live;
 use rgy_name_core::name_query::{Alternatives, Hit, Searcher};
 use std::io::Write;
@@ -221,6 +234,13 @@ struct App {
     source: Option<Box<dyn rgy_launcher::Source>>,
     /// The index in this process, when there is one.
     live: Option<Live>,
+    /// What a command had to say, drawn over the results.
+    ///
+    /// The window shows the preview and the menu as panels over the
+    /// list; the terminal's answer is the same shape, because a command
+    /// that does something and says nothing is a launcher the user
+    /// cannot tell from a frozen one.
+    notice: Option<Notice>,
 }
 
 /// What a key press did to the app.
@@ -230,7 +250,155 @@ enum Action {
     Moved,
     Edited,
     Quit,
-    Open,
+    /// Do one of the launcher's actions to the selected result.
+    Run(LauncherAction),
+    /// The line names a command that does not exist.
+    Unknown,
+}
+
+/// Why the session ended.
+#[derive(PartialEq, Debug)]
+enum Outcome {
+    /// Still running.
+    None,
+    /// The user quit.
+    Quit,
+    /// A result was chosen: its path is printed after the screen is
+    /// restored.
+    Chosen,
+}
+
+/// What a command has to say.
+///
+/// The window shows the preview and the menu as panels over the results,
+/// and the terminal's answer is the same shape: the outcome of the
+/// command is where the results were, and `Escape` takes it away.
+///
+/// The terminal cannot do what the window does — it has no window to open
+/// a file in and owns no clipboard — so every line here says what was
+/// really done.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Notice {
+    /// The first line: what the notice is about.
+    title: String,
+    /// The lines under it.
+    lines: Vec<String>,
+}
+
+impl Notice {
+    /// Nothing to act on: the command had no result to work on.
+    fn nothing() -> Notice {
+        Notice {
+            title: "nothing to act on".to_string(),
+            lines: vec!["there is no result selected".to_string()],
+        }
+    }
+
+    /// The folder that holds the selected path.
+    ///
+    /// The window opens it; the terminal has no file manager to open it
+    /// with, so it says which folder that is and leaves it there.
+    fn folder(path: &str) -> Notice {
+        Notice {
+            title: "folder".to_string(),
+            lines: vec![
+                "the terminal cannot open a folder — this is the one that holds it:".to_string(),
+                parent_of(path).to_string(),
+            ],
+        }
+    }
+
+    /// The path, for the user to copy.
+    ///
+    /// The window puts it on the clipboard; the terminal owns no
+    /// clipboard, so it prints the path and says that is what it did.
+    fn copy(path: &str) -> Notice {
+        Notice {
+            title: "copy".to_string(),
+            lines: vec![
+                "the terminal has no clipboard — copy the path from here:".to_string(),
+                path.to_string(),
+            ],
+        }
+    }
+
+    /// The beginning of the selected file.
+    fn preview(path: &str) -> Notice {
+        let preview = preview::of(path);
+        let title = preview.title;
+        Notice {
+            title: format!("preview — {title}"),
+            lines: preview.lines,
+        }
+    }
+
+    /// The actions of the launcher, with the key that does each one.
+    fn menu() -> Notice {
+        let lines = rgy_launcher::COMMANDS
+            .iter()
+            .map(|command| {
+                let name = format!(">{}", command.name);
+                let key = shortcut(command.action);
+                format!("{name:<9}{key:<11}{}", describe(command.action))
+            })
+            .collect();
+        Notice {
+            title: "actions".to_string(),
+            lines,
+        }
+    }
+
+    /// The line names a command that does not exist.
+    ///
+    /// The sentence is the launcher's own: the two faces say the same
+    /// thing about the same mistake.
+    fn unknown(text: &str) -> Notice {
+        Notice {
+            title: "unknown command".to_string(),
+            lines: vec![rgy_launcher::commands::unknown(text)],
+        }
+    }
+
+    /// The panel's rows, wrapped to the width.
+    fn rows(&self, width: usize) -> Vec<String> {
+        let mut out = vec![self.title.clone().with(palette::ink()).bold().to_string()];
+        for line in &self.lines {
+            for piece in wrap(line, width) {
+                out.push(piece.with(palette::ink()).to_string());
+            }
+        }
+        out
+    }
+}
+
+/// What each action does, in the terminal's own words.
+///
+/// The launcher's labels are the window's; the terminal has a voice of
+/// its own, and this is it.
+fn describe(action: LauncherAction) -> &'static str {
+    match action {
+        LauncherAction::Open => "print the path",
+        LauncherAction::OpenFolder => "the folder that holds it",
+        LauncherAction::CopyPath => "the path, to copy",
+        LauncherAction::Preview => "the first lines of the file",
+        LauncherAction::Menu => "this list",
+    }
+}
+
+/// The key that does the action in the terminal, and the command where
+/// there is no key.
+///
+/// The launcher's menu says `Ctrl+C` for the copy; in a terminal that
+/// key quits, and a menu that sends the user to the wrong key is a menu
+/// that lies. The copy is the `>copy` command there.
+fn shortcut(action: LauncherAction) -> &'static str {
+    match action {
+        LauncherAction::Open => "Enter",
+        LauncherAction::OpenFolder => "Ctrl+Enter",
+        LauncherAction::CopyPath => ">copy",
+        LauncherAction::Preview => "Ctrl+P",
+        LauncherAction::Menu => "Ctrl+K",
+    }
 }
 
 impl App {
@@ -252,6 +420,7 @@ impl App {
             painted_width: 0,
             meter: LatencyMeter::new(),
             source: None,
+            notice: None,
         };
         app.search();
         app
@@ -276,6 +445,7 @@ impl App {
             painted_width: 0,
             meter: LatencyMeter::new(),
             source: Some(source),
+            notice: None,
         };
         app.search();
         app
@@ -286,6 +456,15 @@ impl App {
     /// Matching goes through [`Searcher`] — the same fzf-v1 + one-typo
     /// matcher `searchctl` runs — so the UI and the CLI cannot drift apart.
     fn search(&mut self) {
+        // A command line is not a search: the source would look for the
+        // literal text of the line — ">folder" — and answer nothing,
+        // while the line is a command. The terminal takes it before the
+        // source sees it, the same rule the window follows.
+        if self.is_command() {
+            self.filtered = false;
+            return;
+        }
+
         let started = Instant::now();
         self.filtered = !self.input.trim().is_empty();
 
@@ -456,6 +635,72 @@ impl App {
         self.results.get(self.selected).cloned()
     }
 
+    /// Whether the query is a command line.
+    ///
+    /// A command line is not a search: the daemon would look for the
+    /// literal text of the line — ">folder" — and answer nothing, while
+    /// the line is a command.
+    fn is_command(&self) -> bool {
+        rgy_launcher::commands::is_command(&self.input)
+    }
+
+    /// The action the command line names, if it names one.
+    fn command(&self) -> Option<LauncherAction> {
+        rgy_launcher::commands::command_for(&self.input).map(|c| c.action)
+    }
+
+    /// Do one of the launcher's actions to the selected result.
+    ///
+    /// `true` when the session is over: `Open` is the one action that
+    /// ends it, because the terminal has no window to open a file in and
+    /// prints the path instead — which is what `Enter` does too.
+    fn run_action(&mut self, action: LauncherAction) -> bool {
+        let Some(path) = self.selected_path() else {
+            // Nothing to act on is something to say: a command that does
+            // nothing and says nothing is a launcher the user cannot
+            // tell from a frozen one.
+            self.notice = Some(Notice::nothing());
+            return false;
+        };
+        match action {
+            LauncherAction::Open => true,
+            LauncherAction::OpenFolder => {
+                self.notice = Some(Notice::folder(&path));
+                false
+            }
+            LauncherAction::CopyPath => {
+                self.notice = Some(Notice::copy(&path));
+                false
+            }
+            LauncherAction::Preview => {
+                self.notice = Some(Notice::preview(&path));
+                false
+            }
+            LauncherAction::Menu => {
+                self.notice = Some(Notice::menu());
+                false
+            }
+        }
+    }
+
+    /// Say that the line names a command that does not exist.
+    fn say_unknown(&mut self) {
+        self.notice = Some(Notice::unknown(&self.input));
+    }
+
+    /// Whether a notice is on screen.
+    fn has_notice(&self) -> bool {
+        self.notice.is_some()
+    }
+
+    /// Take the notice away, if there is one.
+    ///
+    /// `Escape` closes the panel before it closes the session — the
+    /// order the window uses.
+    fn close_notice(&mut self) {
+        self.notice = None;
+    }
+
     fn draw(&mut self, out: &mut impl Write, size: (u16, u16)) -> std::io::Result<()> {
         let width = size.0 as usize;
         let height = size.1 as usize;
@@ -509,6 +754,10 @@ impl App {
         rows.push(self.prompt_line(width, &latency));
         rows.push("─".repeat(width).with(palette::dim()).to_string());
 
+        // The notice, when there is one, is a panel over the results:
+        // the same place the window puts the preview and the menu.
+        let notice = self.notice.as_ref().map(|n| n.rows(width));
+
         let first = self.top.min(self.results.len());
         let last = (first + list_height).min(self.results.len());
 
@@ -518,12 +767,17 @@ impl App {
         // leave the previous frame's entries on screen below the last match.
         for offset in 0..list_height {
             let row = first + offset;
-            rows.push(if self.results.is_empty() && offset == 0 {
-                "  no matches".with(palette::dim()).to_string()
-            } else if row < last {
-                self.result_cell(row, width)
-            } else {
-                String::new()
+            rows.push(match &notice {
+                Some(panel) => panel.get(offset).cloned().unwrap_or_default(),
+                None => {
+                    if self.results.is_empty() && offset == 0 {
+                        "  no matches".with(palette::dim()).to_string()
+                    } else if row < last {
+                        self.result_cell(row, width)
+                    } else {
+                        String::new()
+                    }
+                }
             });
         }
 
@@ -751,9 +1005,38 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Action {
     let alt = key.modifiers.contains(KeyModifiers::ALT);
 
     let action = match key.code {
-        KeyCode::Esc => Action::Quit,
+        KeyCode::Esc => {
+            // The panel goes before the session does: the same order the
+            // window uses.
+            if app.has_notice() {
+                app.close_notice();
+                Action::None
+            } else {
+                Action::Quit
+            }
+        }
+        // The launcher's keys do the launcher's actions in the terminal
+        // too: `Control+P` previews the file and `Control+K` opens the
+        // actions. `Control+C` is the one that is not: in a terminal it
+        // is how a user leaves, so it leaves this one — a key that opens
+        // a panel the user cannot leave from is a trap, and the
+        // terminal's copy is the `>copy` command.
         KeyCode::Char('c') if ctrl => Action::Quit,
-        KeyCode::Enter => Action::Open,
+        KeyCode::Char('p') if ctrl => Action::Run(LauncherAction::Preview),
+        KeyCode::Char('k') if ctrl => Action::Run(LauncherAction::Menu),
+        KeyCode::Enter if ctrl => Action::Run(LauncherAction::OpenFolder),
+        KeyCode::Enter => {
+            // A command line runs the command; anything else opens the
+            // selected result.
+            if app.is_command() {
+                match app.command() {
+                    Some(action) => Action::Run(action),
+                    None => Action::Unknown,
+                }
+            } else {
+                Action::Run(LauncherAction::Open)
+            }
+        }
 
         KeyCode::Backspace => {
             app.delete_before_caret();
@@ -800,10 +1083,6 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Action {
             app.selected = app.selected.saturating_sub(1);
             Action::Moved
         }
-        KeyCode::Char('p') if ctrl => {
-            app.selected = app.selected.saturating_sub(1);
-            Action::Moved
-        }
         KeyCode::Down => {
             app.selected += 1;
             Action::Moved
@@ -832,6 +1111,15 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Action {
     // re-run the search is the caller's to decide, because a burst of keys
     // wants exactly one search at the end of it (see [`run`]).
     app.clamp_selection();
+
+    // An edit takes the notice away: the user is doing something else now,
+    // and a panel that stays over the results is a panel about something
+    // that is no longer true. It goes here and not after the burst, so that
+    // a command typed and confirmed in one go keeps what it has to say.
+    if action == Action::Edited {
+        app.close_notice();
+    }
+
     action
 }
 
@@ -880,7 +1168,7 @@ fn run_app(mut app: App) -> Result<(), String> {
         // faster than a large index can be searched, so the queue is where
         // that work piles up and then gets thrown away.
         let mut edited = false;
-        let mut outcome = Action::None;
+        let mut outcome = Outcome::None;
         let mut block = true;
         loop {
             if !block
@@ -896,13 +1184,20 @@ fn run_app(mut app: App) -> Result<(), String> {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     match handle_key(&mut app, key) {
                         Action::Quit => {
-                            outcome = Action::Quit;
+                            outcome = Outcome::Quit;
                             break;
                         }
-                        Action::Open => {
-                            outcome = Action::Open;
-                            break;
+                        Action::Run(action) => {
+                            // `Open` is the one action that ends the
+                            // session: the terminal has no window to open
+                            // a file in, so it prints the path — which is
+                            // what `Enter` does too.
+                            if app.run_action(action) {
+                                outcome = Outcome::Chosen;
+                                break;
+                            }
                         }
+                        Action::Unknown => app.say_unknown(),
                         Action::Edited => edited = true,
                         Action::None | Action::Moved => {}
                     }
@@ -918,12 +1213,12 @@ fn run_app(mut app: App) -> Result<(), String> {
         app.clamp_selection();
 
         match outcome {
-            Action::Quit => break,
-            Action::Open => {
+            Outcome::Quit => break,
+            Outcome::Chosen => {
                 chosen = app.selected_path();
                 break;
             }
-            _ => {}
+            Outcome::None => {}
         }
     }
 
@@ -1018,6 +1313,41 @@ fn fit(s: &str, width: usize) -> String {
     } else {
         elide_tail(s, width)
     }
+}
+
+/// Break a line into pieces that fit the width.
+///
+/// A path is longer than a terminal often, and a path cut in half is a
+/// path the user cannot use: a word that does not fit on a line of its
+/// own is broken, and the rest of the line is broken on its spaces.
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut out: Vec<String> = Vec::new();
+    let mut line = String::new();
+    for word in text.split(' ') {
+        let fits = line.chars().count() + 1 + word.chars().count() <= width;
+        if !line.is_empty() && fits {
+            line.push(' ');
+            line.push_str(word);
+            continue;
+        }
+        if !line.is_empty() {
+            out.push(std::mem::take(&mut line));
+        }
+        let mut chars: Vec<char> = word.chars().collect();
+        while chars.len() > width {
+            out.push(chars[..width].iter().collect());
+            chars.drain(..width);
+        }
+        line = chars.into_iter().collect();
+    }
+    if !line.is_empty() {
+        out.push(line);
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
 }
 
 /// Shorten to `width` chars keeping the tail. Paths are read from the end, so
@@ -1789,6 +2119,261 @@ mod tests {
         assert!(footer.contains("p50"), "{footer}");
         assert!(!footer.contains("entries"), "{footer}");
         assert!(!footer.contains("matches"), "{footer}");
+    }
+
+    /// A source that remembers what it was asked.
+    ///
+    /// The terminal's contract with the daemon is that a command line
+    /// never reaches it: the daemon would look for the literal text of
+    /// the line and answer nothing, and a test that cannot see the
+    /// questions cannot keep that honest.
+    #[derive(Clone, Default)]
+    struct Recorder {
+        queries: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+    }
+
+    impl Recorder {
+        fn asked(&self) -> Vec<String> {
+            self.queries.borrow().clone()
+        }
+    }
+
+    impl rgy_launcher::Source for Recorder {
+        fn search(&mut self, query: &str, _limit: usize) -> rgy_launcher::Answer {
+            self.queries.borrow_mut().push(query.to_string());
+            rgy_launcher::Answer::empty()
+        }
+    }
+
+    /// A command line is not a question for the daemon.
+    ///
+    /// The daemon would look for the literal text of the line — ">folder"
+    /// — and answer nothing, while the line is a command. The terminal
+    /// takes it before the daemon sees it.
+    #[test]
+    fn a_command_line_never_reaches_the_daemon() {
+        let recorder = Recorder::default();
+        let mut app = App::with_source(Box::new(recorder.clone()), "C:\\".to_string());
+        for ch in ">folder".chars() {
+            app.insert(ch);
+        }
+        app.search();
+
+        let asked = recorder.asked();
+        assert!(
+            !asked.iter().any(|q| q.starts_with('>')),
+            "the daemon was asked for the command line: {asked:?}"
+        );
+    }
+
+    /// The query is still a query: the command line did not break the
+    /// search that came before it.
+    #[test]
+    fn a_plain_query_is_still_asked_of_the_daemon() {
+        let recorder = Recorder::default();
+        let mut app = App::with_source(Box::new(recorder.clone()), "C:\\".to_string());
+        for ch in "invoice".chars() {
+            app.insert(ch);
+        }
+        app.search();
+
+        let asked = recorder.asked();
+        assert!(
+            asked.iter().any(|q| q == "invoice"),
+            "the daemon was not asked the question: {asked:?}"
+        );
+    }
+
+    #[test]
+    fn a_command_line_names_the_action_it_means() {
+        let mut app = app_new();
+        for ch in ">folder".chars() {
+            app.insert(ch);
+        }
+        assert!(app.is_command());
+        assert_eq!(app.command(), Some(LauncherAction::OpenFolder));
+
+        // And a word without the prefix is a search, not a command.
+        let mut app = app_new();
+        for ch in "folder".chars() {
+            app.insert(ch);
+        }
+        assert!(!app.is_command());
+        assert_eq!(app.command(), None);
+    }
+
+    /// The launcher's keys do the launcher's actions in the terminal too
+    /// — the ones that are not the way out.
+    #[test]
+    fn the_launcher_keys_that_are_not_control_c_do_their_actions() {
+        let mut app = app_new();
+        let ctrl = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        assert_eq!(
+            handle_key(&mut app, ctrl('p')),
+            Action::Run(LauncherAction::Preview)
+        );
+        assert_eq!(
+            handle_key(&mut app, ctrl('k')),
+            Action::Run(LauncherAction::Menu)
+        );
+        assert_eq!(
+            handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)
+            ),
+            Action::Run(LauncherAction::OpenFolder)
+        );
+    }
+
+    /// `Control+C` is how a user quits a terminal, so it quits this one.
+    ///
+    /// A key that opens a panel the user cannot leave from is a trap:
+    /// the user presses it to leave and stays.
+    #[test]
+    fn control_c_quits_the_terminal() {
+        let mut app = app_new();
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(handle_key(&mut app, ctrl_c), Action::Quit);
+    }
+
+    /// The copy is the `>copy` command in the terminal: it is how the
+    /// path is copied now that `Control+C` quits.
+    #[test]
+    fn the_copy_is_the_command_in_the_terminal() {
+        let mut app = app_new();
+        for ch in ">copy".chars() {
+            let key = KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE);
+            assert_eq!(handle_key(&mut app, key), Action::Edited);
+        }
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(
+            handle_key(&mut app, enter),
+            Action::Run(LauncherAction::CopyPath)
+        );
+    }
+
+    /// The terminal's menu does not offer the key that quits: a menu
+    /// that sends the user to the wrong key is a menu that lies.
+    #[test]
+    fn the_terminal_menu_does_not_offer_the_key_that_quits() {
+        let mut app = app_new();
+        assert!(!app.run_action(LauncherAction::Menu));
+
+        let notice = app.notice.as_ref().expect("the notice is there");
+        let text = notice.lines.join("\n");
+        assert!(text.contains(">copy"), "{text}");
+        assert!(!text.contains("Ctrl+C"), "{text}");
+    }
+
+    /// The list still moves with the keys it moved with: the arrows and
+    /// `Control+N`.
+    #[test]
+    fn the_list_still_moves_with_control_n_and_the_arrows() {
+        let mut app = app_with("main");
+        let first = app.selected;
+        let ctrl_n = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL);
+        assert_eq!(handle_key(&mut app, ctrl_n), Action::Moved);
+        assert_eq!(app.selected, first + 1);
+
+        let up = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(handle_key(&mut app, up), Action::Moved);
+        assert_eq!(app.selected, first);
+    }
+
+    /// The terminal owns no clipboard, so it says so instead of pretending
+    /// that it copied anything.
+    #[test]
+    fn the_copy_command_prints_the_path_and_says_it_has_no_clipboard() {
+        let mut app = app_with("main");
+        let selected = app.selected_path().expect("a result is selected");
+        assert!(!app.run_action(LauncherAction::CopyPath));
+
+        let notice = app.notice.as_ref().expect("the notice is there");
+        let text = notice.lines.join("\n");
+        assert!(text.contains(&selected), "{text}");
+        assert!(text.contains("clipboard"), "{text}");
+    }
+
+    /// A command with nothing to act on says so: it does not do nothing,
+    /// and it does not search for the literal text of the line.
+    #[test]
+    fn a_command_with_nothing_to_act_on_says_so() {
+        let mut app = app_with("zzzz");
+        assert!(app.results.is_empty());
+        assert!(!app.run_action(LauncherAction::CopyPath));
+
+        let notice = app.notice.as_ref().expect("the notice is there");
+        assert!(
+            notice.lines.join("\n").contains("no result"),
+            "{:?}",
+            notice.lines
+        );
+    }
+
+    #[test]
+    fn the_menu_command_lists_the_actions_with_their_keys() {
+        let mut app = app_new();
+        assert!(!app.run_action(LauncherAction::Menu));
+
+        let notice = app.notice.as_ref().expect("the notice is there");
+        let text = notice.lines.join("\n");
+        for command in rgy_launcher::COMMANDS {
+            assert!(text.contains(&format!(">{}", command.name)), "{text}");
+        }
+        assert!(text.contains("Ctrl+P"), "{text}");
+    }
+
+    #[test]
+    fn the_preview_command_shows_the_head_of_the_file() {
+        let path =
+            std::env::temp_dir().join(format!("rgy-search-ui-notas-{}.txt", std::process::id()));
+        std::fs::write(&path, "primeira linha\nsegunda linha\n").expect("the file is written");
+        let mut app = app_new();
+        app.results = vec![path.to_string_lossy().into_owned()];
+        assert!(!app.run_action(LauncherAction::Preview));
+        let _ = std::fs::remove_file(&path);
+
+        let notice = app.notice.as_ref().expect("the notice is there");
+        let text = notice.lines.join("\n");
+        assert!(text.contains("primeira linha"), "{text}");
+    }
+
+    /// The notice is drawn where the results were: the panel is over the
+    /// list, the way the window's preview is over the window's results.
+    #[test]
+    fn the_notice_is_drawn_where_the_results_were() {
+        let mut app = app_with("main");
+        app.run_action(LauncherAction::CopyPath);
+        let rows = frame(&mut app, 60, 10);
+        let text: String = rows.iter().map(|(_, t)| t.as_str()).collect();
+        assert!(text.contains("clipboard"), "{text}");
+    }
+
+    /// `Escape` closes the panel before it closes the session — the
+    /// order the window uses.
+    #[test]
+    fn escape_closes_the_notice_before_the_session() {
+        let mut app = app_with("main");
+        app.run_action(LauncherAction::CopyPath);
+        assert!(app.has_notice());
+
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(handle_key(&mut app, esc), Action::None);
+        assert!(!app.has_notice());
+        assert_eq!(handle_key(&mut app, esc), Action::Quit);
+    }
+
+    /// An edit takes the notice away: the user is doing something else
+    /// now, and the panel was about the last thing.
+    #[test]
+    fn an_edit_takes_the_notice_away() {
+        let mut app = app_with("main");
+        app.run_action(LauncherAction::CopyPath);
+        assert!(app.has_notice());
+
+        let key = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE);
+        assert_eq!(handle_key(&mut app, key), Action::Edited);
+        assert!(!app.has_notice());
     }
 
     #[test]

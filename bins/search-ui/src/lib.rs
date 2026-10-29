@@ -8,6 +8,8 @@
 
 pub mod latency;
 
+mod preview;
+
 mod ui;
 
 pub use ui::*;

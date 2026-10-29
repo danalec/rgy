@@ -225,10 +225,10 @@ In the field:
 | `file:` `folder:` `doc:` `pic:` `video:` `audio:` | the short filters |
 | `>open` `>folder` `>copy` `>preview` `>menu` | the commands |
 
-`Control` twice opens the window, over whatever is on screen. The keys are
-all of them: arrows, `Enter` to open, `Control+Enter` for the folder,
-`Escape` to close, `Control+C` to copy the path, `Control+P` to preview
-the file, `Control+K` for the actions.
+`Control` twice opens the window, over whatever is on screen. In the
+window the keys are all of them: arrows, `Enter` to open, `Control+Enter`
+for the folder, `Escape` to close, `Control+C` to copy the path,
+`Control+P` to preview the file, `Control+K` for the actions.
 
 The daemon's order is the relevance order and it rules; on top of it the
 launcher remembers what **you** opened, and a result you used recently comes
@@ -238,7 +238,12 @@ what it passes goes down one place to make room.
 The window is a Windows thing for now — the double-`Control` hotkey is a
 low-level keyboard hook, and the hook this repository has is the Windows
 one. Everywhere else the terminal interface is the launcher, over the same
-daemon.
+daemon: the same commands (`>open`, `>folder`, `>copy`, `>preview`,
+`>menu`) and the same keys (`Control+P`, `Control+K`), with what it
+cannot do said out loud — a terminal has no window to open a file in and
+no clipboard to copy the path into, so it prints the path. `Control+C` is
+the one key that is not the launcher's there: in a terminal it is how a
+user quits, so it quits — and the copy is the `>copy` command.
 
 ## When it goes wrong
 
