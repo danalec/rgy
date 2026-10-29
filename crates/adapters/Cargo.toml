@@ -16,6 +16,10 @@ readme = "../../README.md"
 [dependencies]
 # The adapter trait, the registry and the pipeline that runs one.
 rgx-core = { path = "../rgx-core", version = "0.1.1", default-features = false }
+# The content engine's seam: the reader the adapters answer through, and
+# the document it hands back. It is `no_std` + `alloc` without its `std`
+# feature, and this crate needs the `std` half — the adapters read files.
+rgy-name-core = { path = "../name-core", version = "0.1.0" }
 # The ten adapter families, transported from upstream. Each one hands over
 # its adapters; the registry is what orders them.
 rgx-adapters-archive = { path = "../rgx-adapters-archive", version = "0.1.1" }

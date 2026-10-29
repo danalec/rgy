@@ -361,10 +361,10 @@ that contain quarterly — one file, where the quoted form finds two.
 The outer quotes are single so that the inner ones reach the engine
 whole.
 
-Note what this does **not** do yet: on a PDF or a Word document, `grep:`
-reads the compressed bytes and finds nothing useful. Those formats are
-listed in [FORMATS.md](FORMATS.md) with their state; the adapters are in
-the tree but not yet wired into the search path.
+On a PDF or a Word document, `grep:` reads the document and not its
+compressed bytes: the format adapters are in the search path, and the words
+of a PDF's text layer are words the query can match. Those formats are listed
+in [FORMATS.md](FORMATS.md) with their state.
 
 ## 6. The flags
 
@@ -802,9 +802,11 @@ the quotes to go fuzzy, or check the spelling of the filter: `ext:pdf`, not
 `--max-age` controls how stale it may get; `--reindex` forces a rebuild
 now; `--explain` shows what rgy did with the query.
 
-**A PDF search finds nothing.** Expected today. `grep:` reads the bytes of
-a PDF, which are compressed; the adapters that read inside PDFs are not
-wired into the search path yet. See [FORMATS.md](FORMATS.md).
+**A PDF search finds its text.** `grep:` reads the document through the
+format adapters, so a PDF's text layer is searched like any other file's
+bytes and a `.docx` is a zip with XML inside. What the adapters do not
+reach is the document's own structure — a PDF's page, a spreadsheet's cell
+— which is not in the path. See [FORMATS.md](FORMATS.md).
 
 **The daemon does not answer.** It expects one JSON object per line, and
 answers on stdout. `{"op":"status"}` tells you whether it is alive and

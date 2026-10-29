@@ -569,13 +569,16 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
                 // are 352, and look confident about it.
                 g.max_per_file = usize::MAX;
                 g.budget = None;
-                let res = content::answer(
+                let res = content::answer_with(
                     &g,
                     alt,
-                    root.as_bytes(),
-                    searcher.live,
-                    home.as_bytes(),
-                    content_index.as_ref(),
+                    content::Scope {
+                        root: root.as_bytes(),
+                        live: searcher.live,
+                        home: home.as_bytes(),
+                        index: content_index.as_ref(),
+                        adapter: Some(&rgy_adapters::Adapters),
+                    },
                     usize::MAX,
                 );
                 n += res.files.iter().map(|f| f.lines.len()).sum::<usize>();
@@ -594,13 +597,19 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
         for alt in &alts.alts {
             let Some(pat) = &alt.grep else { continue };
             let g = Grep::new(pat, alt.grep_mode)?;
-            let res = content::answer(
+            let res = content::answer_with(
                 &g,
                 alt,
-                root.as_bytes(),
-                searcher.live,
-                home.as_bytes(),
-                content_index.as_ref(),
+                content::Scope {
+                    root: root.as_bytes(),
+                    live: searcher.live,
+                    home: home.as_bytes(),
+                    index: content_index.as_ref(),
+                    // The formats the adapters claim are read through them,
+                    // so a PDF's words and an archive member's content are
+                    // searched like any other file's bytes.
+                    adapter: Some(&rgy_adapters::Adapters),
+                },
                 limit,
             );
             // The records that cannot be one line: the line is one path,

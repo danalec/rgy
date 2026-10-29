@@ -47,30 +47,30 @@ messages. The adapters read those structures and hand back searchable text
 — plus the metadata a file carries about itself.
 
 The adapter crates are already in this workspace, transported verbatim from
-[rgx](https://github.com/danalec/rgx). **No binary wires them into the
-search path yet.** The table below is therefore a map of what is coming,
-not a list of what answers today.
+[rgx](https://github.com/danalec/rgx), and they are wired: the content path
+asks the registry what a file renders to, and the answer is searched like the
+file's own bytes. The table below is therefore a list of what answers today.
 
 | family | formats | state |
 |---|---|---|
-| archive | zip (with 35 aliases, among them `.gem`, `.nupkg`, `.crate`) · 7z · tar · cpio · ar · deb · git-pack · git bundle · Subversion dump · rar (store and RAR5) · gz bz2 xz zstd lz4 brotli, including `tar.*` · a PostgreSQL custom dump (`.dump`) · a borg segment (no extension at all: `data/0/2` is claimed by its magic) · the iWork packages (`.pages`, `.numbers`, `.key`), which are zip containers whose *members* are searchable but whose document lives in a compressed IWA archive | in the tree, not wired |
-| images | ISO 9660 (Joliet and Rock Ridge names, files extracted) · SquashFS 4 · WIM · VHD · VHDX · QCOW2 · VMDK · VDI · EROFS · APFS · HFS+ (catalog names) · DMG · a raw `.img` dispatched by its own table | in the tree, not wired |
-| office | docx · xlsx · pptx · ODF · epub · vsd / vsdx · xps · rtf · legacy `.doc/.xls/.ppt` · WordPerfect · AbiWord · Hangul `.hwd` · LaTeX · the lightweight markup family (markdown, HTML, RST, org-mode, MediaWiki, Textile, txt2tags, Jupyter notebooks, troff man pages) — dark by default, see the note below the table | in the tree, not wired |
-| pdf | text in-process: xref streams, object streams, CID fonts, the filter zoo · the text rendering mode is tracked, so a hidden layer is named and a document whose whole layer is invisible hands its page images over for OCR · encrypted PDFs under the standard security handler when the user password is empty | in the tree, not wired |
-| llm | gguf · safetensors · npy · onnx · protobuf · tiktoken · keras · torch · pickle | in the tree, not wired |
-| tabular | sqlite · duckdb · dbf (and the Visual FoxPro `.dbc`) · SYLK · DIF · Lotus 1-2-3 · Microsoft Access · LMDB `data.mdb` · shapefile · parquet · arrow · ERI · mat v5 · netCDF-3 · NASA CDF · hdf5 (and the netCDF-4 and MATLAB v7.3 files that are HDF5 underneath) · MongoDB BSON · Redis RDB and AOF · LevelDB / RocksDB · Zarr | in the tree, not wired |
-| media | EXIF (jpeg/tiff/png/webp) · GIF and BMP headers · PSD · JPEG 2000 · JPEG XL · OpenEXR · audio tags · video headers, Matroska chapters and tags · fits · dicom · font tables · e-book metadata (MOBI/AZW/AZW3/PRC) | in the tree, not wired |
-| 3d | glb · stl · ply · fbx · pcd · las and laz (the LASzip-compressed twin, decoded point for point) · vtk · blend · 3ds · NIfTI volumes · MRC/CCP4 volumes | in the tree, not wired |
-| mail | mbox · eml · emlx · msg · pst/ost · wab (Windows Address Book) · MMDF mailboxes · Thunderbird `.msf` indexes · Apple mailbox index — attachments recurse through the chain | in the tree, not wired |
-| inspect | forensic triage on any binary: magic ID, structure carving, strings, entropy, x509 | in the tree, not wired |
-| inspect · documents | OLE2/CFB compound files · binary property lists · multi-page TIFF and raw camera formats · DjVu · ISO-BMFF (`ftyp`/`meta`/`ilst`) · Windows shell links (`.lnk`) · CALS rasters · JEDMICS C4 | in the tree, not wired |
-| inspect · databases | Firebird and InterBase header pages (the rows live behind `RDB$PAGES` and are not walked) | in the tree, not wired |
-| inspect · executables | PE `.rsrc` · Mach-O `__cstring`/`__cfstring` · ELF `.comment` and `NT_GNU_BUILD_ID` · DEX string pool · WASM `name`/`producers` | in the tree, not wired |
-| inspect · science | GRIB 1/2 · BUFR · SEG-Y · CERN ROOT · N5 · N5z | in the tree, not wired |
-| inspect · CAD | DWG · Parasolid transmit files · ACIS `.sab` · Revit `.rvt` · MicroStation DGN · and the text CAD formats — DXF, IFC/STEP, IGES, ACIS `.sat`, STL — which are *rendered*: the file's own bytes stay the default answer, and the rendering appears under `RGX_ADAPTER_VIEW=render` | in the tree, not wired |
-| inspect · graphics | plotter drawings (HP-GL) — *rendered* the same way · graphics metafiles (CGM) — *revealed*, since the file is binary | in the tree, not wired |
-| inspect · genomics | BAM · BCF 1 and 2 · CRAM 3 · and the flat files of the same family — FASTA, FASTQ, VCF, GFF/GTF, PDB, mmCIF — which are *rendered* | in the tree, not wired |
-| docs | OCR through an external `tesseract` on `*.ocr.jpg`, `*.ocr.png`, `*.ocr.pdf` — a scanned PDF's page images are handed over, so the claim works on any tesseract build · a faxed page (CCITT G3/G4) and a JBIG2 page decoded in-house · `.pub` through `soffice` | in the tree, not wired |
+| archive | zip (with 35 aliases, among them `.gem`, `.nupkg`, `.crate`) · 7z · tar · cpio · ar · deb · git-pack · git bundle · Subversion dump · rar (store and RAR5) · gz bz2 xz zstd lz4 brotli, including `tar.*` · a PostgreSQL custom dump (`.dump`) · a borg segment (no extension at all: `data/0/2` is claimed by its magic) · the iWork packages (`.pages`, `.numbers`, `.key`), which are zip containers whose *members* are searchable but whose document lives in a compressed IWA archive | wired: read through the adapter |
+| images | ISO 9660 (Joliet and Rock Ridge names, files extracted) · SquashFS 4 · WIM · VHD · VHDX · QCOW2 · VMDK · VDI · EROFS · APFS · HFS+ (catalog names) · DMG · a raw `.img` dispatched by its own table | wired: read through the adapter |
+| office | docx · xlsx · pptx · ODF · epub · vsd / vsdx · xps · rtf · legacy `.doc/.xls/.ppt` · WordPerfect · AbiWord · Hangul `.hwd` · LaTeX · the lightweight markup family (markdown, HTML, RST, org-mode, MediaWiki, Textile, txt2tags, Jupyter notebooks, troff man pages) — dark by default, see the note below the table | wired: read through the adapter |
+| pdf | text in-process: xref streams, object streams, CID fonts, the filter zoo · the text rendering mode is tracked, so a hidden layer is named and a document whose whole layer is invisible hands its page images over for OCR · encrypted PDFs under the standard security handler when the user password is empty | wired: read through the adapter |
+| llm | gguf · safetensors · npy · onnx · protobuf · tiktoken · keras · torch · pickle | wired: read through the adapter |
+| tabular | sqlite · duckdb · dbf (and the Visual FoxPro `.dbc`) · SYLK · DIF · Lotus 1-2-3 · Microsoft Access · LMDB `data.mdb` · shapefile · parquet · arrow · ERI · mat v5 · netCDF-3 · NASA CDF · hdf5 (and the netCDF-4 and MATLAB v7.3 files that are HDF5 underneath) · MongoDB BSON · Redis RDB and AOF · LevelDB / RocksDB · Zarr | wired: read through the adapter |
+| media | EXIF (jpeg/tiff/png/webp) · GIF and BMP headers · PSD · JPEG 2000 · JPEG XL · OpenEXR · audio tags · video headers, Matroska chapters and tags · fits · dicom · font tables · e-book metadata (MOBI/AZW/AZW3/PRC) | wired: read through the adapter |
+| 3d | glb · stl · ply · fbx · pcd · las and laz (the LASzip-compressed twin, decoded point for point) · vtk · blend · 3ds · NIfTI volumes · MRC/CCP4 volumes | wired: read through the adapter |
+| mail | mbox · eml · emlx · msg · pst/ost · wab (Windows Address Book) · MMDF mailboxes · Thunderbird `.msf` indexes · Apple mailbox index — attachments recurse through the chain | wired: read through the adapter |
+| inspect | forensic triage on any binary: magic ID, structure carving, strings, entropy, x509 | wired: read through the adapter |
+| inspect · documents | OLE2/CFB compound files · binary property lists · multi-page TIFF and raw camera formats · DjVu · ISO-BMFF (`ftyp`/`meta`/`ilst`) · Windows shell links (`.lnk`) · CALS rasters · JEDMICS C4 | wired: read through the adapter |
+| inspect · databases | Firebird and InterBase header pages (the rows live behind `RDB$PAGES` and are not walked) | wired: read through the adapter |
+| inspect · executables | PE `.rsrc` · Mach-O `__cstring`/`__cfstring` · ELF `.comment` and `NT_GNU_BUILD_ID` · DEX string pool · WASM `name`/`producers` | wired: read through the adapter |
+| inspect · science | GRIB 1/2 · BUFR · SEG-Y · CERN ROOT · N5 · N5z | wired: read through the adapter |
+| inspect · CAD | DWG · Parasolid transmit files · ACIS `.sab` · Revit `.rvt` · MicroStation DGN · and the text CAD formats — DXF, IFC/STEP, IGES, ACIS `.sat`, STL — which are *rendered*: the file's own bytes stay the default answer, and the rendering appears under `RGX_ADAPTER_VIEW=render` | wired: read through the adapter |
+| inspect · graphics | plotter drawings (HP-GL) — *rendered* the same way · graphics metafiles (CGM) — *revealed*, since the file is binary | wired: read through the adapter |
+| inspect · genomics | BAM · BCF 1 and 2 · CRAM 3 · and the flat files of the same family — FASTA, FASTQ, VCF, GFF/GTF, PDB, mmCIF — which are *rendered* | wired: read through the adapter |
+| docs | OCR through an external `tesseract` on `*.ocr.jpg`, `*.ocr.png`, `*.ocr.pdf` — a scanned PDF's page images are handed over, so the claim works on any tesseract build · a faxed page (CCITT G3/G4) and a JBIG2 page decoded in-house · `.pub` through `soffice` | wired: read through the adapter |
 
 Adapters extract searchable structure, not payloads: model metadata and
 tensor shapes, EXIF and tag values, schemas and rows. Plain-text formats
@@ -87,14 +87,17 @@ rgx's `RGX_ADAPTER_VIEW=render`. The same rule covers the text CAD formats,
 the plotter drawing, and the flat files of the genomics family: a rendering
 is not obliged to be a faithful copy — joining a FASTA's wrapped sequence
 puts `chr1 11869` next to each other, a pattern the file does not contain.
-rgy has no such switch yet, because the adapters are not wired; the byte
-search is the only answer it gives today.
+The switch is rgx's `RGX_ADAPTER_VIEW`, and the content path reads through
+it. The default keeps the file's own bytes for those formats, which is why
+they are dark, and a format whose bytes are not text at all — a PDF, a zip
+— is read through its adapter either way: there the rendering is the only
+text there is.
 
 ## The facts each format gives
 
 A *fact* is a name and a value, and the value is the one the adapter read
 out of the file. This is the catalogue, and it is what a filter will ask
-about when the adapters are wired.
+about.
 
 | fact | where it comes from |
 |---|---|
@@ -230,10 +233,11 @@ The short version of where the specifications live:
 
 Stated rather than papered over.
 
-- **Nothing is wired.** The adapters are in the tree and the reader that
-  would use them is not in the search path. Until it is, `grep:` on a PDF
-  searches the compressed bytes and finds nothing useful, and the honest
-  answer to "what does this PDF say?" is that rgy does not know yet.
+- **The facts are not in the filters yet.** The adapters answer with the
+  structure they can read — a PDF's text layer, an archive's members, a
+  metadata family's tags — and `grep:` searches that. The *filters* still ask
+  the name index only: `ext:`, `type:`, `dir:` and `size:` do not know what a
+  container holds.
 
 - **A member is named, not addressed.** The recursion goes four container
   levels deep by default, and each member carries a logical path — but the

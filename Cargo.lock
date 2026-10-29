@@ -499,6 +499,7 @@ dependencies = [
  "rgx-adapters-tabular",
  "rgx-adapters-threed",
  "rgx-core",
+ "rgy-name-core",
 ]
 
 [[package]]
@@ -642,6 +643,7 @@ name = "rgy-searchctl"
 version = "0.1.0"
 dependencies = [
  "mimalloc",
+ "rgy-adapters",
  "rgy-discovery",
  "rgy-discovery-dispatch",
  "rgy-engine",

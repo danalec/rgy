@@ -37,6 +37,18 @@
 //! What the daemon gets is the whole registry — the ten families, in
 //! upstream's order — because a search that reads a PDF and a search that
 //! does not are not the same search.
+//!
+//! # The reader
+//!
+//! The registry is half of the answer; the other half is the reader that
+//! uses it. [`Adapters`] is the registry as the content path's seam: it
+//! answers "what does this file render to?", and the content path does the
+//! reading, the accounting and the merge — so a `grep:` answers the same
+//! question the same way whichever path it takes.
+
+mod reader;
+
+pub use reader::Adapters;
 
 use rgx_core::{Adapter, Registry};
 

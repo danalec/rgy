@@ -1026,63 +1026,20 @@ fn scoped_content(q: &str, paths: &[String], limit: usize, ctx: &Ctx) -> Vec<Res
         Err(e) => return vec![Response::Error { message: e }],
     };
 
-    // 2. The adapters: the files whose bytes are not searchable text.
+    // 2. The files: the ones the adapters claim are read through them, and
+    // the rest are read as the bytes they are.
     //
-    // The registry is built ONCE, on the first scoped search, and kept: it
-    // is ten families of adapters, and building it again for every
-    // keystroke of the second layer would cost more than the search it
-    // serves.
-    static REGISTRY: std::sync::OnceLock<rgx_core::Registry> = std::sync::OnceLock::new();
-    let reg = REGISTRY.get_or_init(rgy_adapters::registry);
+    // The reader is the registry, and the registry is built ONCE, on the
+    // first search that needs it, and kept: it is ten families of adapters,
+    // and building it again for every keystroke of the second layer would
+    // cost more than the search it serves.
+    let res = content::verify_paths_with(&g, &scope, limit, Some(&rgy_adapters::Adapters));
     let mut files: Vec<GrepFile> = Vec::new();
-    let mut plain: Vec<Vec<u8>> = Vec::new();
-    for p in &scope {
-        // The limit counts files, and the adapter branch honours it too: an
-        // answer with more files than the caller asked for is an answer the
-        // caller has to throw away.
-        if files.len() >= limit {
-            break;
-        }
-        let as_text = rgy_engine::console::spell(p);
-        if reg.may_claim_for_path(&as_text) {
-            let Some(data) = read_for_adapter(p) else {
-                continue;
-            };
-            let mut found = Vec::new();
-            rgx_core::process(
-                reg,
-                &as_text,
-                &data,
-                0,
-                &rgx_core::Ctx::default(),
-                &mut found,
-            );
-            for f in found {
-                if files.len() >= limit {
-                    break;
-                }
-                let lines = g.lines_in(&f.bytes);
-                if !lines.is_empty() {
-                    files.push(GrepFile {
-                        path: f.path,
-                        lines,
-                    });
-                }
-            }
-        } else {
-            plain.push(p.clone());
-        }
-    }
-
-    // 3. The plain path: the files ripgrep could already read.
-    if !plain.is_empty() {
-        let res = content::verify_paths(&g, &plain, limit.saturating_sub(files.len()));
-        for f in res.files {
-            files.push(GrepFile {
-                path: rgy_engine::console::spell(&f.path),
-                lines: f.lines,
-            });
-        }
+    for f in res.files {
+        files.push(GrepFile {
+            path: rgy_engine::console::spell(&f.path),
+            lines: f.lines,
+        });
     }
 
     let count = files.len();
@@ -1116,23 +1073,6 @@ fn same_path(a: &[u8], b: &[u8]) -> bool {
         }
     };
     norm(a) == norm(b)
-}
-
-/// Read a file for an adapter: the same policy the plain path uses, and no
-/// more.
-///
-/// The size cap is the content engine's (`MAX_FILE`), and the cap on the
-/// bytes read is four times it — the same pair the plain path reads with,
-/// so a file the plain path would refuse is a file the adapter path
-/// refuses too.
-fn read_for_adapter(path: &[u8]) -> Option<Vec<u8>> {
-    use std::io::Read;
-    let file = content::open_regular(path)?;
-    let mut buf = Vec::new();
-    file.take(content::MAX_FILE * 4)
-        .read_to_end(&mut buf)
-        .ok()?;
-    Some(buf)
 }
 
 /// Resolve a path through the lookup surface.
@@ -1273,7 +1213,15 @@ fn grep(q: &str, limit: usize, ctx: &Ctx) -> Vec<Response> {
                     )
                 };
                 r.files.retain(|f| covered.contains(&f.path));
-                let rest = content::verify_paths(&g, &bare, limit.saturating_sub(r.files.len()));
+                // The same reader the scoped route uses: a file the
+                // adapters claim is read through them, whichever route the
+                // query took.
+                let rest = content::verify_paths_with(
+                    &g,
+                    &bare,
+                    limit.saturating_sub(r.files.len()),
+                    Some(&rgy_adapters::Adapters),
+                );
                 r.files.extend(rest.files);
                 r.read += rest.read;
                 r.skipped.extend(rest.skipped);

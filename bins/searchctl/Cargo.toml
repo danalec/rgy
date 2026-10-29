@@ -19,6 +19,9 @@ path = "src/main.rs"
 
 [dependencies]
 rgy-discovery = { path = "../../crates/discovery", version = "0.1.0" }
+# The format adapters, as the content path's reader: a PDF's words are
+# words, and a `grep:` that cannot read them misses the file.
+rgy-adapters = { path = "../../crates/adapters", version = "0.1.0" }
 # The platform walk selector.
 rgy-discovery-dispatch = { path = "../../crates/discovery-dispatch", version = "0.1.0" }
 # The console's UTF-8 code page.
