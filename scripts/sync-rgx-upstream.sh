@@ -245,10 +245,23 @@ for crate in $CRATES; do
 
     # The paths this tree does not carry are not paths of this tree: they
     # are not copied, and they are not counted as unchanged.
+    #
+    # The filter has to reach the pairs as well, and not only the paths:
+    # the copy list is built from the pairs, so a pair that survives the
+    # filter is a file the copy carries. The excluded paths were then
+    # reported as "add" by a dry run, and a real sync wrote them out
+    # before removing them at the end -- the tree ended in the right
+    # state by way of a wrong report and a file written and deleted.
     if [ -n "$exclude_pattern" ]; then
         grep -v -E "$exclude_pattern" "$upstream_paths" > "$upstream_paths.kept" \
             || true
         mv "$upstream_paths.kept" "$upstream_paths"
+        awk -F'\t' '
+            FILENAME == ARGV[1] { keep[$0] = 1; next }
+            ($2 in keep)
+        ' "$upstream_paths" "$upstream_pairs" > "$upstream_pairs.kept" \
+            || true
+        mv "$upstream_pairs.kept" "$upstream_pairs"
     fi
 
     # The local hashes, for the paths that exist here. A path that does not
