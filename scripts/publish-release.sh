@@ -7,6 +7,7 @@
 #   bash scripts/publish-release.sh --skip-tests    # trust the build
 #   bash scripts/publish-release.sh --dry-run       # show, don't touch
 #   bash scripts/publish-release.sh --private       # keep the GitHub mirror private
+#   bash scripts/publish-release.sh --commit        # commit the release data
 #
 # Pipeline: build this platform's archive -> tag rgy-v<version> + push ->
 # create or update the forgejo release and (re)upload the assets -> create the
@@ -16,15 +17,18 @@
 # The forgejo API uses the same stored git credentials (`git credential
 # fill`); no tokens live in this script. GitHub is driven through `gh`.
 #
-# TWO PLATFORM DIFFERENCES FROM THE WINDOWS SCRIPT, both because the thing
-# they touch does not exist here:
+# ONE PLATFORM DIFFERENCE FROM THE WINDOWS SCRIPT, because the thing it
+# touches does not exist here:
 #
-#   1. the winget manifests are a Windows package manager's, and there is
-#      no `winget` here to validate them. The step is skipped and says
-#      so; the manifests are the Windows script's business, and they are
-#      updated by the release flow on the Windows side.
-#   2. the Windows script commits the manifest changes at the end. There
-#      is nothing to commit here, so there is nothing to push.
+#   the winget manifests are a Windows package manager's, and there is no
+#   `winget` here to validate them. The step is skipped and says so; the
+#   manifests are the Windows script's business, and they are updated by
+#   the release flow on the Windows side.
+#
+# Everything else the two scripts do is the same thing: the same archives,
+# the same release, the same messages, the same exit code. The commit of
+# the release data is in both — that data is the release's own, and it
+# does not belong to one platform.
 #
 # The assets that go on the release page are the archives in .dist/ -- the
 # one this machine just built, plus the ones the other platforms built into
@@ -41,6 +45,7 @@ skip_tests=0
 dry_run=0
 private=0
 manifests_only=0
+commit=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -49,6 +54,7 @@ while [ $# -gt 0 ]; do
         --dry-run) dry_run=1; shift ;;
         --private) private=1; shift ;;
         --manifests-only) manifests_only=1; shift ;;
+        --commit) commit=1; shift ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
 done
@@ -88,8 +94,14 @@ fi
 # The assets: the archives this release carries. The list is explicit
 # because .dist/ also holds the working files of whoever built the
 # release, and a glob over it would publish all of that to the world.
+# The order is the same on every machine: the digests file first, then the
+# archives by name, byte by byte. A shell glob sorts by the locale, and a
+# locale is a machine's habit, not the release's order — and the release
+# body lists these names, so the body has to be the same wherever it is
+# built.
 assets=""
-for f in .dist/SHA256SUMS .dist/rgy-v"$version"-*; do
+[ -f .dist/SHA256SUMS ] && assets="$assets .dist/SHA256SUMS"
+for f in $(ls -1 .dist/rgy-v"$version"-* 2>/dev/null | LC_ALL=C sort); do
     [ -f "$f" ] && assets="$assets $f"
 done
 if [ -z "$assets" ]; then
@@ -132,6 +144,35 @@ if [ -f "$sums" ]; then
     done
 fi
 
+# The brew formula, checked before anything is published. The formula names
+# the macOS archives, and a release that goes out while the formula cannot
+# name what the release publishes is a release nobody can install from.
+#
+# The check is here, before the tag and before the release, so a formula
+# that cannot be mapped stops the publish instead of stopping it half way.
+formula="Formula/rgy-search.rb"
+mac_arches="aarch64-apple-darwin x86_64-apple-darwin"
+if [ -f "$formula" ]; then
+    url_lines=$(grep -c '^[[:space:]]*url "' "$formula" || true)
+    sha_lines=$(grep -c '^[[:space:]]*sha256 "' "$formula" || true)
+    if [ "$url_lines" != "$sha_lines" ]; then
+        echo "the formula carries $url_lines url lines and $sha_lines sha256 lines: they do not pair up" >&2
+        exit 1
+    fi
+    for arch in $mac_arches; do
+        [ -f ".dist/rgy-v$version-$arch.tar.gz" ] || continue
+        named=$(grep -c -- "-$arch\.tar\.gz" "$formula" || true)
+        if [ "$named" -eq 0 ]; then
+            echo "the formula does not name $arch: this release publishes it and the formula would not install it" >&2
+            exit 1
+        fi
+        if [ "$named" -gt 1 ]; then
+            echo "the formula names $arch $named times: a formula that names the same archive twice is a formula nobody can read" >&2
+            exit 1
+        fi
+    done
+fi
+
 # --- 3. tag + push ---------------------------------------------------------
 if [ "$manifests_only" -eq 1 ]; then
     echo "[manifests-only] the tag is not created"
@@ -169,6 +210,46 @@ json_escape() {
     printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e :a -e 'N' -e '$!ba' -e 's/\n/\\n/g'
 }
 
+# The id of a release, out of the JSON the forgejo answered with.
+#
+# The release's own id is the FIRST "id" in the document. The assets array
+# comes last and every asset carries an id of its own, and a greedy match
+# picks that one: the release is then addressed by an asset id, every
+# upload answers 404, and the publish dies on "the upload of ... failed".
+release_id_of() {
+    id=$(printf '%s' "$1" | sed -n 's/^[[:space:]]*{[[:space:]]*"id"[[:space:]]*:[[:space:]]*\([0-9]\+\).*/\1/p' | head -1)
+    if [ -z "$id" ]; then
+        id=$(printf '%s' "$1" | grep -o '"id"[[:space:]]*:[[:space:]]*[0-9]\+' | head -1 | grep -o '[0-9]\+')
+    fi
+    printf '%s' "$id"
+}
+
+# The body of a release, as the forgejo stored it: the JSON string, still
+# escaped. The comparison below is between two escaped strings, so the
+# escaping has to be the same on both sides — and it is: json_escape
+# writes what the forgejo writes.
+#
+# The string ends at the first quote that is not escaped, and that is not
+# something a sed pattern can say on its own: the body carries escaped
+# quotes of its own.
+release_body_of() {
+    printf '%s' "$1" | awk '
+        {
+            i = index($0, "\"body\":\"")
+            if (i == 0) next
+            rest = substr($0, i + 8)
+            j = 1
+            while (j <= length(rest)) {
+                c = substr(rest, j, 1)
+                if (c == "\\") { j += 2; continue }
+                if (c == "\"") break
+                j++
+            }
+            print substr(rest, 1, j - 1)
+            exit
+        }'
+}
+
 body="Whole-filesystem name search and content search in one stack.
 
 **Which file?** -- asked over the whole filesystem, then **what is inside it?** in the same query.
@@ -183,13 +264,14 @@ floating window over the daemon).
 
 **Assets**
 $(for a in $assets; do printf -- "- \`%s\`\n" "$(basename "$a")"; done)
+
 Apache-2.0."
 
 release=""
 if [ "$manifests_only" -eq 1 ]; then
     echo "[manifests-only] the forgejo release is not touched"
 elif [ "$dry_run" -eq 1 ]; then
-    echo "[dry-run] create/patch the release $tag and upload:"
+    echo "[dry-run] create/patch the forgejo release $tag and upload:"
     for a in $assets; do printf '    %s\n' "$(basename "$a")"; done
 else
     fetch_credentials
@@ -201,8 +283,8 @@ else
     fi
     release_id=""
     if [ -n "$release" ]; then
-        release_id=$(printf '%s' "$release" | sed -n 's/.*"id":\([0-9]\+\).*/\1/p' | head -1)
-        current_body=$(printf '%s' "$release" | sed -n 's/.*"body":"\(.*\)","created_at".*/\1/p' | head -1)
+        release_id=$(release_id_of "$release")
+        current_body=$(release_body_of "$release")
         if [ "$current_body" != "$(json_escape "$body")" ]; then
             curl -fsSL -X PATCH -H "Authorization: Basic $auth" \
                 -H "Content-Type: application/json" \
@@ -216,8 +298,12 @@ else
             -H "Content-Type: application/json" \
             -d "{\"tag_name\":\"$tag\",\"name\":\"rgy v$version\",\"body\":\"$(json_escape "$body")\"}" \
             "$repo_api/releases") || { echo "the release could not be created" >&2; exit 1; }
-        release_id=$(printf '%s' "$created" | sed -n 's/.*"id":\([0-9]\+\).*/\1/p' | head -1)
+        release_id=$(release_id_of "$created")
         echo "release created: $forgejo/releases/tag/$tag"
+    fi
+    if [ -z "$release_id" ]; then
+        echo "the release id could not be read: the forgejo answered with something this script does not understand" >&2
+        exit 1
     fi
 
     for asset in $assets; do
@@ -237,8 +323,13 @@ else
             --data-binary "@$asset" \
             "$repo_api/releases/$release_id/assets?name=$name" > /dev/null \
             || { echo "the upload of $name failed" >&2; exit 1; }
-        size=$(du -m "$asset" | cut -f1)
-        echo "uploaded: $name (${size} MB)"
+        # The size the way the Windows twin prints it: two decimals, in
+        # megabytes, and not the count of blocks a `du -m` rounds up to.
+        # LC_ALL=C: a locale that writes "12,35" is not the number the
+        # Windows twin prints.
+        bytes=$(wc -c < "$asset" | tr -d ' ')
+        size=$(LC_ALL=C awk -v b="$bytes" 'BEGIN { printf "%.2f", b / 1048576 }')
+        echo "uploaded: $name ($size MB)"
     done
 fi
 
@@ -258,22 +349,33 @@ else
     fi
     if ! gh repo view "$gh_repo" > /dev/null 2>&1; then
         if [ "$private" -eq 1 ]; then
-            gh repo create "$gh_repo" --private --source . --remote github
+            gh repo create "$gh_repo" --private --source . --remote github \
+                || { echo "the GitHub mirror could not be created" >&2; exit 1; }
         else
-            gh repo create "$gh_repo" --public --source . --remote github
+            gh repo create "$gh_repo" --public --source . --remote github \
+                || { echo "the GitHub mirror could not be created" >&2; exit 1; }
         fi
     fi
-    git remote get-url github > /dev/null 2>&1 || git remote add github "$gh.git"
-    git push -u github HEAD
-    git push -f github "$tag"
+    if ! git remote get-url github > /dev/null 2>&1; then
+        git remote add github "$gh.git" || { echo "the github remote could not be added" >&2; exit 1; }
+    fi
+    # The mirror carries the branch that is checked out AND main: the
+    # README, the installers and the winget manifests all point at
+    # github.com/danalec/rgy/main, so a mirror without main is a mirror
+    # whose links are all 404.
+    git push -u github HEAD || { echo "the branch could not be pushed to the GitHub mirror" >&2; exit 1; }
+    git push -u github main || { echo "main could not be pushed to the GitHub mirror" >&2; exit 1; }
+    git push -f github "$tag" || { echo "the tag could not be pushed to the GitHub mirror" >&2; exit 1; }
 
     if gh release view "$tag" --repo "$gh_repo" > /dev/null 2>&1; then
-        gh release delete "$tag" --repo "$gh_repo" --yes
+        gh release delete "$tag" --repo "$gh_repo" --yes \
+            || { echo "the previous GitHub release could not be deleted" >&2; exit 1; }
     fi
     files=""
     for a in $assets; do files="$files $a"; done
     # shellcheck disable=SC2086
-    gh release create "$tag" $files --repo "$gh_repo" --title "rgy v$version" --notes "$body"
+    gh release create "$tag" $files --repo "$gh_repo" --title "rgy v$version" --notes "$body" \
+        || { echo "the GitHub release could not be created" >&2; exit 1; }
     echo "github release: $gh/releases/tag/$tag"
 fi
 
@@ -282,14 +384,21 @@ fi
 # files that are about to be published. A Linux box has no macOS archive to
 # digest, and the formula says so instead of carrying a digest of nothing.
 #
-# The formula lists the archives in the order they appear in it -- arm
-# first, then intel -- and the rewrite follows that order: the n-th url
-# line gets the n-th archive's URL, the n-th sha256 line its digest.
+# The rewrite is per architecture: the formula's url line says which archive
+# it installs, and the archive that is here gets the URL and the digest it
+# deserves. The architecture whose archive is not here keeps its placeholder
+# -- the same rule the installer pins follow, and the same truth: there is
+# no release for that platform yet.
+#
+# The n-th url line does NOT get the n-th archive: a formula with two
+# blocks and a release with one archive would write a URL that names no
+# file and a checksum that is empty, and `brew` would be asked to install a
+# directory.
 mac_assets=""
-for f in .dist/rgy-v"$version"-aarch64-apple-darwin.tar.gz .dist/rgy-v"$version"-x86_64-apple-darwin.tar.gz; do
+for arch in $mac_arches; do
+    f=".dist/rgy-v$version-$arch.tar.gz"
     [ -f "$f" ] && mac_assets="$mac_assets $f"
 done
-formula="Formula/rgy-search.rb"
 
 if [ -z "$mac_assets" ]; then
     echo "brew formula: not touched (no macOS archive in .dist/)"
@@ -297,21 +406,53 @@ elif [ "$dry_run" -eq 1 ]; then
     echo "[dry-run] brew formula -> version $version"
     for f in $mac_assets; do echo "    $(basename "$f")"; done
 else
-    names=""
-    shas=""
+    # The digests of the archives this release carries, by architecture.
+    digests=""
     for f in $mac_assets; do
-        names="$names${names:+,}$(basename "$f")"
-        shas="$shas${shas:+,}$(sha256sum "$f" | cut -d' ' -f1)"
+        arch=$(basename "$f")
+        arch=${arch#"rgy-v$version-"}
+        arch=${arch%.tar.gz}
+        digests="$digests $arch=$(sha256sum "$f" | cut -d' ' -f1)"
     done
-    awk -v names="$names" -v shas="$shas" -v base="$gh/releases/download/$tag" -v ver="$version" '
-        BEGIN { split(names, N, ","); split(shas, S, ","); ui = 1; si = 1; vi = 0 }
+    awk -v digests="$digests" -v base="$gh/releases/download/$tag" -v ver="$version" '
+        BEGIN {
+            n = split(digests, D, " ")
+            for (i = 1; i <= n; i++) {
+                split(D[i], kv, "=")
+                digest[kv[1]] = kv[2]
+            }
+            pending = ""
+            vi = 0
+        }
         $0 ~ /^[[:space:]]*url "/ {
-            match($0, /^[[:space:]]*/)
-            printf "%surl \"%s/%s\"\n", substr($0, 1, RLENGTH), base, N[ui++]; next
+            line = $0
+            sub(/^[^"]*"/, "", line)
+            sub(/".*$/, "", line)
+            count = split(line, parts, "/")
+            file = parts[count]
+            arch = ""
+            for (a in digest) {
+                if (file ~ ("-" a "[.]tar[.]gz$")) arch = a
+            }
+            if (arch != "") {
+                match($0, /^[[:space:]]*/)
+                printf "%surl \"%s/rgy-v%s-%s.tar.gz\"\n", substr($0, 1, RLENGTH), base, ver, arch
+                pending = arch
+                next
+            }
+            pending = ""
+            print
+            next
         }
         $0 ~ /^[[:space:]]*sha256 "/ {
-            match($0, /^[[:space:]]*/)
-            printf "%ssha256 \"%s\"\n", substr($0, 1, RLENGTH), S[si++]; next
+            if (pending != "") {
+                match($0, /^[[:space:]]*/)
+                printf "%ssha256 \"%s\"\n", substr($0, 1, RLENGTH), digest[pending]
+                pending = ""
+                next
+            }
+            print
+            next
         }
         $0 ~ /^[[:space:]]*version "/ && vi++ == 0 {
             match($0, /^[[:space:]]*/)
@@ -319,6 +460,10 @@ else
         }
         { print }
     ' "$formula" > "$formula.tmp" && mv "$formula.tmp" "$formula"
+    for arch in $mac_arches; do
+        [ -f ".dist/rgy-v$version-$arch.tar.gz" ] && continue
+        echo "brew formula: $arch keeps its placeholder: this release carries no $arch archive"
+    done
     echo "brew formula updated: version $version"
     for f in $mac_assets; do
         echo "    $(sha256sum "$f" | cut -d' ' -f1)  $(basename "$f")"
@@ -364,7 +509,10 @@ digest_of() {
     fi
     # The digest file, which is what the other platforms wrote.
     [ -f .dist/SHA256SUMS ] || return 1
-    awk -v n="$1" '$2 == n { print toupper($1); exit }' .dist/SHA256SUMS
+    # The carriage return: the digests file is shared with the Windows
+    # twin, and a name that ends with one is not the name the digest is
+    # filed under.
+    awk -v n="$1" '{ sub(/\r$/, "", $2) } $2 == n { print toupper($1); exit }' .dist/SHA256SUMS
 }
 
 if [ "$dry_run" -eq 1 ]; then
@@ -404,7 +552,34 @@ fi
 # instead of pretending to have done it.
 echo "winget manifests: not touched (winget is a Windows package manager; scripts/publish-release.ps1 owns that step)"
 
-# --- 9. done ---------------------------------------------------------------
+# --- 9. the release data ----------------------------------------------------
+# The release's own data -- the installer pins, the brew formula and the
+# winget manifests -- is release data: this script writes it, and it is
+# committed with it. A clone that still carries the placeholders is a clone
+# whose one-line installer says "there is no published rgy release for
+# x86_64 yet" on the day of the release.
+#
+# The commit is asked for, not done on the side: publishing and committing
+# are two acts, and the owner decides when the release data lands.
+if [ "$commit" -eq 1 ] && [ "$dry_run" -eq 0 ] && [ "$manifests_only" -eq 0 ]; then
+    staged=""
+    for p in .winget install.sh install.ps1 Formula; do
+        [ -e "$p" ] && staged="$staged $p"
+    done
+    # shellcheck disable=SC2086
+    git add $staged || { echo "the release data could not be staged" >&2; exit 1; }
+    if git diff --cached --quiet; then
+        echo "release data: nothing to commit"
+    else
+        git commit -m "release: $tag release data" || { echo "the release data could not be committed" >&2; exit 1; }
+        echo "release data committed"
+    fi
+    branch=$(git rev-parse --abbrev-ref HEAD)
+    git push forgejo "$branch" || { echo "the release data could not be pushed to the forgejo" >&2; exit 1; }
+    echo "release data pushed to the forgejo"
+fi
+
+# --- 10. done ---------------------------------------------------------------
 if [ "$manifests_only" -eq 1 ]; then
     echo ""
     echo "manifests rewritten; nothing was published"

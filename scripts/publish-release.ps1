@@ -6,6 +6,7 @@
 #   pwsh -File scripts/publish-release.ps1 -SkipTests   # trust the build
 #   pwsh -File scripts/publish-release.ps1 -DryRun      # show, don't touch
 #   pwsh -File scripts/publish-release.ps1 -Private     # keep the GitHub mirror private
+#   pwsh -File scripts/publish-release.ps1 -Commit      # commit the release data
 #
 # PowerShell 7 (pwsh) is required: under Windows PowerShell 5.1 the
 # credential request git needs does not survive the trip.
@@ -19,14 +20,17 @@
 # The forgejo API uses the same stored git credentials (`git credential
 # fill`); no tokens live in this script. GitHub is driven through `gh`.
 #
-# TWO PLATFORM DIFFERENCES FROM THE LINUX SCRIPT, both because the thing
-# they touch does not exist on Linux:
+# ONE PLATFORM DIFFERENCE FROM THE LINUX SCRIPT, because the thing it
+# touches does not exist on Linux:
 #
-#   1. the winget manifests are a Windows package manager's, and there is
-#      no `winget` here to validate them. The step is skipped and says
-#      so; the manifests are this script's business.
-#   2. the Windows script commits the manifest changes at the end. There
-#      is nothing to commit there, so there is nothing to push.
+#   the winget manifests are a Windows package manager's, and there is no
+#   `winget` here to validate them. The step is skipped and says so; the
+#   manifests are this script's business.
+#
+# Everything else the two scripts do is the same thing: the same archives,
+# the same release, the same messages, the same exit code. The commit of
+# the release data is in both — that data is the release's own, and it
+# does not belong to one platform.
 #
 # The assets that go on the release page are the archives in .dist/ -- the
 # ones this machine built, plus the ones the other platforms built into the
@@ -99,9 +103,27 @@ if ($LASTEXITCODE -ne 0) { throw "build failed" }
 # The assets: the archives this release carries. The list is explicit
 # because .dist/ also holds the working files of whoever built the release,
 # and a glob over it would publish all of that to the world.
-$assets = Get-ChildItem ".dist" -File -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -eq "SHA256SUMS" -or $_.Name -like "rgy-v$Version-*" } |
-    Sort-Object Name
+# The order is the same on every machine: the digests file first, then the
+# archives by name, byte by byte. A locale's order is a machine's habit, not
+# the release's order — and the release body lists these names, so the body
+# has to be the same wherever it is built.
+function Sort-ByNameOrdinal($items) {
+    $list = [System.Collections.Generic.List[object]]::new()
+    foreach ($item in $items) {
+        $at = 0
+        while ($at -lt $list.Count -and
+               [System.StringComparer]::Ordinal.Compare($list[$at].Name, $item.Name) -le 0) {
+            $at++
+        }
+        $list.Insert($at, $item)
+    }
+    return $list
+}
+$assets = @()
+$sums = Get-Item ".dist\SHA256SUMS" -ErrorAction SilentlyContinue
+if ($sums) { $assets += $sums }
+$assets += @(Sort-ByNameOrdinal (Get-ChildItem ".dist" -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -like "rgy-v$Version-*" }))
 if (-not $assets) {
     throw "no assets to publish: .dist/ holds nothing for $tag. Run scripts/build-release.ps1 first."
 }
@@ -134,6 +156,36 @@ if (Test-Path $sumsPath) {
         $got = (Get-FileHash $asset.FullName -Algorithm SHA256).Hash.ToLower()
         if ($digests[$asset.Name] -ne $got) {
             throw "$($asset.Name) does not match the digest the build wrote: expected $($digests[$asset.Name]), got $got"
+        }
+    }
+}
+
+# The brew formula, checked before anything is published. The formula names
+# the macOS archives, and a release that goes out while the formula cannot
+# name what the release publishes is a release nobody can install from.
+#
+# The check is here, before the tag and before the release, so a formula
+# that cannot be mapped stops the publish instead of stopping it half way.
+$formula = "Formula\rgy-search.rb"
+$macArches = @("aarch64-apple-darwin", "x86_64-apple-darwin")
+if (Test-Path $formula) {
+    $formulaLines = Get-Content $formula
+    $urlLines = @($formulaLines | Where-Object { $_ -match '^\s*url "' })
+    $shaLines = @($formulaLines | Where-Object { $_ -match '^\s*sha256 "' })
+    if ($urlLines.Count -ne $shaLines.Count) {
+        [Console]::Error.WriteLine("the formula carries $($urlLines.Count) url lines and $($shaLines.Count) sha256 lines: they do not pair up")
+        exit 1
+    }
+    foreach ($arch in $macArches) {
+        if (-not (Test-Path ".dist\rgy-v$Version-$arch.tar.gz")) { continue }
+        $named = @($urlLines | Where-Object { $_ -match "-$([regex]::Escape($arch))\.tar\.gz" })
+        if ($named.Count -eq 0) {
+            [Console]::Error.WriteLine("the formula does not name ${arch}: this release publishes it and the formula would not install it")
+            exit 1
+        }
+        if ($named.Count -gt 1) {
+            [Console]::Error.WriteLine("the formula names $arch $($named.Count) times: a formula that names the same archive twice is a formula nobody can read")
+            exit 1
         }
     }
 }
@@ -193,27 +245,24 @@ $auth = $null
 $release = $null
 if ($ManifestsOnly) {
     Write-Host "[manifests-only] the forgejo release is not touched"
+} elseif ($DryRun) {
+    Write-Host "[dry-run] create/patch the forgejo release $tag and upload:"
+    $assets | ForEach-Object { Write-Host "    $($_.Name)" }
 } else {
     $cred = Get-GitCredential $forgejoProto $forgejoHost
     $user = $cred["username"]
     $pass = $cred["password"]
     if (-not $user -or -not $pass) {
-        if ($DryRun) {
-            Write-Host "no git credentials for the forgejo: the dry run cannot read the release page"
-        } else {
-            throw "no git credentials for the forgejo"
-        }
-    } else {
-        $auth = @{ Authorization = "Basic " + [Convert]::ToBase64String(
-            [Text.Encoding]::ASCII.GetBytes("${user}:${pass}")) }
+        [Console]::Error.WriteLine("no git credentials for the forgejo")
+        exit 1
     }
-    if ($auth) {
-        try {
-            $release = Invoke-RestMethod -Headers $auth "$repoApi/releases/tags/$tag"
-            Write-Host "release exists: $($release.html_url)"
-        } catch {
-            Write-Host "release $tag does not exist yet"
-        }
+    $auth = @{ Authorization = "Basic " + [Convert]::ToBase64String(
+        [Text.Encoding]::ASCII.GetBytes("${user}:${pass}")) }
+    try {
+        $release = Invoke-RestMethod -Headers $auth "$repoApi/releases/tags/$tag"
+        Write-Host "release exists: $forgejo/releases/tag/$tag"
+    } catch {
+        Write-Host "release $tag does not exist yet"
     }
 }
 
@@ -225,9 +274,9 @@ Whole-filesystem name search and content search in one stack.
     searchctl --root ~ "invoice ext:pdf"
     searchctl --root ~ "invoice grep:tesla"
 
-The release carries four binaries: `searchctl` (the command-line tool),
-`searchd` (the daemon: JSON lines over stdio, a pipe or a unix socket),
-`rgy-autostart` (put the daemon in place at login) and `rgxy` (the
+The release carries four binaries: ``searchctl`` (the command-line tool),
+``searchd`` (the daemon: JSON lines over stdio, a pipe or a unix socket),
+``rgy-autostart`` (put the daemon in place at login) and ``rgxy`` (the
 floating window over the daemon).
 
 **Assets**
@@ -236,21 +285,18 @@ $(($assets | ForEach-Object { "- ``$($_.Name)``" }) -join "`n")
 Apache-2.0.
 "@
 
-if ($ManifestsOnly) {
-    Write-Host "[manifests-only] the forgejo release is not touched"
-} elseif ($DryRun) {
-    Write-Host "[dry-run] create/patch the forgejo release $tag and upload:"
-    $assets | ForEach-Object { Write-Host "    $($_.Name)" }
-} else {
+if (-not $ManifestsOnly -and -not $DryRun) {
     if (-not $release) {
         $release = Invoke-RestMethod -Headers $auth -Method Post "$repoApi/releases" `
             -ContentType "application/json" -Body ([Text.Encoding]::UTF8.GetBytes(
                 (@{ tag_name = $tag; name = "rgy v$Version"; body = $body } |
                     ConvertTo-Json -Compress)))
+        Write-Host "release created: $forgejo/releases/tag/$tag"
     } elseif ($release.body -ne $body) {
         $release = Invoke-RestMethod -Headers $auth -Method Patch "$repoApi/releases/$($release.id)" `
             -ContentType "application/json" -Body ([Text.Encoding]::UTF8.GetBytes(
                 (@{ name = "rgy v$Version"; body = $body } | ConvertTo-Json -Compress)))
+        Write-Host "release updated"
     }
 
     foreach ($asset in $assets) {
@@ -261,7 +307,10 @@ if ($ManifestsOnly) {
         }
         Invoke-RestMethod -Headers $auth -Method Post "$($release.upload_url)?name=$($asset.Name)" `
             -ContentType "application/octet-stream" -Body ([IO.File]::ReadAllBytes($asset.FullName)) | Out-Null
-        Write-Host "uploaded: $($asset.Name) ($([math]::Round($asset.Length / 1MB, 2)) MB)"
+        # The size the way the .sh twin prints it: two decimals, in
+        # megabytes, and not a locale's comma between them.
+        $size = [math]::Round($asset.Length / 1MB, 2).ToString("0.00", [Globalization.CultureInfo]::InvariantCulture)
+        Write-Host "uploaded: $($asset.Name) ($size MB)"
     }
 }
 
@@ -273,26 +322,66 @@ if ($ManifestsOnly) {
 if ($ManifestsOnly) {
     Write-Host "[manifests-only] the GitHub release is not touched"
 } elseif ($DryRun) {
-    Write-Host "[dry-run] create the GitHub release $tag in $ghRepo with $($assets.Count) asset(s)"
+    Write-Host "[dry-run] create the GitHub release $tag in $ghRepo"
 } else {
     gh auth status *> $null
-    if ($LASTEXITCODE -ne 0) { throw "gh is not authenticated" }
+    if ($LASTEXITCODE -ne 0) {
+        [Console]::Error.WriteLine("gh is not authenticated")
+        exit 1
+    }
 
     gh repo view $ghRepo *> $null
     if ($LASTEXITCODE -ne 0) {
         if ($Private) { gh repo create $ghRepo --private --source . --remote github }
         else { gh repo create $ghRepo --public --source . --remote github }
+        if ($LASTEXITCODE -ne 0) {
+            [Console]::Error.WriteLine("the GitHub mirror could not be created")
+            exit 1
+        }
     }
     git remote get-url github *> $null
-    if ($LASTEXITCODE -ne 0) { git remote add github "$gh.git" }
+    if ($LASTEXITCODE -ne 0) {
+        git remote add github "$gh.git"
+        if ($LASTEXITCODE -ne 0) {
+            [Console]::Error.WriteLine("the github remote could not be added")
+            exit 1
+        }
+    }
+    # The mirror carries the branch that is checked out AND main: the
+    # README, the installers and the winget manifests all point at
+    # github.com/danalec/rgy/main, so a mirror without main is a mirror
+    # whose links are all 404.
     git push -u github HEAD
+    if ($LASTEXITCODE -ne 0) {
+        [Console]::Error.WriteLine("the branch could not be pushed to the GitHub mirror")
+        exit 1
+    }
+    git push -u github main
+    if ($LASTEXITCODE -ne 0) {
+        [Console]::Error.WriteLine("main could not be pushed to the GitHub mirror")
+        exit 1
+    }
     git push -f github $tag
+    if ($LASTEXITCODE -ne 0) {
+        [Console]::Error.WriteLine("the tag could not be pushed to the GitHub mirror")
+        exit 1
+    }
 
     gh release view $tag --repo $ghRepo *> $null
-    if ($LASTEXITCODE -eq 0) { gh release delete $tag --repo $ghRepo --yes }
+    if ($LASTEXITCODE -eq 0) {
+        gh release delete $tag --repo $ghRepo --yes
+        if ($LASTEXITCODE -ne 0) {
+            [Console]::Error.WriteLine("the previous GitHub release could not be deleted")
+            exit 1
+        }
+    }
 
     $files = $assets | ForEach-Object { $_.FullName }
     gh release create $tag @files --repo $ghRepo --title "rgy v$Version" --notes $body
+    if ($LASTEXITCODE -ne 0) {
+        [Console]::Error.WriteLine("the GitHub release could not be created")
+        exit 1
+    }
     Write-Host "github release: $gh/releases/tag/$tag"
 }
 
@@ -337,7 +426,89 @@ if (-not $zip) {
     Write-Host "manifests updated: version $Version, sha256 $sha, date $today"
 }
 
-# --- 7. the installer pins ----------------------------------------------------
+# --- 7. the brew formula ----------------------------------------------------
+# The formula names the macOS archives, so its digests are the digests of the
+# files that are about to be published. A Windows box has no macOS archive to
+# digest, and the formula says so instead of carrying a digest of nothing.
+#
+# The rewrite is per architecture: the formula's url line says which archive
+# it installs, and the archive that is here gets the URL and the digest it
+# deserves. The architecture whose archive is not here keeps its placeholder
+# -- the same rule the installer pins follow, and the same truth: there is
+# no release for that platform yet.
+#
+# The n-th url line does NOT get the n-th archive: a formula with two blocks
+# and a release with one archive would write a URL that names no file and a
+# checksum that is empty, and `brew` would be asked to install a directory.
+$macAssets = @()
+foreach ($arch in $macArches) {
+    $f = Get-Item ".dist\rgy-v$Version-$arch.tar.gz" -ErrorAction SilentlyContinue
+    if ($f) { $macAssets += $f }
+}
+
+if ($macAssets.Count -eq 0) {
+    Write-Host "brew formula: not touched (no macOS archive in .dist/)"
+} elseif ($DryRun) {
+    Write-Host "[dry-run] brew formula -> version $Version"
+    $macAssets | ForEach-Object { Write-Host "    $($_.Name)" }
+} else {
+    # The digests of the archives this release carries, by architecture.
+    $digests = @{}
+    foreach ($a in $macAssets) {
+        $arch = $a.Name -replace "^rgy-v$([regex]::Escape($Version))-", ""
+        $arch = $arch -replace "\.tar\.gz$", ""
+        $digests[$arch] = (Get-FileHash $a.FullName -Algorithm SHA256).Hash.ToLower()
+    }
+    $lines = Get-Content $formula
+    $pending = ""
+    $vi = 0
+    $rewritten = foreach ($line in $lines) {
+        if ($line -match '^(\s*)url "') {
+            $indent = $Matches[1]
+            $file = ($line -replace '^[^"]*"', "") -replace '".*$', ""
+            $name = ($file -split "/")[-1]
+            $arch = ""
+            foreach ($key in $digests.Keys) {
+                if ($name -match "-$([regex]::Escape($key))\.tar\.gz$") { $arch = $key }
+            }
+            if ($arch) {
+                $pending = $arch
+                $indent + 'url "' + "$gh/releases/download/$tag/rgy-v$Version-$arch.tar.gz" + '"'
+            } else {
+                $pending = ""
+                $line
+            }
+        } elseif ($line -match '^(\s*)sha256 "') {
+            $indent = $Matches[1]
+            if ($pending) {
+                $digest = $digests[$pending]
+                $pending = ""
+                $indent + 'sha256 "' + $digest + '"'
+            } else {
+                $line
+            }
+        } elseif ($line -match '^(\s*)version "' -and $vi -eq 0) {
+            $vi++
+            "$($Matches[1])version `"$Version`""
+        } else {
+            $line
+        }
+    }
+    # The formula, written with LF endings and no BOM: the .sh twin writes
+    # it that way, and the two scripts have to leave the same bytes behind.
+    [IO.File]::WriteAllText($formula, (($rewritten -join "`n") + "`n"), (New-Object Text.UTF8Encoding $false))
+    foreach ($arch in $macArches) {
+        if ($digests.ContainsKey($arch)) { continue }
+        Write-Host "brew formula: $arch keeps its placeholder: this release carries no $arch archive"
+    }
+    Write-Host "brew formula updated: version $Version"
+    foreach ($a in $macAssets) {
+        $digest = (Get-FileHash $a.FullName -Algorithm SHA256).Hash.ToLower()
+        Write-Host "    $digest  $($a.Name)"
+    }
+}
+
+# --- 8. the installer pins ----------------------------------------------------
 # Both installers carry one digest per architecture they may install, and
 # the digests are release data: they are rewritten here, from the artifacts
 # this release carries, and a pin that does not end up naming the release's
@@ -348,8 +519,11 @@ if (-not $zip) {
 # The installer then says that there is no release for that platform yet,
 # which is true -- and better than a digest of an archive that is not there.
 function Set-InstallerPin([string]$file, [string]$version, [string]$sha, [string]$pattern) {
+    # The name, not the path: the .sh twin names the file the same way, and
+    # the two scripts have to say the same thing about the same pin.
+    $name = Split-Path $file -Leaf
     if (-not (Test-Path $file)) {
-        Write-Host "installer pin: $file not found, skipped"
+        Write-Host "installer pin: $name not found, skipped"
         return
     }
     $text = Get-Content $file -Raw
@@ -362,12 +536,12 @@ function Set-InstallerPin([string]$file, [string]$version, [string]$sha, [string
     Set-Content $file $text -NoNewline
     $check = Get-Content $file -Raw
     if ($check -notmatch [regex]::Escape($sha)) {
-        throw "the pin in $file does not carry the digest of the release ($sha)"
+        throw "the pin in $name does not carry the digest of the release ($sha)"
     }
     if ($check -notmatch 'expected') {
-        throw "the pin in $file lost its name: the rewrite ate more than the digest"
+        throw "the pin in $name lost its name: the rewrite ate more than the digest"
     }
-    Write-Host "pin updated: $file -> $version $sha"
+    Write-Host "pin updated: $name -> $version $sha"
 }
 
 # The digest of an asset this release carries.
@@ -415,7 +589,7 @@ if ($DryRun) {
     }
 }
 
-# --- 8. winget validate -----------------------------------------------------
+# --- 9. winget validate -----------------------------------------------------
 $winget = Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps\winget.exe"
 if (Test-Path $winget) {
     if ($DryRun) { Write-Host "[dry-run] winget validate --manifest $wingetDir" }
@@ -428,64 +602,49 @@ if (Test-Path $winget) {
     Write-Host "winget.exe not found, skipping validation"
 }
 
-# --- 8. the brew formula ----------------------------------------------------
-# The formula names the macOS archives, so its digests are the digests of the
-# files that are about to be published. A Windows box has no macOS archive to
-# digest, and the formula says so instead of carrying a digest of nothing.
-#
-# The formula lists the archives in the order they appear in it -- arm
-# first, then intel -- and the rewrite follows that order: the n-th url
-# line gets the n-th archive's URL, the n-th sha256 line its digest.
-$macAssets = @()
-foreach ($arch in @("aarch64-apple-darwin", "x86_64-apple-darwin")) {
-    $f = Get-Item ".dist\rgy-v$Version-$arch.tar.gz" -ErrorAction SilentlyContinue
-    if ($f) { $macAssets += $f }
-}
-$formula = "Formula\rgy-search.rb"
-
-if ($macAssets.Count -eq 0) {
-    Write-Host "brew formula: not touched (no macOS archive in .dist/)"
-} elseif ($DryRun) {
-    Write-Host "[dry-run] brew formula -> version $Version"
-    $macAssets | ForEach-Object { Write-Host "    $($_.Name)" }
-} else {
-    $lines = Get-Content $formula
-    $ui = 0; $si = 0; $vi = 0
-    $rewritten = foreach ($line in $lines) {
-        if ($line -match '^(\s*)url "') {
-            $a = $macAssets[$ui]; $ui++
-            "$($Matches[1])url `"$gh/releases/download/$tag/$($a.Name)`""
-        } elseif ($line -match '^(\s*)sha256 "') {
-            $a = $macAssets[$si]; $si++
-            $digest = (Get-FileHash $a.FullName -Algorithm SHA256).Hash.ToLower()
-            "$($Matches[1])sha256 `"$digest`""
-        } elseif ($line -match '^(\s*)version "' -and $vi -eq 0) {
-            $vi++
-            "$($Matches[1])version `"$Version`""
-        } else {
-            $line
-        }
-    }
-    Set-Content $formula $rewritten -Encoding utf8
-    Write-Host "brew formula updated: version $Version"
-    foreach ($a in $macAssets) {
-        $digest = (Get-FileHash $a.FullName -Algorithm SHA256).Hash.ToLower()
-        Write-Host "    $digest  $($a.Name)"
-    }
-}
-
 if ($ManifestsOnly) {
+    Write-Host ""
     Write-Host "manifests rewritten; nothing was published"
     exit 0
 }
 
-# --- 9. commit --------------------------------------------------------------
+# --- 10. the release data ----------------------------------------------------
+# The release's own data -- the installer pins, the brew formula and the
+# winget manifests -- is release data: this script writes it, and it is
+# committed with it. A clone that still carries the placeholders is a clone
+# whose one-line installer says "there is no published rgy release for
+# x86_64 yet" on the day of the release.
+#
+# The commit is asked for, not done on the side: publishing and committing
+# are two acts, and the owner decides when the release data lands.
 if ($Commit -and -not $DryRun) {
-    git add .winget
-    git commit -m "release: $tag winget manifests"
+    $staged = @()
+    foreach ($p in @(".winget", "install.sh", "install.ps1", "Formula")) {
+        if (Test-Path $p) { $staged += $p }
+    }
+    git add @staged
+    if ($LASTEXITCODE -ne 0) {
+        [Console]::Error.WriteLine("the release data could not be staged")
+        exit 1
+    }
+    git diff --cached --quiet
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "release data: nothing to commit"
+    } else {
+        git commit -m "release: $tag release data"
+        if ($LASTEXITCODE -ne 0) {
+            [Console]::Error.WriteLine("the release data could not be committed")
+            exit 1
+        }
+        Write-Host "release data committed"
+    }
     $branch = git rev-parse --abbrev-ref HEAD
     git push forgejo $branch
-    Write-Host "manifests committed and pushed"
+    if ($LASTEXITCODE -ne 0) {
+        [Console]::Error.WriteLine("the release data could not be pushed to the forgejo")
+        exit 1
+    }
+    Write-Host "release data pushed to the forgejo"
 }
 
 Write-Host ""
