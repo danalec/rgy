@@ -37,7 +37,9 @@ extern crate alloc;
 pub mod indexer;
 pub mod ntfs;
 pub mod paths;
+pub mod rdcw;
 pub mod seam;
 pub mod volume;
 
+pub use rdcw::RdcwWatch;
 pub use seam::{MftSource, UsnWatch};

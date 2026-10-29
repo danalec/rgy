@@ -1520,6 +1520,26 @@ struct Feed {
 /// position, and the feed then starts at the journal's head.
 #[cfg(windows)]
 fn open_watch(root: &[u8], journal: &Journal, watermark: u64) -> Option<Feed> {
+    // The journal first: it has the history, and the changes that happened
+    // while the daemon was off are in it.
+    if let Some(feed) = usn_watch(root, journal, watermark) {
+        return Some(feed);
+    }
+    // The fallback: the tree's own directory notifications. They have no
+    // history -- the gap the journal would have replayed stays a gap -- but
+    // they need no privileges, and a volume handle needs the rights an
+    // elevated process has. So the daemon follows the tree from the moment
+    // it starts, where the journal is out of reach.
+    let watch = rgy_discovery_windows::RdcwWatch::new(root).ok()?;
+    Some(Feed {
+        name: "the tree's directory notifications",
+        watch: Box::new(watch),
+    })
+}
+
+/// The journal's feed, where this process may read the journal.
+#[cfg(windows)]
+fn usn_watch(root: &[u8], journal: &Journal, watermark: u64) -> Option<Feed> {
     let path = std::str::from_utf8(root).ok()?;
     let vol_root = std::path::Path::new(path).ancestors().last()?.to_str()?;
     // The volume lives for the process; leak it so the UsnWatch owns a
