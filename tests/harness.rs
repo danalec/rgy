@@ -57,42 +57,52 @@ fn assert_up_to_date(name: &str, exe: &Path) {
     // code and reporting green.
     let mut newest = newest_source(&src.join("src"));
     if let Some(crates) = newest_source(&root.join("crates")) {
-        if newest.map(|n| crates > n).unwrap_or(true) {
+        if newest.as_ref().map(|n| crates.0 > n.0).unwrap_or(true) {
             newest = Some(crates);
         }
     }
-    if let Some(newest) = newest {
+    if let Some((newest, path)) = newest {
+        // The path is in the message on purpose. The guard compares the bin
+        // against every crate in the tree, so a change in one crate makes
+        // the other bins stale as well -- and a message that names only a
+        // time leaves the reader to guess which file moved.
+        let rel = path.strip_prefix(&root).unwrap_or(&path);
         assert!(
             built >= newest,
-            "{name} at {} is older than the sources it is built from (newest source modified {:?}). \
+            "{name} at {} is older than the sources it is built from (the newest is {} at {:?}). \
              The e2e harness resolves bins by path, so `cargo test -p rgy-e2e-tests` \
              does not rebuild them - build first (`cargo build --workspace`), or \
              this run would test stale code. (`cargo test --workspace` alone is \
              not a build-first: on a clean tree the e2e tests race the rest of \
              the workspace and spawn nothing.)",
             exe.display(),
+            rel.display(),
             newest
         );
     }
 }
 
-/// The newest modification time under `dir`, if there is a file under it.
-fn newest_source(dir: &Path) -> Option<std::time::SystemTime> {
+/// The newest source under `dir`: its modification time, and the path of
+/// the file it belongs to.
+///
+/// The path comes back with the time because the guard's message names
+/// it: a time alone says that something moved and not what.
+fn newest_source(dir: &Path) -> Option<(std::time::SystemTime, PathBuf)> {
     let entries = std::fs::read_dir(dir).ok()?;
-    let mut newest = None;
+    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
     for entry in entries.flatten() {
         let Ok(meta) = entry.metadata() else { continue };
         if meta.is_dir() {
             if let Some(inner) = newest_source(&entry.path()) {
-                if newest.map(|n| inner > n).unwrap_or(true) {
+                if newest.as_ref().map(|n| inner.0 > n.0).unwrap_or(true) {
                     newest = Some(inner);
                 }
             }
             continue;
         }
         if let Ok(modified) = meta.modified() {
-            if newest.map(|n| modified > n).unwrap_or(true) {
-                newest = Some(modified);
+            if newest.as_ref().map(|n| modified > n.0).unwrap_or(true) {
+                newest = Some((modified, entry.path()));
             }
         }
     }
