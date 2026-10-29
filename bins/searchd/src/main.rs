@@ -449,9 +449,32 @@ struct Journal {
     head: u64,
     /// The oldest position the journal still covers (0: no journal).
     lowest: u64,
+    /// Why there is no journal (empty: there is one).
+    ///
+    /// The note the reader gets has to name the cause. "This platform keeps
+    /// no history" and "this process was not allowed to open the volume"
+    /// are different facts, and only one of them is the platform's: the old
+    /// note said the platform, and on a machine where the journal is there
+    /// and the process may not ask for it, that was the platform being
+    /// blamed for a permission.
+    reason: &'static str,
+    /// The win32 error that stopped it (0: nothing failed, or there was no
+    /// journal to ask).
+    code: u32,
 }
 
 impl Journal {
+    /// No journal, and the reason why.
+    fn none_with(reason: &'static str, code: u32) -> Journal {
+        Journal {
+            id: 0,
+            head: 0,
+            lowest: 0,
+            reason,
+            code,
+        }
+    }
+
     /// Does the journal still cover `position`?
     ///
     /// A journal that wrapped (its oldest record moved past the position)
@@ -466,69 +489,99 @@ impl Journal {
     /// What goes with an index this platform cannot bring up to date: a
     /// journal-less platform keeps no history, so the changes made since
     /// the index was built are not in it, and the reader has to be told.
-    fn gap_note(&self) -> &'static str {
-        if self.head == 0 {
-            " — no change journal on this platform, so the changes made since then are not in it"
-        } else {
-            ""
+    ///
+    /// The note names the cause, because the causes are not the same fact:
+    /// a platform that keeps no history cannot be fixed by a different
+    /// process, and a volume that would not open can. It also says what the
+    /// daemon does about it -- nothing, while it runs -- because a reader
+    /// who finds a stale index has to know whether to wait for it.
+    fn gap_note(&self) -> String {
+        if self.head != 0 {
+            return String::new();
         }
+        let mut note = String::from(" — no change journal: ");
+        note.push_str(self.reason);
+        if self.code != 0 {
+            note.push_str(&format!(" (win32 error {})", self.code));
+        }
+        note.push_str(
+            ", so the changes made since then are not in it and the daemon does not follow the tree while it runs",
+        );
+        note
     }
 }
 
 #[cfg(windows)]
 impl Journal {
-    fn none() -> Journal {
-        Journal {
-            id: 0,
-            head: 0,
-            lowest: 0,
-        }
-    }
-
     /// The USN journal of the volume `root` is on, when this process can
     /// read it.
     ///
     /// The handle is opened and closed again here: the feed opens its own
     /// for the daemon's life, and a journal is a property of the volume, not
     /// of the handle.
+    ///
+    /// Every way this can fail says which way it failed. The volume handle
+    /// is opened with GENERIC_READ, and a process without the rights that
+    /// needs is refused with ERROR_ACCESS_DENIED -- so a daemon with no
+    /// journal said "no change journal on this platform", and on a machine
+    /// where the journal is there and the process may not ask for it, that
+    /// was the platform being blamed for a permission.
     fn open(root: &[u8]) -> Journal {
         let Ok(path) = std::str::from_utf8(root) else {
-            return Journal::none();
+            return Journal::none_with("the root is not a UTF-8 path", 0);
         };
         let Some(vol_root) = std::path::Path::new(path)
             .ancestors()
             .last()
             .and_then(|p| p.to_str())
         else {
-            return Journal::none();
+            return Journal::none_with("the root has no volume root to name", 0);
         };
-        let Ok(volume) = rgy_discovery_windows::volume::Volume::open(vol_root) else {
-            return Journal::none();
+        let volume = match rgy_discovery_windows::volume::Volume::open(vol_root) {
+            Ok(volume) => volume,
+            Err(e) => {
+                return Journal::none_with(
+                    "the volume would not open; a volume handle on Windows needs the rights an elevated process has",
+                    volume_error_code(&e),
+                );
+            }
         };
-        let Ok(j) = volume.query_usn_journal() else {
-            return Journal::none();
+        let j = match volume.query_usn_journal() {
+            Ok(j) => j,
+            Err(e) => {
+                return Journal::none_with("the journal would not answer", volume_error_code(&e));
+            }
         };
         Journal {
             id: j.usn_journal_id,
             head: j.next_usn.max(0) as u64,
             lowest: j.lowest_valid_usn.max(0) as u64,
+            reason: "",
+            code: 0,
         }
+    }
+}
+
+/// The win32 error behind a volume failure.
+///
+/// The variants carry the code and the operation; the note the daemon prints
+/// wants the code, because the code is the part a reader can look up and the
+/// part that says which of the failures happened.
+#[cfg(windows)]
+fn volume_error_code(e: &rgy_discovery_windows::volume::VolumeError) -> u32 {
+    use rgy_discovery_windows::volume::VolumeError;
+    match e {
+        VolumeError::Open { code, .. } => *code,
+        VolumeError::IoControl { code, .. } => *code,
+        VolumeError::JournalUnavailable { code } => *code,
     }
 }
 
 #[cfg(not(windows))]
 impl Journal {
-    fn none() -> Journal {
-        Journal {
-            id: 0,
-            head: 0,
-            lowest: 0,
-        }
-    }
-
     /// No journal: inotify and kqueue keep no history to replay.
     fn open(_root: &[u8]) -> Journal {
-        Journal::none()
+        Journal::none_with("this platform keeps no change history", 0)
     }
 }
 
@@ -1965,7 +2018,39 @@ mod tests {
 
     /// A journal that reaches back to `lowest` and is at `head`.
     fn journal(id: u64, head: u64, lowest: u64) -> Journal {
-        Journal { id, head, lowest }
+        Journal {
+            id,
+            head,
+            lowest,
+            reason: "",
+            code: 0,
+        }
+    }
+
+    /// The note a reader gets when the daemon has no journal.
+    ///
+    /// It has to name the cause: the causes are not the same fact, and a
+    /// reader told "no change journal on this platform" on a machine whose
+    /// platform has one is left looking in the wrong place.
+    #[test]
+    fn the_note_names_the_cause_and_not_the_platform() {
+        let refused = Journal::none_with(
+            "the volume would not open; a volume handle on Windows needs the rights an elevated process has",
+            5,
+        );
+        let note = refused.gap_note();
+        assert!(note.contains("the volume would not open"), "{note}");
+        assert!(note.contains("win32 error 5"), "{note}");
+        assert!(
+            !note.contains("on this platform"),
+            "the platform is not the cause: {note}"
+        );
+    }
+
+    /// A journal that is there says nothing about a missing one.
+    #[test]
+    fn a_journal_that_is_there_has_no_note() {
+        assert_eq!(journal(7, 1_000, 500).gap_note(), "");
     }
 
     /// The decision the startup makes about a saved index, as the pure
