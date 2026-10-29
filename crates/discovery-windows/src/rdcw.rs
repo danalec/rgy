@@ -30,15 +30,13 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::mem::offset_of;
 
-use rgy_discovery::{ChangeBatch, UsnRecord, Watch};
-use windows::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
-use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_LIST_DIRECTORY, FILE_NOTIFY_CHANGE,
-    FILE_NOTIFY_CHANGE_CREATION, FILE_NOTIFY_CHANGE_DIR_NAME, FILE_NOTIFY_CHANGE_FILE_NAME,
-    FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_NOTIFY_CHANGE_SIZE, FILE_NOTIFY_INFORMATION,
-    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, ReadDirectoryChangesW,
+use crate::win::{
+    self, FILE_FLAG_BACKUP_SEMANTICS, FILE_LIST_DIRECTORY, FILE_NOTIFY_CHANGE_CREATION,
+    FILE_NOTIFY_CHANGE_DIR_NAME, FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE,
+    FILE_NOTIFY_CHANGE_SIZE, FILE_NOTIFY_INFORMATION, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, HANDLE, OPEN_EXISTING,
 };
-use windows::core::PCWSTR;
+use rgy_discovery::{ChangeBatch, UsnRecord, Watch};
 
 // The tests, and only the tests, need `std`: a tree to watch, a thread to
 // watch it on, and a channel to answer over. The crate body is `core` plus
@@ -53,9 +51,6 @@ extern crate std;
 /// be DWORD-aligned, because the records in it are DWORD-aligned
 /// structures.
 const BUFFER_WORDS: usize = 16 * 1024;
-
-/// The bytes of the buffer the call is told about.
-const BUFFER_BYTES: u32 = (BUFFER_WORDS * 4) as u32;
 
 /// The room after the buffer the platform may fill.
 ///
@@ -76,13 +71,11 @@ const HEADER_BYTES: usize = offset_of!(FILE_NOTIFY_INFORMATION, FileName);
 /// A name is a name, a size and a time, so the filter asks for the name,
 /// the size and the write time — and for the creations that change which
 /// paths exist.
-const NOTIFY_FILTER: FILE_NOTIFY_CHANGE = FILE_NOTIFY_CHANGE(
-    FILE_NOTIFY_CHANGE_FILE_NAME.0
-        | FILE_NOTIFY_CHANGE_DIR_NAME.0
-        | FILE_NOTIFY_CHANGE_SIZE.0
-        | FILE_NOTIFY_CHANGE_LAST_WRITE.0
-        | FILE_NOTIFY_CHANGE_CREATION.0,
-);
+const NOTIFY_FILTER: u32 = FILE_NOTIFY_CHANGE_FILE_NAME
+    | FILE_NOTIFY_CHANGE_DIR_NAME
+    | FILE_NOTIFY_CHANGE_SIZE
+    | FILE_NOTIFY_CHANGE_LAST_WRITE
+    | FILE_NOTIFY_CHANGE_CREATION;
 
 /// `ERROR_INVALID_PARAMETER`. The call answers this when the buffer could
 /// not hold the changes that happened.
@@ -129,34 +122,27 @@ impl RdcwWatch {
             .ok_or_else(|| "the root is not a path: it carries a NUL".to_string())?;
         let wide = handle_path(&text);
 
-        let handle = unsafe {
-            CreateFileW(
-                PCWSTR(wide.as_ptr()),
-                // `FILE_LIST_DIRECTORY` and nothing else: the call reads
-                // the directory's names, and an ordinary process has that
-                // right. This is the whole difference from the volume
-                // handle the journal needs, which wants `GENERIC_READ` and
-                // is refused without the rights for it.
-                FILE_LIST_DIRECTORY.0,
-                // The whole world shares it: the daemon watches a tree other
-                // programs are writing to, and a handle that locked it
-                // would keep them out.
-                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                None,
-                OPEN_EXISTING,
-                // A directory handle needs the backup semantics: without
-                // them the call opens the path as a file and fails. On a
-                // volume device the same flag is what makes `\\.\X:`
-                // resolve as a directory instead of the volume, which is
-                // why the volume reader does not pass it.
-                FILE_FLAG_BACKUP_SEMANTICS,
-                None,
-            )
-        }
-        .map_err(|_| {
-            let code = unsafe { GetLastError().0 };
-            format!("cannot watch {text} (win32 error {code})")
-        })?;
+        let handle = win::create_file_w(
+            wide.as_ptr(),
+            // `FILE_LIST_DIRECTORY` and nothing else: the call reads
+            // the directory's names, and an ordinary process has that
+            // right. This is the whole difference from the volume
+            // handle the journal needs, which wants `GENERIC_READ` and
+            // is refused without the rights for it.
+            FILE_LIST_DIRECTORY,
+            // The whole world shares it: the daemon watches a tree other
+            // programs are writing to, and a handle that locked it
+            // would keep them out.
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            OPEN_EXISTING,
+            // A directory handle needs the backup semantics: without
+            // them the call opens the path as a file and fails. On a
+            // volume device the same flag is what makes `\\.\X:`
+            // resolve as a directory instead of the volume, which is
+            // why the volume reader does not pass it.
+            FILE_FLAG_BACKUP_SEMANTICS,
+        )
+        .map_err(|code| format!("cannot watch {text} (win32 error {code})"))?;
 
         Ok(RdcwWatch {
             handle,
@@ -181,6 +167,17 @@ impl RdcwWatch {
         // bytes are read through a shared borrow of it.
         unsafe { core::slice::from_raw_parts(self.buffer.as_ptr().cast::<u8>(), bytes) }
     }
+
+    /// The buffer as bytes, to write into.
+    ///
+    /// The same view as `storage`, borrowed mutably: the platform fills
+    /// the buffer, and the fill is a write.
+    fn storage_mut(&mut self) -> &mut [u8] {
+        let bytes = self.buffer.len() * core::mem::size_of::<u32>();
+        // SAFETY: the buffer is a live allocation of whole `u32`s, and the
+        // bytes are written through a mutable borrow of it.
+        unsafe { core::slice::from_raw_parts_mut(self.buffer.as_mut_ptr().cast::<u8>(), bytes) }
+    }
 }
 
 impl Watch for RdcwWatch {
@@ -190,26 +187,21 @@ impl Watch for RdcwWatch {
     /// daemon runs it on a thread of its own.
     fn next_batch(&mut self) -> Result<ChangeBatch, String> {
         let mut filled: u32 = 0;
-        let ok = unsafe {
-            ReadDirectoryChangesW(
-                self.handle,
-                self.buffer.as_mut_ptr().cast(),
-                BUFFER_BYTES,
-                // The whole tree: a change in a subdirectory is reported
-                // with its path relative to the root.
-                true,
-                NOTIFY_FILTER,
-                // The call is synchronous, so the number of bytes it wrote
-                // is the only way to know how much of the buffer holds
-                // records.
-                Some(&mut filled as *mut u32),
-                None,
-                None,
-            )
-        };
+        let ok = win::read_directory_changes_w(
+            self.handle,
+            self.storage_mut(),
+            // The whole tree: a change in a subdirectory is reported
+            // with its path relative to the root.
+            true,
+            NOTIFY_FILTER,
+            // The call is synchronous, so the number of bytes it wrote
+            // is the only way to know how much of the buffer holds
+            // records.
+            Some(&mut filled),
+            None,
+        );
 
-        if ok.is_err() {
-            let code = unsafe { GetLastError().0 };
+        if let Err(code) = ok {
             // The buffer could not hold the changes that happened: the feed
             // lost history, and the only complete answer is a rebuild. A
             // partial batch would be a lie — the records that did fit are
@@ -232,10 +224,8 @@ impl Watch for RdcwWatch {
 
 impl Drop for RdcwWatch {
     fn drop(&mut self) {
-        if !self.handle.is_invalid() {
-            unsafe {
-                let _ = CloseHandle(self.handle);
-            }
+        if !win::is_invalid(self.handle) {
+            let _ = win::close_handle(self.handle);
         }
     }
 }
@@ -349,10 +339,10 @@ fn full_path(root: &str, relative: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::win::FILE_ACTION_ADDED;
     use rgy_discovery::FILE_ATTRIBUTE_DIRECTORY;
     use std::sync::mpsc;
     use std::time::Duration;
-    use windows::Win32::Storage::FileSystem::FILE_ACTION_ADDED;
 
     /// A tree in the temporary directory that takes itself away.
     ///

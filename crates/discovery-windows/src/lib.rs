@@ -14,14 +14,9 @@
 //
 // Everything here is Win32 -- `DeviceIoControl` with `FSCTL_ENUM_USN_DATA`,
 // `CreateFileW` on `\\.\C:`, `ReadFile` on a volume handle -- so it could not
-// work elsewhere. More to the point, it could not *build* elsewhere: the
-// `windows` crate family does not cross-compile. `windows-future 0.3.2`
-// references `windows_core::imp::IMarshal` and `windows_core::imp::marshaler`,
-// which `windows-core 0.62.2` only defines for the Windows target, so every
-// non-Windows build died in a dependency before reaching a line of ours. It
-// breaks on `x86_64-unknown-linux-gnu` too, which is how we know it is not
-// ours. Pinning does not help: `windows 0.62.2` is the newest, and it is the
-// one that pulls the broken `windows-future`.
+// work elsewhere. The calls are declared by hand, in `src/win.rs`, and a
+// hand-written declaration of a platform call is still a platform call: it
+// links against `kernel32`, and there is no `kernel32` on a Linux box.
 //
 // An empty crate off-Windows is what keeps `cargo check --workspace` honest
 // on the platforms the rest of the stack supports. `ntfs.rs` is pure byte
@@ -40,6 +35,7 @@ pub mod paths;
 pub mod rdcw;
 pub mod seam;
 pub mod volume;
+pub mod win;
 
 pub use rdcw::RdcwWatch;
 pub use seam::{MftSource, UsnWatch};

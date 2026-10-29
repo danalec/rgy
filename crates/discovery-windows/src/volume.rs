@@ -3,23 +3,16 @@
 //! Win32 volume access: raw NTFS file records and USN journal reads.
 
 use crate::ntfs::{self, FileRecordInput, ReadUsnJournalData};
+use crate::win::{
+    self, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FSCTL_GET_NTFS_FILE_RECORD,
+    FSCTL_GET_NTFS_VOLUME_DATA, FSCTL_QUERY_USN_JOURNAL, FSCTL_READ_USN_JOURNAL, HANDLE,
+    OPEN_EXISTING, OVERLAPPED,
+};
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
-use core::ffi::c_void;
 use hashbrown::HashSet;
-use windows::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
-use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    GetDriveTypeW, GetVolumeInformationW, OPEN_EXISTING, ReadFile,
-};
-use windows::Win32::System::IO::{DeviceIoControl, OVERLAPPED};
-use windows::Win32::System::Ioctl::{
-    FSCTL_GET_NTFS_FILE_RECORD, FSCTL_GET_NTFS_VOLUME_DATA, FSCTL_QUERY_USN_JOURNAL,
-    FSCTL_READ_USN_JOURNAL,
-};
-use windows::core::PCWSTR;
 
 /// The tests, and only the tests, need `std`: a temp file to read at an
 /// offset, and the process id to name it after. The crate body is `core`
@@ -29,10 +22,10 @@ extern crate std;
 
 /// `GENERIC_READ`. The NTFS driver rejects volume reads opened with anything
 /// weaker; Zen uses the same value (0x80000000) for its volume handles.
-const GENERIC_READ_ACCESS: u32 = 0x8000_0000;
+const GENERIC_READ_ACCESS: u32 = win::GENERIC_READ;
 
-/// `DRIVE_FIXED` — `GetDriveTypeW` returns this as a bare `u32` and the
-/// `windows` crate does not declare the constant.
+/// `DRIVE_FIXED` — `GetDriveTypeW` returns this as a bare `u32`, so the
+/// value is spelled out here.
 const DRIVE_FIXED: u32 = 3;
 
 /// USN read buffer size, matching what Zen uses (64 KiB).
@@ -110,23 +103,16 @@ impl Volume {
         // makes \\.\X: resolve as a directory handle rather than the volume.
         let wide: Vec<u16> = device.encode_utf16().chain(core::iter::once(0)).collect();
 
-        let handle = unsafe {
-            CreateFileW(
-                PCWSTR(wide.as_ptr()),
-                GENERIC_READ_ACCESS,
-                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                None,
-                OPEN_EXISTING,
-                FILE_FLAGS_AND_ATTRIBUTES(0),
-                None,
-            )
-        }
-        .map_err(|_| {
-            let code = unsafe { GetLastError().0 };
-            VolumeError::Open {
-                path: device.clone(),
-                code,
-            }
+        let handle = win::create_file_w(
+            wide.as_ptr(),
+            GENERIC_READ_ACCESS,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            OPEN_EXISTING,
+            0,
+        )
+        .map_err(|code| VolumeError::Open {
+            path: device.clone(),
+            code,
         })?;
 
         let serial = volume_serial(root).unwrap_or(0);
@@ -161,21 +147,16 @@ impl Volume {
         let mut out = vec![0u8; 0x60];
         let mut returned: u32 = 0;
 
-        let ok = unsafe {
-            DeviceIoControl(
-                self.handle,
-                FSCTL_GET_NTFS_VOLUME_DATA,
-                None,
-                0,
-                Some(out.as_mut_ptr() as *mut c_void),
-                out.len() as u32,
-                Some(&mut returned as *mut u32),
-                None,
-            )
-        };
+        let ok = win::device_io_control(
+            self.handle,
+            FSCTL_GET_NTFS_VOLUME_DATA,
+            None,
+            Some(out.as_mut_slice()),
+            Some(&mut returned),
+            None,
+        );
 
-        if ok.is_err() {
-            let code = unsafe { GetLastError().0 };
+        if let Err(code) = ok {
             return Err(VolumeError::IoControl {
                 op: "FSCTL_GET_NTFS_VOLUME_DATA",
                 code,
@@ -198,21 +179,16 @@ impl Volume {
         let mut out = vec![0u8; 0x60];
         let mut returned: u32 = 0;
 
-        let ok = unsafe {
-            DeviceIoControl(
-                self.handle,
-                FSCTL_QUERY_USN_JOURNAL,
-                None,
-                0,
-                Some(out.as_mut_ptr() as *mut c_void),
-                out.len() as u32,
-                Some(&mut returned as *mut u32),
-                None,
-            )
-        };
+        let ok = win::device_io_control(
+            self.handle,
+            FSCTL_QUERY_USN_JOURNAL,
+            None,
+            Some(out.as_mut_slice()),
+            Some(&mut returned),
+            None,
+        );
 
-        if ok.is_err() {
-            let code = unsafe { GetLastError().0 };
+        if let Err(code) = ok {
             return Err(VolumeError::JournalUnavailable { code });
         }
 
@@ -238,21 +214,16 @@ impl Volume {
         let mut out = vec![0u8; ntfs::FILE_RECORD_OUTPUT_PREFIX + record_size + 64];
         let mut returned: u32 = 0;
 
-        let ok = unsafe {
-            DeviceIoControl(
-                self.handle,
-                FSCTL_GET_NTFS_FILE_RECORD,
-                Some(input_bytes.as_ptr() as *const c_void),
-                input_bytes.len() as u32,
-                Some(out.as_mut_ptr() as *mut c_void),
-                out.len() as u32,
-                Some(&mut returned as *mut u32),
-                None,
-            )
-        };
+        let ok = win::device_io_control(
+            self.handle,
+            FSCTL_GET_NTFS_FILE_RECORD,
+            Some(&input_bytes),
+            Some(out.as_mut_slice()),
+            Some(&mut returned),
+            None,
+        );
 
-        if ok.is_err() {
-            let code = unsafe { GetLastError().0 };
+        if let Err(code) = ok {
             // ERROR_BAD_FRN / ERROR_FILE_CORRUPT mean "this record is not a live
             // file", which we report as absent rather than as a hard failure.
             if code == 0xC000_008C || code == 1006 || code == 0xC000_0035 {
@@ -308,21 +279,16 @@ impl Volume {
         let mut out = vec![0u8; USN_BUFFER_SIZE];
         let mut returned: u32 = 0;
 
-        let result = unsafe {
-            DeviceIoControl(
-                self.handle,
-                FSCTL_READ_USN_JOURNAL,
-                Some(in_buf.as_ptr() as *const c_void),
-                in_buf.len() as u32,
-                Some(out.as_mut_ptr() as *mut c_void),
-                out.len() as u32,
-                Some(&mut returned as *mut u32),
-                None,
-            )
-        };
+        let result = win::device_io_control(
+            self.handle,
+            FSCTL_READ_USN_JOURNAL,
+            Some(&in_buf),
+            Some(out.as_mut_slice()),
+            Some(&mut returned),
+            None,
+        );
 
-        if result.is_err() {
-            let code = unsafe { GetLastError().0 };
+        if let Err(code) = result {
             // ERROR_HANDLE_EOF / ERROR_JOURNAL_NOT_IN_EXIST mean nothing newer.
             if code == 38 || code == 0xC000_00D9 || code == 1179 {
                 return Ok((Vec::new(), read.start_usn));
@@ -366,17 +332,14 @@ impl Volume {
         overlapped.Anonymous.Anonymous.OffsetHigh = (byte_offset >> 32) as u32;
 
         let mut bytes_read = 0u32;
-        let ok = unsafe {
-            ReadFile(
-                self.handle,
-                Some(buf),
-                Some(&mut bytes_read as *mut u32),
-                Some(&mut overlapped as *mut _),
-            )
-        };
+        let ok = win::read_file(
+            self.handle,
+            Some(buf),
+            Some(&mut bytes_read),
+            Some(&mut overlapped),
+        );
 
-        if ok.is_err() {
-            let code = unsafe { GetLastError().0 };
+        if let Err(code) = ok {
             // ERROR_HANDLE_EOF means the read ran off the end of the volume.
             if code == 38 {
                 return Ok(bytes_read as usize);
@@ -443,10 +406,8 @@ impl Volume {
 
 impl Drop for Volume {
     fn drop(&mut self) {
-        if !self.handle.is_invalid() {
-            unsafe {
-                let _ = CloseHandle(self.handle);
-            }
+        if !win::is_invalid(self.handle) {
+            let _ = win::close_handle(self.handle);
         }
     }
 }
@@ -458,7 +419,7 @@ impl Volume {
     /// closes nothing.
     pub(crate) fn dummy_for_tests() -> Self {
         Volume {
-            handle: HANDLE(core::ptr::null_mut()),
+            handle: core::ptr::null_mut(),
             root: "C:\\".to_string(),
             path: String::new(),
             serial: 0,
@@ -488,16 +449,8 @@ fn volume_serial(root: &str) -> Option<u32> {
         .collect();
 
     let mut serial: u32 = 0;
-    let ok = unsafe {
-        GetVolumeInformationW(
-            PCWSTR(wide.as_ptr()),
-            None,
-            Some(&mut serial as *mut u32),
-            None,
-            None,
-            None,
-        )
-    };
+    let ok =
+        win::get_volume_information_w(wide.as_ptr(), None, Some(&mut serial), None, None, None);
     if ok.is_ok() { Some(serial) } else { None }
 }
 
@@ -521,7 +474,7 @@ pub fn list_fixed_ntfs_roots() -> Vec<String> {
         let root = format!("{}:\\", letter as char);
         let wide: Vec<u16> = root.encode_utf16().chain(core::iter::once(0)).collect();
 
-        let drive_type = unsafe { GetDriveTypeW(PCWSTR(wide.as_ptr())) };
+        let drive_type = win::get_drive_type_w(wide.as_ptr());
         if drive_type != DRIVE_FIXED {
             continue;
         }
@@ -529,16 +482,8 @@ pub fn list_fixed_ntfs_roots() -> Vec<String> {
         // Ask the filesystem name rather than assuming: a ReFS fixed disk is
         // not readable with NTFS ioctls and would fail every record read.
         let mut fs_buf = [0u16; 32];
-        let ok = unsafe {
-            GetVolumeInformationW(
-                PCWSTR(wide.as_ptr()),
-                None,
-                None,
-                None,
-                None,
-                Some(&mut fs_buf),
-            )
-        };
+        let ok =
+            win::get_volume_information_w(wide.as_ptr(), None, None, None, None, Some(&mut fs_buf));
         if ok.is_err() {
             continue;
         }
@@ -629,12 +574,8 @@ mod tests {
     /// from the handle's file pointer and return the wrong bytes.
     #[test]
     fn an_overlapped_offset_positions_a_read_on_a_synchronous_handle() {
-        use windows::Win32::Foundation::CloseHandle;
-        use windows::Win32::Storage::FileSystem::{
-            CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ, OPEN_EXISTING, ReadFile,
-        };
-        use windows::Win32::System::IO::OVERLAPPED;
-        use windows::core::PCWSTR;
+        use crate::win;
+        use crate::win::OVERLAPPED;
 
         let path = std::env::temp_dir().join(format!(
             "zen-rs-read-at-{}-{:?}.bin",
@@ -649,17 +590,13 @@ mod tests {
             .chain(core::iter::once(0))
             .collect();
         // Opened exactly like Volume::open: no FILE_FLAG_OVERLAPPED.
-        let handle = unsafe {
-            CreateFileW(
-                PCWSTR(wide.as_ptr()),
-                GENERIC_READ_ACCESS,
-                FILE_SHARE_READ,
-                None,
-                OPEN_EXISTING,
-                FILE_FLAGS_AND_ATTRIBUTES(0),
-                None,
-            )
-        }
+        let handle = win::create_file_w(
+            wide.as_ptr(),
+            GENERIC_READ_ACCESS,
+            FILE_SHARE_READ,
+            OPEN_EXISTING,
+            0,
+        )
         .expect("open temp file");
 
         let read_at_offset = |offset: u32| -> Vec<u8> {
@@ -667,14 +604,12 @@ mod tests {
             overlapped.Anonymous.Anonymous.Offset = offset;
             let mut buf = [0u8; 4];
             let mut read = 0u32;
-            let r = unsafe {
-                ReadFile(
-                    handle,
-                    Some(&mut buf),
-                    Some(&mut read as *mut u32),
-                    Some(&mut overlapped as *mut _),
-                )
-            };
+            let r = win::read_file(
+                handle,
+                Some(&mut buf),
+                Some(&mut read),
+                Some(&mut overlapped),
+            );
             assert!(r.is_ok(), "overlapped read at {offset} should succeed");
             assert_eq!(read, 4);
             buf.to_vec()
@@ -687,7 +622,7 @@ mod tests {
             "a positioned read must not be affected by the previous one"
         );
 
-        let _ = unsafe { CloseHandle(handle) };
+        let _ = win::close_handle(handle);
         let _ = std::fs::remove_file(&path);
     }
 }

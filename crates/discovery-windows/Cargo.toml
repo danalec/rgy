@@ -27,22 +27,6 @@ rgy-discovery = { path = "../discovery", version = "0.1.0", default-features = f
 # cheap hasher the name index already carries.
 hashbrown = { version = "0.16", default-features = false, features = ["default-hasher", "inline-more"] }
 
-# Gated to Windows, like the crate body in `src/lib.rs`. The `windows` family
-# does not cross-compile -- `windows-future` pulls internals `windows-core`
-# only defines for the Windows target -- and a declared dependency is built
-# for the target even when the crate that wants it is empty there. So the
-# gate has to be here too, or `cargo check --workspace` still dies in
-# `windows-future` on every other platform.
-#
-# `default-features = false` drops the `std` feature of the `windows` family:
-# the crate is `no_std`, and the Win32 bindings do not need a standard
-# library to call `DeviceIoControl`.
-[target.'cfg(windows)'.dependencies]
-windows = { version = "0.62.2", default-features = false, features = [
-    "Win32_Foundation",
-    "Win32_Security",
-    "Win32_Storage_FileSystem",
-    "Win32_System_IO",
-    "Win32_System_Ioctl",
-    "Win32_System_Threading",
-] }
+# The Win32 calls are declared by hand, in `src/win.rs`, so there is no
+# dependency to gate here: the calls themselves are the Windows-only part of
+# the crate, and the crate's body is empty everywhere else.

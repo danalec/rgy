@@ -222,12 +222,7 @@ mod tests {
     /// and this one pins the read against a real MFT.
     #[test]
     fn a_file_reference_resolves_to_the_path_the_file_is_at() {
-        use windows::Win32::Foundation::CloseHandle;
-        use windows::Win32::Storage::FileSystem::{
-            CreateFileW, FILE_ID_INFO, FILE_SHARE_READ, FILE_SHARE_WRITE, FileIdInfo,
-            GetFileInformationByHandleEx, OPEN_EXISTING,
-        };
-        use windows::core::PCWSTR;
+        use crate::win::{self, FILE_ID_INFO, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING};
 
         let file = std::env::temp_dir().join(format!("rgy_paths_{}.txt", std::process::id()));
         std::fs::write(&file, b"x").expect("the temp file is written");
@@ -250,28 +245,17 @@ mod tests {
         };
 
         let wide: Vec<u16> = text.encode_utf16().chain(core::iter::once(0)).collect();
-        let handle = unsafe {
-            CreateFileW(
-                PCWSTR(wide.as_ptr()),
-                0,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                None,
-                OPEN_EXISTING,
-                Default::default(),
-                None,
-            )
-        }
+        let handle = win::create_file_w(
+            wide.as_ptr(),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            OPEN_EXISTING,
+            0,
+        )
         .expect("the file opens");
         let mut info = FILE_ID_INFO::default();
-        let ok = unsafe {
-            GetFileInformationByHandleEx(
-                handle,
-                FileIdInfo,
-                &mut info as *mut FILE_ID_INFO as *mut _,
-                core::mem::size_of::<FILE_ID_INFO>() as u32,
-            )
-        };
-        let _ = unsafe { CloseHandle(handle) };
+        let ok = win::get_file_information_by_handle_ex(handle, &mut info);
+        let _ = win::close_handle(handle);
         assert!(ok.is_ok(), "the file id is readable");
         let frn = u64::from_le_bytes(info.FileId.Identifier[..8].try_into().expect("8 bytes"));
 
