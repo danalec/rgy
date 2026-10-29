@@ -52,13 +52,19 @@ TAG="rgy-v$VERSION"
 echo ">> rgy $VERSION ($TAG) on $HOST"
 
 echo ">> pushing $REF to forgejo"
-git push forgejo "$REF" 2>&1 | tail -1 || true
+# The push is checked: a rejected push is invisible otherwise, and the host
+# then clones the ref the forgejo still holds -- an archive of code that is
+# not the code being released.
+git push forgejo "$REF" 2>&1 | tail -1
 
 echo ">> syncing the source on $HOST"
 ssh "$HOST" "rm -rf '$REMOTE' && mkdir -p '$REMOTE' && git clone --depth 1 --branch '$REF' '$FORGEJO' '$REMOTE/src' 2>&1 | tail -1"
 
 echo ">> building on $HOST (this takes a few minutes)"
-ssh "$HOST" "bash '$REMOTE/src/scripts/build-release.sh' --skip-tests --version '$VERSION'"
+# The gate runs here too: the Windows release path runs it, and an asset
+# that never passed the workspace's own tests is an asset nobody can say
+# was tested.
+ssh "$HOST" "bash '$REMOTE/src/scripts/build-release.sh' --version '$VERSION'"
 
 echo ">> fetching the artifacts to .dist/"
 mkdir -p .dist

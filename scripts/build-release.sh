@@ -99,7 +99,13 @@ read_manifest_version() {
     sed -n 's/^version = "\(.*\)"/\1/p' "$1" | head -1
 }
 
-manifests="bins/searchctl/Cargo.toml bins/searchd/Cargo.toml bins/search-ui/Cargo.toml bins/zen-rs/Cargo.toml bins/rgxy/Cargo.toml crates/autostart/Cargo.toml"
+# Every manifest this repository owns. The vendored trees are upstream's:
+# they carry upstream's version, upstream publishes them, and a bump here
+# would be a fork. The harness is not published either.
+manifests=$(ls -1 crates/*/Cargo.toml bins/*/Cargo.toml 2>/dev/null \
+    | grep -v '^crates/rgx-' \
+    | grep -v '^crates/rar-codec/' \
+    | LC_ALL=C sort)
 if [ -z "$version" ]; then
     version=$(read_manifest_version bins/searchctl/Cargo.toml)
 fi
@@ -112,6 +118,26 @@ for m in $manifests; do
         echo "the crates must agree about their version" >&2
         exit 1
     fi
+done
+
+# Every path dependency on a crate of this repository has to ask for the
+# version the release carries. A dependency that still asks for the old one
+# breaks `cargo build --locked`, and that is the release build itself.
+for m in $manifests; do
+    while IFS= read -r line; do
+        p=$(printf '%s' "$line" | sed -n 's/.*path[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p')
+        [ -n "$p" ] || continue
+        case "$p" in
+            *rgx-*|*rar-codec*) continue ;;
+        esac
+        req=$(printf '%s' "$line" | sed -n 's/.*version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p')
+        [ -n "$req" ] || continue
+        if [ "$req" != "$version" ] && [ "$req" != "^$version" ]; then
+            echo "$m asks for $req where the release is $version" >&2
+            echo "the dependency lines have to be bumped with the manifests" >&2
+            exit 1
+        fi
+    done < "$m"
 done
 
 # --- 2. the target and the flavour -----------------------------------------

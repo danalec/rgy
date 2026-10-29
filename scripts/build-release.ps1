@@ -91,11 +91,14 @@ function Get-ManifestVersion([string]$path) {
 # because the release ships it: the archive carries searchctl, searchd,
 # rgy-autostart and rgxy, so a version drift in one of those crates is a
 # release carrying binaries that do not agree about which release they are.
+# Every manifest this repository owns. The vendored trees are upstream's:
+# they carry upstream's version, upstream publishes them, and a bump here
+# would be a fork. The harness is not published either.
 $manifests = @(
-    "bins/searchctl/Cargo.toml", "bins/searchd/Cargo.toml",
-    "bins/search-ui/Cargo.toml", "bins/zen-rs/Cargo.toml",
-    "bins/rgxy/Cargo.toml",
-    "crates/autostart/Cargo.toml"
+    Get-ChildItem -Path "crates/*/Cargo.toml", "bins/*/Cargo.toml" |
+        Where-Object { $_.FullName -notmatch '[\\/]crates[\\/]rgx-' -and $_.FullName -notmatch '[\\/]crates[\\/]rar-codec[\\/]' } |
+        ForEach-Object { $_.FullName.Substring((Get-Location).Path.Length + 1).Replace('\', '/') } |
+        Sort-Object
 )
 if (-not $Version) { $Version = Get-ManifestVersion "bins/searchctl/Cargo.toml" }
 if (-not $Version) { throw "no version in bins/searchctl/Cargo.toml" }
@@ -109,6 +112,25 @@ foreach ($m in $manifests) {
         [Console]::Error.WriteLine("$m says version $v, but the release is $Version")
         [Console]::Error.WriteLine("the crates must agree about their version")
         exit 1
+    }
+}
+
+# Every path dependency on a crate of this repository has to ask for the
+# version the release carries. A dependency that still asks for the old one
+# breaks `cargo build --locked`, and that is the release build itself.
+foreach ($m in $manifests) {
+    foreach ($line in Get-Content $m) {
+        if ($line -notmatch 'path\s*=') { continue }
+        $p = if ($line -match 'path\s*=\s*"([^"]*)"') { $matches[1] } else { "" }
+        if (-not $p) { continue }
+        if ($p -match 'rgx-' -or $p -match 'rar-codec') { continue }
+        $req = if ($line -match 'version\s*=\s*"([^"]*)"') { $matches[1] } else { "" }
+        if (-not $req) { continue }
+        if ($req -ne $Version -and $req -ne "^$Version") {
+            [Console]::Error.WriteLine("$m asks for $req where the release is $Version")
+            [Console]::Error.WriteLine("the dependency lines have to be bumped with the manifests")
+            exit 1
+        }
     }
 }
 
