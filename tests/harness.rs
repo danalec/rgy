@@ -333,6 +333,92 @@ impl Drop for Daemon {
     }
 }
 
+/// A daemon on the endpoint the clients look for, and the environment that
+/// finds it.
+///
+/// The registered endpoint is the named pipe that carries the user's name
+/// on Windows, and the socket in the cache directory everywhere else. A
+/// test points the client at it through the environment -- `USERNAME` on
+/// Windows, the cache directory everywhere else -- so a test never touches
+/// the daemon the machine really has.
+pub struct Registered {
+    /// The daemon, killed when the test ends.
+    pub daemon: Daemon,
+    /// The environment a client has to see.
+    pub env: Vec<(&'static str, String)>,
+    /// The cache directory, where the socket lives.
+    ///
+    /// It lives as long as the daemon does: a socket whose directory is
+    /// gone is a socket nobody can reach, and the test would be measuring
+    /// the removal instead of the answer.
+    _cache: Option<TempDir>,
+}
+
+/// A daemon over `root`, on the registered endpoint.
+#[cfg(windows)]
+pub fn registered(root: &Path) -> Registered {
+    let user = format!("rgy-e2e-{}", unique());
+    let args = [
+        "--root".to_string(),
+        root.to_str().unwrap().to_string(),
+        "--listen".to_string(),
+        format!("pipe:rgy-searchd-{user}"),
+    ];
+    let borrowed: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    Registered {
+        daemon: spawn_pipe(&bin("searchd"), &borrowed),
+        env: vec![("USERNAME", user)],
+        _cache: None,
+    }
+}
+
+/// A daemon over `root`, on the registered endpoint.
+#[cfg(unix)]
+pub fn registered(root: &Path) -> Registered {
+    let cache = TempDir::new("registered");
+    std::fs::create_dir_all(cache.join("rgy")).unwrap();
+    let args = [
+        "--root".to_string(),
+        root.to_str().unwrap().to_string(),
+        "--listen".to_string(),
+        format!("uds:{}/rgy/searchd.sock", cache.path().display()),
+    ];
+    let borrowed: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    Registered {
+        daemon: spawn_uds(&bin("searchd"), &borrowed),
+        env: vec![(
+            "XDG_CACHE_HOME",
+            cache.path().to_string_lossy().into_owned(),
+        )],
+        _cache: Some(cache),
+    }
+}
+
+/// The environment of an endpoint nobody listens on.
+pub fn absent() -> Vec<(&'static str, String)> {
+    #[cfg(windows)]
+    {
+        vec![("USERNAME", format!("rgy-e2e-none-{}", unique()))]
+    }
+    #[cfg(unix)]
+    {
+        let cache = std::env::temp_dir().join(format!("rgy-e2e-none-{}", unique()));
+        vec![("XDG_CACHE_HOME", cache.to_string_lossy().into_owned())]
+    }
+}
+
+/// A token that is different for every call, so no two tests share a
+/// daemon.
+pub fn unique() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    format!(
+        "{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
 /// Spawn `searchd` listening on a named pipe, left running.
 ///
 /// Unlike [`run_stdin`], the process stays up so a test can hold several

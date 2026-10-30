@@ -608,89 +608,6 @@ fn a_redirected_stdout_keeps_the_utf8_bytes_in_json() {
 
 // --- the daemon, instead of the local index --------------------------------
 
-/// A token that is different for every call, so no two tests share a
-/// daemon.
-fn unique() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    format!(
-        "{}-{}",
-        std::process::id(),
-        COUNTER.fetch_add(1, Ordering::Relaxed)
-    )
-}
-
-/// The daemon of a test, and the environment that finds it.
-///
-/// The registered endpoint is where the clients look for the daemon: the
-/// named pipe that carries the user's name on Windows, and the socket in
-/// the cache directory everywhere else. The test points the client at it
-/// through the environment — `USERNAME` on Windows, the cache directory
-/// everywhere else — so a test never touches the daemon the machine
-/// really has.
-struct Registered {
-    /// The daemon, killed when the test ends.
-    _daemon: harness::Daemon,
-    /// The environment the client has to see.
-    env: Vec<(&'static str, String)>,
-    /// The cache directory, where the socket lives.
-    ///
-    /// It lives as long as the daemon does: a socket whose directory is
-    /// gone is a socket nobody can reach, and the test would be measuring
-    /// the removal instead of the answer.
-    _cache: Option<harness::TempDir>,
-}
-
-/// A daemon over `root`, on the registered endpoint.
-#[cfg(windows)]
-fn registered(root: &std::path::Path) -> Registered {
-    let user = format!("rgy-e2e-{}", unique());
-    let args = [
-        "--root".to_string(),
-        root.to_str().unwrap().to_string(),
-        "--listen".to_string(),
-        format!("pipe:rgy-searchd-{user}"),
-    ];
-    let borrowed: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    Registered {
-        _daemon: harness::spawn_pipe(&bin("searchd"), &borrowed),
-        env: vec![("USERNAME", user)],
-        _cache: None,
-    }
-}
-
-/// A daemon over `root`, on the registered endpoint.
-#[cfg(unix)]
-fn registered(root: &std::path::Path) -> Registered {
-    let cache = harness::fixture_dir("searchctl-registered");
-    std::fs::create_dir_all(cache.join("rgy")).unwrap();
-    let args = [
-        "--root".to_string(),
-        root.to_str().unwrap().to_string(),
-        "--listen".to_string(),
-        format!("uds:{}/rgy/searchd.sock", cache.display()),
-    ];
-    let borrowed: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    Registered {
-        _daemon: harness::spawn_uds(&bin("searchd"), &borrowed),
-        env: vec![("XDG_CACHE_HOME", cache.to_str().unwrap().to_string())],
-        _cache: Some(cache),
-    }
-}
-
-/// The environment of an endpoint nobody listens on.
-fn absent() -> Vec<(&'static str, String)> {
-    #[cfg(windows)]
-    {
-        vec![("USERNAME", format!("rgy-e2e-none-{}", unique()))]
-    }
-    #[cfg(unix)]
-    {
-        let cache = std::env::temp_dir().join(format!("rgy-e2e-none-{}", unique()));
-        vec![("XDG_CACHE_HOME", cache.to_string_lossy().into_owned())]
-    }
-}
-
 /// Run the CLI with the environment the test says it should see.
 ///
 /// The harness's own runner does not take an environment, and the
@@ -749,7 +666,7 @@ fn the_daemon_flag_answers_from_the_daemons_tree() {
     let other = fixture_dir("searchctl-other");
     std::fs::write(other.join("hello.txt"), "a hello of its own\n").unwrap();
 
-    let daemon = registered(&served);
+    let daemon = harness::registered(&served);
     let root = other.to_str().unwrap();
 
     let (code, out, err) = ask(&["--daemon", "--root", root, "hello"], &daemon.env);
@@ -784,7 +701,7 @@ fn the_daemon_flag_does_not_fall_back_to_the_local_index() {
     text_tree(&dir);
     let root = dir.to_str().unwrap();
 
-    let (code, out, err) = run_with(&["--daemon", "--root", root, "hello"], &absent());
+    let (code, out, err) = run_with(&["--daemon", "--root", root, "hello"], &harness::absent());
     assert_eq!(code, 2, "no daemon is an error; stdout={out} stderr={err}");
     assert!(out.is_empty(), "nothing is printed: {out}");
     assert!(err.contains("daemon"), "the error names the daemon: {err}");
@@ -803,7 +720,7 @@ fn the_daemon_flag_does_not_fall_back_to_the_local_index() {
 fn the_daemon_flag_answers_the_content_layer() {
     let served = fixture_dir("searchctl-content");
     text_tree(&served);
-    let daemon = registered(&served);
+    let daemon = harness::registered(&served);
 
     let (code, out, err) = ask(&["--daemon", "grep:zebra"], &daemon.env);
     assert_eq!(

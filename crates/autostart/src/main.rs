@@ -937,17 +937,41 @@ fn doctor(options: &Options) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// Whether the daemon is up, as the daemon itself says.
+///
+/// "Registered" and "running" are two different questions. The entry
+/// answers the first -- the registry value, the unit file, the plist --
+/// and the daemon answers the second: it serves the endpoint the clients
+/// look for, and something serving that endpoint is a daemon that is up.
+///
+/// The connection is the question, and not the daemon's own answer: a
+/// daemon that is busy indexing the tree does not answer, and a daemon
+/// that is busy is up. The entry's own state is what is left when there
+/// is no endpoint to ask -- a machine with nowhere to put a socket has no
+/// daemon to ask, and the scheduled task still knows whether it runs.
+///
+/// The doctor asks a question and changes nothing: the connection is
+/// opened and closed, and no request is sent.
+fn daemon_is_up() -> Option<bool> {
+    let endpoint = rgy_proto::endpoint::Endpoint::registered()?;
+    Some(rgy_proto::Client::connect(&endpoint).is_ok())
+}
+
 /// The Windows side.
 fn diagnose_windows(name: &str) -> Diagnosis {
     let state = windows::status(name, name);
     let command = state.task.clone().or_else(|| state.run_value.clone());
     // The registry value has no state to ask about: there is no "is it
     // running" in a string, and the tool says "unknown" rather than
-    // guessing.
-    let running = match &state.task {
-        Some(_) => windows::task_status(name).map(|status| windows::status_is_running(&status)),
-        None => None,
-    };
+    // guessing. The daemon can be asked, and a daemon that serves the
+    // registered endpoint is one that is up.
+    let running = daemon_is_up().or_else(|| {
+        state
+            .task
+            .as_ref()
+            .and_then(|_| windows::task_status(name))
+            .map(|status| windows::status_is_running(&status))
+    });
     let (daemon, daemon_where) = daemon_and_where();
     let dir = tool_dir();
     Diagnosis {
@@ -983,7 +1007,8 @@ fn diagnose_linux(name: &str) -> Diagnosis {
         registered: state.file,
         mechanism: Mechanism::SystemdUserUnit,
         entry: Some(linux::unit_path_in(&home, &unit).display().to_string()),
-        running: state.active.as_deref().map(|active| active == "active"),
+        running: daemon_is_up()
+            .or_else(|| state.active.as_deref().map(|active| active == "active")),
         root: command.as_deref().and_then(root_of),
         listen: command.as_deref().and_then(listen_of),
         on_path: dir.as_deref().and_then(on_path),
@@ -1005,9 +1030,11 @@ fn diagnose_macos(name: &str) -> Diagnosis {
         registered: state.file,
         mechanism: Mechanism::LaunchdAgent,
         entry: Some(macos::plist_path(name).display().to_string()),
-        running: macos::agent_state(name)
-            .as_deref()
-            .map(macos::state_is_running),
+        running: daemon_is_up().or_else(|| {
+            macos::agent_state(name)
+                .as_deref()
+                .map(macos::state_is_running)
+        }),
         root: command.as_deref().and_then(root_of),
         listen: command.as_deref().and_then(listen_of),
         on_path: dir.as_deref().and_then(on_path),

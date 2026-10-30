@@ -33,6 +33,12 @@ path = "license.rs"
 name = "help"
 path = "help.rs"
 
+# The doctor, from the outside: it is the command a user runs when
+# something is not working.
+[[test]]
+name = "autostart"
+path = "autostart.rs"
+
 [dev-dependencies]
 # The pack store, for the test that proves the third backend of the
 # content layer: the daemon started with `--tv-dir` answers from a packed
