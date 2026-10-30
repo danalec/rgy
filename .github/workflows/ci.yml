@@ -441,6 +441,44 @@ jobs:
         env:
           RGY_FORGEJO_URL: http://forgejo.invalid
         run: ./scripts/publish-release.ps1 -ManifestsOnly -SkipTests
+      # A script that ignores an option it does not understand does the real
+      # thing when the caller asked for a dry run, and in this directory the
+      # real thing is a release: a tag, an archive, a release page on two
+      # forges. It happened -- `--dry-run` is not a PowerShell parameter, it
+      # landed in $args, and 0.1.1 was published with the dry run the caller
+      # had asked for. So the refusal is a gate, not a habit.
+      - name: the scripts refuse an option they do not know (unix)
+        if: runner.os != 'Windows'
+        run: |
+          for script in publish-release build-release publish-crates publish-homebrew apply-vendored-edits; do
+            rc=0
+            out=$(bash "scripts/$script.sh" --rgy-nonsense 2>&1) || rc=$?
+            if [ "$rc" -ne 2 ]; then
+              echo "$script.sh ignored the option it does not know (exit $rc)"
+              exit 1
+            fi
+            if [ "$out" != "unknown option: --rgy-nonsense" ]; then
+              echo "$script.sh said: $out"
+              exit 1
+            fi
+          done
+      - name: the scripts refuse an option they do not know (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          foreach ($script in @('publish-release','build-release','publish-crates','publish-homebrew','apply-vendored-edits')) {
+            $out = & pwsh -NoProfile -File "scripts/$script.ps1" --rgy-nonsense 2>&1
+            $rc = $LASTEXITCODE
+            if ($rc -ne 2) {
+              Write-Host "$script.ps1 ignored the option it does not know (exit $rc)"
+              exit 1
+            }
+            $text = ($out | Out-String).Trim()
+            if ($text -ne 'unknown option: --rgy-nonsense') {
+              Write-Host "$script.ps1 said: $text"
+              exit 1
+            }
+          }
 
 
   clippy:
