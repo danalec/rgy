@@ -17,11 +17,11 @@
 //! (see `name_bits`) before any name is read.
 
 use crate::fold;
+use crate::hmap::Map;
 use alloc::borrow::Cow;
 use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
-use hashbrown::HashMap;
 use rgy_discovery::walk::{KIND_DIR, Listing, NONE};
 
 #[cfg(feature = "std")]
@@ -647,14 +647,14 @@ impl Index {
         drop(dir_of);
 
         // Intern names in entry order.
-        let mut ids: HashMap<&[u8], u32, Fx> = HashMap::with_capacity_and_hasher(n / 3, Fx);
+        let mut ids: Map<&[u8], u32> = Map::with_capacity(n / 3);
         let mut ent_name = vec![0u32; n];
         let mut uoff = vec![0u32];
         let mut unames: Vec<u8> = Vec::with_capacity(names.len() / 2);
         for i in 0..n {
             let nm = &names[name_off[i] as usize..][..name_len[i] as usize];
             let next = ids.len() as u32;
-            let id = *ids.entry(nm).or_insert_with(|| {
+            let id = *ids.get_or_insert_with(nm, || {
                 unames.extend_from_slice(nm);
                 uoff.push(unames.len() as u32);
                 next
@@ -1126,31 +1126,35 @@ pub(crate) fn ext_slots(names: &[u8], off: &[u32]) -> (Vec<[u8; 16]>, Vec<u8>) {
     // The counts, one map per piece of the names, merged at the end: the
     // merge is a walk over the maps, and the pieces are the workers.
     let parts = rgy_par::map_chunks(off.len() - 1, 1 << 16, |r| {
-        r.fold(HashMap::<[u8; 16], u32, Fx>::default(), |mut m, k| {
+        r.fold(Map::<[u8; 16], u32>::default(), |mut m, k| {
             if let Some(e) = ext(k) {
-                *m.entry(e).or_default() += 1;
+                *m.get_or_insert_with(e, || 0) += 1;
             }
             m
         })
     });
-    let mut count = HashMap::<[u8; 16], u32, Fx>::default();
+    let mut count = Map::<[u8; 16], u32>::default();
     for part in parts {
-        for (e, n) in part {
-            *count.entry(e).or_default() += n;
+        for (e, n) in part.into_entries() {
+            *count.get_or_insert_with(e, || 0) += n;
         }
     }
-    let mut common: Vec<([u8; 16], u32)> = count.into_iter().collect();
+    let mut common: Vec<([u8; 16], u32)> = count.into_entries().collect();
     common.sort_by(|(a, m), (b, n)| n.cmp(m).then_with(|| a[1..=a[0] as usize].cmp(&b[1..=b[0] as usize])));
     let mut table = vec![[0u8; 16]; 256];
-    let mut slot: HashMap<[u8; 16], u8, Fx> = HashMap::default();
+    // The slot of an extension is a sorted vector with a binary search, not
+    // a table: it is built once, read once per name, and holds at most 254
+    // entries.
+    let mut by_ext: Vec<([u8; 16], u8)> = Vec::with_capacity(254);
     for (i, (e, _)) in common.into_iter().take(254).enumerate() {
         table[i + 1] = e;
-        slot.insert(e, i as u8 + 1);
+        by_ext.push((e, i as u8 + 1));
     }
+    by_ext.sort_unstable_by_key(|(a, _)| *a);
     let slots = rgy_par::map_collect(off.len() - 1, |k| {
         let n = name(k);
         match ext(k) {
-            Some(e) => slot.get(&e).copied().unwrap_or(255),
+            Some(e) => by_ext.binary_search_by(|(probe, _)| probe.cmp(&e)).map_or(255, |at| by_ext[at].1),
             None => n.contains(&b'.') as u8 * 255,
         }
     });
@@ -1695,5 +1699,46 @@ mod prior_tests {
         assert_eq!(idx.dir_prior()[d], 15, "the directory carries the prior of its entry");
         let root = idx.dir_of(0).expect("the root is a directory") as usize;
         assert_eq!(idx.dir_prior()[root], 0, "the root carries nothing");
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod ext_tests {
+    use super::*;
+    use alloc::string::String;
+    use rgy_discovery::walk::{KIND_FILE, Listing, NONE, RawEnt};
+
+    /// The extension slot of a name is the slot of its extension.
+    ///
+    /// The table of the common extensions is built once over the corpus and
+    /// read once per name, and the two readers have to agree: a name whose
+    /// slot is wrong is a name whose extension filter lets through a file
+    /// it should have skipped. The readers are independent -- the slot
+    /// stored with the name, and the table's own scan.
+    #[test]
+    fn a_name_s_extension_slot_is_the_slot_of_its_extension() {
+        let names: [&[u8]; 6] = [b"alpha.txt", b"beta.txt", b"gamma.rs", b"delta.RS", b"epsilon.md", b"zeta"];
+        let mut blob = Vec::new();
+        let mut ents = Vec::new();
+        for n in names {
+            ents.push(RawEnt { name_off: blob.len() as u32, name_len: n.len() as u16, kind: KIND_FILE, size: 1, mtime: 1, child: NONE });
+            blob.extend_from_slice(n);
+        }
+        let idx = Index::build(vec![Listing { id: 0, names: blob, ents }], 0, 1, b"/");
+        let slots = idx.name_ext();
+        for (k, &slot) in slots.iter().enumerate().take(idx.u) {
+            let name = idx.uname(k as u32);
+            let want = match ext_key(&crate::fold::fold(name)) {
+                Some(key) => idx.ext_slot(&key[1..1 + key[0] as usize]),
+                None => u8::from(name.contains(&b'.')) * 255,
+            };
+            assert_eq!(slot, want, "the slot of {:?}", String::from_utf8_lossy(name));
+        }
+        // The common extensions are in the table, and a name with no
+        // extension has none.
+        assert_ne!(idx.ext_slot(b"txt"), 255, "txt is in the table");
+        assert_ne!(idx.ext_slot(b"rs"), 255, "rs is in the table");
+        let plain = (0..idx.u).find(|&k| !idx.uname(k as u32).contains(&b'.')).expect("a name with no dot");
+        assert_eq!(slots[plain as usize], 0, "a name with no dot has no extension");
     }
 }

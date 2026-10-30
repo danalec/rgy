@@ -37,5 +37,9 @@ pub mod seam;
 pub mod volume;
 pub mod win;
 
+/// The tree's own map for the cache of rebuilt paths, and the crate it
+/// replaced is the oracle it is held to.
+mod hmap;
+
 pub use rdcw::RdcwWatch;
 pub use seam::{MftSource, UsnWatch};

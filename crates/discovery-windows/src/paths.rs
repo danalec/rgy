@@ -12,8 +12,8 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use hashbrown::HashMap;
 
+use crate::hmap::Cache;
 use crate::ntfs;
 use crate::volume::Volume;
 
@@ -33,7 +33,7 @@ const MAX_DEPTH: u32 = 64;
 pub struct Paths<'a> {
     volume: &'a Volume,
     /// File reference to the path it holds, relative to the volume's root.
-    cache: HashMap<u64, Vec<u8>>,
+    cache: Cache,
 }
 
 impl<'a> Paths<'a> {
@@ -41,7 +41,7 @@ impl<'a> Paths<'a> {
     pub fn new(volume: &'a Volume) -> Paths<'a> {
         Paths {
             volume,
-            cache: HashMap::new(),
+            cache: Cache::new(),
         }
     }
 
@@ -77,7 +77,7 @@ impl<'a> Paths<'a> {
 /// hand-built records, in a test.
 fn path_of(
     frn: u64,
-    cache: &mut HashMap<u64, Vec<u8>>,
+    cache: &mut Cache,
     read: &mut impl FnMut(u64) -> Option<Vec<u8>>,
 ) -> Option<Vec<u8>> {
     path_of_at(frn, 0, cache, read)
@@ -86,14 +86,14 @@ fn path_of(
 fn path_of_at(
     frn: u64,
     depth: u32,
-    cache: &mut HashMap<u64, Vec<u8>>,
+    cache: &mut Cache,
     read: &mut impl FnMut(u64) -> Option<Vec<u8>>,
 ) -> Option<Vec<u8>> {
     if depth > MAX_DEPTH {
         return None;
     }
-    if let Some(p) = cache.get(&frn) {
-        return Some(p.clone());
+    if let Some(p) = cache.get(frn) {
+        return Some(p.to_vec());
     }
     // The volume's root is the tree's own root: its path is empty.
     if frn == ntfs::ROOT_FRN {
@@ -124,7 +124,7 @@ fn path_of_at(
 fn path_of_record(
     root: &str,
     record: &rgy_discovery::UsnRecord,
-    cache: &mut HashMap<u64, Vec<u8>>,
+    cache: &mut Cache,
     read: &mut impl FnMut(u64) -> Option<Vec<u8>>,
 ) -> Option<String> {
     let parent = path_of(ntfs::frn_number(record.parent_reference), cache, read)?;
@@ -146,6 +146,9 @@ mod tests {
     use crate::ntfs::testutil::build_record;
     use alloc::format;
     use alloc::string::ToString;
+    // The records of the fixture are a map of the oracle's: the cache
+    // under test is the tree's own.
+    use hashbrown::HashMap;
 
     /// The records of a small tree: `\Users` (7), `\Users\me` (42) and
     /// `\Users\me\docs` (99), each naming its parent.
@@ -169,7 +172,7 @@ mod tests {
     #[test]
     fn a_file_reference_resolves_to_the_path_of_its_folder() {
         let records = tree_records();
-        let mut cache = HashMap::new();
+        let mut cache = Cache::new();
         let mut read = |frn: u64| records.get(&frn).cloned();
 
         assert_eq!(
@@ -198,7 +201,7 @@ mod tests {
     #[test]
     fn a_change_record_is_placed_at_an_openable_path() {
         let records = tree_records();
-        let mut cache = HashMap::new();
+        let mut cache = Cache::new();
         let mut read = |frn: u64| records.get(&frn).cloned();
 
         let record = rgy_discovery::UsnRecord {

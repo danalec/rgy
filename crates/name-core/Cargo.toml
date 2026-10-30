@@ -30,10 +30,6 @@ rgy-par = { path = "../par", version = "0.1.0", default-features = false }
 # path patterns compile through rgx-core's syntax/nfa/vm, the same engine
 # the copy was taken from (Apache-2.0).
 rgx-core = { path = "../rgx-core", version = "0.1.0", default-features = false }
-# `std::collections::HashMap` is not in `alloc`, and the query engine's
-# hot maps want the cheap hasher the index already carries. This is the
-# no_std map: the same API, the same hasher, no `std`.
-hashbrown = { version = "0.16", default-features = false, features = ["default-hasher", "inline-more"] }
 # The content grep runs on rgx-core's engine too -- the same one the name
 # path uses. There is no second engine behind it: a pattern that engine
 # refuses is a pattern the search refuses, and the refusal is said.
@@ -42,3 +38,9 @@ hashbrown = { version = "0.16", default-features = false, features = ["default-h
 # content.rs declare their own `extern "C"` and ABI constants inline —
 # the same pattern `without_materializing` already used for
 # getiopolicy_np. rgx-core stays `no_std`.
+
+[dev-dependencies]
+# The oracle the tree's own hash map is held to: the same operations, in the
+# same order, on the same inputs, with the same answers. A dev-dependency
+# does not enter a binary, so the library tree links no external crate.
+hashbrown = { version = "0.16", default-features = false, features = ["default-hasher", "inline-more"] }

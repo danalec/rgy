@@ -41,8 +41,8 @@ use alloc::vec::Vec;
 use rgy_discovery::walk;
 use rgy_discovery::walk::{FLAG_MOUNT, KIND_DIR, Listing, NONE, RawEnt};
 // `String` is the watch feed's error type.
+use crate::hmap::Map;
 use alloc::string::String;
-use hashbrown::HashMap;
 
 /// One entry of the overlay.
 #[derive(Clone, Copy)]
@@ -132,7 +132,7 @@ pub struct Live {
     /// The wall-clock second up to which every change is known applied.
     pub synced_at: u32,
     /// Overlay folder to the prior of its nearest base folder.
-    priors: HashMap<Vec<u8>, i8>,
+    priors: Map<Vec<u8>, i8>,
     /// The tree the base was built from, as the disk spells it.
     ///
     /// The base holds root-relative paths ("/a/b") and the overlay holds
@@ -150,7 +150,7 @@ pub struct Fetched {
     blocked: bool,
     attrs: Option<OEnt>,
     listing: Option<Listing>,
-    scans: HashMap<Vec<u8>, Vec<Listing>>,
+    scans: Map<Vec<u8>, Vec<Listing>>,
 }
 
 /// What an update did.
@@ -191,7 +191,7 @@ impl Live {
             trees: Vec::new(),
             names_cache: Default::default(),
             synced_at,
-            priors: HashMap::new(),
+            priors: Map::new(),
             root: normalize(root),
         }
     }
@@ -379,7 +379,7 @@ impl Live {
     /// searches keep answering while the disk is read.
     pub fn fetch(&self, path: &[u8], recursive: bool) -> Fetched {
         let p = normalize(path);
-        let mut f = Fetched { path: p, recursive, blocked: false, attrs: None, listing: None, scans: HashMap::new() };
+        let mut f = Fetched { path: p, recursive, blocked: false, attrs: None, listing: None, scans: Map::new() };
         // Not even an lstat inside folders we may not touch.
         if walk::blocked(&f.path) {
             f.blocked = true;
@@ -422,8 +422,8 @@ impl Live {
 
     /// The children this index holds for a folder: the base's children by
     /// name, and the overlay's children that the base does not have.
-    fn current_children(&self, p: &[u8]) -> HashMap<Vec<u8>, Option<u32>> {
-        let mut cur: HashMap<Vec<u8>, Option<u32>> = HashMap::new();
+    fn current_children(&self, p: &[u8]) -> Map<Vec<u8>, Option<u32>> {
+        let mut cur: Map<Vec<u8>, Option<u32>> = Map::new();
         if let Some(d) = self.base_alive(p).and_then(|e| self.base.dir_of(e)) {
             for c in self.base.children(d) {
                 if !self.is_dead(c as u32) {
@@ -504,7 +504,7 @@ impl Live {
             }
         }
         // What is here and no longer on the disk.
-        for (name, c) in cur {
+        for (name, c) in cur.into_entries() {
             let child = join(&p, &name);
             match c {
                 Some(c) => {
@@ -659,14 +659,21 @@ impl Live {
         // the base's root-relative space, so every key is translated before
         // it is grouped. Without that, an overlay whose root is not "/"
         // never joins the tree it belongs to, and the rebuild loses it.
-        let mut by_parent: HashMap<Vec<u8>, Vec<(Vec<u8>, OEnt)>> = HashMap::new();
+        // The overlay's entries, grouped by the folder they are in. The
+        // grouping is a sort and a scan, not a table: the overlay is
+        // already sorted by its own keys, and the groups are read once
+        // each.
+        let mut by_parent: Vec<Overlay> = Vec::new();
         for (k, v) in &self.over {
             let Some(bp) = self.base_path(k) else { continue };
             let cut = bp.iter().rposition(|&b| b == b'/').unwrap_or(0);
             let parent: Vec<u8> = if cut == 0 { b"/".to_vec() } else { bp[..cut].to_vec() };
             let name = bp[cut + 1..].to_vec();
-            by_parent.entry(parent).or_default().push((name, *v));
+            by_parent.push((parent, name, *v));
         }
+        // The sort is stable, so the children of a folder keep the order the
+        // overlay's own keys have.
+        by_parent.sort_by(|a, b| a.0.cmp(&b.0));
         let mut out = Vec::new();
         // (the base folder id if the base still has it, the path, the listing id)
         let mut stack: Vec<(Option<u32>, Vec<u8>, u32)> = vec![(Some(0), b"/".to_vec(), 0)];
@@ -704,8 +711,8 @@ impl Live {
                     push(&mut l, name, k, self.base.size_of(c), self.base.mtime()[c], cp, sub);
                 }
             }
-            if let Some(kids) = by_parent.get(path.as_slice()) {
-                for &(ref name, o) in kids {
+            if let Some(kids) = overlay_children(&by_parent, &path) {
+                for &(_, ref name, o) in kids {
                     let descend = o.kind & 3 == KIND_DIR && o.kind & FLAG_MOUNT == 0;
                     push(&mut l, name, o.kind, o.size, o.mtime, descend.then(|| join(&path, name)), None);
                 }
@@ -716,15 +723,33 @@ impl Live {
     }
 }
 
+/// The overlay's entries, grouped by the folder they are in: the folder, the
+/// name in it, and the entry itself.
+type Overlay = (Vec<u8>, Vec<u8>, OEnt);
+
+/// The overlay's entries of one folder, out of the entries grouped by
+/// folder.
+///
+/// The groups are sorted by their folder, so the ones of a folder are one
+/// run of the vector and a pair of binary searches finds them.
+fn overlay_children<'a>(by_parent: &'a [Overlay], path: &[u8]) -> Option<&'a [Overlay]> {
+    let start = by_parent.partition_point(|e| e.0.as_slice() < path);
+    let end = by_parent.partition_point(|e| e.0.as_slice() <= path);
+    (start < end).then(|| &by_parent[start..end])
+}
+
 /// Visit every entry of a scan with its full path.
 pub fn for_each_path(ls: &[Listing], root: &[u8], mut f: impl FnMut(Vec<u8>, &RawEnt)) {
-    let mut by_id: HashMap<u32, &Listing> = HashMap::with_capacity(ls.len());
+    // The listings by their id: the walk numbers them from zero, one per
+    // listing, so the id is the place in the vector.
+    let n = ls.iter().map(|l| l.id as usize + 1).max().unwrap_or(0);
+    let mut by_id: Vec<Option<&Listing>> = vec![None; n];
     for l in ls {
-        by_id.insert(l.id, l);
+        by_id[l.id as usize] = Some(l);
     }
     let mut stack = vec![(0u32, root.to_vec())];
     while let Some((id, path)) = stack.pop() {
-        let Some(l) = by_id.get(&id) else { continue };
+        let Some(l) = by_id.get(id as usize).copied().flatten() else { continue };
         for r in &l.ents {
             let p = join(&path, &l.names[r.name_off as usize..][..r.name_len as usize]);
             if r.child != NONE {

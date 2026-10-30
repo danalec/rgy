@@ -12,7 +12,6 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
-use hashbrown::HashSet;
 
 /// The tests, and only the tests, need `std`: a temp file to read at an
 /// offset, and the process id to name it after. The crate body is `core`
@@ -377,7 +376,9 @@ impl Volume {
             let Some(list) = ntfs::attr_list_value(&rec) else {
                 return Ok(runs);
             };
-            let mut seen = HashSet::new();
+            // The targets already read: the attribute list names a handful
+            // of siblings, so a vector and a scan are cheaper than a table.
+            let mut seen: Vec<u64> = Vec::new();
             for entry in ntfs::parse_attr_list(list) {
                 // $DATA run-list fragments only. A nonzero VCN marks run data,
                 // and `start_vcn == 0` is the fragment already in record 0.
@@ -385,9 +386,10 @@ impl Volume {
                     continue;
                 }
                 let target = ntfs::frn_number(entry.mft_reference);
-                if target == 0 || !seen.insert(target) {
+                if target == 0 || seen.contains(&target) {
                     continue;
                 }
+                seen.push(target);
                 let Ok(Some(sibling)) = self.read_file_record(target) else {
                     continue;
                 };

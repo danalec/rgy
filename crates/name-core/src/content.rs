@@ -65,7 +65,7 @@ fn rgx_starts(re: &ByteRegex, hay: &[u8]) -> Vec<usize> {
     }
     out
 }
-use hashbrown::HashMap;
+use crate::hmap::Map;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -623,7 +623,7 @@ pub struct Docs {
 #[derive(Default)]
 struct Dedup {
     held: Vec<Held>,
-    built: std::sync::Mutex<HashMap<[u64; 2], u32>>,
+    built: std::sync::Mutex<Map<[u64; 2], u32>>,
     free: std::sync::Mutex<Gids>,
 }
 
@@ -803,7 +803,7 @@ pub fn build_segment(dir: &Path, id: u64, docs: &Docs, range: std::ops::Range<us
     const AHEAD: usize = 8;
     let dedup = docs.dedup.get_or_init(Dedup::default);
     // Contents new in this build, by hash, numbered as first seen.
-    let new = std::sync::Mutex::new(HashMap::<[u64; 2], u32>::new());
+    let new = std::sync::Mutex::new(Map::<[u64; 2], u32>::new());
     let scratch = std::sync::Mutex::new(Vec::new());
     let runs: Vec<std::ops::Range<usize>> = range.clone().step_by(RUN).map(|s| s..(s + RUN).min(range.end)).collect();
     let splits: Vec<Split> = rgy_par::map_collect_with(runs.len(), 1, |ri| {
@@ -832,7 +832,7 @@ pub fn build_segment(dir: &Path, id: u64, docs: &Docs, range: std::ops::Range<us
                             let (k, first) = {
                                 let mut m = new.lock().unwrap();
                                 let n = m.len() as u32;
-                                let k = *m.entry(h).or_insert(n);
+                                let k = *m.get_or_insert_with(h, || n);
                                 (k, k == n)
                             };
                             if first {
@@ -925,7 +925,12 @@ pub fn build_segment(dir: &Path, id: u64, docs: &Docs, range: std::ops::Range<us
     });
     let seg = write_segment(dir, id, &meta, &own, parts)?;
     // This sync's later builds find these contents.
-    dedup.built.lock().unwrap().extend(shared);
+    {
+        let mut built = dedup.built.lock().unwrap();
+        for (h, g) in shared {
+            built.insert(h, g);
+        }
+    }
     Some(seg)
 }
 
@@ -950,12 +955,21 @@ pub fn merge(dir: &Path, id: u64, segs: &[&Segment]) -> Option<Segment> {
         }
         remap.push(r);
     }
-    let at: HashMap<u32, u32> = own.iter().enumerate().map(|(c, m)| (m.gid, c as u32)).collect();
+    // The own contents by their gid: a sorted vector with a binary search,
+    // not a table. The gids come out of a pool and are not dense, so a
+    // vector indexed by the gid would be mostly holes -- but there is one
+    // entry per own content, and the search is over a corpus built once.
+    let mut at: Vec<(u32, u32)> = own.iter().enumerate().map(|(c, m)| (m.gid, c as u32)).collect();
+    at.sort_unstable();
     for (d, m) in meta.iter().enumerate() {
-        if let Some(&c) = at.get(&m.gid)
-            && own[c as usize].doc == NONE
-        {
-            own[c as usize].doc = d as u32;
+        // The content of this gid. The gids are unique -- one per own
+        // content -- so the run of the gid is one entry.
+        let end = at.partition_point(|&(g, _)| g <= m.gid);
+        if end > 0 && at[end - 1].0 == m.gid {
+            let c = at[end - 1].1;
+            if own[c as usize].doc == NONE {
+                own[c as usize].doc = d as u32;
+            }
         }
     }
     // Postings, merged in parallel over runs of keys.
@@ -1612,13 +1626,19 @@ impl Content {
             return Some(vec![s.id]);
         }
         let tier = |s: &Segment| (s.plen.max(1) as f64).log(4.0) as u32;
-        let mut by_tier: HashMap<u32, Vec<&Segment>> = HashMap::new();
+        // The segments by their tier: the tiers are the logarithm of the
+        // posting length, so there are a handful of them and a vector
+        // indexed by the tier is the shape.
+        let mut by_tier: Vec<Vec<&Segment>> = Vec::new();
         for s in &self.segs {
-            by_tier.entry(tier(s)).or_default().push(s);
+            let t = tier(s) as usize;
+            if by_tier.len() <= t {
+                by_tier.resize_with(t + 1, Vec::new);
+            }
+            by_tier[t].push(s);
         }
-        let mut tiers: Vec<_> = by_tier.into_iter().filter(|(_, v)| v.len() >= 8).collect();
-        tiers.sort_by_key(|(t, _)| *t);
-        for (_, v) in tiers {
+        // The tiers are already in order.
+        for v in by_tier.into_iter().filter(|v| v.len() >= 8) {
             let group: Vec<u64> = v.iter().take(8).map(|s| s.id).collect();
             let bytes: usize = v.iter().take(8).map(|s| s.plen).sum();
             if bytes <= MERGE_CAP {

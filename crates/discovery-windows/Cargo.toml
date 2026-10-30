@@ -23,10 +23,13 @@ readme = "../../README.md"
 # types and the change vocabulary, and neither needs a filesystem -- so the
 # seam must not drag `std` in through the back door.
 rgy-discovery = { path = "../discovery", version = "0.1.0", default-features = false }
-# `std::collections` is not in `alloc`, and the backend's maps want the same
-# cheap hasher the name index already carries.
-hashbrown = { version = "0.16", default-features = false, features = ["default-hasher", "inline-more"] }
 
 # The Win32 calls are declared by hand, in `src/win.rs`, so there is no
 # dependency to gate here: the calls themselves are the Windows-only part of
 # the crate, and the crate's body is empty everywhere else.
+
+[dev-dependencies]
+# The oracle the tree's own path cache is held to: the same operations, in
+# the same order, on the same inputs, with the same answers. A dev-dependency
+# does not enter a binary, so the library tree links no external crate.
+hashbrown = { version = "0.16", default-features = false, features = ["default-hasher", "inline-more"] }

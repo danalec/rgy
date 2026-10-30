@@ -64,13 +64,12 @@ fn name_is_indexable(e: &ntfs::FileNameEntry) -> bool {
 /// same child listing — directories are not hard-linked on NTFS, so this is
 /// only a hard-link-style edge case in the data.
 pub fn listings_from_rows(rows: &[NameRow], root_frn: u64) -> Vec<rgy_discovery::walk::Listing> {
-    use hashbrown::HashMap;
     use rgy_discovery::walk::{KIND_DIR, KIND_FILE, KIND_LINK, Listing, NONE, RawEnt};
 
-    let mut by_parent: HashMap<u64, Vec<usize>> = HashMap::new();
-    for (i, r) in rows.iter().enumerate() {
-        by_parent.entry(r.parent_frn).or_default().push(i);
-    }
+    // The rows by their parent: a sort and a scan, not a table. The rows of
+    // one parent are one run of the vector, and each run is read once.
+    let mut order: Vec<u32> = (0..rows.len() as u32).collect();
+    order.sort_by_key(|&i| rows[i as usize].parent_frn);
 
     // (parent frn, slot in `out` that takes this listing's id)
     let mut out: Vec<Listing> = Vec::new();
@@ -79,9 +78,10 @@ pub fn listings_from_rows(rows: &[NameRow], root_frn: u64) -> Vec<rgy_discovery:
     // takes the id of the listing we are about to build)
     let mut stack: Vec<(u64, Option<(usize, usize)>)> = vec![(root_frn, None)];
     while let Some((parent, fix)) = stack.pop() {
-        let Some(indices) = by_parent.get(&parent) else {
+        let indices = rows_of(&order, rows, parent);
+        if indices.is_empty() {
             continue;
-        };
+        }
         let id = if fix.is_none() { 0 } else { next_id };
         if fix.is_some() {
             next_id += 1;
@@ -93,7 +93,7 @@ pub fn listings_from_rows(rows: &[NameRow], root_frn: u64) -> Vec<rgy_discovery:
         let mut ents = Vec::new();
         let mut kids = Vec::new();
         for &ri in indices {
-            let r = &rows[ri];
+            let r = &rows[ri as usize];
             let name_off = names.len() as u32;
             names.extend_from_slice(&r.name);
             // fsearch's walk model: a symlink/reparse point is its own kind,
@@ -126,6 +126,16 @@ pub fn listings_from_rows(rows: &[NameRow], root_frn: u64) -> Vec<rgy_discovery:
         }
     }
     out
+}
+
+/// The rows of one parent, out of the rows sorted by their parent.
+///
+/// The rows of a parent are one run of the sorted vector, and the sort is
+/// stable, so the rows of a folder keep the order the scan gave them.
+fn rows_of<'a>(order: &'a [u32], rows: &[NameRow], parent: u64) -> &'a [u32] {
+    let start = order.partition_point(|&i| rows[i as usize].parent_frn < parent);
+    let end = order.partition_point(|&i| rows[i as usize].parent_frn <= parent);
+    &order[start..end]
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -546,7 +556,9 @@ impl<'a> Indexer<'a> {
         };
 
         let mut out = Vec::new();
-        let mut seen_targets = hashbrown::HashSet::new();
+        // The targets already read: the attribute list names a handful of
+        // siblings, so a vector and a scan are cheaper than a table.
+        let mut seen_targets: Vec<u64> = Vec::new();
         for entry in ntfs::parse_attr_list(list) {
             // Only $FILE_NAME rows that point somewhere else; a nonzero VCN
             // marks a data run, never a name.
@@ -554,9 +566,10 @@ impl<'a> Indexer<'a> {
                 continue;
             }
             let target = ntfs::frn_number(entry.mft_reference);
-            if target == frn || !seen_targets.insert(target) {
+            if target == frn || seen_targets.contains(&target) {
                 continue;
             }
+            seen_targets.push(target);
 
             let sibling = match self.volume.read_file_record(target) {
                 Ok(Some(s)) => s,

@@ -57,6 +57,9 @@ extern crate std;
 /// seconds. The session's idle trim and the persisted index's age ask it.
 pub mod clock;
 pub mod fuzzy;
+/// The tree's own hash map: the maps that really are maps, and the crate
+/// they replaced is the oracle they are held to.
+mod hmap;
 /// fsearch's live overlay (dead bits + overrides).
 pub mod live;
 /// fsearch's name index v2 (interned names, DFS layout, class bitmaps).

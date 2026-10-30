@@ -14,6 +14,7 @@
 //! on top of zen-rs's filter vocabulary.
 
 use crate::fold;
+use crate::hmap::Map;
 use crate::live::Live;
 use crate::name_index::{BM_DOUBLE, BM_FIRST, BM_SECOND, BM_START, CLASSES, Index, ZONE, Zone, char_bit, start_bit};
 use crate::rank::{RankKey, Score, Tier};
@@ -21,7 +22,6 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
-use hashbrown::HashMap;
 use rgy_discovery::walk::{FLAG_HIDDEN, FLAG_MOUNT, KIND_DIR, KIND_FILE, KIND_LINK};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -3740,9 +3740,9 @@ impl Hit {
 /// treats every entry added since the last compaction as one entry and drops
 /// the rest, which is a silent wrong answer rather than a loud one.
 ///
-/// Owned (not a borrow of the hit) so a merge can hold it while it moves and
-/// replaces hits.
-#[derive(PartialEq, Eq, Hash)]
+/// Owned (not a borrow of the hit) so a count can hold it while the hits it
+/// came from are dropped.
+#[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum HitId {
     /// A base entry, named by its index.
     Base(u32),
@@ -3766,8 +3766,10 @@ impl Hit {
 /// distinct overlay entries disappear (see [`HitId`]); find the match by
 /// scanning the hits kept so far and the loop is O(n^2) over up to `limit`
 /// hits, which is hundreds of milliseconds on every keystroke of an
-/// interactive search. So: a map from identity to the winning hit, O(1) per
-/// hit.
+/// interactive search. So: a sort by identity and a scan over the runs, which
+/// is O(n log n) and asks for no table at all. The merge is one-shot -- the
+/// hits are in hand and the answer is a list -- so a table would be a table
+/// built to be thrown away.
 ///
 /// The order is score descending, then base entries by index before overlay
 /// entries, then overlay entries by path. That is the same total order the
@@ -3776,22 +3778,26 @@ impl Hit {
 /// hits share `idx`, so two of them tying on score would otherwise come out
 /// in a different order on every run.
 pub fn merge_hits(all: Vec<Hit>, limit: usize) -> Vec<Hit> {
-    use hashbrown::hash_map::Entry;
-
-    let mut best: hashbrown::HashMap<HitId, Hit> = hashbrown::HashMap::with_capacity(all.len());
+    let mut all = all;
+    // The hits by identity, so the hits of one entry are together.
+    all.sort_by(id_cmp);
+    let mut hits: Vec<Hit> = Vec::with_capacity(all.len());
     for h in all {
-        match best.entry(h.id()) {
-            Entry::Occupied(mut e) => {
-                if e.get().key < h.key {
-                    e.insert(h);
-                }
+        let same = match hits.last() {
+            Some(last) => id_cmp(last, &h) == core::cmp::Ordering::Equal,
+            None => false,
+        };
+        if same {
+            // The same entry again: the better of the two scores wins, and
+            // the first of them wins a tie.
+            let last = hits.last_mut().expect("there is one");
+            if last.key < h.key {
+                *last = h;
             }
-            Entry::Vacant(e) => {
-                e.insert(h);
-            }
+        } else {
+            hits.push(h);
         }
     }
-    let mut hits: Vec<Hit> = best.into_values().collect();
     hits.sort_by(|a, b| {
         b.key.cmp(&a.key).then_with(|| match (&a.over, &b.over) {
             (None, None) => a.idx.cmp(&b.idx),
@@ -3802,6 +3808,19 @@ pub fn merge_hits(all: Vec<Hit>, limit: usize) -> Vec<Hit> {
     });
     hits.truncate(limit);
     hits
+}
+
+/// The order of two hits by identity.
+///
+/// The same identity as [`Hit::id`], compared without owning it: a merge
+/// sorts the hits by this rather than copying a path per hit.
+fn id_cmp(a: &Hit, b: &Hit) -> core::cmp::Ordering {
+    match (&a.over, &b.over) {
+        (None, None) => a.idx.cmp(&b.idx),
+        (Some(x), Some(y)) => x.cmp(y),
+        (None, Some(_)) => core::cmp::Ordering::Less,
+        (Some(_), None) => core::cmp::Ordering::Greater,
+    }
 }
 struct TopK {
     k: usize,
@@ -4171,7 +4190,7 @@ impl Searcher<'_> {
         // re-rank slower than the scan it replaces, on a machine with more
         // than one core.
         let mut hits = top_k(entries.len(), q.limit, entries.len(), RankKey::default(), |r, top| {
-            let (mut pbuf, mut memo) = (Vec::new(), HashMap::<u32, DirMemo, crate::name_index::Fx>::default());
+            let (mut pbuf, mut memo) = (Vec::new(), Map::<u32, DirMemo>::default());
             let re = q.path_re.clone();
             for &(i, name) in &entries[r] {
                 let i = i as usize;
@@ -4341,12 +4360,17 @@ impl Searcher<'_> {
     /// disagree with the list it counts. Keyed on `Hit::idx` this returns 1
     /// for any query matching only entries added since the last compaction.
     pub fn count_alternatives(&self, alts: &[Query]) -> usize {
-        let mut seen: hashbrown::HashSet<HitId> = hashbrown::HashSet::new();
+        // The identities of the hits, sorted: the count is the number of
+        // runs. A set would be a table built to be thrown away, and the
+        // count is one-shot.
+        let mut seen: Vec<HitId> = Vec::new();
         for alt in alts {
             for h in self.search_uncapped(alt) {
-                seen.insert(h.id());
+                seen.push(h.id());
             }
         }
+        seen.sort_unstable();
+        seen.dedup();
         seen.len()
     }
 
@@ -4567,7 +4591,7 @@ impl Searcher<'_> {
         let entries = |k: u32| &ne[ne_off[k as usize] as usize..ne_off[k as usize + 1] as usize];
         let (parent, de, dp, en) = (idx.parent(), idx.dir_entry(), idx.dir_parent(), idx.ent_name());
         // Whether a folder on the path to dir `d` has a negated token's name.
-        let negated = |d: u32, cache: &mut HashMap<u32, bool, crate::name_index::Fx>| {
+        let negated = |d: u32, cache: &mut Map<u32, bool>| {
             let mut chain = Vec::new();
             let mut k = d;
             let mut out = loop {
@@ -4593,7 +4617,7 @@ impl Searcher<'_> {
         let visit = |names: &[Cand], floor: RankKey| {
             let visits = names.iter().map(|x| entries(x.k).len().min(q.limit)).sum();
             top_k(names.len(), q.limit, visits, floor, |r, top| {
-                let (mut pbuf, mut cache) = (Vec::new(), HashMap::default());
+                let (mut pbuf, mut cache) = (Vec::new(), Map::<u32, bool>::default());
                 for c in &names[r] {
                     let nh = NameHit { score: c.score, bits: 1, flags: c.flags, best: [0; 4] };
                     for &e in entries(c.k).iter().filter(|&&e| (lo..hi).contains(&(e as usize))) {
@@ -4987,10 +5011,10 @@ impl Searcher<'_> {
                 now: now_secs(),
             };
             return Ok(top_k(ents.len(), q.limit, ents.len(), RankKey::default(), |r, top| {
-                let (mut pbuf, mut memo) = (Vec::new(), HashMap::<u32, DirMemo, crate::name_index::Fx>::default());
-                let mut hits = HashMap::<u32, Option<NameHit>, crate::name_index::Fx>::default();
+                let (mut pbuf, mut memo) = (Vec::new(), Map::<u32, DirMemo>::default());
+                let mut hits = Map::<u32, Option<NameHit>>::default();
                 let re = q.name_re.clone();
-                let mut hit = |k: u32| *hits.entry(k).or_insert_with(|| name_hit(idx, q, pos, neg, re.as_ref(), k));
+                let mut hit = |k: u32| *hits.get_or_insert_with(k, || name_hit(idx, q, pos, neg, re.as_ref(), k));
                 for j in r {
                     let i = ents[j] as usize;
                     let Some(nh) = hit(en[i]).filter(|h| h.flags & NF_OK != 0 && (j < first || h.bits >> t & 1 == 0)) else { continue };
@@ -5030,7 +5054,7 @@ impl Searcher<'_> {
         let scan =
             Scan { q, live: self.live, names: &names, npos: pos.len(), need_dirs: true, all: all_mask(pos.len(), &axes), axes, now: now_secs() };
         Ok(top_k(ents.len(), q.limit, ents.len(), RankKey::default(), |r, top| {
-            let (mut pbuf, mut memo) = (Vec::new(), HashMap::<u32, DirMemo, crate::name_index::Fx>::default());
+            let (mut pbuf, mut memo) = (Vec::new(), Map::<u32, DirMemo>::default());
             let path_re = q.path_re.clone();
             for j in r {
                 let i = ents[j] as usize;
@@ -5440,12 +5464,12 @@ impl Searcher<'_> {
         // Overlay entries cluster in a few busy folders: match each folder's
         // components once per folder, not per entry.
         let score = |items: &[&(Vec<u8>, crate::live::OEnt)]| {
-            let mut memo = HashMap::<&[u8], DirMatch, crate::name_index::Fx>::default();
+            let mut memo = Map::<&[u8], DirMatch>::default();
             let mut out = Vec::new();
             for &&(ref path, o) in items {
                 let cut = path.iter().rposition(|&b| b == b'/').unwrap_or(0);
                 let dir = &path[..cut];
-                if let Some(score) = q.match_path_with(path, o.kind, o.size, o.mtime, |_| *memo.entry(dir).or_insert_with(|| q.dir_match(dir))) {
+                if let Some(score) = q.match_path_with(path, o.kind, o.size, o.mtime, |_| *memo.get_or_insert_with(dir, || q.dir_match(dir))) {
                     let prior = o.prior as i32;
                     let score = score + prior + rank_tweaks(name_flags(&path[cut + 1..]), o.kind, o.mtime, now);
                     // The overlay has no entry in the index, so its key has
@@ -5740,7 +5764,7 @@ impl Scan<'_> {
         let (ne_off, ne, parent) = (idx.name_ents_off(), idx.name_ents(), idx.parent());
         let ok: Vec<(u32, NameHit)> = self.names.iter().filter(|(_, h)| h.flags & NF_OK != 0).collect();
         top_k(ok.len(), self.q.limit, self.names.ok_entries, RankKey::default(), |r, top| {
-            let (mut pbuf, mut memo) = (Vec::new(), HashMap::<u32, DirMemo, crate::name_index::Fx>::default());
+            let (mut pbuf, mut memo) = (Vec::new(), Map::<u32, DirMemo>::default());
             let re = self.q.path_re.clone();
             for &(id, nh) in &ok[r] {
                 for &e in &ne[ne_off[id as usize] as usize..ne_off[id as usize + 1] as usize] {
@@ -5761,7 +5785,7 @@ impl Scan<'_> {
     }
 
     /// The dir memo of `d` (see `dir_tokens`), from its ancestor chain.
-    fn memo_of(&self, d: u32, cache: &mut HashMap<u32, DirMemo, crate::name_index::Fx>, hit: &mut impl FnMut(u32) -> Option<NameHit>) -> DirMemo {
+    fn memo_of(&self, d: u32, cache: &mut Map<u32, DirMemo>, hit: &mut impl FnMut(u32) -> Option<NameHit>) -> DirMemo {
         let idx = &self.live.base;
         let (de, en, dp) = (idx.dir_entry(), idx.ent_name(), idx.dir_parent());
         let mut chain = Vec::new();
