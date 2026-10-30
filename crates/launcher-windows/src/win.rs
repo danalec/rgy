@@ -199,7 +199,7 @@ pub const WM_SIZE: UINT = 0x0005;
 pub const WM_PAINT: UINT = 0x000F;
 pub const WM_CLOSE: UINT = 0x0010;
 pub const WM_ERASEBKGND: UINT = 0x0014;
-pub const WM_TIMER: UINT = 0x0013;
+pub const WM_TIMER: UINT = 0x0113;
 pub const WM_KEYDOWN: UINT = 0x0100;
 pub const WM_KEYUP: UINT = 0x0101;
 pub const WM_CHAR: UINT = 0x0102;
@@ -703,4 +703,84 @@ unsafe extern "system" {
         cbFileInfo: UINT,
         uFlags: UINT,
     ) -> u32;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The platform's message numbers, pinned.
+    ///
+    /// A message number is a number the platform chose, and a number the
+    /// platform chose is a fact: the window compares what arrives against
+    /// what it declared, and a digit lost in the declaration is a message
+    /// the window never hears.
+    ///
+    /// The timer is the one that matters most. It is the clock that asks
+    /// the daemon, and a window whose clock never ticks is a window that
+    /// never answers: the field takes the query, the list stays empty,
+    /// and nothing says why. The number was `0x0013` — a digit short of
+    /// the platform's `0x0113` — and the window was silent for as long as
+    /// it was there.
+    #[test]
+    fn the_messages_are_the_platform_s_own() {
+        assert_eq!(WM_TIMER, 0x0113, "the clock is the platform's");
+        assert_eq!(WM_SIZE, 0x0005);
+        assert_eq!(WM_PAINT, 0x000F);
+        assert_eq!(WM_CLOSE, 0x0010);
+        assert_eq!(WM_ERASEBKGND, 0x0014);
+        assert_eq!(WM_DESTROY, 0x0002);
+        assert_eq!(WM_KEYDOWN, 0x0100);
+        assert_eq!(WM_KEYUP, 0x0101);
+        assert_eq!(WM_CHAR, 0x0102);
+        assert_eq!(WM_SYSKEYDOWN, 0x0104);
+        assert_eq!(WM_SYSKEYUP, 0x0105);
+        assert_eq!(WM_ACTIVATEAPP, 0x001C);
+        assert_eq!(WM_APP, 0x8000);
+    }
+
+    /// The platform's keys, pinned.
+    ///
+    /// A key that is not the platform's is a key the window never hears,
+    /// and the arrow keys are the ones the user reaches for without
+    /// looking.
+    #[test]
+    fn the_keys_are_the_platform_s_own() {
+        assert_eq!(VK_BACK, 0x08);
+        assert_eq!(VK_TAB, 0x09);
+        assert_eq!(VK_RETURN, 0x0D);
+        assert_eq!(VK_CONTROL, 0x11);
+        assert_eq!(VK_PRIOR, 0x21);
+        assert_eq!(VK_NEXT, 0x22);
+        assert_eq!(VK_END, 0x23);
+        assert_eq!(VK_HOME, 0x24);
+        assert_eq!(VK_LEFT, 0x25);
+        assert_eq!(VK_UP, 0x26);
+        assert_eq!(VK_RIGHT, 0x27);
+        assert_eq!(VK_DOWN, 0x28);
+        assert_eq!(VK_ESCAPE, 0x1B);
+        assert_eq!(VK_DELETE, 0x2E);
+        assert_eq!(VK_LCONTROL, 0xA2);
+        assert_eq!(VK_RCONTROL, 0xA3);
+    }
+
+    /// The platform's window styles, pinned.
+    ///
+    /// The window is a tool window on top of everything else: the styles
+    /// are what make it a tool window, and a style that is not the
+    /// platform's is a window that behaves like another window.
+    #[test]
+    fn the_styles_are_the_platform_s_own() {
+        assert_eq!(WS_POPUP, 0x8000_0000);
+        assert_eq!(WS_EX_TOOLWINDOW, 0x0000_0080);
+        assert_eq!(WS_EX_TOPMOST, 0x0000_0008);
+        assert_eq!(CS_VREDRAW, 0x0001);
+        assert_eq!(CS_HREDRAW, 0x0002);
+        assert_eq!(CS_DROPSHADOW, 0x0002_0000);
+        assert_eq!(SW_HIDE, 0);
+        assert_eq!(SW_SHOWNOACTIVATE, 4);
+        assert_eq!(SWP_NOMOVE, 0x0002);
+        assert_eq!(SWP_NOACTIVATE, 0x0010);
+        assert_eq!(GWL_USERDATA, -21);
+    }
 }
