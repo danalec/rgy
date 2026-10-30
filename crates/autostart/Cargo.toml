@@ -1,6 +1,6 @@
 [package]
 name = "rgy-autostart"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
 description = "Registering the rgy search daemon to start at login, per platform"
@@ -39,4 +39,4 @@ required-features = ["std"]
 # reason: the rule that says where the daemon listens has to be the same
 # rule for the registration and for the client that finds it.
 [dependencies]
-rgy-proto = { path = "../proto", version = "0.1.0", default-features = false }
+rgy-proto = { path = "../proto", version = "0.1.1", default-features = false }

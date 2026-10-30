@@ -454,7 +454,7 @@ dependencies = [
 
 [[package]]
 name = "rgy-adapters"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rgx-adapters-archive",
  "rgx-adapters-docs",
@@ -472,21 +472,21 @@ dependencies = [
 
 [[package]]
 name = "rgy-autostart"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rgy-proto",
 ]
 
 [[package]]
 name = "rgy-discovery"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rgy-par",
 ]
 
 [[package]]
 name = "rgy-discovery-dispatch"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rgy-discovery",
  "rgy-discovery-freebsd",
@@ -498,21 +498,21 @@ dependencies = [
 
 [[package]]
 name = "rgy-discovery-freebsd"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rgy-discovery",
 ]
 
 [[package]]
 name = "rgy-discovery-linux"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rgy-discovery",
 ]
 
 [[package]]
 name = "rgy-discovery-macos"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rgy-discovery",
  "rgy-name-core",
@@ -521,7 +521,7 @@ dependencies = [
 
 [[package]]
 name = "rgy-discovery-windows"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "hashbrown 0.16.1",
  "rgy-discovery",
@@ -536,7 +536,7 @@ dependencies = [
 
 [[package]]
 name = "rgy-engine"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rgx-core",
  "rgy-discovery",
@@ -545,18 +545,18 @@ dependencies = [
 
 [[package]]
 name = "rgy-launcher"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "rgy-launcher-windows"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rgy-launcher",
 ]
 
 [[package]]
 name = "rgy-name-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "hashbrown 0.16.1",
  "rgx-core",
@@ -566,19 +566,19 @@ dependencies = [
 
 [[package]]
 name = "rgy-par"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "rgy-pick"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "rgy-proto"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "rgy-rgxy"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rgy-engine",
  "rgy-launcher",
@@ -590,7 +590,7 @@ dependencies = [
 
 [[package]]
 name = "rgy-search-ui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "crossterm",
  "rgy-discovery",
@@ -602,7 +602,7 @@ dependencies = [
 
 [[package]]
 name = "rgy-searchctl"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "mimalloc",
  "rgy-adapters",
@@ -617,7 +617,7 @@ dependencies = [
 
 [[package]]
 name = "rgy-searchd"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "mimalloc",
  "rgx-core",
@@ -635,7 +635,7 @@ dependencies = [
 
 [[package]]
 name = "rgy-zen"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "mimalloc",
  "rgy-discovery",

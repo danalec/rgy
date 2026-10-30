@@ -1,6 +1,6 @@
 [package]
 name = "rgy-launcher"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
 description = "The launcher's model: the query, the results, the actions, the hotkey"

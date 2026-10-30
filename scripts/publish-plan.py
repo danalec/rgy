@@ -12,7 +12,9 @@ that no user could install, and nothing in the tree would have said so.
 So the order is computed here, from the manifests themselves, and the
 publish script follows it. The rule is a dependency order: a crate is
 published after every crate it depends on. Ties are broken alphabetically,
-so the same tree always produces the same plan.
+so the same tree always produces the same plan -- with one exception, the
+**faces go last**: the launcher is a client of the running daemon, so the
+product behind it is on the registry before the window onto it is.
 
 **What it reads.** `cargo metadata` for the workspace's packages and their
 in-tree dependency edges, and crates.io for what the registry already has.
@@ -43,6 +45,18 @@ from pathlib import Path
 # publish them would be offering to publish somebody else's crate under a
 # version upstream never released.
 VENDORED = ("rgx-", "rar-codec")
+
+# The faces of the product: the launcher is the window the user sees, and it
+# is a **client of the running daemon** -- it talks to `searchd` over the wire
+# rather than linking it. So the daemon's crates have to be on the registry
+# before the launcher is: a launcher published first is a window onto a
+# daemon that is not there yet.
+#
+# Nothing in the launcher's manifest says that -- it does not depend on
+# `searchd`, it speaks to it -- so the rule is here, and it is the only
+# place where the order of a release is decided by anything but a
+# dependency.
+FACES = ("rgy-rgxy",)
 
 USER_AGENT = "rgy-publish-plan (crates.io publish order)"
 
@@ -90,11 +104,18 @@ def workspace_packages(root: Path) -> list[dict]:
 
 
 def publish_order(packages: list[dict]) -> list[dict]:
-    """The packages, dependencies first.
+    """The packages, dependencies first, and the faces last.
 
     Kahn's algorithm, with the ready set kept in alphabetical order: the same
     tree always produces the same plan, and a plan that changed between two
     runs of the same tree would be a plan nobody could check.
+
+    The **faces** go at the end: the launcher is a client of the running
+    daemon, so the product behind it has to be on the registry before the
+    window onto it is. Nothing in the launcher's manifest says that -- it
+    does not depend on `searchd`, it speaks to it -- so the rule is here.
+    A face that something else depends on cannot move: the dependency order
+    wins, and the plan stays a plan a publisher can follow.
     """
     by_name = {p["name"]: p for p in packages}
     pending = {p["name"]: set(p["_deps"]) for p in packages}
@@ -113,6 +134,20 @@ def publish_order(packages: list[dict]) -> list[dict]:
             del pending[name]
         for deps in pending.values():
             deps.difference_update(ready)
+
+    # Who depends on what: a face that something else needs cannot be moved
+    # to the end, because the crate that needs it would then be published
+    # first.
+    dependents: dict[str, list[str]] = {}
+    for pkg in packages:
+        for dep in pkg["_deps"]:
+            dependents.setdefault(dep, []).append(pkg["name"])
+
+    movable = [
+        p for p in ordered if p["name"] in FACES and not dependents.get(p["name"])
+    ]
+    if movable:
+        ordered = [p for p in ordered if p not in movable] + movable
     return ordered
 
 
