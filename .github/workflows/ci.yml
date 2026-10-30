@@ -177,8 +177,11 @@ jobs:
       # format those families decode turns `std` on with it.
       #
       # `rgy-search-ui` is this repository's too: the terminal interface,
-      # which is a terminal. It reads the console and the files, and
-      # crossterm is `std` by definition.
+      # which is a terminal. It reads the console and the files, and a
+      # terminal is a machine: `std` by definition. The calls it needs
+      # are declared by hand, in `src/term.rs`, the way the clock and the
+      # filesystem are -- so what is left of the crate is the machine, not
+      # a dependency on one.
       #
       # `--features rgx-core/tv` is the pack store's `no_std` half: the
       # query engine and the reader, without the `std` half on top of it

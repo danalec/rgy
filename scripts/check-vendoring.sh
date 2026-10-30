@@ -294,7 +294,7 @@ fi
 # separator because the notes are sentences, and splitting a list of
 # sentences on whitespace loses the sentences.
 known_external=$(printf '%s\t%s\n' \
-    'crossterm' 'the terminal UI of bins/search-ui: the raw mode, the cursor and the keys. No in-tree equivalent yet; the terminal backend would have to be written by hand' \
+    'crossterm' 'the terminal UI of bins/search-ui speaks the terminal itself now: the escape sequences, the keys and the mode are declared by hand in bins/search-ui/src/term.rs, the way the clock and the filesystem are. The crate is a dev-dependency only -- the oracle the escape sequences and the key corpus are measured against' \
     'hashbrown' 'the no_std hash map of crates/name-core (the maps of the query engine) and crates/discovery-windows; the query path wants the cheap hasher, and std::collections::HashMap is SipHash' \
     'ignore' 'the pack-store builder of rgx-core walks the tree with a walker of its own (crates/rgx-core/src/tv_runtime/walk.rs), behind the tv-runtime feature -- and the default build turns that feature on, through rgy-engine'"'"'s own std feature, so the code that uses it is compiled and linted by every gate. In rgx-core the crate is a dev-dependency only -- the oracle the walker, the globs and the ignore files are measured against; the portable walk of the seam (crates/discovery) has no gitignore semantics yet' \
     'mimalloc' 'the allocator of the three binaries; it measured 5-12% on the parallel walk on Windows' \

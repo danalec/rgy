@@ -10,6 +10,8 @@ pub mod latency;
 
 mod preview;
 
+pub mod term;
+
 mod ui;
 
 pub use ui::*;

@@ -22,8 +22,12 @@ rgy-engine = { path = "../../crates/engine", version = "0.1.0" }
 # The rule of the line format: a path that carries a line break is not
 # one line, and the ones left out are counted and said out loud.
 rgy-pick = { path = "../../crates/pick", version = "0.1.0" }
-crossterm = "0.28.1"
 
 [dev-dependencies]
 # Test fixtures build `rgy_discovery::walk::Listing`s for `name_index::Index::build`.
 rgy-discovery = { path = "../../crates/discovery", version = "0.1.0" }
+# The oracle: the crate this tree wrote the terminal with, kept here so the
+# differential test has something to hold the in-house backend to. A
+# dev-dependency does not enter a binary, and the thing that replaces a crate
+# is held to it until the oracle is retired.
+crossterm = "0.28.1"

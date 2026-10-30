@@ -22,11 +22,7 @@
 
 use crate::latency::LatencyMeter;
 use crate::preview;
-use crossterm::cursor::{Hide, MoveTo, Show};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use crossterm::execute;
-use crossterm::style::{Print, ResetColor, SetBackgroundColor, Stylize};
-use crossterm::terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen};
+use crate::term::{self, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, Paint};
 use rgy_launcher::Action as LauncherAction;
 use rgy_name_core::live::Live;
 use rgy_name_core::name_query::{Alternatives, Hit, Searcher};
@@ -37,16 +33,15 @@ use std::time::Instant;
 /// reproduces that design rather than whatever theme the host terminal
 /// happens to carry.
 ///
-/// 24-bit SGR is not universal, and on the Windows console path crossterm
-/// quantizes `Color::Rgb` to the 16-colour attribute palette — which is how
-/// the "colours look old and the background is pure black" symptom happens:
-/// every `38;2;…`/`48;2;…` is thrown away and you get the default fg on the
-/// default bg. So each role has both an exact RGB and the nearest ANSI-16
-/// colour, and [`truecolor`] picks. The ANSI fallback keeps the video's hues
-/// (blue prompt, green timings) on a terminal that cannot honour the exact
-/// values; the RGB is used only where it will actually render.
+/// 24-bit SGR is not universal, and a terminal that cannot honour it shows
+/// what it can — which is how the "colours look old and the background is
+/// pure black" symptom happens. So each role has both an exact RGB and the
+/// nearest ANSI-16 colour, and [`truecolor`] picks. The ANSI fallback keeps
+/// the video's hues (blue prompt, green timings) on a terminal that cannot
+/// honour the exact values; the RGB is used only where it will actually
+/// render.
 mod palette {
-    use crossterm::style::Color;
+    use crate::term::Color;
 
     /// Whether the host advertises 24-bit colour. `COLORTERM` is the standard
     /// signal; `WT_SESSION` is Windows Terminal and `TERM_PROGRAM` covers
@@ -172,18 +167,18 @@ struct TerminalGuard;
 
 impl TerminalGuard {
     fn enter(out: &mut impl Write) -> Result<Self, String> {
-        terminal::enable_raw_mode().map_err(|e| format!("cannot enter raw mode: {e}"))?;
+        term::enable_raw_mode().map_err(|e| format!("cannot enter raw mode: {e}"))?;
         // Paint the whole alternate screen with the reference palette's
         // background so the ink colours read the way they do in the video,
         // whatever the host terminal's own theme is.
-        execute!(
-            out,
-            EnterAlternateScreen,
-            Hide,
-            SetBackgroundColor(palette::bg()),
-            Clear(ClearType::All)
-        )
-        .map_err(|e| format!("cannot set up the screen: {e}"))?;
+        let mut screen = term::Screen::new(&mut *out);
+        screen
+            .enter_alternate_screen()
+            .and_then(|()| screen.hide())
+            .and_then(|()| screen.background(palette::bg()))
+            .and_then(|()| screen.clear_all())
+            .and_then(|()| screen.flush())
+            .map_err(|e| format!("cannot set up the screen: {e}"))?;
         Ok(TerminalGuard)
     }
 }
@@ -191,8 +186,12 @@ impl TerminalGuard {
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let mut out = rgy_engine::console::stdout();
-        let _ = execute!(out, ResetColor, Show, LeaveAlternateScreen);
-        let _ = terminal::disable_raw_mode();
+        let mut screen = term::Screen::new(&mut out);
+        let _ = screen.reset_colour();
+        let _ = screen.show();
+        let _ = screen.leave_alternate_screen();
+        let _ = screen.flush();
+        let _ = term::disable_raw_mode();
     }
 }
 
@@ -710,7 +709,10 @@ impl App {
             // this must repaint rather than trust rows it never painted.
             self.painted.clear();
             self.painted_width = 0;
-            execute!(out, MoveTo(0, 0), Clear(ClearType::All))?;
+            let mut screen = term::Screen::new(&mut *out);
+            screen.move_to(0, 0)?;
+            screen.clear_all()?;
+            screen.flush()?;
             return self.write_line(
                 out,
                 0,
@@ -807,13 +809,12 @@ impl App {
         let rendered: Vec<String> = rows.iter().map(|c| truncate_visible(c, width)).collect();
         for (row, cell) in rendered.iter().enumerate() {
             if stale || self.painted.get(row) != Some(cell) {
-                execute!(
-                    out,
-                    MoveTo(0, row as u16),
-                    SetBackgroundColor(palette::bg()),
-                    Clear(ClearType::CurrentLine),
-                    Print(cell),
-                )?;
+                let mut screen = term::Screen::new(&mut *out);
+                screen.move_to(0, row as u16)?;
+                screen.background(palette::bg())?;
+                screen.clear_line()?;
+                screen.print(cell)?;
+                screen.flush()?;
             }
         }
         self.painted = rendered;
@@ -988,13 +989,12 @@ impl App {
     ) -> std::io::Result<()> {
         // Re-assert the background before every clear: `Clear` paints with the
         // currently active background, and a styled span may have reset it.
-        execute!(
-            out,
-            MoveTo(0, row),
-            SetBackgroundColor(palette::bg()),
-            Clear(ClearType::CurrentLine),
-            Print(truncate_visible(cell, width)),
-        )
+        let mut screen = term::Screen::new(out);
+        screen.move_to(0, row)?;
+        screen.background(palette::bg())?;
+        screen.clear_line()?;
+        screen.print(&truncate_visible(cell, width))?;
+        screen.flush()
     }
 }
 
@@ -1156,7 +1156,7 @@ fn run_app(mut app: App) -> Result<(), String> {
     let mut chosen = None;
 
     loop {
-        let size = terminal::size().map_err(|e| format!("cannot read the terminal size: {e}"))?;
+        let size = term::size().map_err(|e| format!("cannot read the terminal size: {e}"))?;
         app.draw(&mut out, size)
             .map_err(|e| format!("cannot draw: {e}"))?;
 
@@ -1171,16 +1171,16 @@ fn run_app(mut app: App) -> Result<(), String> {
         let mut block = true;
         loop {
             if !block
-                && !event::poll(std::time::Duration::ZERO)
+                && !term::poll(std::time::Duration::ZERO)
                     .map_err(|e| format!("cannot poll the keyboard: {e}"))?
             {
                 break;
             }
             block = false;
-            match event::read().map_err(|e| format!("cannot read the keyboard: {e}"))? {
+            match term::read().map_err(|e| format!("cannot read the keyboard: {e}"))? {
                 // Windows can report releases as well as presses; ignore
                 // anything that is not a key going down.
-                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                term::Event::Key(key) if key.kind == KeyEventKind::Press => {
                     match handle_key(&mut app, key) {
                         Action::Quit => {
                             outcome = Outcome::Quit;
@@ -1417,7 +1417,7 @@ fn truncate_visible(s: &str, width: usize) -> String {
             continue;
         }
         if visible == width {
-            out.push_str(&ResetColor.to_string());
+            out.push_str(term::RESET);
             return out;
         }
         out.push(c);
@@ -1907,7 +1907,7 @@ mod tests {
     #[test]
     fn the_prompt_keeps_the_query_and_the_timing_on_one_line() {
         let app = app_with("ext:rs");
-        let line = app.prompt_line(60, &"3.5 ms".green().to_string());
+        let line = app.prompt_line(60, &"3.5 ms".with(palette::green()).to_string());
         assert_eq!(display_width(&line), 60);
         let visible = strip_ansi(&line);
         assert!(visible.contains("ext:rs"), "{visible:?}");
@@ -1922,15 +1922,15 @@ mod tests {
         for _ in 0..40 {
             app.insert('x');
         }
-        let line = app.prompt_line(30, &"2.0 ms".green().to_string());
+        let line = app.prompt_line(30, &"2.0 ms".with(palette::green()).to_string());
         assert_eq!(display_width(&line), 30, "never exceeds the terminal width");
     }
 
     /// Walk a rendered frame and pair every painted row with the text a user sees.
     ///
-    /// crossterm writes each row as a cursor move, a clear and the styled text,
-    /// so the cursor moves are the row boundaries and everything else is either
-    /// styling to strip or payload to keep.
+    /// The terminal backend writes each row as a cursor move, a clear and the
+    /// styled text, so the cursor moves are the row boundaries and everything
+    /// else is either styling to strip or payload to keep.
     fn parse_frame(raw: &str) -> Vec<(u16, String)> {
         let mut rows: Vec<(u16, String)> = Vec::new();
         let mut chars = raw.chars();
