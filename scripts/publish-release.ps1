@@ -648,5 +648,15 @@ if ($Commit -and -not $DryRun) {
 }
 
 Write-Host ""
+if ($DryRun) {
+    # The dry run says what it did not do. A line that says "published" at
+    # the end of a run that published nothing is a line nobody can trust
+    # -- and this is the last line of the script, the one a reader's eye
+    # lands on.
+    Write-Host "[dry-run] the release would be $tag :"
+    Write-Host "[dry-run]   $forgejo/releases/tag/$tag"
+    Write-Host "[dry-run]   $gh/releases/tag/$tag"
+    exit 0
+}
 Write-Host "published $tag : $forgejo/releases/tag/$tag"
 Write-Host "published $tag : $gh/releases/tag/$tag"

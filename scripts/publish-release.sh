@@ -587,5 +587,15 @@ if [ "$manifests_only" -eq 1 ]; then
 fi
 
 echo ""
+if [ "$dry_run" -eq 1 ]; then
+    # The dry run says what it did not do. A line that says "published" at
+    # the end of a run that published nothing is a line nobody can trust
+    # -- and this is the last line of the script, the one a reader's eye
+    # lands on.
+    echo "[dry-run] the release would be $tag :"
+    echo "[dry-run]   $forgejo/releases/tag/$tag"
+    echo "[dry-run]   $gh/releases/tag/$tag"
+    exit 0
+fi
 echo "published $tag : $forgejo/releases/tag/$tag"
 echo "published $tag : $gh/releases/tag/$tag"
