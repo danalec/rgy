@@ -420,6 +420,17 @@ struct State {
     /// The window says sentences — under the field, in the menu, in the
     /// panel — and a sentence is said in the language the user reads.
     lang: Lang,
+    /// What the launcher has already said on the stderr.
+    ///
+    /// The daemon's absence is a **state**, and the launcher asks about it
+    /// on the clock — and the clock ticks every hundred and twenty
+    /// milliseconds. A state said again and again is a flood: the
+    /// launcher's stderr fills in a minute, and a pipe nobody reads fills
+    /// in a second.
+    ///
+    /// So the stderr carries the message once, when it changes, and the
+    /// window carries it the whole time, in the line under the field.
+    said: Vec<String>,
 }
 
 impl State {
@@ -567,6 +578,7 @@ pub fn run(source: DaemonSource, options: &Options) -> Result<(), String> {
         history,
         usage_path,
         lang,
+        said: Vec::new(),
     };
 
     // The rows the screen has room for: the window is sized from them, and
@@ -1068,6 +1080,27 @@ fn run_action(state: &mut State, action: Action) -> Control {
     }
 }
 
+/// The lines the stderr has to carry, when the news changed.
+///
+/// The launcher asks about the daemon on the clock, and the clock does
+/// not stop: a message said on every tick is a flood, and a flood fills
+/// the machine's log — and the pipe of a launcher whose reader is slow.
+///
+/// So the stderr carries the message once, when it changes, and the
+/// window carries it the whole time, in the line under the field.
+fn said_once(said: &mut Vec<String>, messages: &[String]) -> Option<Vec<String>> {
+    if messages == said.as_slice() {
+        return None;
+    }
+    *said = messages.to_vec();
+    Some(
+        messages
+            .iter()
+            .map(|message| format!("rgxy: {message}"))
+            .collect(),
+    )
+}
+
 /// The answer that came back, on the screen.
 ///
 /// The answer is applied here, on the thread that draws the window: it
@@ -1085,8 +1118,20 @@ fn apply_reply(state: &mut State) -> bool {
         Reply::Who { messages, status } => {
             state.in_flight = false;
             state.status = status;
-            for message in &messages {
-                eprintln!("rgxy: {message}");
+            // The stderr carries the message once, when it changes.
+            //
+            // And the write is on a thread of its own: a pipe that is
+            // full does not take the message back, and a window that
+            // waits for the pipe is a window that stops answering. The
+            // launcher is resident, and a resident launcher that freezes
+            // when the machine's log is full is a launcher the user has
+            // to kill.
+            if let Some(lines) = said_once(&mut state.said, &messages) {
+                std::thread::spawn(move || {
+                    for line in lines {
+                        eprintln!("{line}");
+                    }
+                });
             }
             if !messages.is_empty() {
                 // Whatever the user has to be told, the window tells it:
@@ -1462,6 +1507,7 @@ mod tests {
             history: History::new(),
             usage_path: None,
             lang: Lang::English,
+            said: Vec::new(),
         };
         (state, asked)
     }
@@ -2229,6 +2275,47 @@ mod tests {
             "the preview did not open from the menu"
         );
         assert_ne!(state.app.mode(), Mode::Menu, "the menu is closed");
+    }
+
+    /// The launcher says the machine's news once, and not once a tick.
+    ///
+    /// The launcher asks about the daemon on the clock, and the clock
+    /// ticks every hundred and twenty milliseconds: a message said on
+    /// every tick is a flood, and a flood fills the machine's log — and
+    /// the pipe of a launcher whose reader is slow. The stderr carries
+    /// the message once, when it changes; the window carries it the whole
+    /// time, in the line under the field.
+    ///
+    /// Measured on 2026-10-31: the launcher wrote the same sentence eight
+    /// times a second, and a launcher whose stderr was a pipe that nobody
+    /// read filled that pipe in a second and then **stopped answering** —
+    /// the window did not take a message for two seconds.
+    #[test]
+    fn the_launcher_says_the_news_once() {
+        let mut said = Vec::new();
+        let news = vec![String::from("no daemon in pipe:rgy-searchd")];
+
+        assert_eq!(
+            said_once(&mut said, &news),
+            Some(vec![String::from("rgxy: no daemon in pipe:rgy-searchd")]),
+            "the news is said the first time"
+        );
+
+        // The same news on the next tick: there is nothing new to say.
+        assert_eq!(said_once(&mut said, &news), None, "the news was said again");
+
+        // Other news: the stderr carries it.
+        assert_eq!(
+            said_once(&mut said, &[String::from("the daemon is slow")]),
+            Some(vec![String::from("rgxy: the daemon is slow")]),
+            "the new news is said"
+        );
+
+        // And back to the first: it changed, so the stderr carries it.
+        assert!(
+            said_once(&mut said, &news).is_some(),
+            "the news that changed is said again"
+        );
     }
 
     /// The menu says that it has the keyboard.
