@@ -341,6 +341,14 @@ for crate in $CRATES; do
                 echo "  add    $rel"
                 added=$((added + 1))
             fi
+            # The patch is not applied -- nothing is -- but the report has to
+            # say what a real run would do with it, or the two reports
+            # disagree about the same tree: the dry run said "patched 4"
+            # where the real run said "patched 26".
+            if [ -f "$PATCH_DIR/$rel.patch" ]; then
+                echo "  patch  $rel"
+                patched=$((patched + 1))
+            fi
             continue
         fi
         # The tree's file is moved aside before the copy. The copy is
