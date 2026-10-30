@@ -84,18 +84,27 @@ def workspace_packages(root: Path) -> list[dict]:
     packages = json.loads(out)["packages"]
     names = {p["name"] for p in packages}
     for p in packages:
-        # A dev-dependency is not resolved by whoever installs the crate, so
-        # it does not constrain the order. A build-dependency is.
+        # EVERY kind of edge constrains the order, and not only the ones an
+        # installer resolves. A dev-dependency does not enter a binary, but
+        # `cargo publish` packages the crate and then builds that package
+        # to verify it, and the build carries the examples and the tests --
+        # and the dev-dependencies they need, resolved from the registry
+        # like any other.
+        #
+        # Measured on 2026-10-30, with the plan as it was: it put rgy-engine
+        # before rgy-name-core, because the edge between them is a
+        # dev-dependency (the examples' oracle), and the publish stopped
+        # with "failed to select a version for the requirement
+        # `rgy-name-core = "^0.1.1"` -- candidate versions found which
+        # didn't match: 0.1.0". The dependency was not on the registry yet,
+        # and the plan had put it after the crate that needs it.
         p["_deps"] = sorted(
             {
                 d["name"]
                 for d in p["dependencies"]
                 # cargo metadata writes no `kind` at all for a normal
-                # dependency, and "dev" or "build" for the other two. A
-                # dev-dependency is not resolved by whoever installs the
-                # crate, so it does not constrain the order; a
-                # build-dependency is.
-                if d["kind"] in (None, "", "normal", "build") and d["name"] in names
+                # dependency, and "dev" or "build" for the other two.
+                if d["name"] in names
             }
         )
         p["_publishable"] = p.get("publish") != []
