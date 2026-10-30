@@ -311,11 +311,20 @@ if [ -f "$sums" ]; then
     # The carriage return: the file is shared with the Windows twin, and a
     # line written there can end with one. The name is the second field, so
     # the return would be part of it.
-    grep -v "  $archive_name[[:space:]]*\$" "$sums" | tr -d '\r' >> "$tmp" || true
+    # The digests file belongs to ONE release: the rows of the archives
+    # this release carries, and nothing else. A row left over from an older
+    # build in the same .dist/ names an archive the release does not
+    # publish, and `sha256sum -c` then fails on a file the user never got.
+    version_re=$(printf '%s' "$version" | sed 's/[.[\*^$\\]/\\&/g')
+    grep "  rgy-v$version_re-" "$sums" | tr -d '\r' | grep -v "  $archive_name[[:space:]]*\$" >> "$tmp" || true
 fi
 sha=$(sha256sum "$archive" | cut -d' ' -f1)
 printf '%s  %s\n' "$sha" "$archive_name" >> "$tmp"
-awk '{ sub(/\r$/, "", $2) } !seen[$2]++' "$tmp" | sort -k2 > "$sums"
+# The order is the ordinal one, and not the locale's: the file is read by
+# `sha256sum -c` everywhere and compared byte for byte between the
+# platforms, so the two scripts have to write the same lines in the same
+# order whatever the machine's language says.
+awk '{ sub(/\r$/, "", $2) } !seen[$2]++' "$tmp" | LC_ALL=C sort -k2 > "$sums"
 rm -f "$tmp"
 echo "checksum: .dist/SHA256SUMS ($sha  $archive_name)"
 

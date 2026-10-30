@@ -342,6 +342,11 @@ $lines = @()
 # each line, and a name with one is not the name: the line is trimmed on the
 # way in, so a file from the other platform reads the same as one from here.
 if (Test-Path $sums) { $lines = @(Get-Content $sums | ForEach-Object { $_.TrimEnd("`r") }) }
+# The digests file belongs to ONE release: the rows of the archives this
+# release carries, and nothing else. A row left over from an older build in
+# the same .dist/ names an archive the release does not publish, and
+# `sha256sum -c` then fails on a file the user never got.
+$lines = @($lines | Where-Object { $_ -match "  rgy-v$([regex]::Escape($Version))-" })
 $lines = @($lines | Where-Object { $_ -notmatch "  $([regex]::Escape($archiveName))$" })
 $sha = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLower()
 $lines += "$sha  $archiveName"
@@ -356,7 +361,21 @@ $deduped = $lines | Where-Object {
 # LF and no BOM: the file is read by awk on the other platform, and by
 # `sha256sum -c` everywhere. A carriage return at the end of a line is part
 # of the name awk reads, and the digest never matches.
-$text = (($deduped | Sort-Object { ($_ -split '\s+', 2)[1] }) -join "`n") + "`n"
+# The order is the ordinal one, and not the locale's: the file is read by
+# `sha256sum -c` everywhere and compared byte for byte between the
+# platforms, so the two scripts have to write the same lines in the same
+# order whatever the machine's language says.
+$ordered = [System.Collections.Generic.List[string]]::new()
+foreach ($row in $deduped) {
+    $rowName = ($row -split '\s+', 2)[1]
+    $at = 0
+    while ($at -lt $ordered.Count -and
+           [System.StringComparer]::Ordinal.Compare((($ordered[$at] -split '\s+', 2)[1]), $rowName) -le 0) {
+        $at++
+    }
+    $ordered.Insert($at, $row)
+}
+$text = (($ordered) -join "`n") + "`n"
 [System.IO.File]::WriteAllText($sums, $text, [System.Text.UTF8Encoding]::new($false))
 Write-Host "checksum: .dist/SHA256SUMS ($sha  $archiveName)"
 
