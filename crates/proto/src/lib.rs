@@ -202,19 +202,24 @@ pub enum Response {
     /// `{"op":"grep-files","files":[…],"took_us":…,"complete":…,"skipped":…}`
     /// — content matches.
     ///
-    /// `complete` says the search read every candidate it was given, and
-    /// `skipped` says how many files it did not read. A truncated search
-    /// and a complete one are different answers, and the difference is
-    /// on the wire: the two fields are additive, so a reader that does
-    /// not know them keeps working — and a line without them is a line
+    /// `complete` says the answer is whole, and `skipped` says how many
+    /// files the search did not read for a reason of its own -- a budget
+    /// that ran out, or a cloud placeholder it refused to download. The
+    /// files the limit left behind are not counted: the limit is the
+    /// caller's, and a search that stopped because it already had the
+    /// limit read what it was asked to read.
+    ///
+    /// A truncated search and a complete one are different answers, and the
+    /// difference is on the wire: the two fields are additive, so a reader
+    /// that does not know them keeps working — and a line without them is a line
     /// from a daemon that does not say, which reads as "not complete",
     /// the answer that promises the least.
     GrepFiles {
         files: Vec<GrepFile>,
         took_us: u64,
-        /// Whether the search read every candidate it was given.
+        /// Whether the answer is whole.
         complete: bool,
-        /// How many files the search did not read.
+        /// How many files the search did not read for a reason of its own.
         skipped: usize,
     },
     /// `{"op":"resolved","path":…,"folder":…,"backend":…}` — the answer of

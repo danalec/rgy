@@ -506,6 +506,35 @@ pub struct GrepOutcome {
     pub skipped: usize,
 }
 
+impl GrepOutcome {
+    /// The sentence for an answer that did not read everything.
+    ///
+    /// A search that did not read everything did not say it read
+    /// everything, and an answer that does not say so is an answer that
+    /// looks whole. The sentence lives with the answer: two clients that
+    /// read the same daemon have to say the same thing about the same
+    /// answer, and a client that says nothing says the answer is whole.
+    pub fn partial(&self) -> Option<String> {
+        if self.complete {
+            return None;
+        }
+        if self.skipped > 0 {
+            Some(format!(
+                "the daemon did not read {} file(s): the answer is partial",
+                self.skipped
+            ))
+        } else {
+            // The daemon read what it was asked to read and the answer is
+            // still not whole: the limit cut it, and a limit is the
+            // caller's own. The sentence says the limit stopped the
+            // answer, because that is what happened -- and it does not
+            // say how many files are behind it, because the daemon does
+            // not count the ones the limit left behind.
+            Some("the answer stops at the limit".to_string())
+        }
+    }
+}
+
 /// What the daemon says about itself.
 #[derive(Debug, Clone)]
 pub struct DaemonStatus {
@@ -1438,6 +1467,50 @@ mod tests {
             limit: 10,
             session: None,
         }
+    }
+
+    /// The sentence says which kind of not-whole the answer is.
+    ///
+    /// Two facts on the wire, two sentences: the files the daemon did not
+    /// read are a hole in the search, and an answer that stopped at the
+    /// limit is a page of a longer list. A sentence that named "0
+    /// file(s)" for the second would be a number that says nothing and
+    /// sounds like it does.
+    #[test]
+    fn the_answer_says_which_partial_it_is() {
+        let whole = GrepOutcome {
+            complete: true,
+            skipped: 0,
+            ..Default::default()
+        };
+        assert!(
+            whole.partial().is_none(),
+            "a whole answer says nothing about being whole"
+        );
+
+        let hole = GrepOutcome {
+            complete: false,
+            skipped: 3,
+            ..Default::default()
+        };
+        let said = hole.partial().expect("an answer that is not whole says so");
+        assert!(said.contains("3 file(s)"), "the count is the count: {said}");
+        assert!(
+            said.contains("partial"),
+            "the answer is called partial: {said}"
+        );
+
+        let cut = GrepOutcome {
+            complete: false,
+            skipped: 0,
+            ..Default::default()
+        };
+        let said = cut.partial().expect("an answer that is not whole says so");
+        assert!(
+            !said.contains("0 file(s)"),
+            "the sentence names no files it did not read: {said}"
+        );
+        assert!(said.contains("limit"), "the limit is what cut it: {said}");
     }
 
     /// A daemon that hangs up.

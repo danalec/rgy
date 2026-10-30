@@ -1697,6 +1697,22 @@ mod tests {
         assert!(line.contains("no connection"), "{line}");
     }
 
+    /// The line under the field says the answer is not whole.
+    ///
+    /// The window used to show a short list with nothing saying the list
+    /// was short: an answer that looks whole. The sentence comes from the
+    /// daemon's own answer, and the line under the field carries it.
+    #[test]
+    fn the_status_line_says_the_answer_is_not_whole() {
+        let mut state = empty();
+        // What the daemon's answer carried.
+        state.status.connected = true;
+        state.status.warnings = vec!["the answer stops at the limit".to_string()];
+        apply(&mut state, answer_with("C:/a.txt"));
+        let line = status_line(&state);
+        assert!(line.contains("the answer stops at the limit"), "{line}");
+    }
+
     #[test]
     fn a_command_with_nothing_to_act_on_says_so() {
         // `>copy` in an empty window used to do nothing at all, and the

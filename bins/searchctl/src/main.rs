@@ -569,14 +569,11 @@ fn run_daemon(opts: &Opts, query: &str) -> Result<(), String> {
                 rgy_pick::uncarryable_paths(printed.dropped)
             );
         }
-        if !outcome.complete {
+        if let Some(why) = outcome.partial() {
             // The daemon says what it did not read. A search that did not
             // read everything did not say it read everything, and an
             // answer that does not say so is an answer that looks whole.
-            eprintln!(
-                "searchctl: the daemon did not read {} file(s): the answer is partial",
-                outcome.skipped
-            );
+            eprintln!("searchctl: {why}");
         }
         if opts.explain {
             rgy_engine::errln!(

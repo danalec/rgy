@@ -776,7 +776,7 @@ impl DaemonSource {
         {
             let mut st = self.status.borrow_mut();
             st.connected = true;
-            st.warnings = outcome.warnings.clone();
+            st.warnings = content_warnings(&outcome);
             st.took_us = outcome.took_us;
             st.layer = Some(Layer::Content);
             st.backend = backend;
@@ -829,7 +829,7 @@ impl DaemonSource {
         {
             let mut st = self.status.borrow_mut();
             st.connected = true;
-            st.warnings = outcome.warnings.clone();
+            st.warnings = content_warnings(&outcome);
             st.took_us = outcome.took_us;
             st.layer = Some(Layer::Content);
             st.backend = backend;
@@ -890,6 +890,18 @@ impl DaemonSource {
             }
         }
     }
+}
+
+/// The warnings of a content answer.
+///
+/// The daemon's own warnings, and the sentence for an answer that did not
+/// read everything. The command line says the same thing about the same
+/// answer, and a window that shows a short list without saying so shows
+/// an answer that looks whole.
+fn content_warnings(outcome: &rgy_proto::client::GrepOutcome) -> Vec<String> {
+    let mut out = outcome.warnings.clone();
+    out.extend(outcome.partial());
+    out
 }
 
 /// The sentence for a feed that is not live, when it is not live.
@@ -994,6 +1006,66 @@ mod tests {
         );
     }
     use super::*;
+
+    /// The window says the answer is partial.
+    ///
+    /// The daemon says what it did not read, and the command line says
+    /// it. The window said nothing: a content search that was cut short
+    /// showed a short list with nothing saying the list was short.
+    #[test]
+    fn the_window_says_the_answer_is_partial() {
+        let outcome = rgy_proto::client::GrepOutcome {
+            complete: false,
+            skipped: 3,
+            ..Default::default()
+        };
+        let warnings = content_warnings(&outcome);
+        assert!(
+            warnings.iter().any(|w| w.contains("3 file(s)")),
+            "the window does not say what the daemon did not read: {warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|w| w.contains("partial")),
+            "the window does not say the answer is partial: {warnings:?}"
+        );
+    }
+
+    /// An answer that stopped at the limit says that, and names no files.
+    ///
+    /// The daemon read what it was asked to read and the answer is still
+    /// not whole: the limit cut it. A window that said "did not read 0
+    /// file(s)" would be naming a number that says nothing and sounds
+    /// like it does.
+    #[test]
+    fn an_answer_cut_short_by_the_limit_names_no_files() {
+        let outcome = rgy_proto::client::GrepOutcome {
+            complete: false,
+            skipped: 0,
+            ..Default::default()
+        };
+        let warnings = content_warnings(&outcome);
+        assert!(
+            !warnings.iter().any(|w| w.contains("0 file(s)")),
+            "the window names files it did not read: {warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|w| w.contains("limit")),
+            "the window does not say what cut the answer: {warnings:?}"
+        );
+    }
+
+    /// A whole answer says nothing about being whole.
+    #[test]
+    fn a_whole_answer_carries_no_partial_sentence() {
+        let outcome = rgy_proto::client::GrepOutcome {
+            complete: true,
+            ..Default::default()
+        };
+        assert!(
+            content_warnings(&outcome).is_empty(),
+            "a whole answer was called partial"
+        );
+    }
 
     /// A daemon that does not follow the tree says so, both ways.
     ///

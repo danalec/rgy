@@ -1263,9 +1263,12 @@ fn scoped_content(q: &str, paths: &[String], limit: usize, ctx: &Ctx) -> Vec<Ans
         return vec![Answer::Frame(Response::Error { message: why })];
     }
     // What the search did not read, said on the wire: a truncated search
-    // and a complete one are different answers.
-    let complete = res.complete;
-    let skipped = res.skipped.len();
+    // and a complete one are different answers. The files are the ones a
+    // budget stopped the search from reaching, and the placeholders it
+    // refused to download: the files the limit left behind are not among
+    // them, because the limit is the caller's own.
+    let scanned_complete = res.complete;
+    let skipped = unread_files(scope.len(), res.read, scanned_complete, res.skipped.len());
     let mut files: Vec<GrepFile> = Vec::new();
     for f in res.files {
         files.push(GrepFile {
@@ -1275,6 +1278,10 @@ fn scoped_content(q: &str, paths: &[String], limit: usize, ctx: &Ctx) -> Vec<Ans
     }
 
     let count = files.len();
+    // The answer is whole when the search read everything it was given and
+    // the limit did not cut it short -- the same rule the whole-tree grep
+    // follows, so the two routes say the same thing about the same answer.
+    let complete = count < limit && scanned_complete;
     out.push(Answer::Frame(Response::GrepFiles {
         files,
         took_us: t0.elapsed().as_micros() as u64,
@@ -1354,6 +1361,24 @@ fn resolve(path: &str, ctx: &Ctx) -> Answer {
         folder,
         backend,
     })
+}
+
+/// The files the search did not read for a reason of its own.
+///
+/// The ones a budget stopped it from reaching, and the placeholders it
+/// refused to download. The files the limit left behind are not among
+/// them: the limit is the caller's, and a search that stopped because it
+/// already had enough read what it was asked to read.
+///
+/// The whole-tree route and the scoped route both answer this, and the
+/// rule lives here so that the two cannot drift.
+fn unread_files(candidates: usize, read: usize, complete: bool, placeholders: usize) -> usize {
+    let never_reached = if complete {
+        0
+    } else {
+        candidates.saturating_sub(read)
+    };
+    never_reached + placeholders
 }
 
 fn grep(q: &str, limit: usize, ctx: &Ctx) -> Vec<Answer> {
@@ -1498,11 +1523,17 @@ fn grep(q: &str, limit: usize, ctx: &Ctx) -> Vec<Answer> {
                 }
                 r.files.extend(rest.files);
                 r.read += rest.read;
+                // The placeholders the index's own scan refused, and the
+                // ones this scan refused: both are files the search did
+                // not read.
+                let plan_placeholders = r.skipped.len();
+                let scan_placeholders = rest.skipped.len();
                 r.skipped.extend(rest.skipped);
                 r.candidates = covered.len() + bare.len();
                 r.complete = r.files.len() < limit && rest.complete;
                 complete = complete && r.complete;
-                skipped += r.skipped.len();
+                skipped += unread_files(bare.len(), rest.read, rest.complete, scan_placeholders)
+                    + plan_placeholders;
                 for f in r.files {
                     files.push(GrepFile {
                         path: platform_path(&f.path),
@@ -2833,6 +2864,82 @@ mod tests {
         assert_eq!(
             before, after,
             "the index changes what is read, not what is answered"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The rule for the number, in one place.
+    ///
+    /// A search that stopped because it already had the limit read what
+    /// it was asked to read: nothing is missing, and the number is zero.
+    /// A budget that ran out is a hole, and the hole is the files the
+    /// search never reached.
+    #[test]
+    fn the_files_the_search_did_not_read_are_the_ones_it_never_reached() {
+        // It read everything it was asked to read: the limit stopped it,
+        // and the limit is the caller's.
+        assert_eq!(unread_files(100, 100, true, 0), 0);
+        // The placeholders are files it did not read, whoever stopped it.
+        assert_eq!(unread_files(100, 100, true, 2), 2);
+        // A budget that ran out: the files it never reached are missing.
+        assert_eq!(unread_files(100, 40, false, 0), 60);
+        assert_eq!(unread_files(100, 40, false, 3), 63);
+    }
+
+    /// An answer cut short by the limit names no files.
+    ///
+    /// The daemon read what it was asked to read and the answer is still
+    /// not whole: the limit cut it. The wire's `skipped` says how many
+    /// files the search did not read for a reason of its own, and the
+    /// limit is not a reason of its own -- so the number is zero, and a
+    /// sentence that said "did not read 0 file(s)" would be naming a
+    /// number that says nothing and sounds like it does.
+    #[test]
+    fn an_answer_cut_short_by_the_limit_names_no_files() {
+        let dir = std::env::temp_dir().join("rgy-searchd-limit-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..3 {
+            std::fs::write(dir.join(format!("hello{i}.txt")), b"hello world\n").unwrap();
+        }
+        let root = dir.to_string_lossy().into_owned().into_bytes();
+
+        let source = PortableSource::new(root.clone(), 2);
+        let live = Live::with_root(
+            Index::build(source.enumerate().expect("the walk"), 0, 1, b"/"),
+            &root,
+        );
+        let ctx = std::sync::Arc::new(Ctx {
+            root: root.clone(),
+            home: String::new(),
+            tv_dir: None,
+            live: std::sync::RwLock::new(live),
+            catch_up: std::sync::atomic::AtomicU8::new(CATCH_UP_RELISTED),
+            feed: std::sync::atomic::AtomicU8::new(FEED_NONE),
+            changed: Changed::new(),
+            content: std::sync::Mutex::new(None),
+            wants_content: std::sync::atomic::AtomicBool::new(false),
+            sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
+        });
+
+        let answer = grep("hello", 1, &ctx);
+        let (files, complete, skipped) = answer
+            .iter()
+            .find_map(|r| match r {
+                Answer::Frame(Response::GrepFiles {
+                    files,
+                    complete,
+                    skipped,
+                    ..
+                }) => Some((files.len(), *complete, *skipped)),
+                _ => None,
+            })
+            .expect("the answer carries the files");
+        assert_eq!(files, 1, "the limit is the limit");
+        assert!(!complete, "an answer cut short is not whole");
+        assert_eq!(
+            skipped, 0,
+            "the daemon read what it was asked to read, so it skipped nothing"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
