@@ -190,6 +190,28 @@ if (Test-Path $formula) {
     }
 }
 
+# The release's main. The README, the installers and the winget manifests
+# point at github.com/danalec/rgy/main, and the mirror carries main
+# because of it -- so main has to carry the release, or the links resolve
+# to an older tree that answers with the wrong project.
+#
+# The check is here, before the tag and before the release, so a main that
+# is behind stops the publish instead of stopping it half way -- and it
+# runs in the dry run too, because a dry run that says "the release would
+# be rgy-v0.1.0" when the release would stop at the first step is a dry
+# run that lies.
+$mainBranch = git rev-parse --verify --quiet refs/heads/main
+if (-not $ManifestsOnly -and $LASTEXITCODE -eq 0 -and $mainBranch) {
+    git merge-base --is-ancestor HEAD main
+    if ($LASTEXITCODE -ne 0) {
+        $behind = (git rev-list --count main..HEAD).Trim()
+        [Console]::Error.WriteLine("main does not carry the release commit: main is $behind commits behind HEAD")
+        [Console]::Error.WriteLine("  the README, the installers and the winget manifests point at main, and they would answer with the older tree")
+        [Console]::Error.WriteLine("  merge the branch into main (git merge --ff-only <branch>) and run this again")
+        exit 1
+    }
+}
+
 # --- 3. tag + push ---------------------------------------------------------
 $existingTag = git tag -l $tag
 if ($ManifestsOnly) {
