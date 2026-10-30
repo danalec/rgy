@@ -305,6 +305,63 @@ fn bad_invocation_exits_two() {
 
 // --- rgx --serve compatibility front ---------------------------------------
 
+/// The compat front spells a path the way the platform spells it.
+///
+/// The tree's own form is `/` everywhere, and the compat front is rg's
+/// front: rg prints the paths of the platform it runs on. The whole-tree
+/// answer came out with the tree's form and the scoped answer with the
+/// caller's, so one front said one file two ways.
+#[test]
+fn the_compat_front_says_a_path_one_way() {
+    let root = fixture_dir("serve-spelling");
+    text_tree(&root);
+    let root_arg = root.to_str().unwrap();
+    // The path goes into a JSON string, so its separators are escaped on
+    // the way in.
+    let file = root
+        .join("hello.txt")
+        .to_string_lossy()
+        .replace('\\', "\\\\");
+
+    // The whole tree: the path comes from the tree.
+    let (code, wide, err) = run_stdin(
+        &searchd(),
+        &["--root", root_arg, "--serve"],
+        "[\"-F\",\"needle\"]\n",
+    );
+    assert_eq!(code, 0, "stderr={err}");
+
+    // The same file, named: the path comes from the caller.
+    let (code, narrow, err) = run_stdin(
+        &searchd(),
+        &["--root", root_arg, "--serve"],
+        &format!("[\"-F\",\"needle\",\"{file}\"]\n"),
+    );
+    assert_eq!(code, 0, "stderr={err}");
+
+    assert_eq!(
+        path_in(&wide),
+        path_in(&narrow),
+        "one file, one spelling: {wide}"
+    );
+}
+
+/// The path in the compat front's answer.
+///
+/// The wire escapes the separator, so the bytes here are the escaped
+/// ones -- and that is enough: a `/` is not escaped and a `\\` is, so
+/// two spellings of one file are two different answers here.
+fn path_in(out: &str) -> String {
+    let line = out
+        .lines()
+        .find(|l| l.contains("\"type\":\"begin\""))
+        .unwrap_or_else(|| panic!("the answer names a file; got {out}"));
+    let start = line.find("\"text\":\"").expect("the line carries a path") + 8;
+    let rest = &line[start..];
+    let end = rest.find('"').expect("the path ends");
+    rest[..end].to_string()
+}
+
 #[test]
 fn serve_front_argv_round_trip() {
     let dir = fixture_dir("dserve");

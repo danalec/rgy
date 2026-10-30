@@ -1615,7 +1615,7 @@ fn serve_stream(mut input: impl BufRead, mut out: impl Write, ctx: &Ctx) {
                         matched = true;
                         serve_file(
                             &mut out,
-                            &f.path,
+                            &platform_path(f.path.as_bytes()),
                             &f.lines
                                 .iter()
                                 .map(|(n, t)| (*n as usize, t.clone()))
@@ -1670,7 +1670,7 @@ fn serve_stream(mut input: impl BufRead, mut out: impl Write, ctx: &Ctx) {
             }
             for f in &res.files {
                 matched = true;
-                serve_file(&mut out, &rgy_engine::console::spell(&f.path), &f.lines);
+                serve_file(&mut out, &platform_path(&f.path), &f.lines);
             }
         }
         serve_end(
