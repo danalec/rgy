@@ -388,9 +388,8 @@ impl DaemonSource {
                 // feed that died leaves it answering on a snapshot, and a
                 // window that says "the daemon is there" is telling the
                 // user that a live tree is behind it.
-                if status.feed == "gone" {
-                    st.warnings
-                        .push(Text::for_lang(self.lang).tree_not_followed.to_string());
+                if let Some(why) = feed_warning(&status.feed, self.lang) {
+                    st.warnings.push(why);
                 }
             }
             Err(e) => {
@@ -893,6 +892,21 @@ impl DaemonSource {
     }
 }
 
+/// The sentence for a feed that is not live, when it is not live.
+///
+/// `gone` and `none` are two different facts and they get two different
+/// sentences: a feed that died was there and is not, and a daemon that
+/// never had one answers on a snapshot from the start. `live` is not a
+/// warning at all.
+fn feed_warning(feed: &str, lang: Lang) -> Option<String> {
+    let text = Text::for_lang(lang);
+    match feed {
+        "gone" => Some(text.tree_not_followed.to_string()),
+        "none" => Some(text.tree_never_followed.to_string()),
+        _ => None,
+    }
+}
+
 /// The word the status line shows for the content layer's backend.
 ///
 /// The label belongs to the **answer**: the daemon's answers are the
@@ -980,6 +994,30 @@ mod tests {
         );
     }
     use super::*;
+
+    /// A daemon that does not follow the tree says so, both ways.
+    ///
+    /// A feed that died and a daemon that never had one are two facts,
+    /// and the window that says "the daemon is there" is telling the
+    /// user that a live tree is behind it when there is none.
+    #[test]
+    fn a_daemon_that_does_not_follow_the_tree_says_so() {
+        let live = feed_warning("live", Lang::English);
+        assert!(live.is_none(), "a live feed is not a warning: {live:?}");
+        for feed in ["gone", "none"] {
+            let warning = feed_warning(feed, Lang::English);
+            assert!(
+                warning.as_deref().is_some_and(|w| !w.is_empty()),
+                "the feed {feed} is not warned about"
+            );
+        }
+        // And in the user's language.
+        let portuguese = feed_warning("none", Lang::Portuguese).unwrap_or_default();
+        assert!(
+            portuguese.contains("não segue"),
+            "the sentence is not in the user's language: {portuguese:?}"
+        );
+    }
 
     /// A daemon that answered badly is a daemon that is there.
     ///

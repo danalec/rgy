@@ -128,6 +128,8 @@ vocabulary! {
     no_daemon_in => "no daemon in {}; {}", "sem daemon em {}; {}";
     tree_not_followed => "the tree is no longer followed by the daemon",
         "a árvore já não é seguida pelo daemon";
+    tree_never_followed => "the daemon does not follow this tree: the index is a snapshot",
+        "o daemon não segue esta árvore: o índice é uma fotografia";
     index_read_only => "the index is in read-only mode", "o índice está em modo somente-leitura";
 
     // --- the searches --------------------------------------------------------
