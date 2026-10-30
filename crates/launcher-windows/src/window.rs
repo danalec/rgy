@@ -1511,24 +1511,6 @@ impl Window {
                     return on_event(Event::Key(key));
                 }
             }
-            if msg.message == WM_ACTIVATEAPP && msg.wParam == 0 {
-                // The user clicked somewhere else and the launcher gets out
-                // of the way: a window floating over the editor the user
-                // just clicked into is a window the user has to close by
-                // hand.
-                //
-                // The window hiding itself does not count: that is the
-                // launcher saying goodbye, and answering it would open the
-                // window the user just closed.
-                if self.state_mut().hiding {
-                    self.state_mut().hiding = false;
-                } else {
-                    // The answer waits for the pump: the message can come
-                    // from inside a platform call, and the host cannot be
-                    // asked twice for the same state.
-                    self.state_mut().focus_lost = true;
-                }
-            }
             if msg.message == WM_SIZE {
                 return on_event(Event::Resize);
             }
@@ -1783,6 +1765,42 @@ unsafe extern "system" fn wnd_proc(
         // The backdrop is the system's: erasing the background here would
         // paint over the blur the accent policy asked for.
         WM_ERASEBKGND => 1,
+        // The user went somewhere else: the launcher gets out of the way.
+        // A window floating over the editor the user just clicked into is
+        // a window the user has to close by hand.
+        //
+        // The platform **sends** this message to every top-level window
+        // of the application when the activation state changes: it is not
+        // posted, so it never comes out of the message queue and the pump
+        // never sees it. The window procedure is the only place it
+        // arrives — and the probe that proved it posted the message
+        // instead, and the window hid, and the real message did nothing.
+        //
+        // So the window procedure raises the flag and the pump gives the
+        // answer: the decision to hide belongs to the host, and the host
+        // is asked where the host is not inside a platform call.
+        WM_ACTIVATEAPP => {
+            if wparam == 0
+                && let Some(state) = unsafe { state_of(hwnd) }
+            {
+                // SAFETY: the state lives in the window's own thread,
+                // the window procedure runs on that thread, and the
+                // pointer is the one the window put in its own user
+                // data.
+                unsafe {
+                    let state = &mut *state;
+                    // The window hiding itself does not count: that is
+                    // the launcher saying goodbye, and answering it
+                    // would open the window the user just closed.
+                    if state.hiding {
+                        state.hiding = false;
+                    } else {
+                        state.focus_lost = true;
+                    }
+                }
+            }
+            0
+        }
         WM_DESTROY => {
             unsafe { PostQuitMessage(0) };
             0
@@ -2221,6 +2239,86 @@ mod tests {
         unsafe {
             ShowWindow(hwnd, SW_HIDE);
         }
+    }
+
+    /// The user going somewhere else is the window's own news.
+    ///
+    /// The platform **sends** `WM_ACTIVATEAPP` to every top-level window
+    /// of the application when the activation state changes: it is not
+    /// posted, so it never comes out of the message queue and the pump
+    /// never sees it. The window procedure is the only place it arrives.
+    ///
+    /// The bug this pins: the pump used to look for the message, and the
+    /// message the platform really sends never reached the pump — so the
+    /// launcher stayed on the screen when the user clicked into their
+    /// editor. A posted message is not the platform's message, and a
+    /// probe that posts one proves nothing about the real one.
+    #[test]
+    fn the_user_going_somewhere_else_is_the_window_s_own_news() {
+        let window = Window::new("rgxy-test").expect("the window was made");
+        let hwnd = window.hwnd();
+        assert!(!window.state().focus_lost, "the user has not gone anywhere");
+
+        // The message the platform sends: the window procedure raises the
+        // flag, and the pump gives the answer.
+        unsafe {
+            PostMessageW(hwnd, WM_ACTIVATEAPP, 0, 0);
+        }
+        // The message has to be pumped for the window procedure to see it:
+        // a posted message waits in the queue.
+        let mut msg = MSG {
+            hwnd: core::ptr::null_mut(),
+            message: 0,
+            wParam: 0,
+            lParam: 0,
+            time: 0,
+            pt: POINT { x: 0, y: 0 },
+        };
+        unsafe {
+            let got = GetMessageW(&mut msg, core::ptr::null_mut(), 0, 0);
+            assert!(got > 0, "the message arrived");
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        assert!(
+            window.state().focus_lost,
+            "the user went somewhere else and the window did not hear it"
+        );
+    }
+
+    /// The window hiding itself is not the user going somewhere else.
+    ///
+    /// The platform says goodbye to the application when the window goes
+    /// away, and answering that goodbye would open the window the user
+    /// just closed.
+    #[test]
+    fn a_window_that_hides_itself_is_not_the_user_going_somewhere_else() {
+        let mut window = Window::new("rgxy-test").expect("the window was made");
+        let hwnd = window.hwnd();
+        window.hide();
+        assert!(window.state().hiding, "the window is saying goodbye");
+
+        unsafe {
+            PostMessageW(hwnd, WM_ACTIVATEAPP, 0, 0);
+        }
+        let mut msg = MSG {
+            hwnd: core::ptr::null_mut(),
+            message: 0,
+            wParam: 0,
+            lParam: 0,
+            time: 0,
+            pt: POINT { x: 0, y: 0 },
+        };
+        unsafe {
+            let got = GetMessageW(&mut msg, core::ptr::null_mut(), 0, 0);
+            assert!(got > 0, "the message arrived");
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        assert!(
+            !window.state().focus_lost,
+            "the window opened itself again after the user closed it"
+        );
     }
 
     /// The window speaks English until it is told otherwise.
