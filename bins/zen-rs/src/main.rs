@@ -146,9 +146,28 @@ fn load_or_build(source: &str) -> Result<(Index, String), String> {
     }
 }
 
-#[cfg(windows)]
-fn usage() -> ! {
-    eprintln!(
+/// Print the usage and leave. `code` is the exit status: 0 when the
+/// user asked for help, 2 for the rg convention's "bad invocation".
+///
+/// The stream follows the status: the help is an answer, and an answer
+/// goes to stdout. The complaint about a bad invocation goes to
+/// stderr, because that one is not an answer.
+fn usage(code: i32) -> ! {
+    if code == 0 {
+        println!("{}", usage_text());
+    } else {
+        eprintln!("{}", usage_text());
+    }
+    std::process::exit(code);
+}
+
+/// The usage text.
+///
+/// The text is the same on every platform, and it says what the tool
+/// is where it cannot run: a program that hides its own commands on
+/// the platforms that have none is a program nobody can read.
+fn usage_text() -> String {
+    format!(
         "zen-rs <command> [args]\n\n\
          commands:\n  \
            index <volume|file>      inspect volume or saved index statistics\n  \
@@ -162,12 +181,25 @@ fn usage() -> ! {
            search-all <q>           search every fixed NTFS volume\n  \
            tail <volume>            walk the MFT, then apply pending USN journal records\n  \
            record <volume> <frn>    hexdump and parse a single raw MFT record\n\n\
+         options:\n  \
+           -h, --help              this text\n  \
+           -V, --version           the version\n\n\
          volume examples: C:\\  D:  \\\\?\\E:\\\n\
          query examples:  \"ext:rs dir:src main\"  \"size:>100mb !draft\"  \"*.rs | *.ts\"\n\n\
          in the ui, Esc or ctrl-c quits, enter prints the selected path,\n\
-         ctrl-u clears the query, ctrl-w deletes the previous word"
-    );
-    std::process::exit(2);
+         ctrl-u clears the query, ctrl-w deletes the previous word\n{note}",
+        note = if cfg!(windows) {
+            ""
+        } else {
+            "\nthe indexer is Windows-only: on the other platforms searchctl is the search.\n"
+        },
+    )
+}
+
+/// The version, as the answer to a question.
+fn version() -> ! {
+    println!("zen-rs {}", env!("CARGO_PKG_VERSION"));
+    std::process::exit(0);
 }
 
 /// On any platform but Windows there is no NTFS MFT and no USN journal to
@@ -176,15 +208,29 @@ fn usage() -> ! {
 /// exists for the Windows fast path.
 #[cfg(not(windows))]
 fn main() {
-    eprintln!("zen-rs: the NTFS MFT/USN indexer is Windows-only; use searchctl on this platform");
-    std::process::exit(2);
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        Some("-h") | Some("--help") | Some("help") => usage(0),
+        Some("-V") | Some("--version") => version(),
+        _ => {
+            eprintln!(
+                "zen-rs: the NTFS MFT/USN indexer is Windows-only; use searchctl on this platform"
+            );
+            std::process::exit(2);
+        }
+    }
 }
 
 #[cfg(windows)]
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
-        usage();
+        usage(2);
+    }
+    match args[0].as_str() {
+        "-h" | "--help" | "help" => usage(0),
+        "-V" | "--version" => version(),
+        _ => {}
     }
 
     let result = match args[0].as_str() {
@@ -199,7 +245,7 @@ fn main() {
         "list" if args.len() == 2 => cmd_list(&args[1], None),
         "search" if args.len() == 3 => cmd_search(&args[1], &args[2]),
         "tail" if args.len() == 2 => cmd_tail(&args[1]),
-        _ => usage(),
+        _ => usage(2),
     };
 
     if let Err(e) = result {

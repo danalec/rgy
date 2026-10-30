@@ -41,11 +41,21 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 /// alive, slow enough that the lines stay readable.
 const REPORT_EVERY: Duration = Duration::from_millis(500);
 
-/// Print usage and leave. `code` is the exit status: 0 when the user asked
-/// for help, 2 for the rg convention's "bad invocation". `--help` used to
-/// exit 2 like a malformed command, which a script reads as an error.
+/// Print the usage and leave. `code` is the exit status: 0 when the
+/// user asked for help, 2 for the rg convention's "bad invocation".
+/// `--help` used to exit 2 like a malformed command, which a script
+/// reads as an error.
+///
+/// The stream follows the status: the help is an answer, and an answer
+/// goes to stdout — `searchctl --help | less` shows the reader nothing
+/// when the help goes to stderr. The complaint about a bad invocation
+/// goes to stderr, because that one is not an answer.
 fn usage(code: i32) -> ! {
-    rgy_engine::errln!("{}", help());
+    if code == 0 {
+        rgy_engine::outln!("{}", help());
+    } else {
+        rgy_engine::errln!("{}", help());
+    }
     std::process::exit(code);
 }
 
@@ -72,6 +82,8 @@ fn help() -> String {
            --fzf-binary <p>   the picker to run (default: the first of fzf or sk on PATH)\n  \
            --fzf-arg <arg>    one argument for the picker, repeatable\n  \
            --daemon           ask the running searchd, not the local index\n\
+           -h, --help         this text\n\
+           -V, --version      the version\n\
          \n\
          The default picker is fzf or sk: they are the two that read a list\n\
          separated by NUL. A picker named with --fzf-binary that cannot read\n\
@@ -181,6 +193,10 @@ fn main() {
                 fzf_arg.push(args.get(i).cloned().unwrap_or_else(|| usage(2)));
             }
             "-h" | "--help" => usage(0),
+            "-V" | "--version" => {
+                rgy_engine::outln!("searchctl {}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            }
             a if a.starts_with('-') => {
                 rgy_engine::errln!("searchctl: unknown option {a}");
                 std::process::exit(2);

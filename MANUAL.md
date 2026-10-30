@@ -392,6 +392,13 @@ in [FORMATS.md](FORMATS.md) with their state.
 | `--max-age <dur>` | rebuild an index older than this (`30m`, `2h`, `7d`) |
 | `--explain` | print the query plan on stderr — what rgy did with your query |
 | `--threads <n>` | how many workers to use, for the scan and for the query |
+| `--daemon` | ask the running `searchd` instead of walking the tree yourself |
+
+`--daemon` asks the daemon that is already running, and it never falls
+back: if the daemon is not there, the command says so and stops. The
+daemon answers about the tree it was started on, which is not the tree
+`--root` names — so the two commands answer two different questions,
+and the flag says which one you asked.
 
 The index is what makes the name half of the query fast. rgy keeps it
 between runs and rebuilds it when it is older than `--max-age`.

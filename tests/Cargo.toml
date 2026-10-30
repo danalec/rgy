@@ -28,6 +28,11 @@ path = "launcher.rs"
 name = "license"
 path = "license.rs"
 
+# What every shipped binary says when it is asked what it is.
+[[test]]
+name = "help"
+path = "help.rs"
+
 [dev-dependencies]
 # The pack store, for the test that proves the third backend of the
 # content layer: the daemon started with `--tv-dir` answers from a packed

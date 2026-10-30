@@ -354,22 +354,34 @@ fn status_frame(ctx: &Ctx) -> String {
     .to_json()
 }
 
-/// Print usage and leave. `code` is the exit status: 0 when the user asked
-/// for help, 2 for the rg convention's "bad invocation".
+/// Print the usage and leave. `code` is the exit status: 0 when the
+/// user asked for help, 2 for the rg convention's "bad invocation".
+///
+/// The stream follows the status: the help is an answer, and an answer
+/// goes to stdout — `searchd --help | less` shows the reader nothing
+/// when the help goes to stderr. The complaint about a bad invocation
+/// goes to stderr, because that one is not an answer.
 fn usage(code: i32) -> ! {
-    rgy_engine::errln!(
-        "searchd [--root <dir>] [--index <file>] [--reindex] [--max-age <dur>]\n         [--tv-dir <store>] [--listen stdio|uds:<path>|pipe:<name>] [--serve]\n         [--threads <n>]\n\n\
+    if code == 0 {
+        rgy_engine::outln!("{}", usage_text());
+    } else {
+        rgy_engine::errln!("{}", usage_text());
+    }
+    std::process::exit(code);
+}
+
+/// The usage text.
+fn usage_text() -> String {
+    "searchd [--root <dir>] [--index <file>] [--reindex] [--max-age <dur>]\n         [--tv-dir <store>] [--listen stdio|uds:<path>|pipe:<name>] [--serve]\n         [--threads <n>]\n\n\
          proto framing (default): one JSON request per line\n  \
-           {{\"op\":\"search\",\"q\":\"...\",\"limit\":50}}\n  \
-           {{\"op\":\"grep\",\"q\":\"...\"}}\n  \
-           {{\"op\":\"status\"}}\n  \
+           {\"op\":\"search\",\"q\":\"...\",\"limit\":50}\n  \
+           {\"op\":\"grep\",\"q\":\"...\"}\n  \
+           {\"op\":\"status\"}\n  \
          --serve: rgx compat — a JSON argv-array per line, answers framed\n  \
-           by {{\"rgx\":\"begin\"}}/{{\"rgx\":\"end\"}} with rg --json match lines.\n\n\
+           by {\"rgx\":\"begin\"}/{\"rgx\":\"end\"} with rg --json match lines.\n\n\
          --threads: workers for the scan and the query (default: 4 for the\n\
          scan, the machine's cores for the query; RGY_NUM_THREADS sets\n\
-         both)."
-    );
-    std::process::exit(code);
+         both).".to_string()
 }
 
 /// Parse `30m` / `2h` / `7d` / `90s` / `1w` into a duration. Bare numbers are
@@ -455,6 +467,10 @@ fn main() {
                 );
             }
             "-h" | "--help" => usage(0),
+            "-V" | "--version" => {
+                rgy_engine::outln!("searchd {}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            }
             other => {
                 rgy_engine::errln!("searchd: unknown argument {other}");
                 std::process::exit(2);

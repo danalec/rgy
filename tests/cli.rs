@@ -237,14 +237,17 @@ fn unknown_option_exits_two() {
 /// Asking for help is not a failed invocation. It exited 2 alongside a
 /// malformed command, which the rg convention this CLI follows reads as
 /// "error" and a script acts on; `rg --help` exits 0.
+///
+/// The usage goes to stdout: the help is the program's answer, and an
+/// answer that goes to stderr shows the reader's pipe nothing.
 #[test]
 fn asking_for_help_is_not_an_error() {
     for flag in ["-h", "--help"] {
-        let (code, _, err) = run(&searchctl(), &[flag]);
+        let (code, out, err) = run(&searchctl(), &[flag]);
         assert_eq!(code, 0, "{flag} must exit 0, not 2; stderr={err}");
         assert!(
-            err.contains("searchctl"),
-            "{flag} printed no usage; stderr={err}"
+            out.contains("searchctl"),
+            "{flag} printed no usage; stdout={out}"
         );
     }
     // ...while an invocation that is actually missing its query is still a
