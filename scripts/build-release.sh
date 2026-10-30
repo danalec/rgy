@@ -73,15 +73,14 @@ version=""
 target=""
 variant="portable"
 
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --skip-tests) skip_tests=1; shift ;;
-        --version) version=${2:-}; shift 2 ;;
-        --target) target=${2:-}; shift 2 ;;
-        --variant) variant=${2:-}; shift 2 ;;
-        *) echo "unknown option: $1" >&2; exit 2 ;;
-    esac
-done
+# The options, read by the helper the two twins share: the long spelling
+# and the PowerShell one are the same option, and an option neither of
+# them knows is an error on both platforms -- not a silent "do the real
+# thing", which in this directory means building an archive that a release
+# then publishes.
+. "$here/lib/options.sh"
+rgy_read_options "skiptests=skip_tests" \
+                 "version=version target=target variant=variant" "$@"
 
 command -v cargo > /dev/null 2>&1 || {
     echo "cargo not found; install Rust: https://rustup.rs" >&2

@@ -36,16 +36,19 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $repoRoot
 
-$dryRun = $false
-foreach ($arg in $args) {
-    switch ($arg) {
-        '-DryRun' { $dryRun = $true }
-        default {
-            Write-Error "unknown option: $arg"
-            exit 2
-        }
-    }
+# The help, before the options are read: the script's own header, the
+# way the twin prints it.
+if ($args -contains "-h" -or $args -contains "--help") {
+    Get-Content $PSCommandPath | Select-Object -Skip 1 -First 39
+    exit 0
 }
+# The options, read by the helper the two twins share: the long spelling
+# and the PowerShell one are the same option, and an option neither of
+# them knows is an error on both platforms -- not a silent "do the real
+# thing", which in this directory means publishing to crates.io.
+. (Join-Path $PSScriptRoot "lib/options.ps1")
+$dryRun = $false
+Read-RgyOptions -Switches @{ "dryrun" = "dryRun" } -Arguments $args
 
 # The plan is computed by a helper both twins call, so the two print the
 # same plan and not two plans that look alike.

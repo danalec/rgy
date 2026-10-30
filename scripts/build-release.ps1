@@ -8,6 +8,10 @@
 #   pwsh -File scripts/build-release.ps1 -Target aarch64-pc-windows-msvc
 #   pwsh -File scripts/build-release.ps1 -Variant znver4
 #
+# Both spellings of every option work: --skip-tests is the twin's and
+# -SkipTests is PowerShell's, and an option neither of them knows stops
+# the script instead of being ignored.
+#
 # Unless -SkipTests, the build fails on any clippy warning
 # (`cargo clippy --release --locked --workspace --all-targets -- -D warnings`)
 # and on any failing test. The workspace stays warning-free by policy, and a
@@ -61,13 +65,6 @@
 # The version comes from the binary crates' manifests, and all four have to
 # agree: a release whose binaries disagree about their version is a release
 # nobody can describe.
-param(
-    [string]$Version = "",
-    [switch]$SkipTests,
-    [string]$Target = "",
-    [string]$Variant = "portable"
-)
-
 $ErrorActionPreference = "Stop"
 # A native command that writes to stderr -- and searchctl writes there
 # whenever it rebuilds an index -- must not turn into a terminating error
@@ -75,6 +72,20 @@ $ErrorActionPreference = "Stop"
 if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
     $PSNativeCommandUseErrorActionPreference = $false
 }
+# The options, read by the helper the two twins share: the long spelling
+# and the PowerShell one are the same option, and an option neither of
+# them knows is an error on both platforms -- not a silent "do the real
+# thing", which in this directory means building an archive that a release
+# then publishes.
+. (Join-Path $PSScriptRoot "lib/options.ps1")
+$Version = ""
+$SkipTests = $false
+$Target = ""
+$Variant = "portable"
+Read-RgyOptions -Switches @{ "skiptests" = "SkipTests" } `
+                 -Values   @{ "version" = "Version"; "target" = "Target"; "variant" = "Variant" } `
+                 -Arguments $args
+
 $root = Split-Path $PSScriptRoot -Parent
 Set-Location $root
 

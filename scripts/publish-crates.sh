@@ -60,13 +60,19 @@ say() {
 }
 
 dry_run=0
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --dry-run) dry_run=1; shift ;;
+# The help, before the options are read: the script's own header, the way
+# the twin prints it.
+for _arg in "$@"; do
+    case "$_arg" in
         -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
-        *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
 done
+# The options, read by the helper the two twins share: the long spelling
+# and the PowerShell one are the same option, and an option neither of
+# them knows is an error on both platforms -- not a silent "do the real
+# thing", which in this directory means publishing to crates.io.
+. "$here/lib/options.sh"
+rgy_read_options "dryrun=dry_run" "" "$@"
 
 # The plan is computed by a helper both twins call, so the two print the
 # same plan and not two plans that look alike.

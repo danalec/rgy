@@ -46,12 +46,24 @@
 # Exit codes: 0 all patches applied, 1 at least one failed.
 
 [CmdletBinding()]
-param(
-    [string]$Upstream = "",
-    [switch]$DryRun
-)
-
 $ErrorActionPreference = 'Stop'
+
+# The help, before the options are read: the script's own header, the way
+# the twin prints it.
+if ($args -contains "-h" -or $args -contains "--help") {
+    Get-Content $PSCommandPath | Select-Object -Skip 1 -First 44
+    exit 0
+}
+# The options, read by the helper the two twins share: the long spelling
+# and the PowerShell one are the same option, and an option neither of
+# them knows is an error on both platforms -- not a silent "do the real
+# thing", which in this directory means patching the vendored trees.
+. (Join-Path $PSScriptRoot "lib/options.ps1")
+$Upstream = ""
+$DryRun = $false
+Read-RgyOptions -Switches @{ "dryrun" = "DryRun" } `
+                 -Values   @{ "upstream" = "Upstream" } `
+                 -Arguments $args
 
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repo = Split-Path -Parent $here

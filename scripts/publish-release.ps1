@@ -8,6 +8,10 @@
 #   pwsh -File scripts/publish-release.ps1 -Private     # keep the GitHub mirror private
 #   pwsh -File scripts/publish-release.ps1 -Commit      # commit the release data
 #
+# Both spellings of every option work: --dry-run is the twin's and
+# -DryRun is PowerShell's, and an option neither of them knows stops the
+# script instead of being ignored.
+#
 # PowerShell 7 (pwsh) is required: under Windows PowerShell 5.1 the
 # credential request git needs does not survive the trip.
 #
@@ -35,15 +39,6 @@
 # The assets that go on the release page are the archives in .dist/ -- the
 # ones this machine built, plus the ones the other platforms built into the
 # same directory -- and the SHA256SUMS file beside them.
-param(
-    [string]$Version = "",
-    [switch]$SkipTests,
-    [switch]$Commit,
-    [switch]$Private,
-    [switch]$ManifestsOnly,
-    [switch]$DryRun
-)
-
 $ErrorActionPreference = "Stop"
 # A native command that writes to stderr -- git and gh both do, when they
 # have something to say -- must not turn into a terminating error here: the
@@ -59,6 +54,24 @@ if ($PSVersionTable.PSVersion.Major -lt 7) {
     Write-Error "this script needs PowerShell 7: run it with 'pwsh -File $PSCommandPath'"
     exit 1
 }
+
+# The options, read by the helper the two twins share: the long spelling
+# and the PowerShell one are the same option, and an option neither of
+# them knows is an error on both platforms -- not a silent "do the real
+# thing", which in this directory means publishing a release.
+. (Join-Path $PSScriptRoot "lib/options.ps1")
+$Version = ""
+$SkipTests = $false
+$Commit = $false
+$Private = $false
+$ManifestsOnly = $false
+$DryRun = $false
+Read-RgyOptions -Switches @{ "skiptests" = "SkipTests"; "dryrun" = "DryRun";
+                             "private" = "Private"; "manifestsonly" = "ManifestsOnly";
+                             "commit" = "Commit" } `
+                 -Values   @{ "version" = "Version" } `
+                 -Arguments $args
+
 $root = Split-Path $PSScriptRoot -Parent
 Set-Location $root
 

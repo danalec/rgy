@@ -33,14 +33,12 @@ DRY_RUN=0
 CORE_REPO="Homebrew/homebrew-core"
 CORE_FORK="danalec/homebrew-core"
 
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --version) VERSION=${2:-}; shift 2 ;;
-        --formula) FORMULA=${2:-}; shift 2 ;;
-        --dry-run) DRY_RUN=1; shift ;;
-        *) echo "unknown option: $1" >&2; exit 2 ;;
-    esac
-done
+# The options, read by the helper the two twins share: the long spelling
+# and the PowerShell one are the same option, and an option neither of
+# them knows is an error on both platforms -- not a silent "do the real
+# thing", which in this directory means opening a pull request.
+. "$ROOT/scripts/lib/options.sh"
+rgy_read_options "dryrun=DRY_RUN" "version=VERSION formula=FORMULA" "$@"
 
 formula_file="Formula/$FORMULA.rb"
 if [ ! -f "$formula_file" ]; then

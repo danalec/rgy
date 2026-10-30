@@ -21,13 +21,20 @@
 #
 # Requires git, curl and gh (authenticated). The fork is created if it is
 # not there yet.
-param(
-    [string]$Version = "",
-    [string]$Formula = "rgy-search",
-    [switch]$DryRun
-)
-
 $ErrorActionPreference = "Stop"
+
+# The options, read by the helper the two twins share: the long spelling
+# and the PowerShell one are the same option, and an option neither of
+# them knows is an error on both platforms -- not a silent "do the real
+# thing", which in this directory means opening a pull request.
+. (Join-Path $PSScriptRoot "lib/options.ps1")
+$Version = ""
+$Formula = "rgy-search"
+$DryRun = $false
+Read-RgyOptions -Switches @{ "dryrun" = "DryRun" } `
+                 -Values   @{ "version" = "Version"; "formula" = "Formula" } `
+                 -Arguments $args
+
 $root = Split-Path $PSScriptRoot -Parent
 Set-Location $root
 

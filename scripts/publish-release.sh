@@ -47,17 +47,13 @@ private=0
 manifests_only=0
 commit=0
 
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --version) version=${2:-}; shift 2 ;;
-        --skip-tests) skip_tests=1; shift ;;
-        --dry-run) dry_run=1; shift ;;
-        --private) private=1; shift ;;
-        --manifests-only) manifests_only=1; shift ;;
-        --commit) commit=1; shift ;;
-        *) echo "unknown option: $1" >&2; exit 2 ;;
-    esac
-done
+# The options, read by the helper the two twins share: the long spelling
+# and the PowerShell one are the same option, and an option neither of
+# them knows is an error on both platforms -- not a silent "do the real
+# thing", which in this directory means publishing a release.
+. "$here/lib/options.sh"
+rgy_read_options "skiptests=skip_tests dryrun=dry_run private=private manifestsonly=manifests_only commit=commit" \
+                 "version=version" "$@"
 
 [ -n "$version" ] || version=$(sed -n 's/^version = "\(.*\)"/\1/p' bins/searchctl/Cargo.toml | head -1)
 [ -n "$version" ] || { echo "no version in bins/searchctl/Cargo.toml" >&2; exit 1; }
