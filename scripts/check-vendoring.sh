@@ -220,6 +220,14 @@ fi
 # is lib.rs, so that is accepted as the root when mod.rs is absent.
 #
 # So the invariant checked here is: the tree root names its upstream source.
+#
+# The list is the one upstream's own provenance manifest names -- the trees
+# whose root module carries a tree-level statement. Upstream records them in
+# `scripts/vendored-sources.tsv`, one section header per tree ("header:
+# <path>"), and the five of them are the 7z adapter tree, the LZ4 adapter
+# tree, the rgx-core codecs, the RAR codec and the memmap2 tree. Two of
+# them were missing here until 2026-10-30, so the gate was looking at three
+# of the five trees the record names.
 say_head "[3/5] vendored trees declare provenance"
 # The roots are spelled with backslashes, as the .ps1 spells them: the
 # failure messages quote them the same way, and a message that says
@@ -227,6 +235,8 @@ say_head "[3/5] vendored trees declare provenance"
 # other is two different messages.
 vendored_roots=(
     'crates\rgx-adapters-archive\src\sevenz'
+    'crates\rgx-adapters-archive\src\lz4'
+    'crates\rgx-core\src\compress'
     'crates\rar-codec\src'
     'crates\rgx-core\src\memmap2'
 )
