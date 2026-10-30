@@ -509,7 +509,7 @@ impl DaemonSource {
         &mut self,
         engine_query: &str,
         window: Duration,
-    ) -> Result<Vec<String>, Failure> {
+    ) -> Result<(Vec<String>, Vec<String>), Failure> {
         let saved = self.session;
         if let Some(client) = self.client.as_mut() {
             client.set_session(None);
@@ -518,10 +518,18 @@ impl DaemonSource {
             Some(client) => client
                 .search_within(engine_query, SCOPE_LIMIT, window)
                 .map(|out| {
-                    out.hits
-                        .into_iter()
-                        .map(|h| h.path)
-                        .collect::<Vec<String>>()
+                    // The warnings come back with the scope. The scope was
+                    // chosen with the **name** half of the question, and a
+                    // word the engine does not know is said here and
+                    // nowhere else: the content answer is about the other
+                    // half and cannot say it.
+                    (
+                        out.hits
+                            .into_iter()
+                            .map(|h| h.path)
+                            .collect::<Vec<String>>(),
+                        out.warnings,
+                    )
                 })
                 .map_err(|e| Failure::of(Text::for_lang(self.lang).name_search_failed, &e)),
             None => Err(Failure::gone(String::from(rgy_launcher::text::no_daemon(
@@ -628,9 +636,16 @@ impl DaemonSource {
         // daemon died while choosing it, and the fallback has the last
         // one to work on.
         let mut scope_failed = false;
+        // What the scope's own answer said. The scope is chosen with the
+        // name half of the question, so a word the engine does not know
+        // is said here and nowhere else.
+        let mut scope_warnings: Vec<String> = Vec::new();
         if connected && !engine_names.is_empty() {
             match self.scope_paths(engine_names, left(deadline)) {
-                Ok(paths) => scope = paths,
+                Ok((paths, warnings)) => {
+                    scope = paths;
+                    scope_warnings = warnings;
+                }
                 Err(reason) => {
                     self.fail(&reason);
                     failure = Some(reason);
@@ -649,7 +664,8 @@ impl DaemonSource {
                     }
                 }
             } else if !scope.is_empty() {
-                match self.daemon_content(&content, &scope, limit, left(deadline)) {
+                match self.daemon_content(&content, &scope, &scope_warnings, limit, left(deadline))
+                {
                     Ok(answer) => return answer,
                     Err(reason) => {
                         // The daemon answered with a failure: the fallback
@@ -726,7 +742,11 @@ impl DaemonSource {
         st.layer = Some(Layer::Content);
         st.matches = 0;
         st.connected = connected;
-        st.warnings = vec![warning];
+        // The scope's warnings first: they say why the scope was empty,
+        // and the reason below says what the content layer did about it.
+        let mut warnings = scope_warnings;
+        warnings.push(warning);
+        st.warnings = warnings;
         Answer::empty()
     }
 
@@ -798,6 +818,7 @@ impl DaemonSource {
         &mut self,
         content: &str,
         scope: &[String],
+        scope_warnings: &[String],
         limit: usize,
         window: Duration,
     ) -> Result<Answer, Failure> {
@@ -829,7 +850,12 @@ impl DaemonSource {
         {
             let mut st = self.status.borrow_mut();
             st.connected = true;
-            st.warnings = content_warnings(&outcome);
+            // The scope's warnings and the content answer's: the scope was
+            // chosen with the name half of the question and the answer
+            // comes from the content half, and the user asked both.
+            let mut warnings = scope_warnings.to_vec();
+            warnings.extend(content_warnings(&outcome));
+            st.warnings = warnings;
             st.took_us = outcome.took_us;
             st.layer = Some(Layer::Content);
             st.backend = backend;
@@ -1522,6 +1548,46 @@ mod tests {
             "the status says the names chose nothing: {warnings:?}"
         );
         // The daemon waits for the client to go.
+        drop(source);
+        daemon.join();
+    }
+
+    /// The scope's warnings are said.
+    ///
+    /// The scope is chosen with the name half of the question and the
+    /// content answer comes from the other half, so a warning about the
+    /// name half -- a word the engine does not know -- was lost. A window
+    /// that says "no files to read" without saying why the scope was
+    /// empty leaves the user guessing.
+    #[test]
+    fn the_scope_search_says_what_it_warned_about() {
+        let daemon = serve(|peer| {
+            let mut peer = peer;
+            while let Ok(request) = peer.read_line() {
+                if request.is_empty() {
+                    break;
+                }
+                if request.contains("\"op\":\"status\"") {
+                    let _ = peer.send(
+                        b"{\"op\":\"status\",\"docs\":0,\"event_id\":0,\"catch_up\":\"replayed\",\"tv\":false}\n",
+                    );
+                } else {
+                    let _ =
+                        peer.send(b"{\"op\":\"warning\",\"message\":\"unknown type: banana\"}\n");
+                    let _ = peer.send(b"{\"op\":\"hits\",\"hits\":[],\"took_us\":1}\n");
+                    let _ = peer.send(b"{\"op\":\"done\",\"count\":0}\n");
+                }
+            }
+        });
+        let mut source = DaemonSource::new(daemon.endpoint.clone(), None, Lang::English);
+        assert!(source.connect(), "the daemon is there");
+        let _ = source.search("banana grep:zebra", 10);
+        let st = source.status();
+        let warnings = st.borrow().warnings.clone();
+        assert!(
+            warnings.iter().any(|w| w.contains("unknown type: banana")),
+            "the scope's warning is lost: {warnings:?}"
+        );
         drop(source);
         daemon.join();
     }
