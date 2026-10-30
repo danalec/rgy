@@ -361,6 +361,7 @@ fi
 if [ "$manifests_only" -eq 1 ]; then
     echo "[manifests-only] the GitHub release is not touched"
 elif [ "$dry_run" -eq 1 ]; then
+    echo "[dry-run] push main and the checked-out branch to $gh_repo, and make main the default branch"
     echo "[dry-run] create the GitHub release $tag in $gh_repo"
 else
     if ! gh auth status > /dev/null 2>&1; then
@@ -383,9 +384,16 @@ else
     # README, the installers and the winget manifests all point at
     # github.com/danalec/rgy/main, so a mirror without main is a mirror
     # whose links are all 404.
-    git push -u github HEAD || { echo "the branch could not be pushed to the GitHub mirror" >&2; exit 1; }
+    #
+    # main goes first: a mirror with no commit yet takes its default
+    # branch from the first push, and a mirror whose default is
+    # `feature/rgxy-launcher` opens on a branch nobody asked for. The
+    # default is then set by name, so the outcome does not depend on
+    # which push landed first.
     git push -u github main || { echo "main could not be pushed to the GitHub mirror" >&2; exit 1; }
+    git push -u github HEAD || { echo "the branch could not be pushed to the GitHub mirror" >&2; exit 1; }
     git push -f github "$tag" || { echo "the tag could not be pushed to the GitHub mirror" >&2; exit 1; }
+    gh repo edit "$gh_repo" --default-branch main || { echo "the default branch of the mirror could not be set to main" >&2; exit 1; }
 
     if gh release view "$tag" --repo "$gh_repo" > /dev/null 2>&1; then
         gh release delete "$tag" --repo "$gh_repo" --yes \

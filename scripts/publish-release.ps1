@@ -344,6 +344,7 @@ if (-not $ManifestsOnly -and -not $DryRun) {
 if ($ManifestsOnly) {
     Write-Host "[manifests-only] the GitHub release is not touched"
 } elseif ($DryRun) {
+    Write-Host "[dry-run] push main and the checked-out branch to $ghRepo, and make main the default branch"
     Write-Host "[dry-run] create the GitHub release $tag in $ghRepo"
 } else {
     gh auth status *> $null
@@ -373,19 +374,30 @@ if ($ManifestsOnly) {
     # README, the installers and the winget manifests all point at
     # github.com/danalec/rgy/main, so a mirror without main is a mirror
     # whose links are all 404.
-    git push -u github HEAD
-    if ($LASTEXITCODE -ne 0) {
-        [Console]::Error.WriteLine("the branch could not be pushed to the GitHub mirror")
-        exit 1
-    }
+    #
+    # main goes first: a mirror with no commit yet takes its default
+    # branch from the first push, and a mirror whose default is
+    # `feature/rgxy-launcher` opens on a branch nobody asked for. The
+    # default is then set by name, so the outcome does not depend on
+    # which push landed first.
     git push -u github main
     if ($LASTEXITCODE -ne 0) {
         [Console]::Error.WriteLine("main could not be pushed to the GitHub mirror")
         exit 1
     }
+    git push -u github HEAD
+    if ($LASTEXITCODE -ne 0) {
+        [Console]::Error.WriteLine("the branch could not be pushed to the GitHub mirror")
+        exit 1
+    }
     git push -f github $tag
     if ($LASTEXITCODE -ne 0) {
         [Console]::Error.WriteLine("the tag could not be pushed to the GitHub mirror")
+        exit 1
+    }
+    gh repo edit $ghRepo --default-branch main
+    if ($LASTEXITCODE -ne 0) {
+        [Console]::Error.WriteLine("the default branch of the mirror could not be set to main")
         exit 1
     }
 
