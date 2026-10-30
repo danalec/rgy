@@ -538,3 +538,62 @@ fn the_protocol_stream_keeps_the_utf8_bytes() {
         "the accent must not become a question mark: {out}"
     );
 }
+
+/// The two layers spell the same file the same way.
+///
+/// The name layer's answers were spelled with the platform's separator and
+/// the content layer's came out with the tree's own `/`, so one daemon
+/// said one file two ways. A window that shows both layers then showed
+/// the same file twice, and a script that compared a name with a content
+/// hit compared two strings for one file.
+#[test]
+fn the_two_layers_spell_the_same_file_the_same_way() {
+    let dir = fixture_dir("dspell");
+    // One file, so the first path of each frame is the same file.
+    std::fs::write(dir.join("only.txt"), "a needle in the body\n").unwrap();
+    let root = dir.to_str().unwrap();
+
+    let req = "{\"op\":\"search\",\"q\":\"only\",\"limit\":10}\n\
+               {\"op\":\"grep\",\"q\":\"grep:needle\",\"limit\":10}\n";
+    let (code, out, err) = run_stdin(&searchd(), &["--root", root], req);
+    assert_eq!(code, 0, "stderr={err}");
+
+    let hits = out
+        .lines()
+        .find(|l| l.contains("\"op\":\"hits\""))
+        .unwrap_or_else(|| panic!("the hits frame is there: {out}"));
+    let files = out
+        .lines()
+        .find(|l| l.contains("\"op\":\"grep-files\""))
+        .unwrap_or_else(|| panic!("the grep frame is there: {out}"));
+
+    assert_eq!(
+        path_of(hits),
+        path_of(files),
+        "one file, one spelling: {out}"
+    );
+}
+
+/// The path in a frame, as the answer carries it.
+///
+/// The wire escapes the separator, so the bytes on it are not the bytes
+/// the answer carries: `\\` on the wire is one backslash. The test
+/// compares the answers, not the wire.
+fn path_of(frame: &str) -> String {
+    let start = frame.find("\"path\":\"").expect("the frame carries a path") + "\"path\":\"".len();
+    let mut out = String::new();
+    let mut rest = frame[start..].chars();
+    while let Some(c) = rest.next() {
+        match c {
+            '"' => break,
+            '\\' => match rest.next() {
+                Some('\\') => out.push('\\'),
+                Some('n') => out.push('\n'),
+                Some(other) => out.push(other),
+                None => break,
+            },
+            other => out.push(other),
+        }
+    }
+    out
+}

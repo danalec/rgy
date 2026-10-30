@@ -1205,7 +1205,7 @@ fn scoped_content(q: &str, paths: &[String], limit: usize, ctx: &Ctx) -> Vec<Ans
                     .into_iter()
                     .filter(|f| scope.iter().any(|s| same_path(s, f.path.as_bytes())))
                     .map(|f| GrepFile {
-                        path: f.path,
+                        path: platform_path(f.path.as_bytes()),
                         lines: f.lines.into_iter().map(|(n, t)| (n as usize, t)).collect(),
                     })
                     .collect();
@@ -1253,7 +1253,7 @@ fn scoped_content(q: &str, paths: &[String], limit: usize, ctx: &Ctx) -> Vec<Ans
     let mut files: Vec<GrepFile> = Vec::new();
     for f in res.files {
         files.push(GrepFile {
-            path: rgy_engine::console::spell(&f.path),
+            path: platform_path(&f.path),
             lines: f.lines,
         });
     }
@@ -1267,6 +1267,17 @@ fn scoped_content(q: &str, paths: &[String], limit: usize, ctx: &Ctx) -> Vec<Ans
     }));
     out.push(Answer::Frame(Response::Done { count }));
     out
+}
+
+/// A path, spelled the way the platform spells it.
+///
+/// The tree's own form uses `/` everywhere — that is the tree's form, not
+/// the platform's — and the name layer's answers are already spelled with
+/// the platform's separator. The content layer's answers came out with the
+/// tree's form, so one daemon said one file two ways, and a window that
+/// shows both layers showed the same file twice.
+fn platform_path(path: &[u8]) -> String {
+    rgy_engine::console::spell(path).replace('/', std::path::MAIN_SEPARATOR_STR)
 }
 
 /// Two paths are the same file when they are the same bytes, or when they
@@ -1353,7 +1364,7 @@ fn grep(q: &str, limit: usize, ctx: &Ctx) -> Vec<Answer> {
                                     break;
                                 }
                                 files.push(GrepFile {
-                                    path: f.path,
+                                    path: platform_path(f.path.as_bytes()),
                                     lines: f
                                         .lines
                                         .into_iter()
@@ -1478,7 +1489,7 @@ fn grep(q: &str, limit: usize, ctx: &Ctx) -> Vec<Answer> {
                 skipped += r.skipped.len();
                 for f in r.files {
                     files.push(GrepFile {
-                        path: rgy_engine::console::spell(&f.path),
+                        path: platform_path(&f.path),
                         lines: f.lines,
                     });
                 }
