@@ -534,11 +534,38 @@ mod tests {
             .collect()
     }
 
+    /// The tree, read until two reads in a row agree.
+    ///
+    /// A directory's timestamp lives in two records on NTFS: the one the
+    /// directory keeps about itself, and the one its parent keeps about
+    /// it. The parent's copy is refreshed a moment later -- a file's is
+    /// not, because a file's timestamp changes when the file is written
+    /// and the parent's entry changes with it -- and the tree truncates
+    /// both to seconds. A read that lands on the wrong side of a second
+    /// boundary therefore sees a different answer than the read before
+    /// it, for a tree that did not change at all.
+    ///
+    /// Two reads of a tree that has stopped changing must agree. This is
+    /// the tree that has stopped changing: the comparison that follows is
+    /// about the walk, not about the platform's bookkeeping.
+    fn settled(root: &[u8]) -> Rows {
+        let mut last = normalize(&scan_sequential(root));
+        for _ in 0..50 {
+            let now = normalize(&scan_sequential(root));
+            if now == last {
+                return last;
+            }
+            last = now;
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        last
+    }
+
     #[test]
     fn parallel_walk_matches_sequential_oracle() {
         let dir = fixture("diff");
         let root = dir.to_string_lossy().as_bytes().to_vec();
-        let want = normalize(&scan_sequential(&root));
+        let want = settled(&root);
         assert!(!want.is_empty(), "fixture produced no blocks");
         for threads in [2usize, 4, 8] {
             let got = normalize(&scan(&root, threads));
@@ -554,7 +581,7 @@ mod tests {
     fn zero_and_one_thread_take_the_inline_path() {
         let dir = fixture("inline");
         let root = dir.to_string_lossy().as_bytes().to_vec();
-        let want = normalize(&scan_sequential(&root));
+        let want = settled(&root);
         for threads in [0usize, 1] {
             assert_eq!(want, normalize(&scan(&root, threads)));
         }

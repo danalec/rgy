@@ -458,6 +458,11 @@ mod tests {
 
     fn fixture(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("rgy-disp-{tag}-{}", std::process::id()));
+        // The tree is built from nothing: a leftover from a run that died
+        // would carry the timestamps of that run, and a directory whose
+        // timestamps are older than its contents is a tree that says
+        // something else about itself than the one this test built.
+        let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::create_dir_all(dir.join("a/aa"));
         let _ = std::fs::create_dir_all(dir.join("b"));
         std::fs::write(dir.join("top.txt"), b"t").unwrap();
@@ -523,13 +528,40 @@ mod tests {
     /// — names, kinds, sizes, mtimes and child links — and the premise is
     /// checked first, so this cannot pass by silently falling back to the
     /// portable walk.
+    /// The tree, read until two reads in a row agree.
+    ///
+    /// A directory's timestamp lives in two records on NTFS: the one the
+    /// directory keeps about itself, and the one its parent keeps about
+    /// it. The parent's copy is refreshed a moment later -- a file's is
+    /// not, because a file's timestamp changes when the file is written
+    /// and the parent's entry changes with it -- and the tree truncates
+    /// both to seconds. A read that lands on the wrong side of a second
+    /// boundary therefore sees a different answer than the read before
+    /// it, for a tree that did not change at all.
+    ///
+    /// Two reads of a tree that has stopped changing must agree. This is
+    /// the tree that has stopped changing: the comparison that follows is
+    /// about the walk, not about the platform's bookkeeping.
+    fn settled(root: &[u8]) -> Rows {
+        let mut last = normalize(&scan_sequential(root));
+        for _ in 0..50 {
+            let now = normalize(&scan_sequential(root));
+            if now == last {
+                return last;
+            }
+            last = now;
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        last
+    }
+
     #[test]
     fn the_selected_backend_matches_the_sequential_oracle() {
         let dir = fixture("diff");
         let root = dir.to_string_lossy().as_bytes().to_vec();
         let src = source_for(root.clone(), 4);
         assert_eq!(src.backend_name(), EXPECTED, "the selector picked wrong");
-        let want = normalize(&scan_sequential(&root));
+        let want = settled(&root);
         assert!(!want.is_empty(), "fixture produced no blocks");
         let got = src.enumerate().expect("the selected backend must answer");
         assert_eq!(want, normalize(&got), "{EXPECTED} diverged from the oracle");
@@ -543,7 +575,7 @@ mod tests {
         let dir = fixture("cancellable");
         let root = dir.to_string_lossy().as_bytes().to_vec();
         let src = source_for(root.clone(), 4);
-        let want = normalize(&scan_sequential(&root));
+        let want = settled(&root);
         let got = src
             .enumerate_cancellable(&Cancel::new(), &|_| {})
             .expect("an uncancelled walk must answer");
