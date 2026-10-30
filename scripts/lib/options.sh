@@ -60,6 +60,11 @@ rgy_option_lookup() {
 #
 # The rest are the arguments of the calling script. An option that is in
 # neither table is an error, and so is a value with nothing after it.
+#
+# A switch is set to 1 -- the shell's "on" -- and a value is set to the
+# text of the argument. The scripts here test their switches with
+# `[ "$dry_run" -eq 1 ]`, and a helper that set them to "true" would
+# break every one of those tests.
 rgy_read_options() {
     local _switches="$1"
     local _values="$2"
@@ -79,9 +84,13 @@ rgy_read_options() {
                 ;;
         esac
         # The name with the dashes and the case off: --dry-run, -DryRun and
-        # --dryrun are one option.
-        _key=$(printf '%s' "$_name" | tr 'A-Z' 'a-z' | tr -d '-_')
-        if _var=$(_rgy_option_lookup "$_switches" "$_key"); then
+        # --dryrun are one option. The dashes go with the shell's own
+        # expansion and not with tr: `tr -d '-_'` reads the dash as the
+        # start of an option, and the name comes out empty.
+        _key=$(printf '%s' "$_name" | tr 'A-Z' 'a-z')
+        _key="${_key//-/}"
+        _key="${_key//_/}"
+        if _var=$(rgy_option_lookup "$_switches" "$_key"); then
             if [ "$_have" -eq 1 ]; then
                 # A switch takes no value. -DryRun:$false is a name the
                 # script does not know, and saying so is better than
@@ -89,9 +98,9 @@ rgy_read_options() {
                 echo "unknown option: $_written" >&2
                 exit 2
             fi
-            eval "$_var=true"
+            eval "$_var=1"
             shift
-        elif _var=$(_rgy_option_lookup "$_values" "$_key"); then
+        elif _var=$(rgy_option_lookup "$_values" "$_key"); then
             if [ "$_have" -eq 0 ]; then
                 if [ $# -lt 2 ]; then
                     echo "option $_written needs a value" >&2
