@@ -290,6 +290,41 @@ fn unknown_type_search_warns_and_yields_no_hits() {
     );
 }
 
+/// The store route fails closed, like the route that reads the files.
+///
+/// The daemon with a pack store and the daemon without one answer the
+/// same query the same way: a query the engine refuses matches nothing,
+/// and the reason is said. The store route used to drop the warning and
+/// search the store anyway -- the same daemon, two different answers.
+#[test]
+fn the_pack_store_fails_closed_on_a_refused_query() {
+    let dir = fixture_dir("dtvbadtype");
+    text_tree(&dir);
+    let root = dir.to_str().unwrap();
+
+    let store = fixture_dir("dtvstore");
+    let config = rgx_core::tv_runtime::builder::BuildConfig::default();
+    rgx_core::tv_runtime::builder::build_store(&dir, &store, &config)
+        .expect("the pack store is built");
+
+    // `grep:needle` alone would match; `type:banana` poisons it.
+    let req = r#"{"op":"grep","q":"type:banana grep:needle","limit":10}"#;
+    let (code, out, err) = run_stdin(
+        &searchd(),
+        &["--root", root, "--tv-dir", store.to_str().unwrap()],
+        &format!("{req}\n"),
+    );
+    assert_eq!(code, 0, "stderr={err}");
+    assert!(
+        out.contains("\"op\":\"warning\""),
+        "the fail-closed warning must ride the response stream; got {out}"
+    );
+    assert!(
+        out.contains("\"op\":\"grep-files\"") && out.contains("\"files\":[]"),
+        "a refused query matches nothing, store or no store; got {out}"
+    );
+}
+
 #[test]
 fn bad_invocation_exits_two() {
     let (code, _, err) = run(&searchd(), &["--listen", "bogus"]);

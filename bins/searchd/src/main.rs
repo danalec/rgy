@@ -1388,9 +1388,23 @@ fn grep(q: &str, limit: usize, ctx: &Ctx) -> Vec<Answer> {
     // bytes are packed once and mmap'd (plan 4.3); the direct engine
     // below stays for trees without a store.
     if let Some(dir) = &ctx.tv_dir {
+        let mut out: Vec<Answer> = Vec::new();
         match Alternatives::parse(q, &ctx.home) {
             Ok(alts) => {
+                // The warnings travel with the answer, as they do on the
+                // route below: a query that failed closed is part of what
+                // the client has to show. The store route used to drop
+                // them, so the same daemon answered the same query two
+                // different ways depending on whether it had a store.
+                for w in &alts.warnings {
+                    out.push(Answer::Frame(Response::Warning { message: w.clone() }));
+                }
                 for alt in &alts.alts {
+                    // A rejected alternative matches nothing, and the
+                    // reason was said above: the store is not asked.
+                    if alt.never {
+                        continue;
+                    }
                     // The limit is the limit. The store answers with every
                     // file that matched, and a launcher that draws fifty
                     // thousand rows is a launcher that froze.
@@ -1426,17 +1440,16 @@ fn grep(q: &str, limit: usize, ctx: &Ctx) -> Vec<Answer> {
         }
         let count = files.len();
         let took = t0.elapsed().as_micros() as u64;
-        return vec![
-            Answer::Frame(Response::GrepFiles {
-                files,
-                took_us: took,
-                // The store searched the corpus whole; the limit is what
-                // can cut the answer short.
-                complete: count < limit,
-                skipped: 0,
-            }),
-            Answer::Frame(Response::Done { count }),
-        ];
+        out.push(Answer::Frame(Response::GrepFiles {
+            files,
+            took_us: took,
+            // The store searched the corpus whole; the limit is what
+            // can cut the answer short.
+            complete: count < limit,
+            skipped: 0,
+        }));
+        out.push(Answer::Frame(Response::Done { count }));
+        return out;
     }
     match Alternatives::parse(q, &ctx.home) {
         Err(e) => vec![Answer::Frame(Response::Error { message: e })],
@@ -1530,7 +1543,12 @@ fn grep(q: &str, limit: usize, ctx: &Ctx) -> Vec<Answer> {
                 let scan_placeholders = rest.skipped.len();
                 r.skipped.extend(rest.skipped);
                 r.candidates = covered.len() + bare.len();
-                r.complete = r.files.len() < limit && rest.complete;
+                // The scan read everything it was given: that is this
+                // alternative's own fact. Whether the *answer* is whole is
+                // the total's fact -- the alternatives make one answer
+                // together, and one alternative's own count says nothing
+                // about it -- so the limit is settled at the end.
+                r.complete = rest.complete;
                 complete = complete && r.complete;
                 skipped += unread_files(bare.len(), rest.read, rest.complete, scan_placeholders)
                     + plan_placeholders;
@@ -1556,7 +1574,11 @@ fn grep(q: &str, limit: usize, ctx: &Ctx) -> Vec<Answer> {
             out.push(Answer::Frame(Response::GrepFiles {
                 files,
                 took_us: took,
-                complete,
+                // The answer is whole when the limit did not cut it and
+                // every scan read everything it was given. The same rule
+                // the other two routes follow, so the three routes say the
+                // same thing about the same answer.
+                complete: count < limit && complete,
                 skipped,
             }));
             out.push(Answer::Frame(Response::Done { count }));
@@ -2940,6 +2962,61 @@ mod tests {
         assert_eq!(
             skipped, 0,
             "the daemon read what it was asked to read, so it skipped nothing"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An answer that several alternatives filled is not whole.
+    ///
+    /// The completeness used to be decided by each alternative's own
+    /// count: two alternatives that each found fewer files than the limit
+    /// could fill the limit between them, and the answer said it was
+    /// whole. The limit is the total's fact.
+    #[test]
+    fn an_answer_filled_by_several_alternatives_is_not_whole() {
+        let dir = std::env::temp_dir().join("rgy-searchd-alts-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..3 {
+            std::fs::write(dir.join(format!("a{i}.txt")), b"alpha\n").unwrap();
+            std::fs::write(dir.join(format!("b{i}.txt")), b"beta\n").unwrap();
+        }
+        let root = dir.to_string_lossy().into_owned().into_bytes();
+
+        let source = PortableSource::new(root.clone(), 2);
+        let live = Live::with_root(
+            Index::build(source.enumerate().expect("the walk"), 0, 1, b"/"),
+            &root,
+        );
+        let ctx = std::sync::Arc::new(Ctx {
+            root: root.clone(),
+            home: String::new(),
+            tv_dir: None,
+            live: std::sync::RwLock::new(live),
+            catch_up: std::sync::atomic::AtomicU8::new(CATCH_UP_RELISTED),
+            feed: std::sync::atomic::AtomicU8::new(FEED_NONE),
+            changed: Changed::new(),
+            content: std::sync::Mutex::new(None),
+            wants_content: std::sync::atomic::AtomicBool::new(false),
+            sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
+        });
+
+        // Three files match the first alternative and one the second: the
+        // limit of four is filled by the two of them together.
+        let answer = grep("grep:alpha|grep:beta", 4, &ctx);
+        let (files, complete) = answer
+            .iter()
+            .find_map(|r| match r {
+                Answer::Frame(Response::GrepFiles {
+                    files, complete, ..
+                }) => Some((files.len(), *complete)),
+                _ => None,
+            })
+            .expect("the answer carries the files");
+        assert_eq!(files, 4, "the limit is the limit");
+        assert!(
+            !complete,
+            "the limit cut the answer, so the answer is not whole"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
