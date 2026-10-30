@@ -272,6 +272,12 @@ impl DaemonSource {
     ///
     /// The source says sentences, and the caller that draws them needs to
     /// know in which language they are said.
+    ///
+    /// The caller is the window, and the window is Windows-only for now:
+    /// everywhere else the terminal interface is the launcher, and it is
+    /// given the language by the hand that read it. The accessor is
+    /// compiled everywhere and called where the window is.
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn lang(&self) -> Lang {
         self.lang
     }
