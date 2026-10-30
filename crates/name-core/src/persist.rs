@@ -20,7 +20,8 @@ use std::time::Duration;
 
 use crate::name_index::Index;
 use alloc::format;
-use alloc::string::{String, ToString};
+use alloc::string::String;
+use alloc::vec::Vec;
 
 /// How old a saved index may be before it is rebuilt instead of reused.
 ///
@@ -112,8 +113,104 @@ pub fn save(idx: &Index, root: &Path, index: &Path) -> std::io::Result<Saved> {
     Ok(Saved { index: index.to_path_buf(), meta })
 }
 
+/// The stamp's version.
+///
+/// Version 1 wrote the root as plain text on a line of its own. A root
+/// is bytes, and a root can carry a line break -- and a line break in a
+/// line-delimited file is the end of the line, so the root came back
+/// cut in half: the index never matched its own tree, the daemon walked
+/// the tree again on every start, and a root whose own name carried the
+/// words `root /etc` chose the tree the index was served for.
+///
+/// Version 2 writes the root as hex. Hex is ASCII, so it cannot carry a
+/// line break, and it carries the bytes exactly.
+const STAMP_VERSION: u32 = 2;
+
 fn stamp(root: &Path, entries: usize, built: u64) -> String {
-    format!("rgy-index-meta 1\nroot {}\nentries {entries}\nbuilt {built}\n", canon(root).to_string_lossy())
+    format!("rgy-index-meta {STAMP_VERSION}\nroot-hex {}\nentries {entries}\nbuilt {built}\n", hex(&root_bytes(root)))
+}
+
+/// The root's bytes, exactly as the filesystem spells them.
+///
+/// The bytes are the root's own. `to_string_lossy` replaces the bytes
+/// that are not text with a question mark, and two roots that differ
+/// only in those bytes are then the same text -- and the same text is
+/// the same digest, and the same digest is the same index file, and one
+/// index file for two trees is an index that answers for the wrong tree.
+fn root_bytes(root: &Path) -> Vec<u8> {
+    canon(root).as_os_str().as_encoded_bytes().to_vec()
+}
+
+/// The hex of some bytes.
+fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(DIGITS[(b >> 4) as usize] as char);
+        out.push(DIGITS[(b & 0x0f) as usize] as char);
+    }
+    out
+}
+
+/// The bytes of some hex, or nothing when it is not hex.
+fn unhex(text: &str) -> Option<Vec<u8>> {
+    let bytes = text.as_bytes();
+    if !bytes.len().is_multiple_of(2) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    for pair in bytes.chunks(2) {
+        let hi = (pair[0] as char).to_digit(16)?;
+        let lo = (pair[1] as char).to_digit(16)?;
+        out.push((hi * 16 + lo) as u8);
+    }
+    Some(out)
+}
+
+/// The sidecar's words: the root it names, in bytes, and when it was built.
+///
+/// The version decides how the root is spelled. Version 1 wrote it in
+/// plain text and version 2 writes it in hex, and both are read: the
+/// index a user already has is still the index the program uses. A
+/// version 1 stamp whose root carried a line break cannot be read back
+/// whole, and that one is refused -- the tree is walked again and the
+/// stamp is written again, in hex.
+fn read_stamp(meta: &str) -> Option<(Vec<u8>, Option<u64>)> {
+    let mut lines = meta.lines();
+    let header = lines.next()?;
+    let version = header.strip_prefix("rgy-index-meta ")?.trim().parse::<u32>().ok()?;
+    let mut root = None;
+    let mut built = None;
+    for line in lines {
+        let Some((key, value)) = line.split_once(' ') else {
+            continue;
+        };
+        match (version, key) {
+            (1, "root") => root = Some(value.as_bytes().to_vec()),
+            (2, "root-hex") => root = unhex(value),
+            (_, "built") => built = value.parse::<u64>().ok(),
+            _ => {}
+        }
+    }
+    Some((root?, built))
+}
+
+/// The bytes of a path, as one line a person can read.
+///
+/// The message is one line, and a path that carries a line break cannot
+/// be one: the line break is shown as what it is.
+fn show(bytes: &[u8]) -> String {
+    let mut out = String::new();
+    for ch in String::from_utf8_lossy(bytes).chars() {
+        match ch {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\x{:02x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// What [`load_for`] decided, and why — so a caller can say so out loud
@@ -125,6 +222,9 @@ pub enum Miss {
     /// The sidecar could not be parsed or read.
     NoStamp,
     /// The sidecar names a different tree than the one being searched.
+    ///
+    /// The two roots are as one line each: a root that carries a line
+    /// break cannot be one, and the message is one line.
     WrongRoot { saved: String, want: String },
     /// Older than the caller's `max_age`.
     TooOld { built: u64 },
@@ -161,7 +261,7 @@ impl std::fmt::Display for Miss {
 /// not something this can infer. `None` means the default limit
 /// ([`DEFAULT_MAX_AGE`]); a zero `max_age` always rebuilds.
 pub fn load_for(root: &Path, index: &Path, max_age: Option<Duration>) -> Result<Index, Miss> {
-    let want = canon(root).to_string_lossy().into_owned();
+    let want = root_bytes(root);
     let meta = match std::fs::read_to_string(stamp_path(index)) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -171,24 +271,11 @@ pub fn load_for(root: &Path, index: &Path, max_age: Option<Duration>) -> Result<
         Err(_) => return Err(Miss::NoStamp),
     };
 
-    let mut saved_root = None;
-    let mut built = None;
-    for line in meta.lines() {
-        let Some((key, value)) = line.split_once(' ') else {
-            continue;
-        };
-        match key {
-            "root" => saved_root = Some(value.to_string()),
-            "built" => built = value.parse::<u64>().ok(),
-            _ => {}
-        }
-    }
-
-    let Some(saved) = saved_root else {
+    let Some((saved, built)) = read_stamp(&meta) else {
         return Err(Miss::NoStamp);
     };
     if saved != want {
-        return Err(Miss::WrongRoot { saved, want });
+        return Err(Miss::WrongRoot { saved: show(&saved), want: show(&want) });
     }
     // An index with no build stamp cannot be dated, and an index that cannot
     // be dated cannot be judged fresh: it is refused rather than served on
@@ -222,15 +309,14 @@ pub fn load_saved(index: &Path) -> Result<(Index, String), Miss> {
         }
         Err(_) => return Err(Miss::NoStamp),
     };
-    let mut saved_root = None;
-    for line in meta.lines() {
-        if let Some(("root", value)) = line.split_once(' ') {
-            saved_root = Some(value.to_string());
-        }
-    }
-    let saved = saved_root.ok_or(Miss::NoStamp)?;
+    let Some((saved, _)) = read_stamp(&meta) else {
+        return Err(Miss::NoStamp);
+    };
     let idx = Index::load(index).ok_or(Miss::BadIndex)?;
-    Ok((idx, saved))
+    // The root is text here because the caller prints it: the paths it
+    // serves are the root's bytes joined to the names, and the root comes
+    // back whole.
+    Ok((idx, String::from_utf8_lossy(&saved).into_owned()))
 }
 
 /// Default index location for a root: `<cache_dir>/rgy/<digest>.idx`, so two
@@ -249,7 +335,7 @@ pub fn load_saved(index: &Path) -> Result<(Index, String), Miss> {
 /// temp dir is still the last resort, for a machine with no home at all,
 /// but it is no longer the first one reached.
 pub fn default_index_path(root: &Path) -> PathBuf {
-    let digest = fnv1a(canon(root).to_string_lossy().as_bytes());
+    let digest = fnv1a(&root_bytes(root));
     let base = std::env::var_os("RGY_INDEX_DIR").map(PathBuf::from).or_else(cache_dir).unwrap_or_else(std::env::temp_dir);
     base.join("rgy").join(format!("{digest:016x}.idx"))
 }
@@ -527,6 +613,107 @@ mod tests {
         assert_eq!(loaded.n, built.n);
         assert_eq!(root, canon(&dir).to_string_lossy().into_owned());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A root whose own name carries a line break comes back whole.
+    ///
+    /// The stamp is a line-delimited text file, and the root used to be
+    /// written into it as plain text on a line of its own. A root is
+    /// bytes, and a root can carry a line break -- and a line break in a
+    /// line-delimited file is the end of the line. So the root came back
+    /// cut in half, the index never matched its own tree, and the daemon
+    /// walked the tree again on every start.
+    #[test]
+    fn a_root_with_a_line_break_comes_back_whole() {
+        let dir = tree("linebreak");
+        let idx_path = dir.join("cache.idx");
+        let built = build(&dir);
+        // The root's own name carries a line break. The directory need
+        // not exist: the canonical form of a path that is not there is
+        // the path itself, and the stamp is what carries the root.
+        let root = dir.join("ro\not");
+        save(&built, &root, &idx_path).expect("save");
+
+        // The stamp is one line per field, and the root's line break is
+        // not one of them.
+        let stamp = std::fs::read_to_string(stamp_path(&idx_path)).expect("read the stamp");
+        assert_eq!(stamp.lines().count(), 4, "the stamp is four lines:\n{stamp}");
+
+        // And the root comes back whole: this index is the one this tree
+        // was built for, and it is served.
+        assert!(outcome(&root, &idx_path, None).is_ok(), "the index was not reused for its own tree");
+        let (_, saved) = load_saved(&idx_path).expect("load");
+        assert_eq!(saved, canon(&root).to_string_lossy().into_owned());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A root cannot name another tree.
+    ///
+    /// The root used to be written into the stamp as plain text, so a
+    /// root whose own name carried the words `root /etc` put a second
+    /// `root` line in the stamp -- and the loader, which believed the
+    /// last one, served the index for a tree nobody asked about.
+    #[test]
+    fn a_root_cannot_name_another_tree() {
+        let dir = tree("spoof");
+        let idx_path = dir.join("cache.idx");
+        let built = build(&dir);
+        let root = dir.join("x\nroot /etc");
+        save(&built, &root, &idx_path).expect("save");
+
+        let (_, saved) = load_saved(&idx_path).expect("load");
+        assert_eq!(saved, canon(&root).to_string_lossy().into_owned());
+        // The tree it names is this one -- not the one the root's own name
+        // spells out.
+        assert_ne!(saved, "/etc", "the stamp chose the tree: {saved}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A stamp written by the previous program is still read.
+    ///
+    /// The index a user already has on disk is the index the program
+    /// uses: the version says how the root is spelled, and both
+    /// spellings are read.
+    #[test]
+    fn a_stamp_from_the_previous_program_is_still_read() {
+        let dir = tree("v1");
+        let idx_path = dir.join("cache.idx");
+        let built = build(&dir);
+        save(&built, &dir, &idx_path).expect("save");
+
+        // The stamp as version 1 wrote it: the root in plain text.
+        let v1 = format!("rgy-index-meta 1\nroot {}\nentries {}\nbuilt {}\n", canon(&dir).to_string_lossy(), built.n, now_unix());
+        std::fs::write(stamp_path(&idx_path), v1).expect("write the old stamp");
+
+        assert_eq!(outcome(&dir, &idx_path, None).expect("no miss"), built.n);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The digest is over the root's bytes, not over its text.
+    ///
+    /// Two roots whose text is the same and whose bytes are not are two
+    /// roots. The text of both is the lossy text, and one index file for
+    /// two trees is an index that answers for the wrong tree.
+    #[cfg(unix)]
+    #[test]
+    fn two_roots_that_differ_only_in_bytes_that_are_not_text_are_two_roots() {
+        use std::os::unix::ffi::OsStrExt;
+        let a = Path::new(std::ffi::OsStr::from_bytes(b"/tmp/a\xff"));
+        let b = Path::new(std::ffi::OsStr::from_bytes(b"/tmp/a\xfe"));
+        assert_ne!(root_bytes(a), root_bytes(b));
+        assert_ne!(fnv1a(&root_bytes(a)), fnv1a(&root_bytes(b)));
+    }
+
+    /// The same, on Windows: a path there is UTF-16, and a surrogate
+    /// with no partner is a byte the lossy text cannot carry.
+    #[cfg(windows)]
+    #[test]
+    fn two_roots_that_differ_only_in_bytes_that_are_not_text_are_two_roots() {
+        use std::os::windows::ffi::OsStringExt;
+        let a = PathBuf::from(std::ffi::OsString::from_wide(&[b'a' as u16, 0xD800]));
+        let b = PathBuf::from(std::ffi::OsString::from_wide(&[b'a' as u16, 0xDC00]));
+        assert_ne!(root_bytes(&a), root_bytes(&b));
+        assert_ne!(fnv1a(&root_bytes(&a)), fnv1a(&root_bytes(&b)));
     }
 
     #[test]
