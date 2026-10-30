@@ -920,6 +920,22 @@ fn paste(state: &mut State, clipboard: actions::Clipboard) -> bool {
 }
 
 /// A key, while the actions menu is open.
+///
+/// The menu has the keyboard for the keys that **choose an action**: the
+/// arrows move it, `Enter` runs it, and `Escape` closes it.
+///
+/// Every other key is the **field's** — a letter, a `Backspace`, a
+/// `Ctrl+U`, a paste, and the keys of the actions themselves — and the
+/// menu closes and the key does what it does in the field. The paste
+/// already worked that way, and a letter that was swallowed while the
+/// menu was open was a key that did nothing and said nothing: a launcher
+/// the user cannot tell from a frozen one. The user who opens the menu
+/// and starts typing is asking a new question, and the menu is in the
+/// way of it.
+///
+/// The key is handed to the field's own handler with the menu already
+/// closed, so there is one place where a letter means what a letter
+/// means.
 fn menu_key(state: &mut State, key: Key) -> Control {
     match key {
         Key::Up => state.app.menu_previous(),
@@ -931,21 +947,11 @@ fn menu_key(state: &mut State, key: Key) -> Control {
                 return run_action(state, action);
             }
         }
-        Key::CtrlV => {
-            // A paste is the field's, and the menu is the keyboard's:
-            // the menu closes and the text lands in the query, with the
-            // field's own words for a clipboard that cannot be pasted.
-            // A key that does nothing and says nothing is a launcher
-            // the user cannot tell from a frozen one.
-            let clipboard = (state.clipboard)();
-            state.app.menu_closed();
-            if paste(state, clipboard) {
-                return changed(state);
-            }
-            return paint(state);
-        }
         Key::Esc | Key::CtrlK => state.app.menu_closed(),
-        _ => {}
+        other => {
+            state.app.menu_closed();
+            return on_key(state, other);
+        }
     }
     paint(state)
 }
@@ -1270,6 +1276,13 @@ fn status_line(state: &State) -> String {
     let status = &state.status;
     let words = Text::for_lang(state.lang);
     let mut parts: Vec<String> = Vec::new();
+    if state.app.mode() == Mode::Menu {
+        // The menu has the keyboard, and the line says so: the arrows move
+        // the action and not the result, and a key that moves the
+        // selection somewhere else without saying anything is a key the
+        // user cannot tell from a frozen one.
+        parts.push(words.menu_has_the_keyboard.to_string());
+    }
     if state.waiting != Waiting::Idle {
         // The answer is on its way, and the line says so: a launcher that
         // is quiet while it waits is a launcher that looks stuck.
@@ -2169,6 +2182,83 @@ mod tests {
             .set_results(vec![Row::new("C:/a/notas.txt".to_string(), 0)]);
         let _ = on_key(&mut state, Key::CtrlK);
         assert_eq!(state.app.mode(), Mode::Menu, "the menu is open");
+    }
+
+    /// A letter typed while the menu is open is the field's.
+    ///
+    /// The menu has the keyboard for the keys that choose an action, and a
+    /// letter is not one of them: the user who opens the menu and starts
+    /// typing is asking a new question. The letter used to be swallowed —
+    /// a key that does nothing and says nothing, which is a launcher the
+    /// user cannot tell from a frozen one.
+    #[test]
+    fn a_letter_typed_in_the_menu_is_the_field_s() {
+        let (mut state, asked) = recording();
+        state
+            .app
+            .set_results(vec![Row::new("C:/a/notas.txt".to_string(), 0)]);
+        let _ = on_key(&mut state, Key::CtrlK);
+        assert_eq!(state.app.mode(), Mode::Menu, "the menu is open");
+
+        let _ = on_key(&mut state, Key::Char('i'));
+
+        assert_eq!(state.app.query().text(), "i", "the letter landed");
+        assert_ne!(state.app.mode(), Mode::Menu, "the menu is closed");
+        assert_eq!(state.waiting, Waiting::Answer, "the answer is on its way");
+        assert!(asked.borrow().is_empty(), "the daemon is asked later");
+    }
+
+    /// The actions' own keys work while the menu is open.
+    ///
+    /// The menu lists the actions and the key that does each one, and the
+    /// key still does it: the menu is where the actions are, not a wall
+    /// between the user and them.
+    #[test]
+    fn the_actions_own_keys_still_work_in_the_menu() {
+        let (mut state, _asked) = recording();
+        state
+            .app
+            .set_results(vec![Row::new("C:/a/notas.txt".to_string(), 0)]);
+        let _ = on_key(&mut state, Key::CtrlK);
+        assert_eq!(state.app.mode(), Mode::Menu, "the menu is open");
+
+        let _ = on_key(&mut state, Key::CtrlP);
+
+        assert!(
+            state.app.preview().is_some(),
+            "the preview did not open from the menu"
+        );
+        assert_ne!(state.app.mode(), Mode::Menu, "the menu is closed");
+    }
+
+    /// The menu says that it has the keyboard.
+    ///
+    /// The key moved the keyboard to the menu: the arrows run an action and
+    /// not the list. A key that moves the selection somewhere else and
+    /// says nothing is a key the user cannot tell from a frozen one, and
+    /// the line under the field is where the launcher says what is
+    /// happening.
+    ///
+    /// And the word is not there the rest of the time: a line that says it
+    /// always says nothing.
+    #[test]
+    fn the_menu_says_that_it_has_the_keyboard() {
+        let mut state = empty();
+        state
+            .app
+            .set_results(vec![Row::new("C:/a/notas.txt".to_string(), 0)]);
+        let closed = status_line(&state);
+        assert!(
+            !closed.contains(Text::for_lang(state.lang).menu_has_the_keyboard),
+            "{closed}"
+        );
+
+        let _ = on_key(&mut state, Key::CtrlK);
+        let open = status_line(&state);
+        assert!(
+            open.contains(Text::for_lang(state.lang).menu_has_the_keyboard),
+            "{open}"
+        );
     }
 
     /// The window does not wait for the daemon.

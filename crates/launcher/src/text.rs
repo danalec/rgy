@@ -226,6 +226,16 @@ vocabulary! {
         "a thread que pergunta ao daemon morreu";
     rgx_ended_badly => "rgx ended badly: {e}", "o rgx terminou mal: {e}";
 
+    // The word for the panel that has the keyboard.
+    //
+    // The menu is a column of actions on the right of the window, and the
+    // key that opens it gives it the keyboard: the arrows move the action
+    // and not the result. The line under the field says so, because a key
+    // that moves the selection somewhere else and says nothing is a key
+    // the user cannot tell from a frozen one.
+    menu_has_the_keyboard => "the actions have the keyboard",
+        "as ações têm o teclado";
+
     // --- the time the answers take ---------------------------------------------
     // The meter's words. The percentiles are the same in every language a
     // person reads, and the cold start is the one that is translated.
@@ -376,6 +386,7 @@ mod tests {
             assert!(!text.thing_folder.is_empty(), "{lang:?}");
             assert!(!text.placeholder.is_empty(), "{lang:?}");
             assert!(!text.no_daemon.is_empty(), "{lang:?}");
+            assert!(!text.menu_has_the_keyboard.is_empty(), "{lang:?}");
         }
     }
 

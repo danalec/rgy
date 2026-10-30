@@ -26,7 +26,7 @@ use rgy_launcher::layout::{
 };
 use rgy_launcher::results::IconKind;
 use rgy_launcher::text::{Lang, Text};
-use rgy_launcher::{Layout, Preview, Row};
+use rgy_launcher::{Layout, Mode, Preview, Row};
 
 use crate::window::View;
 
@@ -1008,6 +1008,15 @@ fn results_right(layout: &Layout) -> i32 {
 /// opaque where the rest of the window is not — and the hairline on its
 /// left edge is what says that it is a separate thing.
 ///
+/// The column is always drawn, and it is the **menu** only while it has
+/// the keyboard. A mark that is there whether the menu has the keyboard or
+/// not is a mark that means nothing: the user pressed `Ctrl+K`, the
+/// keyboard moved to the column, and the picture said the same thing it
+/// said before. So the mark on the selected entry is there while the menu
+/// has the keyboard and not one moment before, and the hairline on the
+/// column's left edge is the accent — the colour that says what the
+/// keyboard is on — for as long as the menu holds it.
+///
 /// The labels are the vocabulary's, in the language the window speaks: a
 /// menu that says "Open" to a user who reads "Abrir" is a menu the user
 /// has to guess.
@@ -1033,6 +1042,9 @@ fn draw_column(
         draw_too_short(hdc, fonts, rect, scale, lang);
         return;
     };
+    // Whether the menu has the keyboard: it is the difference between a
+    // column that is a legend of the keys and a column the user is in.
+    let live = view.mode == Mode::Menu;
     // The separator: a hairline on the column's left edge, the window's
     // own border on the left of the names.
     fill(
@@ -1041,15 +1053,18 @@ fn draw_column(
         rect.top,
         px(scale, 1),
         rect.height,
-        colour::BORDER,
+        if live { colour::ACCENT } else { colour::BORDER },
     );
     // The room inside the column, once its own margins are taken.
     let inner = (rect.width - px(scale, 12) * 2).max(0);
     for (i, action) in view.menu.iter().enumerate() {
         let y = column.entry_top(i);
-        if i == view.menu_selected {
+        if live && i == view.menu_selected {
             // The selected entry is marked the way the selected row is
-            // marked: the band, and the bar on its left.
+            // marked: the band, and the bar on its left. It is marked only
+            // while the menu has the keyboard — the mark says which action
+            // the arrows would run, and the arrows only run an action
+            // while the menu has them.
             fill(hdc, rect.left, y, rect.width, column.row, colour::SELECTED);
             fill(hdc, rect.left, y, px(scale, 3), column.row, colour::ACCENT);
         }
@@ -1326,6 +1341,115 @@ mod tests {
             latency: meter.view(24),
             ..View::default()
         }
+    }
+
+    /// A view with a column of actions, in the mode it was given.
+    ///
+    /// The column is the same in both modes: the actions of the selected
+    /// result, and the key that does each one. What changes is whether the
+    /// keyboard is on it.
+    ///
+    /// The rows are four because the column needs the room: a window with
+    /// one result is shorter than four actions, and a column that does not
+    /// fit is not drawn at all.
+    fn view_with_menu(mode: Mode) -> View {
+        View {
+            query: "toml".to_string(),
+            rows: vec![
+                Row::new("C:/a/Cargo.toml".to_string(), 0),
+                Row::new("C:/a/Cargo.lock".to_string(), 1),
+                Row::new("C:/a/crates.toml".to_string(), 2),
+                Row::new("C:/a/pyproject.toml".to_string(), 3),
+            ],
+            menu: vec![
+                Action::Open,
+                Action::OpenFolder,
+                Action::CopyPath,
+                Action::Preview,
+            ],
+            menu_selected: 0,
+            mode,
+            ..View::default()
+        }
+    }
+
+    /// Where the column is, and how tall its entries are.
+    ///
+    /// The geometry is the one the picture used: the side bar is in it,
+    /// because the column's own edge is where the side bar's left edge
+    /// is, and a column measured without it would be somewhere else.
+    fn column_geometry(view: &View, height: i32) -> (Rect, i32) {
+        let model = Layout::with_rows(view.rows.len() as u32).with_side_bar(SIDE_BAR_WIDTH);
+        let layout = model.scaled(SCALE_PERCENT);
+        let rect = column_rect(&layout, height);
+        let row = px(SCALE_PERCENT, SIDE_BAR_ENTRY_HEIGHT as i32);
+        let column = Column::at(
+            rect,
+            view.menu.len(),
+            row,
+            px(SCALE_PERCENT, SIDE_BAR_MINIMUM_ENTRY_HEIGHT as i32),
+        )
+        .expect("the column is there");
+        (rect, column.row)
+    }
+
+    /// The menu says that it has the keyboard.
+    ///
+    /// The column of actions is drawn whether the menu is open or not — it
+    /// is the actions of the selected result and the key that does each
+    /// one — and a mark that is there either way says nothing: the user
+    /// pressed `Ctrl+K`, the keyboard moved to the column, and the picture
+    /// said the same thing it said before.
+    ///
+    /// So the selected action is marked while the menu has the keyboard and
+    /// not one moment before, and the test draws the picture and looks for
+    /// the mark: a rule about the picture is only checkable by drawing it.
+    #[test]
+    fn the_menu_is_marked_only_while_it_has_the_keyboard() {
+        let closed = view_with_menu(Mode::Typing);
+        let (canvas, _width, height) = draw(&closed);
+        let (rect, _row) = column_geometry(&closed, height);
+        assert_ne!(
+            canvas.pixel(rect.left + 1, rect.top + 2),
+            in_pixels(colour::ACCENT),
+            "the menu is closed and the action is still marked"
+        );
+
+        let open = view_with_menu(Mode::Menu);
+        let (canvas, _width, height) = draw(&open);
+        let (rect, _row) = column_geometry(&open, height);
+        assert_eq!(
+            canvas.pixel(rect.left + 1, rect.top + 2),
+            in_pixels(colour::ACCENT),
+            "the action the arrows would run is not marked"
+        );
+    }
+
+    /// The column's edge is the accent while the menu has the keyboard.
+    ///
+    /// The hairline is what says that the column is a separate thing, and
+    /// it is the accent — the colour that says what the keyboard is on —
+    /// for as long as the menu holds it. The picture says where the
+    /// keyboard is before the user presses a key and finds out.
+    #[test]
+    fn the_column_s_edge_is_the_accent_while_the_menu_has_the_keyboard() {
+        let closed = view_with_menu(Mode::Typing);
+        let (canvas, _width, height) = draw(&closed);
+        let (rect, _row) = column_geometry(&closed, height);
+        assert_eq!(
+            canvas.pixel(rect.left, rect.top + 40),
+            in_pixels(colour::BORDER),
+            "the edge is not the border's colour"
+        );
+
+        let open = view_with_menu(Mode::Menu);
+        let (canvas, _width, height) = draw(&open);
+        let (rect, _row) = column_geometry(&open, height);
+        assert_eq!(
+            canvas.pixel(rect.left, rect.top + 40),
+            in_pixels(colour::ACCENT),
+            "the edge does not say that the menu has the keyboard"
+        );
     }
 
     /// The window shows the time the answers take.
@@ -1848,6 +1972,11 @@ mod tests {
     /// The picture is what the user sees: a column that is drawn over
     /// the names, or one that starts lower than the results, is a
     /// picture the layout does not describe.
+    ///
+    /// The column is drawn with the menu open, because the mark of the
+    /// selected entry is what says where the column's first entry is:
+    /// without the menu the column is a legend, and a legend's first
+    /// letter is a letter and not the top of an entry.
     #[test]
     fn the_column_is_drawn_where_the_layout_says() {
         let model = Layout::with_rows(4).with_side_bar(SIDE_BAR_WIDTH);
@@ -1866,6 +1995,7 @@ mod tests {
                 Action::Preview,
             ],
             menu_selected: 0,
+            mode: Mode::Menu,
             ..View::default()
         };
         // The surface is the window's own colour, so the column's edge
@@ -1880,15 +2010,18 @@ mod tests {
             SCALE_PERCENT,
             Lang::English,
         );
-        let x = layout.side_bar_left() as i32 + 10;
+        // The separator is on the column's own edge, and it opens where
+        // the list opens.
+        let edge = layout.side_bar_left() as i32;
         let top = (0..height)
-            .find(|&y| canvas.pixel(x, y) != in_pixels(colour::BACKDROP))
-            .expect("the column drew an entry");
+            .find(|&y| canvas.pixel(edge, y) != in_pixels(colour::BACKDROP))
+            .expect("the column drew its edge");
         assert_eq!(
             top,
             layout.list_top() as i32,
-            "the column opens with its first entry"
+            "the column opens with the list"
         );
+        let x = layout.side_bar_left() as i32 + 10;
         assert_eq!(
             canvas.pixel(x, top),
             in_pixels(colour::SELECTED),
