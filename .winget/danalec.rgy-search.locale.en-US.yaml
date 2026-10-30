@@ -3,7 +3,7 @@
 # STAGED: no release has been published yet. scripts/publish-release.ps1
 # rewrites the version and the release-notes URL when it publishes one.
 PackageIdentifier: danalec.rgy-search
-PackageVersion: 0.1.0
+PackageVersion: 0.1.1
 PackageLocale: en-US
 Publisher: danalec
 PublisherUrl: https://github.com/danalec
@@ -33,6 +33,6 @@ Tags:
   - fuzzy
   - filesystem
   - mft
-ReleaseNotesUrl: https://github.com/danalec/rgy/releases/tag/rgy-v0.1.0
+ReleaseNotesUrl: https://github.com/danalec/rgy/releases/tag/rgy-v0.1.1
 ManifestType: defaultLocale
 ManifestVersion: 1.9.0

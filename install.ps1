@@ -26,7 +26,7 @@ param(
     [string]$BaseUrl = 'https://github.com/danalec/rgy/releases/download',
 
     # pin the version instead of asking the server for the latest rgy-*
-    [string]$Version = 'rgy-v0.1.0',
+    [string]$Version = 'rgy-v0.1.1',
 
     # skip SHA256 verification (not recommended)
     [switch]$SkipChecksum,
@@ -52,7 +52,7 @@ Set-StrictMode -Version Latest
 # an emulator, and an installer that hands it one installs something that
 # will not start.
 $expected = @{
-    'x86_64-windows.zip' = '0000000000000000000000000000000000000000000000000000000000000000'
+    'x86_64-windows.zip' = '42707293DC24616F2EDE162328391CFF4775845E91B697FD72CC1A9B71F9EA89'
     'aarch64-windows.zip' = '0000000000000000000000000000000000000000000000000000000000000000'
 }
 
