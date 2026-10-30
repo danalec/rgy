@@ -602,3 +602,213 @@ fn a_redirected_stdout_keeps_the_utf8_bytes_in_json() {
         "the JSON must carry the name as UTF-8: {out}"
     );
 }
+
+// --- the daemon, instead of the local index --------------------------------
+
+/// A token that is different for every call, so no two tests share a
+/// daemon.
+fn unique() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    format!(
+        "{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+/// The daemon of a test, and the environment that finds it.
+///
+/// The registered endpoint is where the clients look for the daemon: the
+/// named pipe that carries the user's name on Windows, and the socket in
+/// the cache directory everywhere else. The test points the client at it
+/// through the environment — `USERNAME` on Windows, the cache directory
+/// everywhere else — so a test never touches the daemon the machine
+/// really has.
+struct Registered {
+    /// The daemon, killed when the test ends.
+    _daemon: harness::Daemon,
+    /// The environment the client has to see.
+    env: Vec<(&'static str, String)>,
+    /// The cache directory, where the socket lives.
+    ///
+    /// It lives as long as the daemon does: a socket whose directory is
+    /// gone is a socket nobody can reach, and the test would be measuring
+    /// the removal instead of the answer.
+    _cache: Option<harness::TempDir>,
+}
+
+/// A daemon over `root`, on the registered endpoint.
+#[cfg(windows)]
+fn registered(root: &std::path::Path) -> Registered {
+    let user = format!("rgy-e2e-{}", unique());
+    let args = [
+        "--root".to_string(),
+        root.to_str().unwrap().to_string(),
+        "--listen".to_string(),
+        format!("pipe:rgy-searchd-{user}"),
+    ];
+    let borrowed: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    Registered {
+        _daemon: harness::spawn_pipe(&bin("searchd"), &borrowed),
+        env: vec![("USERNAME", user)],
+        _cache: None,
+    }
+}
+
+/// A daemon over `root`, on the registered endpoint.
+#[cfg(unix)]
+fn registered(root: &std::path::Path) -> Registered {
+    let cache = harness::fixture_dir("searchctl-registered");
+    std::fs::create_dir_all(cache.join("rgy")).unwrap();
+    let args = [
+        "--root".to_string(),
+        root.to_str().unwrap().to_string(),
+        "--listen".to_string(),
+        format!("uds:{}/rgy/searchd.sock", cache.display()),
+    ];
+    let borrowed: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    Registered {
+        _daemon: harness::spawn_uds(&bin("searchd"), &borrowed),
+        env: vec![("XDG_CACHE_HOME", cache.to_str().unwrap().to_string())],
+        _cache: Some(cache),
+    }
+}
+
+/// The environment of an endpoint nobody listens on.
+fn absent() -> Vec<(&'static str, String)> {
+    #[cfg(windows)]
+    {
+        vec![("USERNAME", format!("rgy-e2e-none-{}", unique()))]
+    }
+    #[cfg(unix)]
+    {
+        let cache = std::env::temp_dir().join(format!("rgy-e2e-none-{}", unique()));
+        vec![("XDG_CACHE_HOME", cache.to_string_lossy().into_owned())]
+    }
+}
+
+/// Run the CLI with the environment the test says it should see.
+///
+/// The harness's own runner does not take an environment, and the
+/// registered endpoint is exactly what the environment says: a test that
+/// cannot set it cannot prove that the CLI looks where it says.
+fn run_with(args: &[&str], env: &[(&str, String)]) -> (i32, String, String) {
+    let cache = harness::shared_cache_dir("searchctl-daemon");
+    let mut command = std::process::Command::new(searchctl());
+    command
+        .args(args)
+        .env("RGY_INDEX_DIR", &cache)
+        .stdin(std::process::Stdio::null());
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let out = command
+        .output()
+        .unwrap_or_else(|e| panic!("spawn searchctl: {e}"));
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// Ask the CLI, and ask again while the daemon is starting.
+///
+/// The daemon opens its pipe only when the index is ready, so a daemon
+/// that is a second into its startup has nothing to answer on yet. The
+/// test asks again — the way a person does.
+fn ask(args: &[&str], env: &[(&str, String)]) -> (i32, String, String) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let (code, out, err) = run_with(args, env);
+        if code != 2 || std::time::Instant::now() >= deadline {
+            return (code, out, err);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+/// The daemon flag asks the daemon, and the daemon's tree is the one that
+/// answers.
+///
+/// The flag was documented and parsed, and then read in one place only:
+/// the picker's path. The plain query path never looked at it, so the
+/// CLI walked `--root`, built an index of its own, and answered from
+/// that — a different tree from the daemon's, and the user never told.
+///
+/// The two trees are the point: both hold a file called `hello.txt`, and
+/// only the daemon's one may be in the answer.
+#[test]
+fn the_daemon_flag_answers_from_the_daemons_tree() {
+    let served = fixture_dir("searchctl-served");
+    text_tree(&served);
+    let other = fixture_dir("searchctl-other");
+    std::fs::write(other.join("hello.txt"), "a hello of its own\n").unwrap();
+
+    let daemon = registered(&served);
+    let root = other.to_str().unwrap();
+
+    let (code, out, err) = ask(&["--daemon", "--root", root, "hello"], &daemon.env);
+    assert_eq!(
+        code, 0,
+        "the daemon's tree answers; stdout={out} stderr={err}"
+    );
+    assert!(
+        out.contains(served.to_str().unwrap()),
+        "the answer is the daemon's tree: {out}"
+    );
+    assert!(
+        !out.contains(other.to_str().unwrap()),
+        "the answer is not the local tree: {out}"
+    );
+    assert!(
+        err.contains("asking the running daemon"),
+        "the answer says where it came from: {err}"
+    );
+}
+
+/// The daemon flag never falls back to the local index.
+///
+/// The flag's words are "the running daemon, not the local index": a
+/// client that quietly built an index of its own would be answering a
+/// question nobody asked — and it would be paying for a walk of the
+/// whole tree to do it. A daemon that is not there is an error, and the
+/// error says where it looked.
+#[test]
+fn the_daemon_flag_does_not_fall_back_to_the_local_index() {
+    let dir = fixture_dir("searchctl-absent");
+    text_tree(&dir);
+    let root = dir.to_str().unwrap();
+
+    let (code, out, err) = run_with(&["--daemon", "--root", root, "hello"], &absent());
+    assert_eq!(code, 2, "no daemon is an error; stdout={out} stderr={err}");
+    assert!(out.is_empty(), "nothing is printed: {out}");
+    assert!(err.contains("daemon"), "the error names the daemon: {err}");
+    assert!(
+        !err.contains("indexed") && !err.contains("rebuilding"),
+        "the local index is never built: {err}"
+    );
+}
+
+/// The daemon answers the content layer too.
+///
+/// The content layer reads files, and the daemon is the one that reads
+/// them. The answer is rg's shape — `path:line:text` — the same shape
+/// the local path prints.
+#[test]
+fn the_daemon_flag_answers_the_content_layer() {
+    let served = fixture_dir("searchctl-content");
+    text_tree(&served);
+    let daemon = registered(&served);
+
+    let (code, out, err) = ask(&["--daemon", "grep:zebra"], &daemon.env);
+    assert_eq!(
+        code, 0,
+        "the daemon reads the files; stdout={out} stderr={err}"
+    );
+    assert!(
+        out.contains("notes.md") && out.contains("zebra"),
+        "the answer is the content: {out}"
+    );
+}

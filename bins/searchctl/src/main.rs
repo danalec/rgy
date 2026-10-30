@@ -501,6 +501,206 @@ fn print_selection(records: &[Vec<u8>]) {
     let _ = out.flush();
 }
 
+/// Ask the running daemon, and print what it says.
+///
+/// The flag's words are the contract: **the running daemon, never the local
+/// index**. The daemon's tree is not `--root` — it is the tree the daemon
+/// was started on — and an answer from the wrong tree answers a question
+/// nobody asked. So there is no fallback here: a daemon that is not there
+/// is an error, and the error says where it looked.
+///
+/// The shapes are the local path's shapes: a path per line for the names,
+/// `path:line:text` for the content, and the same JSON. A flag that
+/// changes where the answer comes from must not change what the answer
+/// looks like.
+fn run_daemon(opts: &Opts, query: &str) -> Result<(), String> {
+    if opts.count {
+        // The daemon's answer is a page: it stops at the limit, and the
+        // limit is what the user asked for. A count taken from a page is
+        // a preview wearing a count's clothes.
+        return Err(
+            "--count cannot be answered by the daemon: its answer stops at the limit".to_string(),
+        );
+    }
+    let endpoint = rgy_proto::endpoint::Endpoint::registered()
+        .ok_or_else(|| "this machine has no registered daemon to ask".to_string())?;
+    let mut client = rgy_proto::Client::connect(&endpoint)
+        .map_err(|e| format!("the daemon at {} did not answer: {e}", endpoint.describe()))?;
+    rgy_engine::errln!("searchctl: asking the running daemon (its own tree, not --root)");
+
+    // The query is parsed here for the same reason the local path parses
+    // it: the layer the query belongs to decides which question the
+    // daemon is asked. The warnings are **not** printed from here — the
+    // daemon parses the same query with the same parser and says them
+    // on the wire, and the answer's own warnings are the ones about the
+    // answer.
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_default();
+    let alts = Alternatives::parse(query, &home)?;
+    let content = alts.alts.iter().any(|a| a.grep.is_some());
+
+    if content {
+        let outcome = client.grep(query, opts.limit).map_err(|e| e.to_string())?;
+        for w in &outcome.warnings {
+            rgy_engine::errln!("warning: {w}");
+        }
+        let printed = daemon_content_lines(&outcome.files, opts.json);
+        print_lines(&printed.lines);
+        if printed.dropped > 0 {
+            eprintln!(
+                "searchctl: {}",
+                rgy_pick::uncarryable_paths(printed.dropped)
+            );
+        }
+        if !outcome.complete {
+            // The daemon says what it did not read. A search that did not
+            // read everything did not say it read everything, and an
+            // answer that does not say so is an answer that looks whole.
+            eprintln!(
+                "searchctl: the daemon did not read {} file(s): the answer is partial",
+                outcome.skipped
+            );
+        }
+        if opts.explain {
+            rgy_engine::errln!(
+                "searchctl: the running daemon answered the content layer in {} us",
+                outcome.took_us
+            );
+        }
+        if printed.found == 0 {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
+    let outcome = client
+        .search(query, opts.limit)
+        .map_err(|e| e.to_string())?;
+    for w in &outcome.warnings {
+        rgy_engine::errln!("warning: {w}");
+    }
+    let printed = daemon_name_lines(&outcome.hits, opts.json);
+    print_lines(&printed.lines);
+    if printed.dropped > 0 {
+        eprintln!(
+            "searchctl: {}",
+            rgy_pick::uncarryable_paths(printed.dropped)
+        );
+    }
+    if opts.explain {
+        rgy_engine::errln!(
+            "searchctl: the running daemon answered the name layer in {} us with {} hit(s); the daemon does not report its plan",
+            outcome.took_us,
+            outcome.hits.len()
+        );
+    }
+    if printed.found == 0 {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// What the daemon's answer is printed as.
+///
+/// The lines are what the caller prints. The two counts are what the
+/// caller has to say about them: the records that were found — the answer
+/// is empty when there were none — and the ones that could not be one
+/// line, because half of a path is a path that does not exist.
+#[derive(Debug)]
+struct Printed {
+    lines: Vec<String>,
+    found: usize,
+    dropped: usize,
+}
+
+/// The lines the daemon's names are printed as.
+///
+/// The shapes are the local path's shapes: a path per line, or one JSON
+/// object per hit. The JSON carries the score, and the characters the
+/// query matched when the daemon could say which they were — the daemon
+/// leaves the span empty when it could not, and a span that guessed would
+/// be a lie in the place the user looks first.
+fn daemon_name_lines(hits: &[rgy_proto::Hit], json: bool) -> Printed {
+    let mut printed = Printed {
+        lines: Vec::new(),
+        found: hits.len(),
+        dropped: 0,
+    };
+    for hit in hits {
+        let path = &hit.path;
+        if json {
+            let esc = rgy_proto::escape_json_string(path);
+            let matched = (!hit.span.is_empty()).then(|| {
+                hit.span
+                    .iter()
+                    .map(|n| n.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            });
+            printed.lines.push(match matched {
+                Some(m) => format!(
+                    "{{\"path\":\"{esc}\",\"score\":{},\"match\":[{m}]}}",
+                    hit.score
+                ),
+                None => format!("{{\"path\":\"{esc}\",\"score\":{}}}", hit.score),
+            });
+        } else if rgy_pick::carries_line(path.as_bytes()) {
+            printed.lines.push(path.clone());
+        } else {
+            // The path cannot be one line, and half of it is a path that
+            // does not exist.
+            printed.dropped += 1;
+        }
+    }
+    printed
+}
+
+/// The lines the daemon's content answer is printed as.
+///
+/// The shape is rg's: `path:line:text`, or one JSON object per line. The
+/// path that carries a line break cannot be one line, and it is left out
+/// and counted — the same rule the local path follows.
+fn daemon_content_lines(files: &[rgy_proto::GrepFile], json: bool) -> Printed {
+    let mut printed = Printed {
+        lines: Vec::new(),
+        found: 0,
+        dropped: 0,
+    };
+    for file in files {
+        let path = rgy_engine::console::spell(file.path.as_bytes());
+        for (ln, text) in &file.lines {
+            printed.found += 1;
+            if json {
+                let esc = rgy_proto::escape_json_string;
+                printed.lines.push(format!(
+                    "{{\"path\":\"{}\",\"line\":{ln},\"text\":\"{}\"}}",
+                    esc(&path),
+                    esc(text)
+                ));
+            } else if rgy_pick::carries_line(path.as_bytes()) {
+                printed.lines.push(format!("{path}:{ln}:{text}"));
+            } else {
+                // The record cannot be one line: the path carries a line
+                // break, and half of it is a path that does not exist.
+                printed.dropped += 1;
+            }
+        }
+    }
+    printed
+}
+
+/// Print the lines, one per line.
+///
+/// The console writes them: the bytes are the same, and a console that
+/// refused the UTF-8 code page gets the text as UTF-16 instead of
+/// mojibake.
+fn print_lines(lines: &[String]) {
+    for line in lines {
+        rgy_engine::outln!("{line}");
+    }
+}
+
 fn run(opts: &Opts, query: &str) -> Result<(), String> {
     // `--pick` owns the whole run: it asks, it feeds a picker, and it exits
     // with the picker's status. It is before the index, because the daemon
@@ -508,6 +708,14 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
     if opts.pick {
         let code = run_pick(opts, query)?;
         std::process::exit(code);
+    }
+    // `--daemon` asks the running daemon and nothing else. The daemon's
+    // tree is not `--root` — it is the tree the daemon was started on — so
+    // a client that quietly answered from a local index would be
+    // answering a different question than the one that was asked, and the
+    // user would never know.
+    if opts.daemon {
+        return run_daemon(opts, query);
     }
     let root = &opts.root;
     let limit = opts.limit;
@@ -866,5 +1074,103 @@ mod tests {
     fn the_help_says_what_a_named_picker_gets() {
         let text = help();
         assert!(text.contains("one path per line"), "{text}");
+    }
+
+    /// The daemon's names are printed the way the local names are.
+    ///
+    /// The flag changes where the answer comes from, not what it looks
+    /// like: a path per line, and the same JSON object with the score.
+    #[test]
+    fn the_daemon_names_are_printed_the_way_the_local_names_are() {
+        let hits = vec![rgy_proto::Hit::new("C:/a/hello.txt".into(), 12)];
+        let printed = daemon_name_lines(&hits, false);
+        assert_eq!(printed.lines, vec!["C:/a/hello.txt".to_string()]);
+        assert_eq!(printed.found, 1);
+        assert_eq!(printed.dropped, 0);
+
+        let printed = daemon_name_lines(&hits, true);
+        assert_eq!(
+            printed.lines,
+            vec![r#"{"path":"C:/a/hello.txt","score":12}"#.to_string()]
+        );
+    }
+
+    /// The characters the query matched travel with the hit.
+    ///
+    /// The span is what lets an interface say *which* part of the name
+    /// matched. The daemon leaves it empty when it could not say, and the
+    /// JSON then carries the score alone: a span that guessed would be a
+    /// lie in the place the user looks first.
+    #[test]
+    fn the_daemon_json_carries_the_matched_characters() {
+        let mut hit = rgy_proto::Hit::new("C:/a/hello.txt".into(), 12);
+        hit.span = vec![0, 1, 2];
+        let printed = daemon_name_lines(&[hit], true);
+        assert_eq!(
+            printed.lines,
+            vec![r#"{"path":"C:/a/hello.txt","score":12,"match":[0,1,2]}"#.to_string()]
+        );
+    }
+
+    /// A path that cannot be one line is left out, and counted.
+    ///
+    /// Half of a path is a path that does not exist, so the record is
+    /// dropped rather than printed in two pieces — and the count says so
+    /// on stderr. The JSON carries it: the escape is what a line cannot
+    /// do.
+    #[test]
+    fn a_path_that_cannot_be_one_line_is_left_out_and_counted() {
+        let hits = vec![rgy_proto::Hit::new("C:/a/one\ntwo.txt".into(), 3)];
+        let printed = daemon_name_lines(&hits, false);
+        assert!(
+            printed.lines.is_empty(),
+            "the path is not one line: {printed:?}"
+        );
+        assert_eq!(printed.found, 1);
+        assert_eq!(printed.dropped, 1);
+
+        let printed = daemon_name_lines(&hits, true);
+        assert_eq!(printed.dropped, 0);
+        assert_eq!(printed.lines.len(), 1);
+    }
+
+    /// The daemon's content answer is rg's shape.
+    ///
+    /// `path:line:text` for the plain output, and the same three fields
+    /// in one JSON object — the local path's shapes, so a script reads
+    /// either answer the same way.
+    #[test]
+    fn the_daemon_content_is_printed_as_path_line_text() {
+        let files = vec![rgy_proto::GrepFile {
+            path: "C:/a/notes.md".into(),
+            lines: vec![(7, "the zebra".into())],
+        }];
+        let printed = daemon_content_lines(&files, false);
+        assert_eq!(printed.lines, vec!["C:/a/notes.md:7:the zebra".to_string()]);
+        assert_eq!(printed.found, 1);
+        assert_eq!(printed.dropped, 0);
+
+        let printed = daemon_content_lines(&files, true);
+        assert_eq!(
+            printed.lines,
+            vec![r#"{"path":"C:/a/notes.md","line":7,"text":"the zebra"}"#.to_string()]
+        );
+    }
+
+    /// The content answer counts the records it found, not the lines it
+    /// printed.
+    ///
+    /// The answer is empty when there were no records, and the exit
+    /// status says so. A file with no line in it is a file that was
+    /// found: it is not an answer that was empty.
+    #[test]
+    fn the_content_answer_counts_the_records_it_found() {
+        let files = vec![rgy_proto::GrepFile {
+            path: "C:/a/notes.md".into(),
+            lines: Vec::new(),
+        }];
+        let printed = daemon_content_lines(&files, false);
+        assert_eq!(printed.found, 0);
+        assert!(printed.lines.is_empty(), "{printed:?}");
     }
 }
