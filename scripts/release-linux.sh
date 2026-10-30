@@ -76,7 +76,7 @@ fi
 scp -q "$HOST:$REMOTE/src/.dist/rgy-v$VERSION-*.tar.gz" .dist/
 scp -q "$HOST:$REMOTE/src/.dist/SHA256SUMS" .dist/SHA256SUMS.host
 if [ -f .dist/SHA256SUMS.local ]; then
-    cat .dist/SHA256SUMS.local .dist/SHA256SUMS.host | sort -k2 -u > .dist/SHA256SUMS
+    cat .dist/SHA256SUMS.local .dist/SHA256SUMS.host | LC_ALL=C sort -k2 -u > .dist/SHA256SUMS
     rm -f .dist/SHA256SUMS.local .dist/SHA256SUMS.host
 else
     mv .dist/SHA256SUMS.host .dist/SHA256SUMS
