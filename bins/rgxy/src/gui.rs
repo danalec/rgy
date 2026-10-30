@@ -37,8 +37,10 @@
 
 use std::sync::mpsc::{Receiver, Sender, channel};
 
+use rgy_launcher::latency::LatencyMeter;
+use rgy_launcher::text::{Lang, Text};
 use rgy_launcher::usage::History;
-use rgy_launcher::{Action, Answer, App, Mode, Preview, Row, Source, commands};
+use rgy_launcher::{Action, Answer, App, Layer, Mode, Preview, Row, Source, commands};
 use rgy_launcher_windows::actions;
 use rgy_launcher_windows::hook::Hook;
 use rgy_launcher_windows::window::{Compositor, Control, Event, Key, View, Window};
@@ -51,8 +53,12 @@ use crate::preview;
 /// How many results the window asks for.
 const LIMIT: usize = 50;
 
-/// The placeholder the field shows when it is empty.
-const PLACEHOLDER: &str = "Buscar arquivos, apps ou comandos…";
+/// The chart's width, in characters.
+///
+/// The window is narrower than a terminal, and the chart is the first
+/// thing that goes when the space runs out: the percentiles are the
+/// figures that stay.
+const SPARK_COLUMNS: usize = 16;
 
 /// What the launcher is waiting for.
 ///
@@ -237,8 +243,9 @@ impl Daemon {
         let endpoint = source.endpoint().clone();
         let rgx = source.rgx().map(str::to_string);
         let window = source.window();
+        let lang = source.lang();
         let (outbox, inbox) = spawn_worker(move || DaemonWorker {
-            source: DaemonSource::with_window(endpoint, rgx, window),
+            source: DaemonSource::with_window(endpoint, rgx, window, lang),
         });
         Daemon { outbox, inbox }
     }
@@ -359,6 +366,13 @@ struct State {
     /// was on its way leaves the list showing the results of the
     /// question before it.
     rows_query: Option<String>,
+    /// How long the answers take.
+    ///
+    /// The meter is the model's, and the launcher keeps one: the daemon
+    /// says how long each answer took, and the window draws the chart of
+    /// the last few dozen of them. A window that shows one figure and
+    /// calls it a chart is a window that draws a history it never had.
+    meter: LatencyMeter,
     /// The status of the answer that is on the screen.
     ///
     /// The status comes with the answer: the count, the layer and the
@@ -401,6 +415,11 @@ struct State {
     history: History,
     /// Where the memory is kept.
     usage_path: Option<std::path::PathBuf>,
+    /// The language the launcher is speaking.
+    ///
+    /// The window says sentences — under the field, in the menu, in the
+    /// panel — and a sentence is said in the language the user reads.
+    lang: Lang,
 }
 
 impl State {
@@ -425,6 +444,7 @@ impl State {
     /// down so that the next run of the launcher knows it too.
     fn record_use(&mut self, path: &str) {
         self.history.record(path, mru::now());
+        let lang = self.lang;
         // The write is on a thread of its own: the store is behind a
         // lock, and the lock can be held for half a second. The
         // launcher that opened the result is already gone by then, and
@@ -443,7 +463,9 @@ impl State {
             // that is silently not written is a memory the user believes
             // in and the machine does not have.
             if let Err(reason) = mru::save(&file, &history) {
-                let message = format!("o histórico não foi gravado: {reason}");
+                let message = Text::for_lang(lang)
+                    .history_not_saved
+                    .replace("{reason}", &reason.to_string());
                 eprintln!("rgxy: {message}");
                 let _ = notes.send(message);
             }
@@ -453,7 +475,10 @@ impl State {
 
 /// Run the launcher, until the window is closed.
 pub fn run(source: DaemonSource, options: &Options) -> Result<(), String> {
-    let mut window = Window::new("rgxy")?;
+    // The language is the source's: the source says the sentences about the
+    // daemon, and the window says the ones about itself.
+    let lang = source.lang();
+    let mut window = Window::new("rgxy")?.with_lang(lang);
     // The hook is a global thing, and a global thing can be refused: the
     // launcher still works, it is just opened another way.
     let mut refused = None;
@@ -465,7 +490,9 @@ pub fn run(source: DaemonSource, options: &Options) -> Result<(), String> {
                 // a program started from a shortcut has no stderr, and a
                 // launcher that cannot be opened and says nothing is a
                 // process the user has to kill.
-                let message = format!("o atalho global não foi instalado: {reason}");
+                let message = Text::for_lang(lang)
+                    .hotkey_not_installed
+                    .replace("{reason}", &reason.to_string());
                 eprintln!("rgxy: {message}");
                 refused = Some(message);
                 None
@@ -478,7 +505,7 @@ pub fn run(source: DaemonSource, options: &Options) -> Result<(), String> {
     // The memory is read once, when the launcher starts: the launcher is
     // resident, and the file is the memory of the last time it ran.
     let usage_path = mru::store_path();
-    let (history, memory_note) = memory(usage_path.as_deref());
+    let (history, memory_note) = memory(usage_path.as_deref(), lang);
 
     // What the launcher has to say about the machine it is on: a
     // refused hotkey and a memory that could not be read are two
@@ -506,7 +533,7 @@ pub fn run(source: DaemonSource, options: &Options) -> Result<(), String> {
     // told about, and the line under the field is where the launcher says
     // what is true of the machine it is on.
     if window.compositor() == Compositor::Refused {
-        facts.push("o ecrã recusou a superfície translúcida".to_string());
+        facts.push(Text::for_lang(lang).screen_refused_the_surface.to_string());
     }
     let note = if facts.is_empty() {
         None
@@ -520,13 +547,16 @@ pub fn run(source: DaemonSource, options: &Options) -> Result<(), String> {
         app: App::new(),
         source: Box::new(Daemon::new(source)),
         clipboard: Box::new(actions::paste_text),
-        open: Box::new(actions::open),
-        reveal: Box::new(actions::reveal),
+        // The seams answer in the user's language: the machine's own
+        // refusal is said in the language the user reads.
+        open: Box::new(move |path: &str| actions::open(path, lang)),
+        reveal: Box::new(move |path: &str| actions::reveal(path, lang)),
         waiting: Waiting::Idle,
         ask_daemon: true,
         in_flight: false,
         generation: 0,
         rows_query: None,
+        meter: LatencyMeter::new(),
         status: Status::default(),
         note,
         notes,
@@ -536,6 +566,7 @@ pub fn run(source: DaemonSource, options: &Options) -> Result<(), String> {
         preview_pending: None,
         history,
         usage_path,
+        lang,
     };
 
     // The rows the screen has room for: the window is sized from them, and
@@ -588,14 +619,14 @@ pub fn run(source: DaemonSource, options: &Options) -> Result<(), String> {
 /// altogether: the ranking falls back to the daemon's order, the nudge
 /// does not come back, and the user is told — the memory is gone for
 /// this run, and it is not the daemon's fault.
-fn memory(path: Option<&std::path::Path>) -> (History, Option<String>) {
+fn memory(path: Option<&std::path::Path>, lang: Lang) -> (History, Option<String>) {
     let Some(path) = path else {
         return (History::new(), None);
     };
     match mru::load(path) {
         Ok(history) => (history, None),
         Err(err) => {
-            let message = mru::read_error(&err);
+            let message = mru::read_error(&err, lang);
             // The stderr of a program started from a shortcut is
             // nowhere: the line under the field says it as well.
             eprintln!("rgxy: {message}");
@@ -811,9 +842,10 @@ fn changed(state: &mut State) -> Control {
         // the window was waiting for is not this one.
         state.waiting = Waiting::Idle;
         if state.app.command().is_none() {
-            state
-                .app
-                .set_warnings(vec![commands::unknown(state.app.query().text())]);
+            state.app.set_warnings(vec![commands::unknown(
+                state.app.query().text(),
+                state.lang,
+            )]);
         } else {
             state.app.set_warnings(Vec::new());
         }
@@ -836,8 +868,8 @@ fn changed(state: &mut State) -> Control {
 
 /// The field is empty: the list is empty too.
 ///
-/// The line under the field goes with it. It said "37 resultados" and
-/// "conteúdo" about an answer that was no longer on the screen, and a line
+/// The line under the field goes with it. It said "37 results" and
+/// "content" about an answer that was no longer on the screen, and a line
 /// that describes another answer describes a question the user is not
 /// asking.
 fn cleared(state: &mut State) {
@@ -845,7 +877,7 @@ fn cleared(state: &mut State) {
     state.app.set_warnings(Vec::new());
     state.rows_query = None;
     state.status.matches = 0;
-    state.status.layer = "";
+    state.status.layer = None;
     state.status.backend.clear();
     state.status.took_us = 0;
 }
@@ -867,19 +899,21 @@ fn paste(state: &mut State, clipboard: actions::Clipboard) -> bool {
             // Nothing to paste is an answer the user has to see: the key
             // was pressed and the launcher said nothing, and the silence
             // looks like a launcher that is broken.
-            state.app.set_warnings(vec!["nada para colar".to_string()]);
+            state.app.set_warnings(vec![
+                Text::for_lang(state.lang).nothing_to_paste.to_string(),
+            ]);
             false
         }
         actions::Clipboard::NotText => {
-            state
-                .app
-                .set_warnings(vec!["a área de transferência não tem texto".to_string()]);
+            state.app.set_warnings(vec![
+                Text::for_lang(state.lang).clipboard_is_empty.to_string(),
+            ]);
             false
         }
         actions::Clipboard::Busy => {
-            state
-                .app
-                .set_warnings(vec!["a área de transferência está ocupada".to_string()]);
+            state.app.set_warnings(vec![
+                Text::for_lang(state.lang).clipboard_is_busy.to_string(),
+            ]);
             false
         }
     }
@@ -921,9 +955,10 @@ fn command(state: &mut State) -> Control {
     match state.app.command() {
         Some(action) => run_action(state, action),
         None => {
-            state
-                .app
-                .set_warnings(vec![commands::unknown(state.app.query().text())]);
+            state.app.set_warnings(vec![commands::unknown(
+                state.app.query().text(),
+                state.lang,
+            )]);
             paint(state)
         }
     }
@@ -935,9 +970,9 @@ fn run_action(state: &mut State, action: Action) -> Control {
         // There is nothing to act on. Saying nothing is what makes the
         // user think the launcher is broken, so the line under the field
         // says what happened.
-        state
-            .app
-            .set_warnings(vec!["nenhum resultado selecionado".to_string()]);
+        state.app.set_warnings(vec![
+            Text::for_lang(state.lang).no_result_selected.to_string(),
+        ]);
         return paint(state);
     };
     // The action has to fit the row: the preview reads the head of a
@@ -945,7 +980,7 @@ fn run_action(state: &mut State, action: Action) -> Control {
     // program that head is noise. The refusal says why, in the user's
     // language — a key that was pressed and refused in silence is a key
     // the user presses again.
-    if let Some(reason) = action.refusal(row.icon()) {
+    if let Some(reason) = action.refusal(row.icon(), state.lang) {
         state.app.set_warnings(vec![reason]);
         return paint(state);
     }
@@ -994,8 +1029,8 @@ fn run_action(state: &mut State, action: Action) -> Control {
         }
         Action::CopyPath => {
             // The window stays: the user is copying a path, not leaving.
-            let message = match actions::copy_path(&row.path) {
-                Ok(()) => "caminho copiado".to_string(),
+            let message = match actions::copy_path(&row.path, state.lang) {
+                Ok(()) => Text::for_lang(state.lang).path_copied.to_string(),
                 Err(reason) => reason,
             };
             state.app.set_warnings(vec![message]);
@@ -1009,10 +1044,11 @@ fn run_action(state: &mut State, action: Action) -> Control {
             // waiting.
             let path = row.path.clone();
             let tx = state.preview_tx.clone();
+            let lang = state.lang;
             state.preview_pending = Some(path.clone());
-            state.app.set_preview(preview::pending(&path));
+            state.app.set_preview(preview::pending(&path, lang));
             std::thread::spawn(move || {
-                let _ = tx.send((path.clone(), preview::of(&path)));
+                let _ = tx.send((path.clone(), preview::of(&path, lang)));
             });
             paint(state)
         }
@@ -1066,6 +1102,16 @@ fn apply_reply(state: &mut State) -> bool {
                 return false;
             }
             state.status = status;
+            // The daemon says how long its answer took, and that is the
+            // measurement the meter keeps: the search, not the pipe
+            // around it.
+            //
+            // A zero is not a measurement — the fallback does not say how
+            // long it took — and a zero in the window would make the
+            // median zero, which is a number nobody can read.
+            if state.status.took_us > 0 {
+                state.meter.record(u128::from(state.status.took_us));
+            }
             apply(state, answer);
             state.waiting = Waiting::Idle;
         }
@@ -1131,7 +1177,7 @@ fn tick(state: &mut State) -> Control {
 fn worker_gone(state: &mut State) -> Control {
     state.in_flight = false;
     state.waiting = Waiting::Idle;
-    state.note = Some("a thread que pergunta ao daemon morreu".to_string());
+    state.note = Some(Text::for_lang(state.lang).worker_died.to_string());
     paint(state)
 }
 
@@ -1185,7 +1231,7 @@ fn view(state: &State) -> View {
         // last character: the model moves it with the arrow keys, and a
         // paste lands where it is.
         caret: app.query().caret(),
-        placeholder: PLACEHOLDER.to_string(),
+        placeholder: Text::for_lang(state.lang).placeholder.to_string(),
         rows,
         selected: selected.saturating_sub(top),
         top,
@@ -1194,6 +1240,9 @@ fn view(state: &State) -> View {
         menu_selected: app.menu_index(),
         warnings: app.warnings().to_vec(),
         status: status_line(state),
+        // The figures the launcher has: how long the last answer took,
+        // and the chart of the ones before it.
+        latency: state.meter.view(SPARK_COLUMNS),
         preview: app.preview().cloned(),
     }
 }
@@ -1219,23 +1268,24 @@ fn show(state: &State) -> Control {
 /// The one line under the field.
 fn status_line(state: &State) -> String {
     let status = &state.status;
+    let words = Text::for_lang(state.lang);
     let mut parts: Vec<String> = Vec::new();
     if state.waiting != Waiting::Idle {
         // The answer is on its way, and the line says so: a launcher that
         // is quiet while it waits is a launcher that looks stuck.
-        parts.push("procurando…".to_string());
+        parts.push(words.searching.to_string());
     }
     if status.asked && !status.connected {
         // The daemon was asked and it is not there. The line does not
         // say that about a daemon nobody has asked about yet.
-        parts.push("sem ligação ao daemon".to_string());
+        parts.push(rgy_launcher::text::no_daemon(state.lang).to_string());
     }
     // The count, the layer, the backend and the time belong to the
     // **answer**: they are shown whether the daemon is up or not. The
     // `rgx` fallback answers while the daemon is away, and a line that
     // hides the answer because the daemon is not there hides the one
     // thing the user asked for.
-    let mut count = format!("{} resultados", status.matches);
+    let mut count = words.results.replace("{}", &status.matches.to_string());
     if let Some(query) = &state.rows_query
         && query != state.app.query().text()
         && !state.app.results().is_empty()
@@ -1243,25 +1293,20 @@ fn status_line(state: &State) -> String {
         // The rows on the screen answer another question, and the line
         // says which one: a list of results under a field that says
         // something else is a list of results for another question.
-        count = format!("{count} de \"{query}\"");
+        count = format!("{count} {}", words.of_query.replace("{query}", query));
     }
     parts.push(count);
-    if !status.layer.is_empty() {
-        parts.push(status.layer.to_string());
-    }
-    if status.layer == "conteúdo" {
-        if !status.backend.is_empty() {
-            parts.push(status.backend.clone());
-        }
-        if status.tv {
-            parts.push("TV".to_string());
-        }
-    }
-    if status.took_us > 0 {
-        if status.took_us < 1000 {
-            parts.push("<1 ms".to_string());
-        } else {
-            parts.push(format!("{} ms", status.took_us / 1000));
+    match status.layer {
+        None => {}
+        Some(Layer::Names) => parts.push(words.layer_names.to_string()),
+        Some(Layer::Content) => {
+            parts.push(words.layer_content.to_string());
+            if !status.backend.is_empty() {
+                parts.push(status.backend.clone());
+            }
+            if status.tv {
+                parts.push("TV".to_string());
+            }
         }
     }
     if let Some(note) = &state.note {
@@ -1278,7 +1323,7 @@ fn status_line(state: &State) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::rc::Rc;
 
     /// A directory of the test's own.
@@ -1312,14 +1357,17 @@ mod tests {
     /// the test says what the launcher asked.
     struct Recording {
         asked: Rc<RefCell<Vec<String>>>,
+        /// How long the daemon says its answer took.
+        took: Rc<Cell<u64>>,
         status: Status,
         answers: Vec<Reply>,
     }
 
     impl Recording {
-        fn new(asked: Rc<RefCell<Vec<String>>>) -> Recording {
+        fn new(asked: Rc<RefCell<Vec<String>>>, took: Rc<Cell<u64>>) -> Recording {
             Recording {
                 asked,
+                took,
                 status: Status::default(),
                 answers: Vec::new(),
             }
@@ -1343,10 +1391,14 @@ mod tests {
 
         fn ask(&mut self, query: &str, _limit: usize, generation: u64) -> bool {
             self.asked.borrow_mut().push(query.to_string());
+            // The answer carries the time the daemon took, the way the
+            // daemon's own answer does.
+            let mut status = self.status.clone();
+            status.took_us = self.took.get();
             self.answers.push(Reply::Search {
                 generation,
                 answer: answer_with("C:/a/notas.txt"),
-                status: self.status.clone(),
+                status,
             });
             true
         }
@@ -1362,20 +1414,31 @@ mod tests {
 
     /// A state whose source is a double, and the questions it was asked.
     fn recording() -> (State, Rc<RefCell<Vec<String>>>) {
+        recording_timed(0)
+    }
+
+    /// A state whose source is a double, and whose answers took this long.
+    ///
+    /// The daemon says how long its answer took, and the meter keeps the
+    /// figure: a test that cannot make the daemon take time cannot check
+    /// that the meter is fed.
+    fn recording_timed(us: u64) -> (State, Rc<RefCell<Vec<String>>>) {
         let asked = Rc::new(RefCell::new(Vec::new()));
+        let took = Rc::new(Cell::new(us));
         let (note_tx, notes): (Sender<String>, Receiver<String>) = channel();
         let (preview_tx, previews): (Sender<PreviewReply>, Receiver<PreviewReply>) = channel();
         let state = State {
             app: App::new(),
-            source: Box::new(Recording::new(Rc::clone(&asked))),
+            source: Box::new(Recording::new(Rc::clone(&asked), Rc::clone(&took))),
             clipboard: Box::new(|| actions::Clipboard::Text(String::new())),
-            open: Box::new(|_| Err("um teste não abre ficheiros".to_string())),
-            reveal: Box::new(|_| Err("um teste não abre pastas".to_string())),
+            open: Box::new(|_| Err("a test does not open files".to_string())),
+            reveal: Box::new(|_| Err("a test does not open folders".to_string())),
             waiting: Waiting::Idle,
             ask_daemon: false,
             in_flight: false,
             generation: 0,
             rows_query: None,
+            meter: LatencyMeter::new(),
             status: Status::default(),
             note: None,
             notes,
@@ -1385,6 +1448,7 @@ mod tests {
             preview_pending: None,
             history: History::new(),
             usage_path: None,
+            lang: Lang::English,
         };
         (state, asked)
     }
@@ -1562,7 +1626,7 @@ mod tests {
         state.app.insert('i');
         let _ = handle(&mut state, Event::Toggle);
         let line = status_line(&state);
-        assert!(line.contains("procurando"), "{line}");
+        assert!(line.contains("searching"), "{line}");
     }
 
     #[test]
@@ -1571,7 +1635,7 @@ mod tests {
         // else that could be mistaken for an answer.
         let state = empty();
         let line = status_line(&state);
-        assert!(line.contains("sem ligação"), "{line}");
+        assert!(line.contains("no connection"), "{line}");
     }
 
     #[test]
@@ -1581,7 +1645,7 @@ mod tests {
         let mut state = empty();
         let _ = run_action(&mut state, Action::CopyPath);
         let line = status_line(&state);
-        assert!(line.contains("nenhum resultado"), "{line}");
+        assert!(line.contains("no result"), "{line}");
     }
 
     /// The paste lands in the query.
@@ -1620,6 +1684,42 @@ mod tests {
         assert_eq!(asked.borrow()[0], "invoice", "the daemon was asked");
     }
 
+    /// The window keeps the meter's figures.
+    ///
+    /// The daemon says how long its answer took, and the window draws
+    /// what it said: a window that shows a number it never measured is a
+    /// window that reports a measurement it never took.
+    #[test]
+    fn the_answer_feeds_the_meter() {
+        let (mut state, _) = recording_timed(8_100);
+        let _ = on_key(&mut state, Key::Char('r'));
+        // The question goes down on the clock, and the answer comes back
+        // on the tick after it.
+        let _ = handle(&mut state, Event::Tick);
+        let _ = handle(&mut state, Event::Tick);
+        let figures = view(&state).latency;
+        assert_eq!(figures.last_us, Some(8_100));
+        assert_eq!(
+            figures.first_us,
+            Some(8_100),
+            "the first answer is the cold one"
+        );
+    }
+
+    /// An answer that says nothing about how long it took is not a
+    /// measurement.
+    ///
+    /// The fallback does not say, and a zero in the window would make the
+    /// median zero — a number nobody can read.
+    #[test]
+    fn an_answer_with_no_time_is_not_a_measurement() {
+        let (mut state, _) = recording_timed(0);
+        let _ = on_key(&mut state, Key::Char('r'));
+        let _ = handle(&mut state, Event::Tick);
+        let _ = handle(&mut state, Event::Tick);
+        assert!(view(&state).latency.is_empty());
+    }
+
     /// A keystroke does not wait for the daemon.
     ///
     /// The daemon can take seconds to answer, and a key handler that
@@ -1632,7 +1732,7 @@ mod tests {
         assert!(asked.borrow().is_empty(), "the daemon is asked later");
         assert_eq!(state.waiting, Waiting::Answer, "the answer is on its way");
         let line = status_line(&state);
-        assert!(line.contains("procurando"), "{line}");
+        assert!(line.contains("searching"), "{line}");
         let _ = handle(&mut state, Event::Tick);
         assert_eq!(asked.borrow().len(), 1, "the daemon was asked once");
         assert_eq!(asked.borrow()[0], "i", "the daemon was asked");
@@ -1750,16 +1850,16 @@ mod tests {
         let path = dir.join("usage.tsv");
         std::fs::create_dir_all(&path).expect("the store's path is taken");
 
-        let (history, note) = memory(Some(&path));
+        let (history, note) = memory(Some(&path), Lang::English);
         assert!(history.is_empty(), "there is no history to show");
         let note = note.expect("the memory that could not be read is said");
-        assert!(note.contains("histórico"), "{note}");
+        assert!(note.contains("history"), "{note}");
 
         // And the line under the field carries it.
         let mut state = empty();
         state.note = Some(note);
         let line = status_line(&state);
-        assert!(line.contains("histórico"), "{line}");
+        assert!(line.contains("history"), "{line}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1773,7 +1873,7 @@ mod tests {
         let dir = scratch("gui-memory-absent");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("the folder is there");
-        let (history, note) = memory(Some(&dir.join("usage.tsv")));
+        let (history, note) = memory(Some(&dir.join("usage.tsv")), Lang::English);
         assert!(history.is_empty(), "there is no history yet");
         assert!(note.is_none(), "there is nothing to say: {note:?}");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1787,9 +1887,9 @@ mod tests {
     #[test]
     fn the_note_about_the_machine_is_in_the_line() {
         let mut state = empty();
-        state.note = Some("o atalho global não foi instalado: sem permissão".to_string());
+        state.note = Some("the global shortcut was not installed: no permission".to_string());
         let line = status_line(&state);
-        assert!(line.contains("atalho global"), "{line}");
+        assert!(line.contains("global shortcut"), "{line}");
     }
 
     /// The clipboard speaks the user's language.
@@ -1803,12 +1903,12 @@ mod tests {
         assert!(!paste(&mut state, actions::Clipboard::NotText));
         assert_eq!(
             state.app.warnings().first().map(String::as_str),
-            Some("a área de transferência não tem texto")
+            Some("the clipboard has no text")
         );
         assert!(!paste(&mut state, actions::Clipboard::Busy));
         assert_eq!(
             state.app.warnings().first().map(String::as_str),
-            Some("a área de transferência está ocupada")
+            Some("the clipboard is busy")
         );
     }
 
@@ -1821,7 +1921,7 @@ mod tests {
         let mut state = empty();
         assert!(!paste(&mut state, actions::Clipboard::Text(String::new())));
         let line = status_line(&state);
-        assert!(line.contains("nada para colar"), "{line}");
+        assert!(line.contains("nothing to paste"), "{line}");
     }
 
     #[test]
@@ -1836,7 +1936,7 @@ mod tests {
             .set_results(vec![Row::new("C:/a/notas.txt".to_string(), 0)]);
         let _ = run_action(&mut state, Action::Preview);
         let line = status_line(&state);
-        assert!(!line.contains("nenhum resultado"), "{line}");
+        assert!(!line.contains("no result"), "{line}");
     }
 
     /// A result that was opened is a result the user used.
@@ -1869,7 +1969,7 @@ mod tests {
         state
             .app
             .set_results(vec![Row::new("C:/a/notas.txt".to_string(), 0)]);
-        state.open = Box::new(|_| Err("não pôde ser aberto".to_string()));
+        state.open = Box::new(|_| Err("could not be opened".to_string()));
         let _ = run_action(&mut state, Action::Open);
         assert!(
             state.history.is_empty(),
@@ -1906,7 +2006,7 @@ mod tests {
         let mut state = empty();
         let _ = on_key(&mut state, Key::CtrlK);
         let line = status_line(&state);
-        assert!(line.contains("nenhum resultado"), "{line}");
+        assert!(line.contains("no result"), "{line}");
         assert_ne!(state.app.mode(), Mode::Menu, "there is no menu to open");
     }
 
@@ -1954,15 +2054,18 @@ mod tests {
             let st = &mut state.status;
             st.connected = false;
             st.matches = 3;
-            st.layer = "conteúdo";
+            st.layer = Some(Layer::Content);
             st.backend = "rgx".to_string();
             st.took_us = 1500;
         }
         let line = status_line(&state);
-        assert!(line.contains("3 resultados"), "{line}");
-        assert!(line.contains("conteúdo"), "{line}");
+        assert!(line.contains("3 results"), "{line}");
+        assert!(line.contains("content"), "{line}");
         assert!(line.contains("rgx"), "{line}");
-        assert!(line.contains("1 ms"), "{line}");
+        // The time is not in the line: it is the meter's, and the meter
+        // draws it in green at the right of the query. A time that is in
+        // both places is a number the user reads twice.
+        assert!(!line.contains("ms"), "{line}");
     }
 
     /// The line under the field describes the rows that are on the screen.
@@ -1976,15 +2079,15 @@ mod tests {
         {
             let st = &mut state.status;
             st.matches = 37;
-            st.layer = "conteúdo";
+            st.layer = Some(Layer::Content);
             st.backend = "rgx".to_string();
             st.took_us = 1500;
         }
         cleared(&mut state);
         let line = status_line(&state);
-        assert!(line.contains("0 resultados"), "{line}");
+        assert!(line.contains("0 results"), "{line}");
         assert!(!line.contains("37"), "{line}");
-        assert!(!line.contains("conteúdo"), "{line}");
+        assert!(!line.contains("content"), "{line}");
         assert!(!line.contains("rgx"), "{line}");
         assert!(!line.contains("1 ms"), "{line}");
     }
@@ -1998,7 +2101,7 @@ mod tests {
     fn the_line_does_not_say_the_daemon_is_not_there_before_asking() {
         let (state, _) = recording();
         let line = status_line(&state);
-        assert!(!line.contains("sem ligação ao daemon"), "{line}");
+        assert!(!line.contains("no connection to the daemon"), "{line}");
     }
 
     /// A paste inside the menu is not a silent no-op.
@@ -2048,9 +2151,9 @@ mod tests {
         // The write is on another thread, and the note comes when it is
         // over.
         let note = wait_for_note(&mut state).expect("the note arrives");
-        assert!(note.contains("histórico"), "{note}");
+        assert!(note.contains("history"), "{note}");
         let line = status_line(&state);
-        assert!(line.contains("histórico"), "{line}");
+        assert!(line.contains("history"), "{line}");
         let _ = std::fs::remove_file(&blocker);
     }
 
@@ -2212,7 +2315,7 @@ mod tests {
         // question, and the line says which one.
         let _ = on_key(&mut state, Key::Char('n'));
         let line = status_line(&state);
-        assert!(line.contains("de \"i\""), "the line marks the rows: {line}");
+        assert!(line.contains("of \"i\""), "the line marks the rows: {line}");
     }
 
     /// The note about the machine is one note.
@@ -2222,11 +2325,11 @@ mod tests {
     #[test]
     fn the_note_about_the_machine_is_one_note() {
         let mut state = empty();
-        state.note = Some("o atalho global não foi instalado: sem permissão".to_string());
-        state.note = Some("o histórico não foi gravado: o disco está cheio".to_string());
+        state.note = Some("the global shortcut was not installed: no permission".to_string());
+        state.note = Some("the history was not saved: the disk is full".to_string());
         let line = status_line(&state);
-        assert!(line.contains("histórico"), "{line}");
-        assert!(!line.contains("atalho global"), "{line}");
+        assert!(line.contains("history"), "{line}");
+        assert!(!line.contains("global shortcut"), "{line}");
     }
 
     /// The worker that asks the daemon is gone.
@@ -2250,9 +2353,9 @@ mod tests {
         );
         assert_eq!(state.waiting, Waiting::Idle, "the launcher is not looking");
         let line = status_line(&state);
-        assert!(line.contains("morreu"), "the launcher says why: {line}");
+        assert!(line.contains("died"), "the launcher says why: {line}");
         assert!(
-            !line.contains("procurando"),
+            !line.contains("searching"),
             "the launcher is not looking for an answer: {line}"
         );
     }
@@ -2280,7 +2383,7 @@ mod tests {
         // The panel says it is waiting: the read has not come back yet.
         let panel = state.app.preview().expect("the panel is there");
         assert!(
-            panel.lines.join(" ").contains("a ler"),
+            panel.lines.join(" ").contains("reading"),
             "the panel says it is waiting: {panel:?}"
         );
 
@@ -2375,7 +2478,7 @@ mod tests {
 
         // The write gives up, and the launcher says so.
         let note = wait_for_note(&mut state).expect("the write is over");
-        assert!(note.contains("histórico"), "{note}");
+        assert!(note.contains("history"), "{note}");
         drop(held);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2413,8 +2516,8 @@ mod tests {
         ]);
         let _ = on_key(&mut state, Key::CtrlP);
         let line = status_line(&state);
-        assert!(line.contains("pasta"), "{line}");
-        assert!(line.contains("pré-visualização"), "{line}");
+        assert!(line.contains("folder"), "{line}");
+        assert!(line.contains("no preview"), "{line}");
         assert!(state.app.preview().is_none(), "no preview was opened");
         assert!(
             state.preview_pending.is_none(),

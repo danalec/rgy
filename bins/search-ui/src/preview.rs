@@ -174,11 +174,11 @@ mod tests {
     #[test]
     fn the_preview_shows_the_first_lines_of_a_text_file() {
         let path = temp_path("notas.txt");
-        std::fs::write(&path, "primeira linha\nsegunda linha\n").expect("the file is written");
+        std::fs::write(&path, "first line\nsegunda linha\n").expect("the file is written");
         let preview = of(path.to_str().expect("the path is text"));
         let _ = std::fs::remove_file(&path);
         assert!(preview.title.contains("notas.txt"), "{}", preview.title);
-        assert_eq!(preview.lines, vec!["primeira linha", "segunda linha"]);
+        assert_eq!(preview.lines, vec!["first line", "segunda linha"]);
     }
 
     #[test]

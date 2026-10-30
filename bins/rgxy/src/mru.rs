@@ -62,6 +62,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use rgy_launcher::text::{Lang, Text};
 use rgy_launcher::usage::History;
 
 /// The number that tells the temporary files apart.
@@ -141,8 +142,10 @@ pub fn load(path: &Path) -> Result<History, std::io::Error> {
 /// be read is not the same thing as a daemon that is not there: the
 /// ranking falls back to the daemon's order and the nudge does not
 /// come back, and the two facts have to be told apart.
-pub fn read_error(err: &std::io::Error) -> String {
-    format!("o histórico não pôde ser lido: {err}")
+pub fn read_error(err: &std::io::Error, lang: Lang) -> String {
+    Text::for_lang(lang)
+        .history_not_read
+        .replace("{err}", &err.to_string())
 }
 
 /// The history the text of a store says.

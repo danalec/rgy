@@ -18,7 +18,7 @@ mod harness;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use harness::{bin, fixture_dir, run, text_tree, Daemon};
+use harness::{bin, fixture_dir, text_tree, Daemon};
 // The daemon is reached over a named pipe on Windows and over a unix
 // socket everywhere else, and the helper that spawns it is the platform's
 // own: one endpoint shape, one helper.
@@ -61,6 +61,37 @@ fn unique() -> String {
         "{}-{}",
         std::process::id(),
         COUNTER.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+/// Run the launcher, in English.
+///
+/// The language is pinned so that the assertions do not depend on the
+/// machine the suite runs on: a machine whose locale is Portuguese would
+/// otherwise fail a suite that is about English, and a suite that only
+/// passes on an English machine says nothing about the language at all.
+fn run_launcher(args: &[&str]) -> (i32, String, String) {
+    run_in("en", args)
+}
+
+/// Run the launcher, in the language the environment asks for.
+///
+/// The harness's own runner does not take an environment, and the
+/// language is exactly what the environment says: a test that cannot set
+/// it cannot prove that the launcher reads it.
+fn run_in(lang: &str, args: &[&str]) -> (i32, String, String) {
+    let cache = harness::shared_cache_dir("rgxy-lang");
+    let out = std::process::Command::new(bin("rgxy"))
+        .args(args)
+        .env("RGY_LANG", lang)
+        .env("RGY_INDEX_DIR", &cache)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap_or_else(|e| panic!("spawn rgxy: {e}"));
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
     )
 }
 
@@ -127,19 +158,16 @@ fn start_with(root: &Path, extra: &[&str]) -> Fixture {
 /// come up a moment later, so a question asked too early is answered
 /// "not yet" and asked again — not lost.
 fn ask(fixture: &Fixture, query: &str) -> (i32, String, String) {
-    let launcher = bin("rgxy");
     let deadline = Instant::now() + READY;
     loop {
-        let (code, stdout, stderr) = run(
-            &launcher,
-            &["--endpoint", &fixture.endpoint, "--query", query],
-        );
+        let (code, stdout, stderr) =
+            run_launcher(&["--endpoint", &fixture.endpoint, "--query", query]);
         if code != 1 || Instant::now() >= deadline {
             return (code, stdout, stderr);
         }
         // Exit 1 is "no results" *or* "no daemon": the difference is in
         // the stderr, and the launcher says which.
-        if !stderr.contains("sem ligação ao daemon") {
+        if !stderr.contains("no connection to the daemon") {
             return (code, stdout, stderr);
         }
         std::thread::sleep(Duration::from_millis(100));
@@ -306,19 +334,16 @@ fn without_a_daemon_the_launcher_says_so() {
     // An endpoint nobody is listening on. The unix socket is used on every
     // platform: a path that cannot exist is a path that cannot be served,
     // and the launcher has to say so rather than answer "no results".
-    let (code, stdout, stderr) = run(
-        &bin("rgxy"),
-        &[
-            "--endpoint",
-            "uds:/rgy-e2e-no-daemon-here/x.sock",
-            "--query",
-            "hello",
-        ],
-    );
+    let (code, stdout, stderr) = run_launcher(&[
+        "--endpoint",
+        "uds:/rgy-e2e-no-daemon-here/x.sock",
+        "--query",
+        "hello",
+    ]);
     assert_eq!(code, 1, "no daemon is not a match: {stderr}");
     assert!(stdout.trim().is_empty(), "{stdout}");
     assert!(
-        stderr.contains("sem ligação ao daemon"),
+        stderr.contains("no connection to the daemon"),
         "the reason belongs on stderr: {stderr}"
     );
 }
@@ -370,7 +395,7 @@ fn the_pack_store_answers_the_content_layer() {
 /// nothing.
 #[test]
 fn the_help_names_the_filters_and_the_commands() {
-    let output = run(&bin("rgxy"), &["--help"]);
+    let output = run_launcher(&["--help"]);
     let (code, stdout, _) = output;
     assert_eq!(code, 0);
     for needle in ["file:", "folder:", "doc:", "pic:", "video:", "audio:"] {
@@ -394,7 +419,67 @@ fn the_help_names_the_filters_and_the_commands() {
 /// The launcher refuses an option it does not know.
 #[test]
 fn an_unknown_option_is_refused() {
-    let (code, _, stderr) = run(&bin("rgxy"), &["--nope"]);
+    let (code, _, stderr) = run_launcher(&["--nope"]);
     assert_eq!(code, 1);
-    assert!(stderr.contains("opção desconhecida"), "{stderr}");
+    assert!(stderr.contains("unknown option"), "{stderr}");
+}
+
+/// The launcher speaks the language the environment asks for.
+///
+/// The default is English, and a translation nobody exercises is a
+/// translation that rots: the Portuguese is proved here, on the words a
+/// user reads — the help and the sentence the launcher says when the
+/// daemon is not there.
+#[test]
+fn the_launcher_speaks_portuguese_when_the_environment_says_so() {
+    let (code, stdout, stderr) = run_in("pt-BR", &["--help"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stdout.contains("o lançador residente"),
+        "the help is in the language the environment asked for: {stdout}"
+    );
+    assert!(
+        !stdout.contains("the resident launcher"),
+        "the help is in one language, and it is the one that was asked for: {stdout}"
+    );
+
+    let (code, stdout, stderr) = run_in(
+        "pt-BR",
+        &[
+            "--endpoint",
+            "uds:/rgy-e2e-no-daemon-here/x.sock",
+            "--query",
+            "hello",
+        ],
+    );
+    assert_eq!(code, 1, "no daemon is not a match: {stderr}");
+    assert!(stdout.trim().is_empty(), "{stdout}");
+    assert!(
+        stderr.contains("sem ligação ao daemon"),
+        "the reason is said in the language the environment asked for: {stderr}"
+    );
+}
+
+/// The launcher falls back to English when the environment says nothing.
+///
+/// The machine's locale is not the launcher's language: the launcher
+/// speaks the language it was given, and a machine that gives none gets
+/// the language the code is written in.
+#[test]
+fn a_machine_that_says_nothing_gets_english() {
+    let cache = harness::shared_cache_dir("rgxy-lang");
+    let out = std::process::Command::new(bin("rgxy"))
+        .arg("--help")
+        .env_remove("RGY_LANG")
+        .env_remove("LC_ALL")
+        .env_remove("LANG")
+        .env("RGY_INDEX_DIR", &cache)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap_or_else(|e| panic!("spawn rgxy: {e}"));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("the resident launcher"),
+        "a machine that says nothing gets English: {stdout}"
+    );
 }

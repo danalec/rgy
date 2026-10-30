@@ -25,6 +25,9 @@
 //! list, the same answers — in a terminal.
 
 mod daemon;
+// The language the launcher speaks: read once, at start-up, and handed
+// down to everything that has a word to say.
+mod lang;
 // The memory of what the user used. The window is the only thing that
 // records a use, and the window is Windows-only for now: elsewhere the
 // module is compiled — and tested — with nothing calling it yet.
@@ -34,6 +37,8 @@ mod mru;
 mod preview;
 mod rgx;
 mod tools;
+// The help text, in the language the launcher is speaking.
+mod usage;
 
 #[cfg(windows)]
 mod gui;
@@ -42,6 +47,7 @@ use std::io::{IsTerminal, Write};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
+use rgy_launcher::text::{Lang, Text};
 use rgy_launcher::{Answer, Source};
 use rgy_proto::endpoint::Endpoint;
 
@@ -87,47 +93,12 @@ impl Default for Options {
 }
 
 /// The usage text.
-fn usage() -> String {
-    format!(
-        "rgxy {version} — a janela de procura do daemon rgy.\n\
-         \n\
-         usage:\n  \
-           rgxy                    # o lançador residente: Control duas vezes abre a janela\n  \
-           rgxy [--tui] [--query <texto>] [--limit <n>] [--endpoint <e>] [--no-hook] [--show]\n  \
-                [--pick] [--fzf-binary <p>] [--fzf-arg <arg>]\n\
-         \n\
-         options:\n  \
-           --tui              a interface de terminal, em vez da janela\n  \
-           --query <texto>    uma busca só: imprime os caminhos e sai\n  \
-           --limit <n>        quantos resultados (default: 50)\n  \
-           --endpoint <e>     pipe:<nome> | uds:<caminho> | stdio\n  \
-           --no-hook          não instala o atalho global\n  \
-           --show             abre a janela logo de início\n  \
-           --pick             entrega os resultados a um picker e imprime a escolha\n  \
-           --fzf-binary <p>   o picker a rodar (default: fzf ou sk no PATH)\n  \
-           --fzf-arg <arg>    um argumento para o picker, repetível\n  \
-           -h, --help         este texto\n  \
-           -V, --version      a versão\n\
-         \n\
-         A janela é um cliente: o índice está no daemon (searchd), e uma\n\
-         tecla é uma pergunta enviada por um pipe.\n\
-         \n\
-         Com --pick, os resultados vão para um picker e a escolha sai na\n\
-         stdout, um caminho por linha — o mesmo contrato de --query.\n\
-         \n\
-         Os caminhos saem um por linha. Um caminho que carregue uma
-         quebra de linha não cabe numa linha: ele fica de fora, e o
-         rgxy diz no stderr quantos ficaram.\n\
-         \n\
-         O picker por omissão é o fzf ou o sk: só eles leem a lista\n\
-         separada por NUL. Um picker nomeado que não a leia — o peco, o\n\
-         fz — recebe a lista com um caminho por linha.\n\
-         \n\
-         Na barra: file: folder: doc: pic: video: audio: — filtros;\n\
-         >open >folder >copy >preview >menu — comandos; grep: — o conteúdo\n\
-         dos ficheiros que a busca de nomes escolheu.",
-        version = env!("CARGO_PKG_VERSION"),
-    )
+///
+/// The text is in the language the launcher is speaking: the help is the
+/// program's own description of itself, and the user reads it in the
+/// language the user reads.
+fn usage(lang: Lang) -> String {
+    usage::text(lang)
 }
 
 fn main() -> ExitCode {
@@ -135,8 +106,13 @@ fn main() -> ExitCode {
     // accent has to reach the screen as itself.
     rgy_engine::console::init();
 
+    // The language is read once, here: the launcher speaks one language
+    // for the whole of its life, and a launcher that changed its language
+    // in the middle of a sentence would say two things at once.
+    let lang = lang::from_env();
+
     let argv: Vec<String> = std::env::args().skip(1).collect();
-    match run(&argv) {
+    match run(&argv, lang) {
         Ok(code) => code,
         Err(reason) => {
             eprintln!("rgxy: {reason}");
@@ -164,19 +140,19 @@ enum Request {
 /// entry all say that a bare `rgxy` is the launcher, and a program that
 /// answers a question nobody asked is a program that says what it is
 /// not.
-fn request(argv: &[String]) -> Result<Request, String> {
+fn request(argv: &[String], lang: Lang) -> Result<Request, String> {
     match argv.first().map(String::as_str) {
         Some("-h") | Some("--help") | Some("help") => Ok(Request::Help),
         Some("-V") | Some("--version") => Ok(Request::Version),
-        _ => Ok(Request::Run(parse(argv)?)),
+        _ => Ok(Request::Run(parse(argv, lang)?)),
     }
 }
 
 /// Run the command. `Err` is a sentence for stderr and exit code 1.
-fn run(argv: &[String]) -> Result<ExitCode, String> {
-    let options = match request(argv)? {
+fn run(argv: &[String], lang: Lang) -> Result<ExitCode, String> {
+    let options = match request(argv, lang)? {
         Request::Help => {
-            println!("{}", usage());
+            println!("{}", usage(lang));
             return Ok(ExitCode::SUCCESS);
         }
         Request::Version => {
@@ -188,30 +164,27 @@ fn run(argv: &[String]) -> Result<ExitCode, String> {
     if options.pick && options.query.is_none() {
         // A picker filters the results of a search: without a question
         // there is no list to filter.
-        return Err(
-            "--pick precisa de --query: um picker filtra os resultados de uma busca".to_string(),
-        );
+        return Err(Text::for_lang(lang).pick_needs_a_query.to_string());
     }
     let endpoint = match &options.endpoint {
-        Some(text) => endpoint_of(text)?,
-        None => Endpoint::registered().ok_or(
-            "não se sabe onde o daemon escuta: nem XDG_CACHE_HOME nem HOME estão definidos",
-        )?,
+        Some(text) => endpoint_of(text, lang)?,
+        None => Endpoint::registered()
+            .ok_or_else(|| Text::for_lang(lang).daemon_address_unknown.to_string())?,
     };
     let rgx = tools::rgx();
 
     if let Some(query) = &options.query {
         // The command line waits as long as the client always did.
-        let source = command_source(endpoint, rgx);
+        let source = command_source(endpoint, rgx, lang);
         if options.pick {
-            return pick(source, query, options.limit, &options);
+            return pick(source, query, options.limit, &options, lang);
         }
-        return one_shot(source, query, options.limit);
+        return one_shot(source, query, options.limit, lang);
     }
     if options.tui {
-        return run_tui(DaemonSource::new(endpoint, rgx), None);
+        return run_tui(DaemonSource::new(endpoint, rgx, lang), None, lang);
     }
-    run_window(endpoint, rgx, &options)
+    run_window(endpoint, rgx, &options, lang)
 }
 
 /// The source for the command line.
@@ -220,12 +193,13 @@ fn run(argv: &[String]) -> Result<ExitCode, String> {
 /// a search box that stops answering the keyboard is broken, while a
 /// command line waiting for a cold daemon may wait as long as the
 /// client always did.
-fn command_source(endpoint: Endpoint, rgx: Option<String>) -> DaemonSource {
-    DaemonSource::with_window(endpoint, rgx, rgy_proto::client::read_timeout())
+fn command_source(endpoint: Endpoint, rgx: Option<String>, lang: Lang) -> DaemonSource {
+    DaemonSource::with_window(endpoint, rgx, rgy_proto::client::read_timeout(), lang)
 }
 
 /// Read the options.
-fn parse(argv: &[String]) -> Result<Options, String> {
+fn parse(argv: &[String], lang: Lang) -> Result<Options, String> {
+    let text = Text::for_lang(lang);
     let mut options = Options::default();
     let mut index = 0;
     while index < argv.len() {
@@ -236,44 +210,40 @@ fn parse(argv: &[String]) -> Result<Options, String> {
             "--pick" => options.pick = true,
             "--fzf-binary" => {
                 index += 1;
-                options.fzf_binary = Some(
-                    argv.get(index)
-                        .ok_or("--fzf-binary precisa de um caminho")?
-                        .clone(),
-                );
+                options.fzf_binary =
+                    Some(argv.get(index).ok_or(text.fzf_binary_needs_a_path)?.clone());
             }
             "--fzf-arg" => {
                 index += 1;
                 options.fzf_arg.push(
                     argv.get(index)
-                        .ok_or("--fzf-arg precisa de um argumento")?
+                        .ok_or(text.fzf_arg_needs_an_argument)?
                         .clone(),
                 );
             }
             "--query" => {
                 index += 1;
-                options.query = Some(
-                    argv.get(index)
-                        .ok_or("--query precisa de um texto")?
-                        .clone(),
-                );
+                options.query = Some(argv.get(index).ok_or(text.query_needs_text)?.clone());
             }
             "--limit" => {
                 index += 1;
-                let value = argv.get(index).ok_or("--limit precisa de um número")?;
+                let value = argv.get(index).ok_or(text.limit_needs_a_number)?;
                 options.limit = value
                     .parse::<usize>()
-                    .map_err(|_| format!("--limit precisa de um número: {value}"))?;
+                    .map_err(|_| text.limit_is_not_a_number.replace("{value}", value))?;
             }
             "--endpoint" => {
                 index += 1;
                 options.endpoint = Some(
                     argv.get(index)
-                        .ok_or("--endpoint precisa de um endereço")?
+                        .ok_or(text.endpoint_needs_an_address)?
                         .clone(),
                 );
             }
-            other => return Err(format!("opção desconhecida `{other}`\n\n{}", usage())),
+            other => {
+                let reason = text.unknown_option.replace("{other}", other);
+                return Err(format!("{reason}\n\n{}", usage(lang)));
+            }
         }
         index += 1;
     }
@@ -281,7 +251,7 @@ fn parse(argv: &[String]) -> Result<Options, String> {
 }
 
 /// The endpoint the command line named.
-fn endpoint_of(text: &str) -> Result<Endpoint, String> {
+fn endpoint_of(text: &str, lang: Lang) -> Result<Endpoint, String> {
     if let Some(path) = text.strip_prefix("uds:") {
         return Ok(Endpoint::Socket(std::path::PathBuf::from(path)));
     }
@@ -291,9 +261,9 @@ fn endpoint_of(text: &str) -> Result<Endpoint, String> {
     if text == "stdio" {
         return Ok(Endpoint::Stdio);
     }
-    Err(format!(
-        "endpoint desconhecido: {text} (use pipe:<nome>, uds:<caminho> ou stdio)"
-    ))
+    Err(Text::for_lang(lang)
+        .unknown_endpoint
+        .replace("{text}", text))
 }
 
 /// One search, printed, and out.
@@ -303,7 +273,12 @@ fn endpoint_of(text: &str) -> Result<Endpoint, String> {
 /// results" and "the daemon is not there" are different answers, and an
 /// exit status that cannot tell them apart makes the second one look like
 /// the first.
-fn one_shot(mut source: DaemonSource, query: &str, limit: usize) -> Result<ExitCode, String> {
+fn one_shot(
+    mut source: DaemonSource,
+    query: &str,
+    limit: usize,
+    lang: Lang,
+) -> Result<ExitCode, String> {
     let answer = wait_for_daemon(&mut source, query, limit);
     let mut out = std::io::stdout();
     let written = write_paths(&answer.paths, &mut out);
@@ -314,7 +289,7 @@ fn one_shot(mut source: DaemonSource, query: &str, limit: usize) -> Result<ExitC
         // The paths did not reach the caller: the status says the
         // output did not arrive, and it does not say success for
         // output that never arrived.
-        return Ok(ExitCode::from(write_failure(&err)));
+        return Ok(ExitCode::from(write_failure(&err, lang)));
     }
     Ok(if answer.is_empty() {
         ExitCode::from(1)
@@ -379,9 +354,14 @@ const OUTPUT_NOT_DELIVERED: u8 = 2;
 /// Any other failure is the machine's own, and the user hears about
 /// it: a write that fails for a reason nobody knows about is a
 /// failure nobody can do anything about.
-fn write_failure(err: &std::io::Error) -> u8 {
+fn write_failure(err: &std::io::Error, lang: Lang) -> u8 {
     if err.kind() != std::io::ErrorKind::BrokenPipe {
-        eprintln!("rgxy: a escrita falhou: {err}");
+        eprintln!(
+            "rgxy: {}",
+            Text::for_lang(lang)
+                .the_write_failed
+                .replace("{err}", &err.to_string())
+        );
     }
     OUTPUT_NOT_DELIVERED
 }
@@ -413,12 +393,14 @@ fn pick(
     query: &str,
     limit: usize,
     options: &Options,
+    lang: Lang,
 ) -> Result<ExitCode, String> {
+    let text = Text::for_lang(lang);
     if !std::io::stdout().is_terminal() {
         // A picker is interactive: without a terminal there is nothing
         // for the user to choose with, and pretending otherwise would
         // print a path nobody chose.
-        return Err("um picker precisa de um terminal".to_string());
+        return Err(text.a_picker_needs_a_terminal.to_string());
     }
     let answer = wait_for_daemon(&mut source, query, limit);
     for warning in source.status().borrow().warnings.clone() {
@@ -426,7 +408,7 @@ fn pick(
     }
     if answer.is_empty() {
         // There is nothing to pick, and the picker is not asked.
-        eprintln!("rgxy: nenhum resultado");
+        eprintln!("rgxy: {}", text.no_result);
         return Ok(ExitCode::from(1));
     }
 
@@ -439,8 +421,10 @@ fn pick(
     let buffer = records(&answer.paths);
     let search = Box::new(
         move |out: &mut (dyn Write + Send + 'static)| -> Result<bool, String> {
-            out.write_all(&buffer)
-                .map_err(|e| format!("os resultados não chegaram ao picker: {e}"))?;
+            out.write_all(&buffer).map_err(|e| {
+                text.the_results_did_not_arrive
+                    .replace("{e}", &e.to_string())
+            })?;
             Ok(!buffer.is_empty())
         },
     );
@@ -459,7 +443,7 @@ fn pick(
         // The choice did not reach the caller: the status says the
         // output did not arrive, and it does not say success for
         // output that never arrived.
-        return Ok(ExitCode::from(write_failure(&err)));
+        return Ok(ExitCode::from(write_failure(&err, lang)));
     }
     Ok(ExitCode::from(u8::try_from(code).unwrap_or(1)))
 }
@@ -552,7 +536,7 @@ fn wait_for_daemon(source: &mut DaemonSource, query: &str, limit: usize) -> Answ
 /// The reason, when there is one, is the reason the window was not
 /// chosen: the terminal is the fallback, and the fallback says what it
 /// is standing in for.
-fn run_tui(mut source: DaemonSource, reason: Option<&str>) -> Result<ExitCode, String> {
+fn run_tui(mut source: DaemonSource, reason: Option<&str>, lang: Lang) -> Result<ExitCode, String> {
     let terminal = std::io::stdout().is_terminal();
     for notice in notices(&mut source, reason, terminal) {
         eprintln!("rgxy: {notice}");
@@ -561,7 +545,10 @@ fn run_tui(mut source: DaemonSource, reason: Option<&str>) -> Result<ExitCode, S
         return Ok(ExitCode::SUCCESS);
     }
     let root = home_dir();
-    rgy_search_ui::run_with_source(Box::new(source), root).map(|_| ExitCode::SUCCESS)
+    // The terminal is the launcher's other face: it says the same words in
+    // the same language, and a launcher that speaks two languages at once
+    // is one the user has to read twice.
+    rgy_search_ui::run_with_source_and_lang(Box::new(source), root, lang).map(|_| ExitCode::SUCCESS)
 }
 
 /// The sentences the terminal prints before the interface takes the screen.
@@ -597,17 +584,19 @@ fn run_window(
     endpoint: Endpoint,
     rgx: Option<String>,
     options: &Options,
+    lang: Lang,
 ) -> Result<ExitCode, String> {
     if !rgy_launcher_windows::session_available() {
         // No desktop: the terminal is the fallback, and it says so.
         return run_tui(
-            DaemonSource::new(endpoint, rgx),
-            Some("sem ecrã gráfico; a interface de terminal é a alternativa"),
+            DaemonSource::new(endpoint, rgx, lang),
+            Some(Text::for_lang(lang).no_graphical_screen),
+            lang,
         );
     }
     // The launcher's own window: the window lives on the thread that
     // draws it, and it cannot wait the client's thirty seconds.
-    gui::run(DaemonSource::new(endpoint, rgx), options).map(|_| ExitCode::SUCCESS)
+    gui::run(DaemonSource::new(endpoint, rgx, lang), options).map(|_| ExitCode::SUCCESS)
 }
 
 /// The window, where there is a desktop to put it on.
@@ -621,12 +610,12 @@ fn run_window(
     endpoint: Endpoint,
     rgx: Option<String>,
     _options: &Options,
+    lang: Lang,
 ) -> Result<ExitCode, String> {
     run_tui(
-        DaemonSource::new(endpoint, rgx),
-        Some(
-            "a janela flutuante é só no Windows por agora; a interface de terminal é a alternativa",
-        ),
+        DaemonSource::new(endpoint, rgx, lang),
+        Some(Text::for_lang(lang).the_window_is_windows_only),
+        lang,
     )
 }
 
@@ -643,13 +632,19 @@ mod tests {
 
     #[test]
     fn the_endpoints_are_the_daemons_own_spelling() {
-        assert!(matches!(endpoint_of("stdio"), Ok(Endpoint::Stdio)));
-        assert!(matches!(endpoint_of("pipe:abc"), Ok(Endpoint::Pipe(_))));
         assert!(matches!(
-            endpoint_of("uds:/tmp/x.sock"),
+            endpoint_of("stdio", Lang::English),
+            Ok(Endpoint::Stdio)
+        ));
+        assert!(matches!(
+            endpoint_of("pipe:abc", Lang::English),
+            Ok(Endpoint::Pipe(_))
+        ));
+        assert!(matches!(
+            endpoint_of("uds:/tmp/x.sock", Lang::English),
             Ok(Endpoint::Socket(_))
         ));
-        assert!(endpoint_of("http://x").is_err());
+        assert!(endpoint_of("http://x", Lang::English).is_err());
     }
 
     #[test]
@@ -658,7 +653,7 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let options = parse(&argv).expect("the options read");
+        let options = parse(&argv, Lang::English).expect("the options read");
         assert!(options.tui);
         assert!(!options.hook);
         assert_eq!(options.limit, 10);
@@ -668,13 +663,13 @@ mod tests {
     #[test]
     fn an_unknown_option_is_refused() {
         let argv = vec!["--nope".to_string()];
-        assert!(parse(&argv).is_err());
+        assert!(parse(&argv, Lang::English).is_err());
     }
 
     #[test]
     fn a_limit_that_is_not_a_number_is_refused() {
         let argv = vec!["--limit".to_string(), "many".to_string()];
-        assert!(parse(&argv).is_err());
+        assert!(parse(&argv, Lang::English).is_err());
     }
 
     #[test]
@@ -691,7 +686,7 @@ mod tests {
         .iter()
         .map(|s| s.to_string())
         .collect();
-        let options = parse(&argv).expect("the options read");
+        let options = parse(&argv, Lang::English).expect("the options read");
         assert!(options.pick);
         assert_eq!(options.fzf_binary.as_deref(), Some("C:/bin/fzf.exe"));
         // Each `--fzf-arg` is one argument of the picker, and the order
@@ -702,13 +697,13 @@ mod tests {
     #[test]
     fn a_picker_without_a_search_is_refused() {
         let argv = vec!["--pick".to_string()];
-        let reason = run(&argv).expect_err("a picker has nothing to filter");
+        let reason = run(&argv, Lang::English).expect_err("a picker has nothing to filter");
         assert!(reason.contains("--query"), "{reason}");
     }
 
     #[test]
     fn the_help_names_the_picker_flags() {
-        let text = usage();
+        let text = usage(Lang::English);
         for needle in ["--pick", "--fzf-binary", "--fzf-arg"] {
             assert!(text.contains(needle), "the help needs `{needle}`: {text}");
         }
@@ -725,6 +720,7 @@ mod tests {
         let source = command_source(
             Endpoint::Socket(std::path::PathBuf::from("/tmp/rgy-rgxy-nope.sock")),
             None,
+            Lang::English,
         );
         assert_eq!(source.window(), rgy_proto::client::read_timeout());
         assert!(
@@ -743,6 +739,7 @@ mod tests {
         let source = DaemonSource::new(
             Endpoint::Socket(std::path::PathBuf::from("/tmp/rgy-rgxy-nope.sock")),
             None,
+            Lang::English,
         );
         assert_eq!(source.window(), daemon::LAUNCHER_WINDOW);
     }
@@ -758,11 +755,12 @@ mod tests {
         let mut source = DaemonSource::new(
             Endpoint::Socket(std::path::PathBuf::from("/tmp/rgy-rgxy-nope.sock")),
             None,
+            Lang::English,
         );
         let notices = notices(&mut source, None, true);
         assert_eq!(notices.len(), 1, "the daemon is not there: {notices:?}");
         assert_eq!(notices[0], source.no_daemon_message());
-        assert!(notices[0].contains("sem daemon"), "{:?}", notices[0]);
+        assert!(notices[0].contains("no daemon"), "{:?}", notices[0]);
     }
 
     /// A launcher with no terminal says nothing.
@@ -774,8 +772,13 @@ mod tests {
         let mut source = DaemonSource::new(
             Endpoint::Socket(std::path::PathBuf::from("/tmp/rgy-rgxy-nope.sock")),
             None,
+            Lang::English,
         );
-        let notices = notices(&mut source, Some("sem ecrã gráfico"), false);
+        let notices = notices(
+            &mut source,
+            Some(Text::for_lang(Lang::English).no_graphical_screen),
+            false,
+        );
         assert!(
             notices.is_empty(),
             "there is nowhere to say it: {notices:?}"
@@ -784,12 +787,12 @@ mod tests {
 
     #[test]
     fn the_help_offers_only_the_pickers_that_can_read_the_list() {
-        let text = usage();
+        let text = usage(Lang::English);
         // The default is the picker that reads the NUL-separated list:
         // `peco` and `fz` do not, and offering them is offering a picker
         // that never sees the results.
-        assert!(text.contains("default: fzf ou sk no PATH"), "{text}");
-        assert!(!text.contains("peco, fz no PATH"), "{text}");
+        assert!(text.contains("default: fzf or sk on the PATH"), "{text}");
+        assert!(!text.contains("default: peco"), "{text}");
     }
 
     /// A bare `rgxy` is the launcher.
@@ -800,7 +803,8 @@ mod tests {
     /// an exit status of 0 for a launcher that never started.
     #[test]
     fn an_empty_command_line_is_the_launcher() {
-        let Request::Run(options) = request(&[]).expect("the command line reads") else {
+        let Request::Run(options) = request(&[], Lang::English).expect("the command line reads")
+        else {
             panic!("an empty command line is the launcher, not the help");
         };
         assert!(options.hook, "the hotkey is installed");
@@ -819,7 +823,7 @@ mod tests {
             let argv = vec![flag.to_string()];
             assert!(
                 matches!(
-                    request(&argv).expect("the command line reads"),
+                    request(&argv, Lang::English).expect("the command line reads"),
                     Request::Help
                 ),
                 "`{flag}` asks for the help"
@@ -828,7 +832,7 @@ mod tests {
         let argv = vec!["-V".to_string()];
         assert!(
             matches!(
-                request(&argv).expect("the command line reads"),
+                request(&argv, Lang::English).expect("the command line reads"),
                 Request::Version
             ),
             "`-V` asks for the version"
@@ -842,8 +846,8 @@ mod tests {
     /// line that leaves the reader guessing.
     #[test]
     fn the_help_says_that_a_bare_rgxy_is_the_launcher() {
-        let text = usage();
-        assert!(text.contains("o lançador residente"), "{text}");
+        let text = usage(Lang::English);
+        assert!(text.contains("the resident launcher"), "{text}");
     }
 
     /// A write that fails is a failure.
@@ -882,8 +886,12 @@ mod tests {
     #[test]
     fn a_broken_pipe_is_silent_and_not_a_success() {
         let err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "o leitor foi-se embora");
-        assert_eq!(write_failure(&err), OUTPUT_NOT_DELIVERED);
-        assert_ne!(write_failure(&err), 0, "success is for output that arrived");
+        assert_eq!(write_failure(&err, Lang::English), OUTPUT_NOT_DELIVERED);
+        assert_ne!(
+            write_failure(&err, Lang::English),
+            0,
+            "success is for output that arrived"
+        );
     }
 
     /// The choice the user made has to reach the caller too.

@@ -14,16 +14,10 @@
 //! content layer" is a question about the machine, and the part of it that
 //! is not about the machine can be tested from anywhere.
 
+use crate::text::{Lang, Text};
+
 /// The external programs the launcher looks for.
 pub const KNOWN_TOOLS: &[&str] = &["rgx"];
-
-/// The words the launcher uses when the daemon is not there.
-///
-/// It is a constant because it is a contract with two other things: the
-/// window's status line, and the one-shot query, which says it on stderr
-/// so that "no results" and "the daemon is not there" are not the same
-/// answer wearing the same exit status.
-pub const NO_DAEMON: &str = "sem ligação ao daemon";
 
 /// Where the content layer's answer comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,12 +32,13 @@ pub enum ContentBackend {
 }
 
 impl ContentBackend {
-    /// The word the status line shows.
-    pub fn label(&self) -> &'static str {
+    /// The word the status line shows, in the language the user reads.
+    pub fn label(&self, lang: Lang) -> &'static str {
+        let text = Text::for_lang(lang);
         match self {
-            ContentBackend::Daemon => "adaptadores",
-            ContentBackend::Rgx => "rgx",
-            ContentBackend::None => "sem conteúdo",
+            ContentBackend::Daemon => text.adapters,
+            ContentBackend::Rgx => text.rgx,
+            ContentBackend::None => text.no_content,
         }
     }
 
@@ -96,5 +91,17 @@ mod tests {
     #[test]
     fn the_tool_the_launcher_looks_for_is_rgx() {
         assert!(KNOWN_TOOLS.contains(&"rgx"));
+    }
+
+    /// The backend's word is said in the language the user reads.
+    #[test]
+    fn the_backend_label_is_in_the_users_language() {
+        assert_eq!(ContentBackend::Daemon.label(Lang::English), "adapters");
+        assert_eq!(
+            ContentBackend::Daemon.label(Lang::Portuguese),
+            "adaptadores"
+        );
+        assert_eq!(ContentBackend::None.label(Lang::English), "no content");
+        assert_eq!(ContentBackend::None.label(Lang::Portuguese), "sem conteúdo");
     }
 }

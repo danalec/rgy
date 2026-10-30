@@ -20,10 +20,11 @@
 //! how a user leaves a terminal, so it leaves this one, and the copy is
 //! the `>copy` command.
 
-use crate::latency::LatencyMeter;
 use crate::preview;
 use crate::term::{self, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, Paint};
 use rgy_launcher::Action as LauncherAction;
+use rgy_launcher::latency::{LatencyMeter, duration};
+use rgy_launcher::text::{Lang, Text};
 use rgy_name_core::live::Live;
 use rgy_name_core::name_query::{Alternatives, Hit, Searcher};
 use std::io::Write;
@@ -196,6 +197,12 @@ impl Drop for TerminalGuard {
 }
 
 struct App {
+    /// The language the launcher speaks.
+    ///
+    /// The terminal is the launcher without a desktop, so it says the same
+    /// words in the same language; the words are the launcher's, and the
+    /// language is a byte the caller hands over.
+    lang: Lang,
     /// The fsearch name index + overlay, the same searcher `searchctl` uses.
     /// Volume root, shown in the header.
     root: String,
@@ -332,17 +339,22 @@ impl Notice {
     }
 
     /// The actions of the launcher, with the key that does each one.
-    fn menu() -> Notice {
+    ///
+    /// What each action does is the terminal's own word, and the word is
+    /// the vocabulary's: the two faces say the same thing about the same
+    /// action, in the same language.
+    fn menu(lang: Lang) -> Notice {
+        let text = Text::for_lang(lang);
         let lines = rgy_launcher::COMMANDS
             .iter()
             .map(|command| {
                 let name = format!(">{}", command.name);
                 let key = shortcut(command.action);
-                format!("{name:<9}{key:<11}{}", describe(command.action))
+                format!("{name:<9}{key:<11}{}", describe(command.action, text))
             })
             .collect();
         Notice {
-            title: "actions".to_string(),
+            title: text.notice_actions.to_string(),
             lines,
         }
     }
@@ -350,11 +362,11 @@ impl Notice {
     /// The line names a command that does not exist.
     ///
     /// The sentence is the launcher's own: the two faces say the same
-    /// thing about the same mistake.
-    fn unknown(text: &str) -> Notice {
+    /// thing about the same mistake, in the same language.
+    fn unknown(text: &str, lang: Lang) -> Notice {
         Notice {
-            title: "unknown command".to_string(),
-            lines: vec![rgy_launcher::commands::unknown(text)],
+            title: Text::for_lang(lang).notice_unknown_command.to_string(),
+            lines: vec![rgy_launcher::commands::unknown(text, lang)],
         }
     }
 
@@ -373,14 +385,14 @@ impl Notice {
 /// What each action does, in the terminal's own words.
 ///
 /// The launcher's labels are the window's; the terminal has a voice of
-/// its own, and this is it.
-fn describe(action: LauncherAction) -> &'static str {
+/// its own, and this is it — in the language the launcher speaks.
+fn describe(action: LauncherAction, text: &Text) -> &'static str {
     match action {
-        LauncherAction::Open => "print the path",
-        LauncherAction::OpenFolder => "the folder that holds it",
-        LauncherAction::CopyPath => "the path, to copy",
-        LauncherAction::Preview => "the first lines of the file",
-        LauncherAction::Menu => "this list",
+        LauncherAction::Open => text.terminal_open,
+        LauncherAction::OpenFolder => text.terminal_open_folder,
+        LauncherAction::CopyPath => text.terminal_copy_path,
+        LauncherAction::Preview => text.terminal_preview,
+        LauncherAction::Menu => text.terminal_menu,
     }
 }
 
@@ -403,6 +415,7 @@ fn shortcut(action: LauncherAction) -> &'static str {
 impl App {
     fn new(live: Live, root: String, indexed: usize) -> Self {
         let mut app = App {
+            lang: Lang::English,
             live: Some(live),
             root,
             indexed,
@@ -428,6 +441,7 @@ impl App {
     /// An app that asks a source instead of the index in this process.
     fn with_source(source: Box<dyn rgy_launcher::Source>, root: String) -> Self {
         let mut app = App {
+            lang: Lang::English,
             live: None,
             root,
             indexed: 0,
@@ -675,7 +689,7 @@ impl App {
                 false
             }
             LauncherAction::Menu => {
-                self.notice = Some(Notice::menu());
+                self.notice = Some(Notice::menu(self.lang));
                 false
             }
         }
@@ -683,7 +697,7 @@ impl App {
 
     /// Say that the line names a command that does not exist.
     fn say_unknown(&mut self) {
-        self.notice = Some(Notice::unknown(&self.input));
+        self.notice = Some(Notice::unknown(&self.input, self.lang));
     }
 
     /// Whether a notice is on screen.
@@ -747,9 +761,7 @@ impl App {
         // video puts a green "8.1 ms" flush right of the prompt, with no word
         // before it.
         let latency = match self.meter.last() {
-            Some(us) => format!("{} ms", fmt_us(us))
-                .with(palette::green())
-                .to_string(),
+            Some(us) => duration(us).with(palette::green()).to_string(),
             None => String::new(),
         };
         rows.push(self.prompt_line(width, &latency));
@@ -927,19 +939,14 @@ impl App {
     /// separately on purpose — it is the outlier the sparkline exists to
     /// show, and it must not sit inside p50/p90.
     fn footer_line(&self, width: usize) -> String {
-        let label = "every keystroke is a whole-disk search";
-        let fmt = |us: Option<u128>| match us {
-            Some(us) => format!("{} ms", fmt_us(us)),
-            None => "—".to_string(),
-        };
-        let stats = format!(
-            "first {}  p50 {}  p90 {}",
-            fmt(self.meter.first()),
-            fmt(self.meter.p50()),
-            fmt(self.meter.p90()),
-        );
+        // The prose and the figures are the vocabulary's and the meter's,
+        // and the terminal says them the way the window says them: one
+        // table, one meter, two faces.
+        let text = Text::for_lang(self.lang);
+        let prose = text.terminal_prose_search;
+        let stats = self.meter.stats(text).unwrap_or_default();
 
-        let label_width = label.chars().count();
+        let label_width = prose.chars().count();
         let stats_width = stats.chars().count();
 
         let mut line = String::new();
@@ -948,7 +955,7 @@ impl App {
         // Prose + sparkline + stats. As the budget shrinks the prose goes
         // first, then the chart; the numbers stay.
         if width >= label_width + stats_width + 4 {
-            line.push_str(&label.with(palette::dim()).to_string());
+            line.push_str(&prose.with(palette::dim()).to_string());
             spark_width = 24.min(width.saturating_sub(label_width + stats_width + 4));
         } else if width >= stats_width + 4 {
             spark_width = 24.min(width.saturating_sub(stats_width + 4));
@@ -966,10 +973,12 @@ impl App {
                     .to_string(),
             );
         }
-        if !line.is_empty() {
-            line.push_str("  ");
+        if !stats.is_empty() {
+            if !line.is_empty() {
+                line.push_str("  ");
+            }
+            line.push_str(&stats.with(palette::green()).to_string());
         }
-        line.push_str(&stats.with(palette::green()).to_string());
 
         // Pad to the right edge in case the budget is bigger than the content
         // we could lay down (rare, but happens at very wide widths).
@@ -1128,6 +1137,17 @@ pub fn run(live: Live, root: String, indexed: usize) -> Result<(), String> {
     run_app(App::new(live, root, indexed))
 }
 
+/// Run the interactive search, in the language the launcher speaks.
+///
+/// The language is the caller's: the terminal is the launcher's other
+/// face, and a launcher that speaks two languages at once is a launcher
+/// the user has to read twice.
+pub fn run_with_lang(live: Live, root: String, indexed: usize, lang: Lang) -> Result<(), String> {
+    let mut app = App::new(live, root, indexed);
+    app.lang = lang;
+    run_app(app)
+}
+
 /// Run the interactive search over a source.
 ///
 /// The source is the daemon, or anything else that answers a query: the
@@ -1136,6 +1156,18 @@ pub fn run(live: Live, root: String, indexed: usize) -> Result<(), String> {
 /// on a machine with no desktop.
 pub fn run_with_source(source: Box<dyn rgy_launcher::Source>, root: String) -> Result<(), String> {
     run_app(App::with_source(source, root))
+}
+
+/// Run the interactive search over a source, in the language the launcher
+/// speaks.
+pub fn run_with_source_and_lang(
+    source: Box<dyn rgy_launcher::Source>,
+    root: String,
+    lang: Lang,
+) -> Result<(), String> {
+    let mut app = App::with_source(source, root);
+    app.lang = lang;
+    run_app(app)
 }
 
 /// The runner, over an app that is already built.
@@ -1437,16 +1469,6 @@ fn thousands(n: usize) -> String {
         out.push(c);
     }
     out
-}
-
-/// Render a microsecond duration the way the timings read: sub-millisecond
-/// precision where it matters, whole milliseconds above that.
-fn fmt_us(us: u128) -> String {
-    if us < 10_000 {
-        format!("{:.1}", us as f64 / 1000.0)
-    } else {
-        format!("{}", (us + 500) / 1000)
-    }
 }
 
 #[cfg(test)]
@@ -1871,14 +1893,6 @@ mod tests {
         assert_eq!(thousands(999), "999");
         assert_eq!(thousands(1_000), "1,000");
         assert_eq!(thousands(5_151_234), "5,151,234");
-    }
-
-    #[test]
-    fn latency_formats_below_and_above_ten_milliseconds() {
-        assert_eq!(fmt_us(3_500), "3.5");
-        assert_eq!(fmt_us(999), "1.0");
-        assert_eq!(fmt_us(10_000), "10");
-        assert_eq!(fmt_us(28_400), "28");
     }
 
     #[test]
@@ -2332,7 +2346,7 @@ mod tests {
     fn the_preview_command_shows_the_head_of_the_file() {
         let path =
             std::env::temp_dir().join(format!("rgy-search-ui-notas-{}.txt", std::process::id()));
-        std::fs::write(&path, "primeira linha\nsegunda linha\n").expect("the file is written");
+        std::fs::write(&path, "first line\nsegunda linha\n").expect("the file is written");
         let mut app = app_new();
         app.results = vec![path.to_string_lossy().into_owned()];
         assert!(!app.run_action(LauncherAction::Preview));
@@ -2340,7 +2354,7 @@ mod tests {
 
         let notice = app.notice.as_ref().expect("the notice is there");
         let text = notice.lines.join("\n");
-        assert!(text.contains("primeira linha"), "{text}");
+        assert!(text.contains("first line"), "{text}");
     }
 
     /// The notice is drawn where the results were: the panel is over the

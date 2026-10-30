@@ -19,11 +19,13 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
+use rgy_launcher::latency::Latency;
 use rgy_launcher::layout::{
     SCALE_PERCENT, SIDE_BAR_ENTRY_HEIGHT, SIDE_BAR_MINIMUM_ENTRY_HEIGHT, SIDE_BAR_WIDTH,
     device_pixels,
 };
 use rgy_launcher::results::IconKind;
+use rgy_launcher::text::{Lang, Text};
 use rgy_launcher::{Layout, Preview, Row};
 
 use crate::window::View;
@@ -45,6 +47,11 @@ pub mod colour {
     pub const SELECTED: u32 = 0x002E_2826;
     /// The bar on the left of the selected row.
     pub const ACCENT: u32 = 0x00FF_965A;
+    /// The time the answers take: the number and the chart.
+    ///
+    /// It is the terminal's green, so the two faces say the same thing in
+    /// the same colour.
+    pub const LATENCY: u32 = 0x008B_D977;
     /// The window's own background, when there is no backdrop.
     pub const BACKDROP: u32 = 0x0018_1514;
     /// The border: a hairline, a little lighter than the background.
@@ -512,9 +519,19 @@ fn draw_icon(hdc: HDC, icon: HICON, x: i32, y: i32, size: i32) {
 /// the picture is drawn in device pixels, and every number of the
 /// drawing is a model unit at that scale.
 ///
+/// The language is the one the window is speaking: the menu's labels
+/// and the column's own sentence come from the vocabulary, and a window
+/// that drew the labels in another language would be a window the user
+/// reads in two languages at once.
+///
+/// The picture is a context, a view, a few numbers and a language, and a
+/// struct would be a struct that only this function and its caller ever
+/// see.
+///
 /// # Safety
 ///
 /// `hdc` must be a device context the thread may draw on.
+#[allow(clippy::too_many_arguments)]
 pub unsafe fn paint(
     hdc: HDC,
     view: &View,
@@ -523,6 +540,7 @@ pub unsafe fn paint(
     icons: &mut Icons,
     fonts: &Fonts,
     scale: u32,
+    lang: Lang,
 ) {
     let mut model = Layout::with_rows(view.rows.len() as u32);
     // The preview panel is a layer over the results, and it is as tall as
@@ -583,6 +601,40 @@ pub unsafe fn paint(
         // The field.
         let field_top = layout.input_top() as i32;
         let field_h = layout.input_height as i32;
+
+        // The time the last answer took, flush right of the query.
+        //
+        // The number is the headline of the meter: it is the one figure
+        // that says whether the search is fast, and it sits where the eye
+        // already is — at the end of the line the user is typing on.
+        //
+        // The query gives up the room of it: a query that runs under the
+        // number is a query that hides the number.
+        let latency_label = view.latency.last_label();
+        select(hdc, fonts.folder);
+        let latency_w = match &latency_label {
+            Some(label) => text_width(hdc, label),
+            None => 0,
+        };
+        let query_room = content.saturating_sub(if latency_w > 0 {
+            latency_w + px(scale, 8)
+        } else {
+            0
+        });
+
+        // The number, before the query: the query is cut to the room that
+        // is left, so the two cannot reach each other.
+        if let Some(label) = &latency_label {
+            draw_run(
+                hdc,
+                label,
+                left + content - latency_w,
+                field_top + px(scale, 14),
+                colour::LATENCY,
+                latency_w,
+            );
+        }
+
         select(hdc, fonts.field);
         if view.query.is_empty() {
             let w = draw_run(
@@ -591,7 +643,7 @@ pub unsafe fn paint(
                 left,
                 field_top + px(scale, 14),
                 colour::DIM,
-                content,
+                query_room,
             );
             let _ = w;
         } else {
@@ -607,7 +659,7 @@ pub unsafe fn paint(
                 left,
                 field_top + px(scale, 14),
                 colour::TEXT,
-                content,
+                query_room,
             );
             // The caret: two pixels, two pixels after the text before it.
             // Its height is the text's height and not the field's: the
@@ -628,25 +680,53 @@ pub unsafe fn paint(
                 left + w + px(scale, 5),
                 field_top + px(scale, 14),
                 colour::TEXT,
-                content.saturating_sub(w + px(scale, 5)),
+                query_room.saturating_sub(w + px(scale, 5)),
             );
         }
 
-        // The status line, under the field.
+        // The status line, under the field, and the figures of the meter
+        // on its right.
         //
         // The line is the field's own: it ends six units above the
         // field's bottom, and the rows start where the field ends. A
         // line that reaches into the rows is a line the first row's
         // band paints over.
+        //
+        // The figures share that line because the window has one line
+        // under the field, and a window that grew a second one for the
+        // meter would be a window that moves under the user's hands.
+        // The status is prose and can be cut; the figures are a number
+        // with a unit and a chart, and they are the ones that stay.
+        let figures = latency_figures(&view.latency, lang.text());
+        select(hdc, fonts.folder);
+        let figures_w = if figures.is_empty() {
+            0
+        } else {
+            text_width(hdc, &figures)
+        };
+        let status_room = content.saturating_sub(if figures_w > 0 {
+            figures_w + px(scale, 8)
+        } else {
+            0
+        });
         if !view.status.is_empty() {
-            select(hdc, fonts.folder);
             draw_run(
                 hdc,
                 &view.status,
                 left,
                 field_top + field_h - px(scale, STATUS_HEIGHT),
                 colour::DIM,
-                content,
+                status_room,
+            );
+        }
+        if !figures.is_empty() {
+            draw_run(
+                hdc,
+                &figures,
+                left + content - figures_w,
+                field_top + field_h - px(scale, STATUS_HEIGHT),
+                colour::LATENCY,
+                figures_w,
             );
         }
 
@@ -668,7 +748,7 @@ pub unsafe fn paint(
 
         // The actions, in the column on the right of the window.
         if column {
-            draw_column(hdc, fonts, view, &layout, height, scale);
+            draw_column(hdc, fonts, view, &layout, height, scale, lang);
         }
 
         // The preview panel, over everything the rows were.
@@ -680,6 +760,30 @@ pub unsafe fn paint(
         // The context is left as it was found.
         select(hdc, stock);
     }
+}
+
+/// The figures of the meter, as the window draws them: the chart of the
+/// last few dozen answers, and the percentiles beside it.
+///
+/// The order is the terminal's: the chart first and the numbers after,
+/// because the chart says whether a scan got slower and the numbers say
+/// by how much.
+///
+/// An empty meter gives an empty string: a window that draws a chart of
+/// nothing is a window that reports a measurement it never took.
+fn latency_figures(latency: &Latency, text: &Text) -> String {
+    if latency.is_empty() {
+        return String::new();
+    }
+    let mut out = String::new();
+    if !latency.spark.is_empty() {
+        out.push_str(&latency.spark);
+        out.push_str("  ");
+    }
+    if let Some(stats) = latency.stats(text) {
+        out.push_str(&stats);
+    }
+    out
 }
 
 /// The preview panel: the file's name, and the lines under it.
@@ -903,6 +1007,10 @@ fn results_right(layout: &Layout) -> i32 {
 /// out from that colour, and a shade of its own would make the column
 /// opaque where the rest of the window is not — and the hairline on its
 /// left edge is what says that it is a separate thing.
+///
+/// The labels are the vocabulary's, in the language the window speaks: a
+/// menu that says "Open" to a user who reads "Abrir" is a menu the user
+/// has to guess.
 fn draw_column(
     hdc: HDC,
     fonts: &Fonts,
@@ -910,6 +1018,7 @@ fn draw_column(
     layout: &Layout,
     window_height: i32,
     scale: u32,
+    lang: Lang,
 ) {
     let rect = column_rect(layout, window_height);
     let row = px(scale, SIDE_BAR_ENTRY_HEIGHT as i32);
@@ -921,7 +1030,7 @@ fn draw_column(
     ) else {
         // The window has no room for the column: the column says so
         // instead of the window saying it over its own results.
-        draw_too_short(hdc, fonts, rect, scale);
+        draw_too_short(hdc, fonts, rect, scale, lang);
         return;
     };
     // The separator: a hairline on the column's left edge, the window's
@@ -953,7 +1062,7 @@ fn draw_column(
         select(hdc, fonts.row);
         draw_run(
             hdc,
-            action.label(),
+            action.label(lang),
             rect.left + px(scale, 12),
             y + px(scale, 6),
             colour::TEXT,
@@ -977,18 +1086,17 @@ fn draw_column(
 /// is in can be shorter than the list: the screen is not tall enough for
 /// the column, and the column says so, in the language the window
 /// speaks, because the model cannot know how tall the window ended up.
-const TOO_SHORT: &str = "sem espaço para as ações";
-
-/// The column that does not fit.
 ///
-/// The message is inside the column and not over the window: the results
-/// are the window's own business, and a window that says "too short" over
-/// its own results has thrown them away.
-fn draw_too_short(hdc: HDC, fonts: &Fonts, rect: Rect, scale: u32) {
+/// The sentence is the vocabulary's: the column is the window's own
+/// drawing, and the words it draws are the words the user reads. It is
+/// inside the column and not over the window: the results are the
+/// window's own business, and a window that says "too short" over its
+/// own results has thrown them away.
+fn draw_too_short(hdc: HDC, fonts: &Fonts, rect: Rect, scale: u32, lang: Lang) {
     select(hdc, fonts.folder);
     draw_run(
         hdc,
-        TOO_SHORT,
+        Text::for_lang(lang).no_room_for_the_actions,
         rect.left + px(scale, 12),
         rect.top + px(scale, 4),
         colour::DIM,
@@ -1157,8 +1265,122 @@ mod tests {
     use core::ffi::c_void;
 
     use rgy_launcher::Action;
+    use rgy_launcher::latency::LatencyMeter;
 
     use super::*;
+
+    /// Draw a view and hand back the surface it was drawn on.
+    ///
+    /// The picture is of the window the view describes: the same geometry
+    /// the window's procedure would have used.
+    fn draw(view: &View) -> (Canvas, i32, i32) {
+        let model = Layout::with_rows(view.rows.len() as u32);
+        let width = device_pixels(model.width, SCALE_PERCENT) as i32;
+        let height = device_pixels(model.height(), SCALE_PERCENT) as i32;
+        let Some(canvas) = Canvas::new(width, height) else {
+            panic!("the platform gave no surface to draw on");
+        };
+        let fonts = Fonts::new(SCALE_PERCENT);
+        let mut icons = Icons::new();
+        let mut painted = (0, 0);
+        unsafe {
+            paint(
+                canvas.dc,
+                view,
+                &mut painted,
+                false,
+                &mut icons,
+                &fonts,
+                SCALE_PERCENT,
+                Lang::English,
+            );
+        }
+        (canvas, width, height)
+    }
+
+    /// The green pixels of the picture: the meter is green and nothing
+    /// else in the window is.
+    ///
+    /// The test asks for the hue and not for the exact colour: GDI blends
+    /// the edges of a glyph with what is under it, so the green of a
+    /// letter is never exactly the green of the brush.
+    fn greens(canvas: &Canvas, width: i32, height: i32) -> Vec<(i32, i32)> {
+        let mut out = Vec::new();
+        for y in 0..height {
+            for x in 0..width {
+                let (r, g, b) = canvas.pixel(x, y);
+                if g as i32 - r as i32 > 30 && g as i32 - b as i32 > 30 {
+                    out.push((x, y));
+                }
+            }
+        }
+        out
+    }
+
+    /// A view with one answer's worth of time in it.
+    fn view_with_latency() -> View {
+        let mut meter = LatencyMeter::new();
+        meter.record(8_100);
+        View {
+            query: "rela".to_string(),
+            latency: meter.view(24),
+            ..View::default()
+        }
+    }
+
+    /// The window shows the time the answers take.
+    ///
+    /// The number is green and flush right of the query: the terminal puts
+    /// the same figure in the same place and in the same colour, and a
+    /// figure that is in another place in one of the two faces is a
+    /// figure the user has to look for twice.
+    ///
+    /// The test draws the picture and looks for the green: a rule about
+    /// the picture is only checkable by drawing it.
+    #[test]
+    fn the_time_the_answers_take_is_in_the_picture() {
+        let view = view_with_latency();
+        let (canvas, width, height) = draw(&view);
+        let greens = greens(&canvas, width, height);
+        assert!(!greens.is_empty(), "the time is not in the picture");
+
+        // The number is on the field's own line, and it is at the right
+        // of it: the field's line ends before the row's band starts.
+        let model = Layout::with_rows(view.rows.len() as u32);
+        let field_top = model.scaled(SCALE_PERCENT).input_top() as i32;
+        let on_the_field: Vec<i32> = greens
+            .iter()
+            .filter(|(_, y)| *y >= field_top && *y < field_top + 36)
+            .map(|(x, _)| *x)
+            .collect();
+        assert!(
+            !on_the_field.is_empty(),
+            "the number is not on the line of the query"
+        );
+        let leftmost = on_the_field.iter().min().copied().unwrap_or(0);
+        assert!(
+            leftmost > width / 2,
+            "the number is not flush right: {leftmost} of {width}"
+        );
+    }
+
+    /// A window with no answer has no time to show.
+    ///
+    /// A picture that says "0 ms" before the first answer is a picture
+    /// that reports a measurement it never took.
+    #[test]
+    fn a_window_without_an_answer_shows_no_time() {
+        let view = View {
+            query: "rela".to_string(),
+            ..View::default()
+        };
+        let (canvas, width, height) = draw(&view);
+        let greens = greens(&canvas, width, height);
+        assert!(
+            greens.is_empty(),
+            "the picture has a figure it never took: {greens:?}"
+        );
+    }
 
     /// The line under the field is the field's own.
     ///
@@ -1193,6 +1415,7 @@ mod tests {
                 &mut icons,
                 &fonts,
                 SCALE_PERCENT,
+                Lang::English,
             );
         }
         // The lowest thing on the picture is the line under the field,
@@ -1648,7 +1871,15 @@ mod tests {
         // The surface is the window's own colour, so the column's edge
         // is the first thing on it that is not.
         fill(canvas.dc, 0, 0, width, height, colour::BACKDROP);
-        draw_column(canvas.dc, &fonts, &view, &layout, height, SCALE_PERCENT);
+        draw_column(
+            canvas.dc,
+            &fonts,
+            &view,
+            &layout,
+            height,
+            SCALE_PERCENT,
+            Lang::English,
+        );
         let x = layout.side_bar_left() as i32 + 10;
         let top = (0..height)
             .find(|&y| canvas.pixel(x, y) != in_pixels(colour::BACKDROP))

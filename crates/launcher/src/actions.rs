@@ -16,6 +16,7 @@
 use alloc::string::String;
 
 use crate::results::IconKind;
+use crate::text::{self, Lang, Text};
 
 /// The actions every result has.
 ///
@@ -54,13 +55,17 @@ pub enum Action {
 
 impl Action {
     /// What the action does, in the words the menu shows.
-    pub fn label(&self) -> &'static str {
+    ///
+    /// The word is in the vocabulary, so the menu says what the user
+    /// reads in the language the user reads.
+    pub fn label(&self, lang: Lang) -> &'static str {
+        let text = Text::for_lang(lang);
         match self {
-            Action::Open => "Abrir",
-            Action::OpenFolder => "Abrir pasta",
-            Action::CopyPath => "Copiar caminho",
-            Action::Preview => "Pré-visualizar",
-            Action::Menu => "Ações",
+            Action::Open => text.open,
+            Action::OpenFolder => text.open_folder,
+            Action::CopyPath => text.copy_path,
+            Action::Preview => text.preview,
+            Action::Menu => text.actions,
         }
     }
 
@@ -109,29 +114,13 @@ impl Action {
     ///
     /// `None` when the action fits the row — the launcher does not
     /// refuse what it offers.
-    pub fn refusal(&self, kind: IconKind) -> Option<String> {
+    pub fn refusal(&self, kind: IconKind, lang: Lang) -> Option<String> {
         match self {
-            Action::Preview if !Self::for_kind(kind).contains(&Action::Preview) => Some(
-                alloc::format!("{} não tem pré-visualização", thing_of(kind)),
-            ),
+            Action::Preview if !Self::for_kind(kind).contains(&Action::Preview) => {
+                Some(text::no_preview_of(kind, lang))
+            }
             _ => None,
         }
-    }
-}
-
-/// The name of a kind of thing, in the user's language.
-///
-/// It is what the refusal names: the user does not have to guess which
-/// thing the launcher refused.
-fn thing_of(kind: IconKind) -> &'static str {
-    match kind {
-        IconKind::Folder => "uma pasta",
-        IconKind::Document => "um documento",
-        IconKind::Image => "uma imagem",
-        IconKind::Video => "um vídeo",
-        IconKind::Audio => "um áudio",
-        IconKind::Application => "um programa",
-        IconKind::File => "um ficheiro",
     }
 }
 
@@ -144,7 +133,8 @@ mod tests {
         let all = Action::all();
         assert_eq!(all.len(), 4);
         for a in all {
-            assert!(!a.label().is_empty());
+            assert!(!a.label(Lang::English).is_empty());
+            assert!(!a.label(Lang::Portuguese).is_empty());
             assert!(!a.shortcut().is_empty());
         }
     }
@@ -228,13 +218,47 @@ mod tests {
     #[test]
     fn the_refusal_says_why() {
         let reason = Action::Preview
-            .refusal(IconKind::Folder)
+            .refusal(IconKind::Folder, Lang::English)
             .expect("a folder has no preview");
-        assert!(reason.contains("pasta"), "{reason}");
-        assert!(reason.contains("pré-visualização"), "{reason}");
+        assert!(reason.contains("a folder"), "{reason}");
+        assert!(reason.contains("no preview"), "{reason}");
         // And what fits is not refused.
-        assert!(Action::Preview.refusal(IconKind::Document).is_none());
-        assert!(Action::Open.refusal(IconKind::Folder).is_none());
-        assert!(Action::CopyPath.refusal(IconKind::Image).is_none());
+        assert!(
+            Action::Preview
+                .refusal(IconKind::Document, Lang::English)
+                .is_none()
+        );
+        assert!(
+            Action::Open
+                .refusal(IconKind::Folder, Lang::English)
+                .is_none()
+        );
+        assert!(
+            Action::CopyPath
+                .refusal(IconKind::Image, Lang::English)
+                .is_none()
+        );
+    }
+
+    /// The refusal is said in the language the user reads.
+    ///
+    /// The word is in the vocabulary, so the sentence is the vocabulary's
+    /// too -- and the thing it names is named in that language as well.
+    #[test]
+    fn the_refusal_is_said_in_the_users_language() {
+        let reason = Action::Preview
+            .refusal(IconKind::Folder, Lang::Portuguese)
+            .expect("a folder has no preview");
+        assert!(reason.contains("uma pasta"), "{reason}");
+        assert!(reason.contains("pré-visualização"), "{reason}");
+    }
+
+    /// The menu's labels are in the user's language.
+    #[test]
+    fn the_labels_are_in_the_users_language() {
+        assert_eq!(Action::Open.label(Lang::English), "Open");
+        assert_eq!(Action::Open.label(Lang::Portuguese), "Abrir");
+        assert_eq!(Action::Menu.label(Lang::English), "Actions");
+        assert_eq!(Action::Menu.label(Lang::Portuguese), "Ações");
     }
 }

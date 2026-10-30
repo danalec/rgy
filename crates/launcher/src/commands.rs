@@ -21,6 +21,7 @@
 //! sent on to fail somewhere else.
 
 use crate::actions::Action;
+use crate::text::{Lang, Text};
 
 /// The character that starts a command.
 pub const COMMAND_PREFIX: &str = ">";
@@ -32,43 +33,47 @@ pub struct Command {
     pub name: &'static str,
     /// What it does.
     pub action: Action,
-    /// What the menu shows.
-    pub label: &'static str,
 }
 
 /// The commands, in the order the menu lists them.
 ///
 /// The names are the words a person types: `open`, `folder`, `copy`,
 /// `preview`, `menu`. They are English because they are the keys of an
-/// API — the labels the user reads are Portuguese, and the two are not
-/// required to be the same language.
+/// API, and the label the user reads is the action's own label — the
+/// two are the same word in the language the user reads.
 pub const COMMANDS: &[Command] = &[
     Command {
         name: "open",
         action: Action::Open,
-        label: "Abrir",
     },
     Command {
         name: "folder",
         action: Action::OpenFolder,
-        label: "Abrir pasta",
     },
     Command {
         name: "copy",
         action: Action::CopyPath,
-        label: "Copiar caminho",
     },
     Command {
         name: "preview",
         action: Action::Preview,
-        label: "Pré-visualizar",
     },
     Command {
         name: "menu",
         action: Action::Menu,
-        label: "Ações",
     },
 ];
+
+impl Command {
+    /// What the menu shows, in the language the user reads.
+    ///
+    /// The label is the action's label: a command and the action it
+    /// names are the same thing, and two words for one thing is two
+    /// words that can drift apart.
+    pub fn label(&self, lang: Lang) -> &'static str {
+        self.action.label(lang)
+    }
+}
 
 /// The command a text names, if it names one.
 ///
@@ -89,16 +94,20 @@ pub fn is_command(text: &str) -> bool {
 }
 
 /// The sentence for a `>`-line that names no command.
-pub fn unknown(text: &str) -> alloc::string::String {
+///
+/// It is said in the language the user reads: the sentence is the
+/// vocabulary's, and the vocabulary has one per language.
+pub fn unknown(text: &str, lang: Lang) -> alloc::string::String {
     let name = text
         .trim()
         .strip_prefix(COMMAND_PREFIX)
         .unwrap_or("")
         .trim();
+    let words = Text::for_lang(lang);
     if name.is_empty() {
-        alloc::string::String::from("escreva um comando: >open, >folder, >copy, >preview, >menu")
+        alloc::string::String::from(words.write_a_command)
     } else {
-        alloc::format!("comando desconhecido: >{name}")
+        words.unknown_command.replace("{name}", name)
     }
 }
 
@@ -119,7 +128,8 @@ mod tests {
         // itself included: `>menu` opens the list of the actions.
         for c in COMMANDS {
             assert!(!c.name.is_empty());
-            assert!(!c.label.is_empty());
+            assert!(!c.label(Lang::English).is_empty());
+            assert!(!c.label(Lang::Portuguese).is_empty());
             assert!(
                 c.action == Action::Menu || Action::all().contains(&c.action),
                 "the command >{} is not an action of the launcher",
@@ -169,15 +179,24 @@ mod tests {
 
     #[test]
     fn the_sentence_names_the_commands_when_none_was_written() {
-        let empty = unknown(">");
+        let empty = unknown(">", Lang::English);
         assert!(empty.contains(">open"), "{empty}");
-        let wrong = unknown(">nope");
+        let wrong = unknown(">nope", Lang::English);
         assert!(wrong.contains("nope"), "{wrong}");
+    }
+
+    /// The sentence is said in the language the user reads.
+    #[test]
+    fn the_sentence_is_said_in_the_users_language() {
+        let empty = unknown(">", Lang::Portuguese);
+        assert!(empty.contains(">open"), "{empty}");
+        let wrong = unknown(">nope", Lang::Portuguese);
+        assert!(wrong.contains("comando desconhecido"), "{wrong}");
     }
 
     #[test]
     fn the_sentence_names_every_command_the_table_has() {
-        let sentence = unknown(">");
+        let sentence = unknown(">", Lang::English);
         for command in COMMANDS {
             assert!(
                 sentence.contains(&alloc::format!(">{}", command.name)),

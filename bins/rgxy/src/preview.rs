@@ -13,6 +13,7 @@
 use std::io::Read;
 
 use rgy_launcher::Preview;
+use rgy_launcher::text::{Lang, Text};
 
 /// How many bytes of the file the preview reads.
 const MAX_BYTES: u64 = 64 * 1024;
@@ -24,14 +25,15 @@ const MAX_LINES: usize = 12;
 ///
 /// A file that cannot be read has a preview that says so: an empty panel
 /// would look like a bug, and a sentence does not.
-pub fn of(path: &str) -> Preview {
+pub fn of(path: &str, lang: Lang) -> Preview {
+    let words = Text::for_lang(lang);
     let title = name_of(path);
     let bytes = match read_head(path) {
         Ok(b) => b,
         Err(e) => {
             return Preview {
                 title,
-                lines: vec![format!("não foi possível ler o ficheiro: {e}")],
+                lines: vec![words.file_not_read.replace("{e}", &e.to_string())],
             };
         }
     };
@@ -39,9 +41,12 @@ pub fn of(path: &str) -> Preview {
     if is_binary(&bytes) {
         return Preview {
             title,
-            lines: vec![format!(
-                "ficheiro binário · {} bytes",
-                std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+            lines: vec![rgy_launcher::text::fill(
+                words.binary_file,
+                &[&std::fs::metadata(path)
+                    .map(|m| m.len())
+                    .unwrap_or(0)
+                    .to_string()],
             )],
         };
     }
@@ -56,7 +61,7 @@ pub fn of(path: &str) -> Preview {
         lines.push(line.to_string());
     }
     if lines.is_empty() {
-        lines.push("(ficheiro vazio)".to_string());
+        lines.push(words.empty_file.to_string());
     }
     Preview { title, lines }
 }
@@ -67,10 +72,10 @@ pub fn of(path: &str) -> Preview {
 /// share that is not there, and the read blocks for the SMB timeout --
 /// so the panel has something to show while it waits. A panel that is
 /// empty looks like a bug.
-pub fn pending(path: &str) -> Preview {
+pub fn pending(path: &str, lang: Lang) -> Preview {
     Preview {
         title: name_of(path),
-        lines: vec!["a ler\u{2026}".to_string()],
+        lines: vec![Text::for_lang(lang).reading.to_string()],
     }
 }
 
@@ -154,10 +159,10 @@ mod tests {
 
     #[test]
     fn a_file_that_is_not_there_says_so() {
-        let preview = of("/tmp/rgy-rgxy-no-such-file-12345");
+        let preview = of("/tmp/rgy-rgxy-no-such-file-12345", Lang::English);
         assert!(!preview.lines.is_empty());
         assert!(
-            preview.lines[0].contains("não foi possível"),
+            preview.lines[0].contains("could not be read"),
             "{:?}",
             preview.lines
         );
@@ -206,9 +211,9 @@ mod tests {
         let mut data = vec![b'a'; 32];
         data.push(0);
         std::fs::write(&path, &data).expect("the file is written");
-        let preview = of(path.to_str().expect("the path is text"));
+        let preview = of(path.to_str().expect("the path is text"), Lang::English);
         let _ = std::fs::remove_file(&path);
-        assert!(preview.lines[0].contains("binário"), "{:?}", preview.lines);
+        assert!(preview.lines[0].contains("binary"), "{:?}", preview.lines);
     }
 
     #[test]
@@ -219,7 +224,7 @@ mod tests {
         let mut data = b"caf".to_vec();
         data.push(0xE9);
         std::fs::write(&path, &data).expect("the file is written");
-        let preview = of(path.to_str().expect("the path is text"));
+        let preview = of(path.to_str().expect("the path is text"), Lang::English);
         let _ = std::fs::remove_file(&path);
         assert!(!preview.lines.is_empty());
     }

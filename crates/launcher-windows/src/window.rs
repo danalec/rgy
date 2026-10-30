@@ -40,7 +40,9 @@ use core::ffi::c_void;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use rgy_launcher::latency::Latency;
 use rgy_launcher::layout::{BASE_DPI, SCALE_PERCENT, device_pixels, model_pixels};
+use rgy_launcher::text::{Lang, Text};
 use rgy_launcher::{Action, Layout, Mode, Preview, Row};
 
 use crate::paint::{self, Fonts, Icons};
@@ -139,6 +141,11 @@ pub struct View {
     /// and a caret that is always at the end is a decoration: the model
     /// moves it with the arrow keys, and a paste lands where it is.
     pub caret: usize,
+    /// The line the empty field shows.
+    ///
+    /// The word is the vocabulary's, and the window fills it with the
+    /// word of the language it speaks: the host owns the rows and the
+    /// query, and the words are the window's.
     pub placeholder: String,
     pub rows: Vec<Row>,
     pub selected: usize,
@@ -150,6 +157,14 @@ pub struct View {
     pub warnings: Vec<String>,
     /// The one line under the field: what is happening.
     pub status: String,
+    /// How long the answers take.
+    ///
+    /// The figures are the model's: the meter lives in the model and the
+    /// window draws what the model measured. An empty figure is not a
+    /// measurement — before the first answer there is nothing to show,
+    /// and a window that says "0 ms" then is a window that reports a
+    /// measurement it never took.
+    pub latency: Latency,
     /// The panel over the results, when there is one.
     pub preview: Option<Preview>,
 }
@@ -215,6 +230,12 @@ pub enum Awareness {
 /// The state the window's procedure reads.
 struct State {
     view: View,
+    /// The language the window is speaking.
+    ///
+    /// The words the window draws come from the vocabulary, and the
+    /// vocabulary has a column per language: the window holds the
+    /// language it was given and asks the table for the word it needs.
+    lang: Lang,
     /// The geometry the last paint used, so a resize knows what changed.
     painted: (i32, i32),
     /// Whether the platform really gave the window its blur.
@@ -463,6 +484,11 @@ impl Layer {
     /// The answer is the compositor's own: it took the picture or it
     /// threw it away, and a window whose picture was thrown away shows
     /// nothing at all. False says that.
+    ///
+    /// The picture is the window's own, and the words on it are the
+    /// window's: a struct would be a struct that only this function and
+    /// its caller ever see.
+    #[allow(clippy::too_many_arguments)]
     fn present(
         &mut self,
         hwnd: HWND,
@@ -471,11 +497,12 @@ impl Layer {
         icons: &mut Icons,
         fonts: &Fonts,
         scale: u32,
+        lang: Lang,
     ) -> bool {
         unsafe {
             // The panel's own near-black is what the desktop shows
             // through.
-            paint::paint(self.dc, view, painted, false, icons, fonts, scale);
+            paint::paint(self.dc, view, painted, false, icons, fonts, scale, lang);
             // The alpha is worked out after the drawing: GDI writes the
             // colour of a pixel and never its alpha.
             self.compose();
@@ -640,9 +667,10 @@ impl Window {
         // pointer.
         let raw: *mut State = Box::into_raw(Box::new(State {
             view: View {
-                placeholder: "Buscar arquivos, apps ou comandos…".to_string(),
+                placeholder: Text::for_lang(Lang::English).placeholder.to_string(),
                 ..View::default()
             },
+            lang: Lang::English,
             painted: (0, 0),
             backdrop: false,
             compositor: Compositor::Unknown,
@@ -740,6 +768,22 @@ impl Window {
         }
     }
 
+    /// The window, speaking another language.
+    ///
+    /// The window is built in English — the language the code is written
+    /// in — and the product is not: the launcher was made with
+    /// Portuguese words on purpose, and the words are in the vocabulary,
+    /// one column per language. The window is told which column to read.
+    ///
+    /// The line the empty field shows changes with it: a window whose
+    /// placeholder stayed in the other language would be a window the
+    /// user reads in two at once.
+    pub fn with_lang(mut self, lang: Lang) -> Window {
+        self.state_mut().lang = lang;
+        self.state_mut().view.placeholder = Text::for_lang(lang).placeholder.to_string();
+        self
+    }
+
     /// Make the window composite itself.
     ///
     /// A window that paints its own alpha is composited by itself: the
@@ -785,6 +829,7 @@ impl Window {
                 &mut state.icons,
                 &state.fonts,
                 state.scale,
+                state.lang,
             ),
             // There is no layer: the window paints itself, and the
             // compositor has nothing to refuse.
@@ -885,6 +930,17 @@ impl Window {
 
     /// What the window draws, changed.
     pub fn set_view(&mut self, view: View) {
+        self.install(view);
+    }
+
+    /// The view the window draws, in the language the window speaks.
+    ///
+    /// The placeholder is the word of that language: the host owns the
+    /// rows and the query, and a window that showed its placeholder in
+    /// another language would be a window the user reads in two
+    /// languages at once.
+    fn install(&mut self, mut view: View) {
+        view.placeholder = Text::for_lang(self.state().lang).placeholder.to_string();
         self.state_mut().view = view;
     }
 
@@ -1407,7 +1463,7 @@ impl Window {
         match control {
             Control::None => true,
             Control::Show(view, width, height) => {
-                self.state_mut().view = view;
+                self.install(view);
                 self.resize(width, height);
                 self.show();
                 true
@@ -1417,7 +1473,7 @@ impl Window {
                 true
             }
             Control::Paint(view, width, height) => {
-                self.state_mut().view = view;
+                self.install(view);
                 self.resize(width, height);
                 self.repaint();
                 true
@@ -1692,6 +1748,7 @@ unsafe extern "system" fn wnd_proc(
                                 &mut state.icons,
                                 &state.fonts,
                                 state.scale,
+                                state.lang,
                             ) {
                                 // The compositor threw the picture away.
                                 // The window keeps the one it had -- a
@@ -1714,6 +1771,7 @@ unsafe extern "system" fn wnd_proc(
                                 &mut state.icons,
                                 &state.fonts,
                                 state.scale,
+                                state.lang,
                             );
                         }
                     }
@@ -2163,5 +2221,60 @@ mod tests {
         unsafe {
             ShowWindow(hwnd, SW_HIDE);
         }
+    }
+
+    /// The window speaks English until it is told otherwise.
+    ///
+    /// The words are in the vocabulary, and the vocabulary's base column
+    /// is English: a window that said nothing about its language would
+    /// be a window whose words are a guess.
+    #[test]
+    fn the_window_speaks_english_by_default() {
+        let window = Window::new("rgxy-test").expect("the window was made");
+        assert_eq!(
+            window.view().placeholder,
+            Text::for_lang(Lang::English).placeholder
+        );
+    }
+
+    /// The window speaks the language it is given.
+    ///
+    /// The launcher was made with Portuguese words on purpose, and the
+    /// words are the product's: the window holds the language and asks
+    /// the vocabulary for the word it needs.
+    #[test]
+    fn the_window_speaks_the_language_it_was_given() {
+        let window = Window::new("rgxy-test")
+            .expect("the window was made")
+            .with_lang(Lang::Portuguese);
+        assert_eq!(
+            window.view().placeholder,
+            Text::for_lang(Lang::Portuguese).placeholder
+        );
+        // And the two languages are not the same word.
+        assert_ne!(
+            window.view().placeholder,
+            Text::for_lang(Lang::English).placeholder
+        );
+    }
+
+    /// The view the host installs is in the window's language.
+    ///
+    /// The host owns the rows and the query, and the words are the
+    /// window's: a view that carried the placeholder of another
+    /// language would put two languages on one screen.
+    #[test]
+    fn the_view_the_host_installs_is_in_the_windows_language() {
+        let mut window = Window::new("rgxy-test")
+            .expect("the window was made")
+            .with_lang(Lang::Portuguese);
+        window.set_view(View {
+            placeholder: Text::for_lang(Lang::English).placeholder.to_string(),
+            ..View::default()
+        });
+        assert_eq!(
+            window.view().placeholder,
+            Text::for_lang(Lang::Portuguese).placeholder
+        );
     }
 }

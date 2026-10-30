@@ -653,7 +653,7 @@ mod tests {
         app.show();
         app.set_preview(Preview {
             title: "notas.txt".to_string(),
-            lines: alloc::vec!["primeira linha".to_string()],
+            lines: alloc::vec!["first line".to_string()],
         });
         assert!(app.preview().is_some());
         assert!(app.close_preview());
@@ -866,7 +866,7 @@ mod tests {
         let mut app = App::new();
         app.show();
         app.set_results(vec![
-            Row::new("/a/pasta".to_string(), 0).with_folder(true),
+            Row::new("/a/folder".to_string(), 0).with_folder(true),
             Row::new("/a/notas.txt".to_string(), 1),
         ]);
         assert!(
@@ -892,7 +892,7 @@ mod tests {
     fn the_menu_walks_the_actions_that_are_offered() {
         let mut app = App::new();
         app.show();
-        app.set_results(vec![Row::new("/a/pasta".to_string(), 0).with_folder(true)]);
+        app.set_results(vec![Row::new("/a/folder".to_string(), 0).with_folder(true)]);
         app.open_menu();
         assert_eq!(app.menu_action(), Some(Action::Open));
         app.menu_next();

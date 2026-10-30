@@ -30,7 +30,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use rgy_launcher::{Answer, Query, Source};
+use rgy_launcher::text::{Lang, Text};
+use rgy_launcher::{Answer, Layer, Query, Source};
 use rgy_proto::client::Client;
 use rgy_proto::endpoint::Endpoint;
 
@@ -66,15 +67,19 @@ pub struct Status {
     pub warnings: Vec<String>,
     /// How long the daemon took, in microseconds.
     pub took_us: u64,
-    /// Which layer answered: `nomes` or `conteúdo`.
-    pub layer: &'static str,
+    /// Which layer answered: the names, or the content.
+    ///
+    /// `None` when nothing has answered yet: the line under the field
+    /// names the layer of the last answer, and a layer of an answer that
+    /// never came is a layer the user did not ask about.
+    pub layer: Option<Layer>,
     /// Where the content layer's answers come from.
     pub backend: String,
     /// Whether the daemon is there.
     pub connected: bool,
     /// Whether the daemon has been asked at all.
     ///
-    /// The line says "sem ligação ao daemon" about a daemon that is not
+    /// The line says "no connection to the daemon" about a daemon that is not
     /// there, and not about a daemon nobody has asked about yet.
     pub asked: bool,
     /// Whether the daemon has a pack store (`--tv-dir`).
@@ -89,7 +94,7 @@ pub struct Status {
 /// could not be reached is gone, a daemon that took the connection and
 /// said nothing in the window is up and slow, and a daemon that took
 /// the connection and answered badly is up — it answered, and what it
-/// said was wrong. The line that says "sem ligação ao daemon" under
+/// said was wrong. The line that says "no connection to the daemon" under
 /// a daemon that is up is a lie.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Presence {
@@ -141,7 +146,7 @@ impl Failure {
 /// is not there, and the pipe that was closed. Everything else — the
 /// daemon's own error, a line that is not an answer, an answer that
 /// stops in the middle — is a daemon that IS there and answered badly,
-/// and the line that says "sem ligação ao daemon" about it is a lie.
+/// and the line that says "no connection to the daemon" about it is a lie.
 fn presence(e: &std::io::Error) -> Presence {
     match e.kind() {
         std::io::ErrorKind::TimedOut => Presence::Slow,
@@ -220,6 +225,11 @@ pub struct DaemonSource {
     /// that draws cannot wait the client's thirty seconds, and the
     /// command line — which waits in the background — can.
     window: Duration,
+    /// The language the launcher is speaking.
+    ///
+    /// The source says sentences — to the window and to the terminal — and
+    /// a sentence is said in the language the user reads.
+    lang: Lang,
 }
 
 impl DaemonSource {
@@ -229,8 +239,8 @@ impl DaemonSource {
     /// search box — the window or the terminal interface — can afford to
     /// wait. The command line asks for the client's own window with
     /// [`DaemonSource::with_window`].
-    pub fn new(endpoint: Endpoint, rgx: Option<String>) -> DaemonSource {
-        DaemonSource::with_window(endpoint, rgx, LAUNCHER_WINDOW)
+    pub fn new(endpoint: Endpoint, rgx: Option<String>, lang: Lang) -> DaemonSource {
+        DaemonSource::with_window(endpoint, rgx, LAUNCHER_WINDOW, lang)
     }
 
     /// The same, with the window the caller asks for.
@@ -239,7 +249,12 @@ impl DaemonSource {
     /// two seconds and the command line gives it the client's thirty,
     /// because a program that waits in the background can afford to and
     /// a search box cannot.
-    pub fn with_window(endpoint: Endpoint, rgx: Option<String>, window: Duration) -> DaemonSource {
+    pub fn with_window(
+        endpoint: Endpoint,
+        rgx: Option<String>,
+        window: Duration,
+        lang: Lang,
+    ) -> DaemonSource {
         DaemonSource {
             client: None,
             endpoint,
@@ -249,7 +264,16 @@ impl DaemonSource {
             status: Rc::new(RefCell::new(Status::default())),
             rgx,
             window,
+            lang,
         }
+    }
+
+    /// The language the launcher is speaking.
+    ///
+    /// The source says sentences, and the caller that draws them needs to
+    /// know in which language they are said.
+    pub fn lang(&self) -> Lang {
+        self.lang
     }
 
     /// The window this source gives the daemon to answer in.
@@ -277,10 +301,11 @@ impl DaemonSource {
     /// fallback has nothing to read — the sentence says that instead of
     /// promising a search that cannot happen.
     fn no_content_reason(&self) -> &'static str {
+        let text = Text::for_lang(self.lang);
         if self.rgx.is_some() {
-            "o rgx só responde sobre o escopo de uma busca de nomes, e sem o daemon não houve nenhuma"
+            text.rgx_needs_a_name_scope
         } else {
-            "a camada de conteúdo precisa do daemon (searchd) ou do rgx no PATH"
+            text.content_needs_the_daemon
         }
     }
 
@@ -292,10 +317,9 @@ impl DaemonSource {
     /// the `rgx` fallback promises a search that needs a scope, and
     /// without the daemon there is no scope to have.
     pub fn no_daemon_message(&self) -> String {
-        format!(
-            "sem daemon em {}; {}",
-            self.endpoint.describe(),
-            self.no_content_reason()
+        rgy_launcher::text::fill(
+            Text::for_lang(self.lang).no_daemon_in,
+            &[&self.endpoint.describe(), self.no_content_reason()],
         )
     }
 
@@ -330,7 +354,7 @@ impl DaemonSource {
                 let mut st = self.status.borrow_mut();
                 st.asked = true;
                 st.connected = false;
-                st.warnings = vec![format!("{}: {e}", rgy_launcher::tools::NO_DAEMON)];
+                st.warnings = vec![format!("{}: {e}", rgy_launcher::text::no_daemon(self.lang))];
                 return false;
             }
         };
@@ -360,7 +384,7 @@ impl DaemonSource {
                 // user that a live tree is behind it.
                 if status.feed == "gone" {
                     st.warnings
-                        .push("a árvore já não é seguida pelo daemon".to_string());
+                        .push(Text::for_lang(self.lang).tree_not_followed.to_string());
                 }
             }
             Err(e) => {
@@ -377,10 +401,13 @@ impl DaemonSource {
                 // not there hides the daemon the user has to start.
                 let presence = presence(&e);
                 st.connected = presence != Presence::Gone;
+                let text = Text::for_lang(self.lang);
                 st.warnings = vec![match presence {
-                    Presence::Gone => format!("{}: {e}", rgy_launcher::tools::NO_DAEMON),
-                    Presence::Slow => format!("o daemon não respondeu a tempo: {e}"),
-                    Presence::Answered => format!("o daemon respondeu mal: {e}"),
+                    Presence::Gone => {
+                        format!("{}: {e}", rgy_launcher::text::no_daemon(self.lang))
+                    }
+                    Presence::Slow => text.daemon_slow.replace("{e}", &e.to_string()),
+                    Presence::Answered => text.daemon_bad.replace("{e}", &e.to_string()),
                 }];
             }
         }
@@ -422,7 +449,8 @@ impl DaemonSource {
                     let mut st = self.status.borrow_mut();
                     st.asked = true;
                     st.connected = false;
-                    st.warnings = vec![format!("{}: {e}", rgy_launcher::tools::NO_DAEMON)];
+                    st.warnings =
+                        vec![format!("{}: {e}", rgy_launcher::text::no_daemon(self.lang))];
                     return None;
                 }
             };
@@ -441,7 +469,7 @@ impl DaemonSource {
     /// kept for the window.
     ///
     /// A daemon that did not answer in the window is **up and slow**, not
-    /// gone: the line that says "sem ligação ao daemon" under a daemon
+    /// gone: the line that says "no connection to the daemon" under a daemon
     /// that is up is a lie, and the count, the layer and the time of the
     /// last answer still belong to the line.
     fn fail(&mut self, failure: &Failure) {
@@ -490,8 +518,10 @@ impl DaemonSource {
                         .map(|h| h.path)
                         .collect::<Vec<String>>()
                 })
-                .map_err(|e| Failure::of("a busca de nomes falhou", &e)),
-            None => Err(Failure::gone(String::from(rgy_launcher::tools::NO_DAEMON))),
+                .map_err(|e| Failure::of(Text::for_lang(self.lang).name_search_failed, &e)),
+            None => Err(Failure::gone(String::from(rgy_launcher::text::no_daemon(
+                self.lang,
+            )))),
         };
         if let Some(client) = self.client.as_mut() {
             client.set_session(saved);
@@ -521,7 +551,7 @@ impl DaemonSource {
                     st.connected = true;
                     st.warnings = outcome.warnings.clone();
                     st.took_us = outcome.took_us;
-                    st.layer = "nomes";
+                    st.layer = Some(Layer::Names);
                     st.matches = answer.len();
                 }
                 // The scope the fallback will use if the daemon goes away.
@@ -530,7 +560,10 @@ impl DaemonSource {
                 answer
             }
             Err(e) => {
-                self.fail(&Failure::of("a busca de nomes falhou", &e));
+                self.fail(&Failure::of(
+                    Text::for_lang(self.lang).name_search_failed,
+                    &e,
+                ));
                 Answer::empty()
             }
         }
@@ -648,7 +681,7 @@ impl DaemonSource {
                 // The window is the budget of the whole answer and it is
                 // gone: the fallback would be a process started with no
                 // time to answer, and the sentence says what happened.
-                let reason = Failure::gone("não sobrou tempo para o rgx".to_string());
+                let reason = Failure::gone(String::from(Text::for_lang(self.lang).no_time_for_rgx));
                 self.fail(&reason);
                 failure = Some(reason);
             } else {
@@ -670,7 +703,7 @@ impl DaemonSource {
             // would be a lie — it is answering.
             None if daemon_up => (
                 true,
-                String::from("a parte dos nomes deu nenhum resultado; não há ficheiros para ler"),
+                String::from(Text::for_lang(self.lang).no_files_to_read),
             ),
             // The daemon is not there. Its own reason is kept — it says
             // what went wrong — and the content layer's reason is added
@@ -685,7 +718,7 @@ impl DaemonSource {
             }
         };
         let mut st = self.status.borrow_mut();
-        st.layer = "conteúdo";
+        st.layer = Some(Layer::Content);
         st.matches = 0;
         st.connected = connected;
         st.warnings = vec![warning];
@@ -711,11 +744,13 @@ impl DaemonSource {
         window: Duration,
     ) -> Result<Answer, Failure> {
         let Some(client) = self.client_mut() else {
-            return Err(Failure::gone(String::from(rgy_launcher::tools::NO_DAEMON)));
+            return Err(Failure::gone(String::from(rgy_launcher::text::no_daemon(
+                self.lang,
+            ))));
         };
         let outcome = client
             .grep_within(content, limit, window)
-            .map_err(|e| Failure::of("a busca de conteúdo falhou", &e))?;
+            .map_err(|e| Failure::of(Text::for_lang(self.lang).content_search_failed, &e))?;
         let mut paths = Vec::new();
         let mut spans = Vec::new();
         let mut contexts = Vec::new();
@@ -732,13 +767,13 @@ impl DaemonSource {
             // files, and a folder has no lines to show.
             folders: Vec::new(),
         };
-        let backend = backend_label(rgy_launcher::ContentBackend::Daemon);
+        let backend = backend_label(rgy_launcher::ContentBackend::Daemon, self.lang);
         {
             let mut st = self.status.borrow_mut();
             st.connected = true;
             st.warnings = outcome.warnings.clone();
             st.took_us = outcome.took_us;
-            st.layer = "conteúdo";
+            st.layer = Some(Layer::Content);
             st.backend = backend;
             st.matches = answer.len();
         }
@@ -762,11 +797,13 @@ impl DaemonSource {
         window: Duration,
     ) -> Result<Answer, Failure> {
         let Some(client) = self.client_mut() else {
-            return Err(Failure::gone(String::from(rgy_launcher::tools::NO_DAEMON)));
+            return Err(Failure::gone(String::from(rgy_launcher::text::no_daemon(
+                self.lang,
+            ))));
         };
         let outcome = client
             .content_within(content, scope, limit, window)
-            .map_err(|e| Failure::of("a busca de conteúdo falhou", &e))?;
+            .map_err(|e| Failure::of(Text::for_lang(self.lang).content_search_failed, &e))?;
         let mut paths = Vec::new();
         let mut spans = Vec::new();
         let mut contexts = Vec::new();
@@ -783,13 +820,13 @@ impl DaemonSource {
             // files, and a folder has no lines to show.
             folders: Vec::new(),
         };
-        let backend = backend_label(rgy_launcher::ContentBackend::Daemon);
+        let backend = backend_label(rgy_launcher::ContentBackend::Daemon, self.lang);
         {
             let mut st = self.status.borrow_mut();
             st.connected = true;
             st.warnings = outcome.warnings.clone();
             st.took_us = outcome.took_us;
-            st.layer = "conteúdo";
+            st.layer = Some(Layer::Content);
             st.backend = backend;
             st.matches = answer.len();
         }
@@ -810,7 +847,7 @@ impl DaemonSource {
         limit: usize,
         window: Duration,
     ) -> Answer {
-        match crate::rgx::grep(binary, content, scope, window) {
+        match crate::rgx::grep(binary, content, scope, window, self.lang) {
             Ok(files) => {
                 let mut paths = Vec::new();
                 let mut spans = Vec::new();
@@ -828,14 +865,14 @@ impl DaemonSource {
                     // reads files, and a folder has no lines to show.
                     folders: Vec::new(),
                 };
-                let backend = backend_label(rgy_launcher::ContentBackend::Rgx);
+                let backend = backend_label(rgy_launcher::ContentBackend::Rgx, self.lang);
                 {
                     let mut st = self.status.borrow_mut();
                     st.warnings = Vec::new();
                     // The fallback does not say how long it took, and the
                     // time of the last answer is not its time.
                     st.took_us = 0;
-                    st.layer = "conteúdo";
+                    st.layer = Some(Layer::Content);
                     st.backend = backend;
                     st.matches = answer.len();
                 }
@@ -856,8 +893,8 @@ impl DaemonSource {
 /// adapters' answers and the fallback's are the binary's. Deciding it
 /// from "is the daemon up" would say "adaptadores" for an answer the
 /// `rgx` binary produced while the daemon was away.
-fn backend_label(backend: rgy_launcher::ContentBackend) -> String {
-    backend.label().to_string()
+fn backend_label(backend: rgy_launcher::ContentBackend, lang: Lang) -> String {
+    backend.label(lang).to_string()
 }
 
 /// What is left of the window.
@@ -1023,6 +1060,7 @@ mod tests {
         let mut source = DaemonSource::new(
             Endpoint::Socket(std::path::PathBuf::from("/tmp/rgy-rgxy-nope.sock")),
             None,
+            Lang::English,
         );
         let answer = source.search("invoice", 10);
         assert!(answer.is_empty());
@@ -1169,6 +1207,9 @@ mod tests {
                     b"{\"op\":\"status\",\"docs\":0,\"event_id\":0,\"catch_up\":\"replayed\",\"tv\":false}\n",
                 );
             } else {
+                // The daemon's own sentence, in the daemon's language:
+                // the launcher shows what the daemon said and does not
+                // translate it.
                 let _ = peer.send(
                     "{\"op\":\"error\",\"message\":\"o índice está em modo somente-leitura\"}\n"
                         .as_bytes(),
@@ -1314,7 +1355,7 @@ mod tests {
         let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let recorded = std::sync::Arc::clone(&requests);
         let daemon = serve(move |peer| records_the_requests(peer, recorded));
-        let mut source = DaemonSource::new(daemon.endpoint.clone(), None);
+        let mut source = DaemonSource::new(daemon.endpoint.clone(), None, Lang::English);
         assert!(source.connect(), "the daemon is there");
         let _ = source.search("pic: invoice grep:total", 10);
 
@@ -1347,7 +1388,7 @@ mod tests {
     #[test]
     fn a_daemon_that_chooses_nothing_is_not_a_daemon_that_is_down() {
         let daemon = serve(answers_with_no_names);
-        let mut source = DaemonSource::new(daemon.endpoint.clone(), None);
+        let mut source = DaemonSource::new(daemon.endpoint.clone(), None, Lang::English);
         assert!(source.connect(), "the daemon is there");
         let answer = source.search("invoice grep:zebra", 10);
         assert!(answer.is_empty(), "there was nothing to read");
@@ -1355,11 +1396,13 @@ mod tests {
         assert!(st.borrow().connected, "the daemon is answering");
         let warnings = st.borrow().warnings.clone();
         assert!(
-            !warnings.iter().any(|w| w.contains("sem ligação ao daemon")),
+            !warnings
+                .iter()
+                .any(|w| w.contains("no connection to the daemon")),
             "the daemon is up: {warnings:?}"
         );
         assert!(
-            warnings.iter().any(|w| w.contains("nenhum resultado")),
+            warnings.iter().any(|w| w.contains("no result")),
             "the status says the names chose nothing: {warnings:?}"
         );
         // The daemon waits for the client to go.
@@ -1376,7 +1419,7 @@ mod tests {
     #[test]
     fn a_daemon_that_says_nothing_does_not_hold_the_launcher() {
         let daemon = serve(says_nothing);
-        let mut source = DaemonSource::new(daemon.endpoint.clone(), None);
+        let mut source = DaemonSource::new(daemon.endpoint.clone(), None, Lang::English);
         let started = std::time::Instant::now();
         let _ = source.connect();
         let waited = started.elapsed();
@@ -1390,7 +1433,9 @@ mod tests {
         assert!(st.borrow().connected, "the daemon is there");
         let warnings = st.borrow().warnings.clone();
         assert!(
-            warnings.iter().any(|w| w.contains("não respondeu a tempo")),
+            warnings
+                .iter()
+                .any(|w| w.contains("did not answer in time")),
             "the status says the daemon did not answer in time: {warnings:?}"
         );
         drop(source);
@@ -1401,19 +1446,21 @@ mod tests {
     ///
     /// The daemon is there — it took the connection and it answered —
     /// and what it said is what the user is told. The line that says
-    /// "sem ligação ao daemon" under it is a lie, and the daemon's
+    /// "no connection to the daemon" under it is a lie, and the daemon's
     /// own sentence is the one that belongs there.
     #[test]
     fn a_daemon_that_answers_with_an_error_is_not_a_daemon_that_is_down() {
         let daemon = serve(says_an_error);
-        let mut source = DaemonSource::new(daemon.endpoint.clone(), None);
+        let mut source = DaemonSource::new(daemon.endpoint.clone(), None, Lang::English);
         let answer = source.search("invoice", 10);
         assert!(answer.is_empty(), "there was no answer");
         let st = source.status();
         assert!(st.borrow().connected, "the daemon is there: it answered");
         let warnings = st.borrow().warnings.clone();
         assert!(
-            !warnings.iter().any(|w| w.contains("sem ligação ao daemon")),
+            !warnings
+                .iter()
+                .any(|w| w.contains("no connection to the daemon")),
             "the daemon is not down: {warnings:?}"
         );
         assert!(
@@ -1429,13 +1476,13 @@ mod tests {
     /// A daemon that is too slow is not a daemon that is down.
     ///
     /// The daemon took the connection and did not answer in the window:
-    /// it is up and slow. The line that says "sem ligação ao daemon"
+    /// it is up and slow. The line that says "no connection to the daemon"
     /// under a daemon that is up is a lie, and the count, the layer and
     /// the time of the last answer still belong to the line.
     #[test]
     fn a_daemon_that_is_too_slow_is_not_a_daemon_that_is_down() {
         let daemon = serve(says_nothing);
-        let mut source = DaemonSource::new(daemon.endpoint.clone(), None);
+        let mut source = DaemonSource::new(daemon.endpoint.clone(), None, Lang::English);
         let answer = source.search("invoice", 10);
         assert!(answer.is_empty(), "there was no answer");
         let st = source.status();
@@ -1445,7 +1492,9 @@ mod tests {
         );
         let warnings = st.borrow().warnings.clone();
         assert!(
-            !warnings.iter().any(|w| w.contains("sem ligação ao daemon")),
+            !warnings
+                .iter()
+                .any(|w| w.contains("no connection to the daemon")),
             "the daemon is not down: {warnings:?}"
         );
         assert!(
@@ -1470,15 +1519,16 @@ mod tests {
         let source = DaemonSource::new(
             Endpoint::Socket(std::path::PathBuf::from("/tmp/rgy-rgxy-nope.sock")),
             Some(String::from("/usr/bin/rgx")),
+            Lang::English,
         );
         let message = source.no_daemon_message();
-        assert!(message.contains("sem daemon"), "{message}");
+        assert!(message.contains("no daemon"), "{message}");
         assert!(
-            !message.contains("usará o rgx"),
+            !message.contains("will use rgx"),
             "the message does not promise a search that cannot happen: {message}"
         );
         assert!(
-            message.contains("escopo"),
+            message.contains("scope"),
             "the scope is what is missing: {message}"
         );
     }

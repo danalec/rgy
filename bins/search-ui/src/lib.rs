@@ -3,10 +3,9 @@
 //! Terminal search UI (zen-rs `ui.rs`, transported).
 //!
 //! Per the rules this becomes `search-ui`, backed by the
-//! new name searcher + content grep. The sparkline stays; p50/p90 and
-//! candidates-skipped come later.
-
-pub mod latency;
+//! new name searcher + content grep. The sparkline stays, and the
+//! percentiles are there too: the meter is the launcher's, and the
+//! terminal reads it from the model rather than keeping its own.
 
 mod preview;
 

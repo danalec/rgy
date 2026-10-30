@@ -435,8 +435,8 @@ mod tests {
 
     #[test]
     fn the_name_is_the_last_component_and_the_folder_the_rest() {
-        let r = Row::new("/home/dana/docs/relatorio.pdf".to_string(), 1);
-        assert_eq!(r.name(), "relatorio.pdf");
+        let r = Row::new("/home/dana/docs/report.pdf".to_string(), 1);
+        assert_eq!(r.name(), "report.pdf");
         assert_eq!(r.folder(), "/home/dana/docs");
     }
 
@@ -449,7 +449,7 @@ mod tests {
 
     #[test]
     fn the_line_under_the_name_is_the_folder_by_default() {
-        let r = Row::new("/home/dana/docs/relatorio.pdf".to_string(), 1);
+        let r = Row::new("/home/dana/docs/report.pdf".to_string(), 1);
         assert_eq!(r.context(), "/home/dana/docs");
     }
 
@@ -457,10 +457,10 @@ mod tests {
     fn a_content_row_shows_the_line_that_matched() {
         // The content layer answers "what is inside the file", and the
         // folder does not answer that.
-        let r = Row::new("/home/dana/docs/relatorio.pdf".to_string(), 1)
-            .with_context("linha 42: o total do invoice".to_string());
-        assert_eq!(r.context(), "linha 42: o total do invoice");
-        assert_eq!(r.name(), "relatorio.pdf", "the name is still the name");
+        let r = Row::new("/home/dana/docs/report.pdf".to_string(), 1)
+            .with_context("line 42: the invoice total".to_string());
+        assert_eq!(r.context(), "line 42: the invoice total");
+        assert_eq!(r.name(), "report.pdf", "the name is still the name");
     }
 
     #[test]
