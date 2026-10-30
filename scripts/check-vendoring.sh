@@ -21,7 +21,10 @@
 #      upstream, so copied code stays traceable to its origin.
 #   4. No external crates.io dependencies. Known-remaining ones are
 #      listed with what replaces them, so the count is a progress metric
-#      and a newly added crate fails the check.
+#      and a newly added crate fails the check. The count is split in
+#      two: a crate the product links, and a crate kept only as a
+#      dev-dependency -- an oracle, the thing an in-house implementation
+#      is held to.
 #   5. Every dependency on a vendored crate names it by path, and no lock
 #      file resolves one from a registry. The vendored crates carry the
 #      names upstream publishes on crates.io, at the same version, so a
@@ -340,11 +343,12 @@ done < <(find_files Cargo.toml | walk_sort)
 for f in ${all_manifests[@]+"${all_manifests[@]}"}; do
     [ "${f##*/}" = "Cargo.toml" ] || continue
     rel=$(rel_path "$f")
-    while IFS=$'\t' read -r line_no name; do
+    while IFS=$'\t' read -r line_no name kind; do
         [ -n "$name" ] || continue
-        external="$external$rel:$line_no	$name
+        external="$external$rel:$line_no	$name	$kind
 "
     done < <(awk '
+        BEGIN { kind = "linked" }
         {
             line = $0
             sub(/\r$/, "", line)
@@ -359,6 +363,9 @@ for f in ${all_manifests[@]+"${all_manifests[@]}"}; do
                 gsub(/[[:space:]]+$/, "", s)
                 section = tolower(s)
                 dep = (section ~ /(^|\.)(dev-|build-)?dependencies$/)
+                # A dev-dependency is an oracle: it is not linked into a
+                # shipped artifact. Everything else that names a crate is.
+                kind = (section ~ /(^|\.)dev-dependencies$/) ? "oracle" : "linked"
                 next
             }
             if (!dep) next
@@ -372,7 +379,7 @@ for f in ${all_manifests[@]+"${all_manifests[@]}"}; do
             # path = ... is an in-tree crate; workspace = true inherits one.
             if (code ~ /(^|[^A-Za-z0-9_])path[[:space:]]*=/) next
             if (code ~ /(^|[^A-Za-z0-9_])workspace[[:space:]]*=/) next
-            printf "%d\t%s\n", NR, name
+            printf "%d\t%s\t%s\n", NR, name, kind
         }
     ' "$f")
 done
@@ -382,7 +389,7 @@ done
 # number a worse metric.
 seen_names=""
 unexpected=""
-while IFS=$'\t' read -r where name; do
+while IFS=$'\t' read -r where name kind; do
     [ -n "$name" ] || continue
     case "
 $seen_names
@@ -408,24 +415,62 @@ else
     say "  ok: no unlisted external crates"
 fi
 
-# Report what is still outstanding. This is the number to drive to zero.
-remaining_names=""
-remaining=0
+# A crate that is a dev-dependency in every manifest that names it is an
+# oracle: it is not linked into a shipped artifact, it is the thing an
+# in-house implementation is held to. A crate that is a real dependency
+# anywhere is linked, and it is the one the invariant is about. The two
+# are counted apart, because the number to drive to zero is the number of
+# crates that go into a product -- and a ledger that counts an oracle the
+# same as a dependency cannot say that.
+linked_names=""
+while IFS=$'\t' read -r where name kind; do
+    [ -n "$name" ] || continue
+    [ "$kind" = "linked" ] || continue
+    case "
+$linked_names
+" in
+    *"
+$name
+"*) continue ;;
+    esac
+    linked_names="$linked_names$name
+"
+done <<< "$external"
+
+# Report what is still outstanding, and what is only held back.
+remaining_linked=""
+remaining_oracle=""
 while IFS= read -r name; do
     [ -n "$name" ] || continue
     known_desc "$name" >/dev/null || continue
-    remaining_names="$remaining_names$name
-"
+    case "
+$linked_names
+" in
+    *"
+$name
+"*) remaining_linked="$remaining_linked$name
+" ;;
+    *) remaining_oracle="$remaining_oracle$name
+" ;;
+    esac
 done <<< "$seen_names"
-if [ -n "$remaining_names" ]; then
-    remaining=$(printf '%s' "$remaining_names" | grep -c .)
-    say "  $remaining known external dependenc(ies) still to remove:"
+if [ -n "$remaining_linked" ]; then
+    remaining=$(printf '%s' "$remaining_linked" | grep -c .)
+    say "  $remaining linked external dependenc(ies) still to remove:"
     while IFS= read -r name; do
         [ -n "$name" ] || continue
         say "    - $name ($(known_desc "$name"))"
-    done <<< "$(printf '%s' "$remaining_names" | LC_ALL=C sort)"
+    done <<< "$(printf '%s' "$remaining_linked" | LC_ALL=C sort)"
 else
-    say "  zero external dependencies: the invariant holds"
+    say "  zero linked external dependencies: the invariant holds"
+fi
+if [ -n "$remaining_oracle" ]; then
+    oracles=$(printf '%s' "$remaining_oracle" | grep -c .)
+    say "  $oracles oracle(s): a dev-dependency only -- the crate an in-house implementation is held to:"
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        say "    - $name ($(known_desc "$name"))"
+    done <<< "$(printf '%s' "$remaining_oracle" | LC_ALL=C sort)"
 fi
 
 # --- 5. the vendored crates come from the tree --------------------------------

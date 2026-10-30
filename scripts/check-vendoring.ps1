@@ -18,7 +18,10 @@
          upstream, so copied code stays traceable to its origin.
       4. No external crates.io dependencies. Known-remaining ones are
          listed with what replaces them, so the count is a progress
-         metric and a newly added crate fails the check.
+         metric and a newly added crate fails the check. The count is
+         split in two: a crate the product links, and a crate kept only
+         as a dev-dependency -- an oracle, the thing an in-house
+         implementation is held to.
       5. Every dependency on a vendored crate names it by path, and no
          lock file resolves one from a registry. The vendored crates
          carry the names upstream publishes on crates.io, at the same
@@ -163,6 +166,7 @@ Write-Host "`n[4/5] no unexpected external crates" -ForegroundColor Cyan
 # A dependency section is any [..dependencies] table, including
 # target-specific ones. Everything else is not a dependency list.
 $depSection = $false
+$depKind = 'linked'
 $external = New-Object System.Collections.Generic.List[object]
 # The whole workspace, for this check only: the question is whether the
 # tree links a crate from outside it, and that is a question about every
@@ -184,6 +188,9 @@ foreach ($f in $allManifests) {
         if ($trimmed -match '^\[+\s*([^\]]+?)\s*\]+$') {
             $section = $matches[1]
             $depSection = ($section -match '(^|\.)(dev-|build-)?dependencies$')
+            # A dev-dependency is an oracle: it is not linked into a
+            # shipped artifact. Everything else that names a crate is.
+            $depKind = if ($section -match '(^|\.)dev-dependencies$') { 'oracle' } else { 'linked' }
             continue
         }
         if (-not $depSection) { continue }
@@ -193,7 +200,7 @@ foreach ($f in $allManifests) {
         # path = ... is an in-tree crate; workspace = true inherits one.
         if ($code -match '\bpath\s*=') { continue }
         if ($code -match '\bworkspace\s*=') { continue }
-        $external.Add([pscustomobject]@{ Name = $name; Where = "$rel`:$lineNo" })
+        $external.Add([pscustomobject]@{ Name = $name; Where = "$rel`:$lineNo"; Kind = $depKind })
     }
 }
 
@@ -215,15 +222,35 @@ if ($unexpected.Count -gt 0) {
     Write-Host "  ok: no unlisted external crates" -ForegroundColor Green
 }
 
-# Report what is still outstanding. This is the number to drive to zero.
-$remaining = ($seen.Keys | Where-Object { $knownExternal.ContainsKey($_) } | Sort-Object)
-if ($remaining.Count -gt 0) {
-    Write-Host "  $($remaining.Count) known external dependenc(ies) still to remove:" -ForegroundColor Yellow
-    foreach ($name in $remaining) {
+# A crate that is a dev-dependency in every manifest that names it is an
+# oracle: it is not linked into a shipped artifact, it is the thing an
+# in-house implementation is held to. A crate that is a real dependency
+# anywhere is linked, and it is the one the invariant is about. The two
+# are counted apart, because the number to drive to zero is the number of
+# crates that go into a product -- and a ledger that counts an oracle the
+# same as a dependency cannot say that.
+$linked = @{}
+foreach ($d in $external) {
+    if ($d.Kind -ne 'linked') { continue }
+    $linked[$d.Name] = $true
+}
+
+# Report what is still outstanding, and what is only held back.
+$remainingLinked = @($seen.Keys | Where-Object { $knownExternal.ContainsKey($_) -and $linked.ContainsKey($_) } | Sort-Object)
+$remainingOracle = @($seen.Keys | Where-Object { $knownExternal.ContainsKey($_) -and -not $linked.ContainsKey($_) } | Sort-Object)
+if ($remainingLinked.Count -gt 0) {
+    Write-Host "  $($remainingLinked.Count) linked external dependenc(ies) still to remove:" -ForegroundColor Yellow
+    foreach ($name in $remainingLinked) {
         Write-Host "    - $name ($($knownExternal[$name]))" -ForegroundColor Yellow
     }
 } else {
-    Write-Host "  zero external dependencies: the invariant holds" -ForegroundColor Green
+    Write-Host "  zero linked external dependencies: the invariant holds" -ForegroundColor Green
+}
+if ($remainingOracle.Count -gt 0) {
+    Write-Host "  $($remainingOracle.Count) oracle(s): a dev-dependency only -- the crate an in-house implementation is held to:" -ForegroundColor Yellow
+    foreach ($name in $remainingOracle) {
+        Write-Host "    - $name ($($knownExternal[$name]))" -ForegroundColor Yellow
+    }
 }
 
 # --- 5. the vendored crates come from the tree --------------------------------
