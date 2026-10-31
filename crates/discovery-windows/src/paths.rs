@@ -237,6 +237,14 @@ mod tests {
         }
         let drive = &text[..2];
 
+        // The path the operating system holds for the file: the long name
+        // of every folder on the way, not the alias the environment
+        // spelled `%TEMP%` with. This is the tree's own answer to the
+        // same question the MFT answers, and the two have to agree.
+        let canonical = rgy_discovery::file::canonicalize(file.as_os_str().as_encoded_bytes())
+            .expect("the temp file resolves to its own path");
+        let canonical = String::from_utf8_lossy(&canonical).into_owned();
+
         let volume = match Volume::open(&format!("{drive}\\")) {
             Ok(v) => v,
             Err(_) => {
@@ -268,7 +276,19 @@ mod tests {
 
         // The rebuilt path is relative to the volume's root, and this index
         // speaks `/`.
-        let tail = text[3..].replace('\\', "/");
+        //
+        // The MFT holds the names the disk holds: the long spelling of
+        // every folder, never the 8.3 alias the environment happens to
+        // spell `%TEMP%` with (`C:\Users\RUNNER~1\...` where the disk
+        // says `C:\Users\runneradmin\...`). The expected path is
+        // therefore the one the operating system hands out, and not the
+        // one the test typed — otherwise the test measures which alias
+        // of one folder the machine happened to have.
+        let tail = canonical
+            .strip_prefix(drive)
+            .expect("the canonical path is on the drive the file is on")
+            .trim_start_matches(['\\', '/'])
+            .replace('\\', "/");
         assert_eq!(relative, tail, "the rebuilt path must be the file's own");
 
         let _ = std::fs::remove_file(&file);

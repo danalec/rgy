@@ -35,6 +35,7 @@ pub type HDC = *mut c_void;
 pub type HBRUSH = *mut c_void;
 pub type HFONT = *mut c_void;
 pub type HICON = *mut c_void;
+pub type HBITMAP = *mut c_void;
 pub type HRGN = *mut c_void;
 pub type HHOOK = *mut c_void;
 pub type HMENU = *mut c_void;
@@ -133,6 +134,90 @@ pub struct MONITORINFO {
     pub dwFlags: DWORD,
 }
 
+/// The platform's own identifier, as the shell carries it.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GUID {
+    pub Data1: u32,
+    pub Data2: u16,
+    pub Data3: u16,
+    pub Data4: [u8; 8],
+}
+
+/// The icon the shell draws, as the platform assembles it.
+///
+/// The struct is the platform's, whole: the mask comes first and the colour
+/// second — the platform's own header says so — and the two handles sit at
+/// sixteen and twenty-four, because the struct is laid out the ordinary way.
+///
+/// **The order is the whole story.** The platform's own `WinUser.h` names the
+/// fields `hbmMask` and `hbmColor`, mask first; a tree that puts the colour
+/// in the first handle has its colour bitmap read as the mask, and a
+/// thirty-two bit colour bitmap read as a one bit mask is its alpha bytes
+/// read as bits. Measured on 2026-10-31: the icon in the notification area
+/// came out as black and white stripes instead of the magnifier, and the
+/// stripes were the alpha of the mark, one bit at a time.
+///
+/// The sizes are asserted where the struct is declared, so a layout that
+/// drifts fails the build and not the notification area.
+#[repr(C)]
+pub struct ICONINFO {
+    pub fIcon: BOOL,
+    pub xHotspot: DWORD,
+    pub yHotspot: DWORD,
+    /// The mask: the pixels the icon draws nothing on.
+    pub hbmMask: HICON,
+    /// The colour: the picture itself.
+    pub hbmColor: HICON,
+}
+
+/// The shell's record of an icon in the notification area.
+///
+/// The struct is the shell's, whole — and the shell writes all of it. The
+/// tip, the balloon and the balloon's title are buffers it fills in, and a
+/// struct that left one out would be a shorter struct than the shell
+/// writes: the stack that holds it, and the shell's own read past the end
+/// of it.
+///
+/// The sizes are asserted where the struct is declared, so a field left out
+/// fails the build and not the notification area.
+#[repr(C)]
+pub struct NOTIFYICONDATAW {
+    pub cbSize: DWORD,
+    pub hWnd: HWND,
+    pub uID: UINT,
+    pub uFlags: UINT,
+    pub uCallbackMessage: UINT,
+    pub hIcon: HICON,
+    pub szTip: [u16; 128],
+    pub dwState: DWORD,
+    pub dwStateMask: DWORD,
+    pub szInfo: [u16; 256],
+    /// The version of the icon, or the balloon's timeout — the platform's
+    /// own union, and both halves are a word wide.
+    pub uVersion: UINT,
+    pub szInfoTitle: [u16; 64],
+    pub dwInfoFlags: DWORD,
+    pub guidItem: GUID,
+    pub hBalloonIcon: HICON,
+}
+
+/// The size of the shell's record, on this target.
+///
+/// The platform reads the struct by its own layout and checks the size it
+/// is given, so the size that goes in `cbSize` has to be the platform's own
+/// — and the platform's own is what this asserts.
+const _: () = assert!(core::mem::size_of::<NOTIFYICONDATAW>() == 976);
+const _: () = assert!(core::mem::offset_of!(NOTIFYICONDATAW, hWnd) == 8);
+const _: () = assert!(core::mem::offset_of!(NOTIFYICONDATAW, szTip) == 40);
+const _: () = assert!(core::mem::offset_of!(NOTIFYICONDATAW, szInfo) == 304);
+const _: () = assert!(core::mem::offset_of!(NOTIFYICONDATAW, szInfoTitle) == 820);
+const _: () = assert!(core::mem::offset_of!(NOTIFYICONDATAW, guidItem) == 952);
+const _: () = assert!(core::mem::size_of::<ICONINFO>() == 32);
+const _: () = assert!(core::mem::offset_of!(ICONINFO, hbmMask) == 16);
+const _: () = assert!(core::mem::offset_of!(ICONINFO, hbmColor) == 24);
+const _: () = assert!(core::mem::size_of::<GUID>() == 16);
+
 /// The bitmap's own header, as the platform writes it.
 ///
 /// A struct the platform writes is the platform's struct, whole: the
@@ -208,6 +293,47 @@ pub const WM_SYSKEYUP: UINT = 0x0105;
 /// The application stopped being the active one.
 pub const WM_ACTIVATEAPP: UINT = 0x001C;
 pub const WM_APP: UINT = 0x8000;
+/// The left button went up — on the notification area's icon, this is the
+/// shell telling the window that the user clicked its face.
+pub const WM_LBUTTONUP: UINT = 0x0202;
+/// The left button was double clicked: the same face, twice.
+pub const WM_LBUTTONDBLCLK: UINT = 0x0203;
+/// The right button went up.
+pub const WM_RBUTTONUP: UINT = 0x0205;
+/// The context menu was asked for.
+pub const WM_CONTEXTMENU: UINT = 0x007B;
+/// The message with no meaning, sent to make the thread look once.
+pub const WM_NULL: UINT = 0x0000;
+
+/// What the shell is told to do with the icon.
+pub const NIM_ADD: DWORD = 0x0000_0000;
+pub const NIM_MODIFY: DWORD = 0x0000_0001;
+pub const NIM_DELETE: DWORD = 0x0000_0002;
+pub const NIM_SETVERSION: DWORD = 0x0000_0004;
+
+/// What the shell is told about the icon.
+pub const NIF_MESSAGE: UINT = 0x0000_0001;
+pub const NIF_ICON: UINT = 0x0000_0002;
+pub const NIF_TIP: UINT = 0x0000_0004;
+
+/// The version of the icon the shell is told about.
+///
+/// The fourth version is the one that answers the clicks with the mouse
+/// message in `lParam` and the icon's own coordinates in `wParam`, which is
+/// what a menu needs: the menu opens where the pointer is.
+pub const NOTIFYICON_VERSION_4: UINT = 4;
+
+/// A menu item: a word, and the command it runs.
+pub const MF_STRING: UINT = 0x0000_0000;
+/// The menu is for the keyboard as well as the mouse.
+pub const TPM_RIGHTBUTTON: UINT = 0x0000_0002;
+/// The menu gives back the item that was chosen.
+pub const TPM_RETURNCMD: UINT = 0x0100;
+/// The menu takes the pointer's focus while it is up.
+pub const TPM_NONOTIFY: UINT = 0x0080;
+
+/// The system's small icon size — the notification area's own.
+pub const SM_CXSMICON: i32 = 49;
 
 pub const VK_BACK: u32 = 0x08;
 pub const VK_TAB: u32 = 0x09;
@@ -287,7 +413,7 @@ pub const DIB_RGB_COLORS: u32 = 0;
 pub const BI_RGB: u32 = 0;
 
 /// The icon is drawn at its own size.
-pub const DI_NORMAL: u32 = 0x0000;
+pub const DI_NORMAL: u32 = 0x0003;
 
 /// The window's corner radius, in pixels, as DWM wants it.
 pub const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
@@ -470,19 +596,34 @@ unsafe extern "system" {
         uFormat: UINT,
     ) -> i32;
 
+    /// Draw an icon at a place.
+    ///
+    /// The place comes before the icon: the platform's own header says so,
+    /// and an argument list with the icon in it is a list the platform
+    /// reads the other way round — the icon's own handle arrives as the
+    /// place, and the place arrives as the icon.
     pub fn DrawIconEx(
         hdc: HDC,
+        xLeft: i32,
+        yTop: i32,
         hIcon: HICON,
-        x: i32,
-        y: i32,
-        cx: i32,
-        cy: i32,
-        istep: UINT,
-        hbr: HBRUSH,
-        flags: UINT,
+        cxWidth: i32,
+        cyWidth: i32,
+        istepIfAniCur: UINT,
+        hbrFlickerFreeDraw: HBRUSH,
+        diFlags: UINT,
     ) -> BOOL;
 
     pub fn DestroyIcon(hIcon: HICON) -> BOOL;
+
+    /// The icon the shell draws, out of a colour bitmap and a mask.
+    ///
+    /// The call is in the window library and not in the graphics one: the
+    /// export table of the host says so — measured on 2026-10-31, the name
+    /// is in `user32.dll` and not in `gdi32.dll` — and a name in the wrong
+    /// library only links because the toolchain's default set carries the
+    /// right one anyway.
+    pub fn CreateIconIndirect(piconinfo: *const ICONINFO) -> HICON;
 
     pub fn SetWindowRgn(hWnd: HWND, hRgn: HRGN, bRedraw: BOOL) -> i32;
 
@@ -545,6 +686,38 @@ unsafe extern "system" {
         nLength: u32,
         lpnLengthNeeded: *mut u32,
     ) -> i32;
+
+    /// The message the shell broadcasts when the notification area is made
+    /// again.
+    ///
+    /// The number is the platform's and it changes with the session, so it
+    /// is asked for and not written down: a hard-coded number is a number
+    /// the platform never sends.
+    pub fn RegisterWindowMessageW(lpString: *const u16) -> UINT;
+
+    /// A menu, with nothing in it.
+    pub fn CreatePopupMenu() -> HMENU;
+    /// Put a word in the menu.
+    ///
+    /// The line between the items is the same call with `MF_SEPARATOR` and
+    /// no word: the platform's menu has one way to say both.
+    pub fn AppendMenuW(hMenu: HMENU, uFlags: UINT, uIDNewItem: usize, lpString: *const u16)
+    -> BOOL;
+    /// Show the menu at the pointer and wait.
+    ///
+    /// With `TPM_RETURNCMD` the answer is the item that was chosen, and
+    /// zero is the answer for a menu the user walked away from.
+    pub fn TrackPopupMenu(
+        hMenu: HMENU,
+        uFlags: UINT,
+        x: i32,
+        y: i32,
+        nReserved: i32,
+        hWnd: HWND,
+        lpRect: *const RECT,
+    ) -> UINT;
+    /// Give the menu back.
+    pub fn DestroyMenu(hMenu: HMENU) -> BOOL;
 }
 
 #[link(name = "gdi32")]
@@ -606,6 +779,19 @@ unsafe extern "system" {
     ) -> HANDLE;
     /// The face of the font the context has selected.
     pub fn GetTextFaceW(hdc: HDC, lpszFace: *mut u16, cFace: i32) -> i32;
+
+    /// A bitmap the caller fills in.
+    ///
+    /// The pixels are the caller's own bytes: a colour bitmap is thirty-two
+    /// bits a pixel and a mask is one, and the platform reads them in the
+    /// order the icon's own format says.
+    pub fn CreateBitmap(
+        nWidth: i32,
+        nHeight: i32,
+        nPlanes: u32,
+        nBitsPerPixel: u32,
+        lpBits: *const c_void,
+    ) -> HBITMAP;
 }
 
 unsafe extern "system" {
@@ -703,6 +889,12 @@ unsafe extern "system" {
         cbFileInfo: UINT,
         uFlags: UINT,
     ) -> u32;
+
+    /// Put an icon in the notification area, or take it away.
+    ///
+    /// The answer says whether the shell did it: an icon that is not there
+    /// is a launcher with no face, and the caller has to be able to say so.
+    pub fn Shell_NotifyIconW(dwMessage: DWORD, pnid: *const NOTIFYICONDATAW) -> BOOL;
 }
 
 #[cfg(test)]

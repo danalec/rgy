@@ -15,8 +15,9 @@ is worse than one that is documented as such.
 Three things, and they are three different questions.
 
 **The name.** rgy walks the filesystem — the MFT on Windows, `getdents64`
-on Linux, `getattrlistbulk` on macOS — and indexes every file and folder by
-name. That index is the fast path: a query like `invoice ext:pdf` is
+on Linux, `getattrlistbulk` on macOS, `getdirentries` on FreeBSD — and
+indexes every file and folder by name. That index is the fast path: a query
+like `invoice ext:pdf` is
 answered from the index without reading a single file's contents. This is
 the part of rgy that is finished and measured.
 
@@ -30,8 +31,9 @@ what a `.txt` has always been.
 **The corpus.** A pack store (`searchd --tv-dir`, or `rgx-tv build`) ingests
 a tree once into verified packs, and content queries then run against the
 packed bytes. Same bytes, same answers, but a corpus that does not change
-is read once instead of once per query. See the [manual](MANUAL.md) for the
-flags.
+is read once instead of once per query. `rgx-tv` is upstream's tool and it
+is not in the release archive — build it from the source if you want it.
+See the [manual](MANUAL.md) for the flags.
 
 ```
 searchctl --root ~ "invoice ext:pdf"        # the name
@@ -53,7 +55,7 @@ file's own bytes. The table below is therefore a list of what answers today.
 
 | family | formats | state |
 |---|---|---|
-| archive | zip (with 35 aliases, among them `.gem`, `.nupkg`, `.crate`) · 7z · tar · cpio · ar · deb · git-pack · git bundle · Subversion dump · rar (store and RAR5) · gz bz2 xz zstd lz4 brotli, including `tar.*` · a PostgreSQL custom dump (`.dump`) · a borg segment (no extension at all: `data/0/2` is claimed by its magic) · the iWork packages (`.pages`, `.numbers`, `.key`), which are zip containers whose *members* are searchable but whose document lives in a compressed IWA archive | wired: read through the adapter |
+| archive | zip (36 extensions, among them `.gem`, `.nupkg`, `.crate`) · 7z · tar · cpio · ar · deb · git-pack · git bundle · Subversion dump · rar (store and RAR5) · gz bz2 xz zstd lz4 brotli, including `tar.*` · a PostgreSQL custom dump (`.dump`) · a borg segment (no extension at all: `data/0/2` is claimed by its magic) · the iWork packages (`.pages`, `.numbers`, `.key`), which are zip containers whose *members* are searchable but whose document lives in a compressed IWA archive | wired: read through the adapter |
 | images | ISO 9660 (Joliet and Rock Ridge names, files extracted) · SquashFS 4 · WIM · VHD · VHDX · QCOW2 · VMDK · VDI · EROFS · APFS · HFS+ (catalog names) · DMG · a raw `.img` dispatched by its own table | wired: read through the adapter |
 | office | docx · xlsx · pptx · ODF · epub · vsd / vsdx · xps · rtf · legacy `.doc/.xls/.ppt` · WordPerfect · AbiWord · Hangul `.hwd` · LaTeX · the lightweight markup family (markdown, HTML, RST, org-mode, MediaWiki, Textile, txt2tags, Jupyter notebooks, troff man pages) — dark by default, see the note below the table | wired: read through the adapter |
 | pdf | text in-process: xref streams, object streams, CID fonts, the filter zoo · the text rendering mode is tracked, so a hidden layer is named and a document whose whole layer is invisible hands its page images over for OCR · encrypted PDFs under the standard security handler when the user password is empty | wired: read through the adapter |
@@ -67,7 +69,7 @@ file's own bytes. The table below is therefore a list of what answers today.
 | inspect · databases | Firebird and InterBase header pages (the rows live behind `RDB$PAGES` and are not walked) | wired: read through the adapter |
 | inspect · executables | PE `.rsrc` · Mach-O `__cstring`/`__cfstring` · ELF `.comment` and `NT_GNU_BUILD_ID` · DEX string pool · WASM `name`/`producers` | wired: read through the adapter |
 | inspect · science | GRIB 1/2 · BUFR · SEG-Y · CERN ROOT · N5 · N5z | wired: read through the adapter |
-| inspect · CAD | DWG · Parasolid transmit files · ACIS `.sab` · Revit `.rvt` · MicroStation DGN · and the text CAD formats — DXF, IFC/STEP, IGES, ACIS `.sat`, STL — which are *rendered*: the file's own bytes stay the default answer, and the rendering appears under `RGX_ADAPTER_VIEW=render` | wired: read through the adapter |
+| inspect · CAD | DWG · Parasolid transmit files · ACIS `.sab` · Revit `.rvt` · MicroStation DGN · and the text CAD formats — DXF, IFC/STEP, IGES, ACIS `.sat`, STL — which are *rendered*: the file's own bytes stay the default answer, and the rendering appears under `RGY_ADAPTER_VIEW=render` | wired: read through the adapter |
 | inspect · graphics | plotter drawings (HP-GL) — *rendered* the same way · graphics metafiles (CGM) — *revealed*, since the file is binary | wired: read through the adapter |
 | inspect · genomics | BAM · BCF 1 and 2 · CRAM 3 · and the flat files of the same family — FASTA, FASTQ, VCF, GFF/GTF, PDB, mmCIF — which are *rendered* | wired: read through the adapter |
 | docs | OCR through an external `tesseract` on `*.ocr.jpg`, `*.ocr.png`, `*.ocr.pdf` — a scanned PDF's page images are handed over, so the claim works on any tesseract build · a faxed page (CCITT G3/G4) and a JBIG2 page decoded in-house · `.pub` through `soffice` | wired: read through the adapter |
@@ -83,15 +85,18 @@ reads perfectly, and every one of those extractors is *lossy* on it — the
 HTML arm drops `<script>`, `<style>` and `<head>` bodies, the Markdown arm
 drops front matter and link targets. So the file's own bytes stay the
 default answer and the rendering appears only when it is asked for, under
-rgx's `RGX_ADAPTER_VIEW=render`. The same rule covers the text CAD formats,
+`RGY_ADAPTER_VIEW=render`. The same rule covers the text CAD formats,
 the plotter drawing, and the flat files of the genomics family: a rendering
 is not obliged to be a faithful copy — joining a FASTA's wrapped sequence
 puts `chr1 11869` next to each other, a pattern the file does not contain.
-The switch is rgx's `RGX_ADAPTER_VIEW`, and the content path reads through
-it. The default keeps the file's own bytes for those formats, which is why
-they are dark, and a format whose bytes are not text at all — a PDF, a zip
-— is read through its adapter either way: there the rendering is the only
-text there is.
+The switch is `RGY_ADAPTER_VIEW`, and rgx's `RGX_ADAPTER_VIEW` is the
+fallback: rgy reads its own name first, so a shell that exports rgx's gets
+the same behaviour here, and a shell that exports rgy's gets rgy to differ
+from rgx without touching rgx. The content path reads through whichever
+name is set. The default keeps the file's own bytes for those formats,
+which is why they are dark, and a format whose bytes are not text at all — a
+PDF, a zip — is read through its adapter either way: there the rendering is
+the only text there is.
 
 ## The facts each format gives
 
@@ -209,12 +214,17 @@ point by point, so a LAS and its compressed twin answer the same.
 ## Where the formats are specified
 
 Each format has a document that says what its bytes are, and an
-implementation that writes them. Both are named in rgx's own
-[FORMATS.md](https://github.com/danalec/rgx/blob/main/FORMATS.md), which
-also names the oracle each reading is checked against — the producer's own
-tool, not a second implementation of the same idea.
+implementation that writes them.
 
-The short version of where the specifications live:
+The long version is rgx's own
+[FORMATS.md](https://github.com/danalec/rgx/blob/main/FORMATS.md) — the
+sibling repository's copy of this document, where each format gets a
+section of its own and where each reading is checked against the oracle
+the format's own producer ships, not a second implementation of the same
+idea. This file is the summary of that one.
+
+The [short version](#where-the-formats-are-specified) of where the
+specifications live:
 
 | format | the specification |
 |---|---|

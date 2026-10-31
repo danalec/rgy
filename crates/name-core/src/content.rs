@@ -2713,12 +2713,49 @@ pub struct GrepResult {
 ///
 /// The reason is the part that makes it actionable: "skipped" alone leaves
 /// the user guessing whether the file was empty, locked, or never there.
+///
+/// The reasons are a fixed vocabulary -- one string per kind of refusal --
+/// because the wire groups the files by them: a tree with a thousand locked
+/// files is one thing that happened, and a thousand entries would be a
+/// thousand lines of wire for one fact. The kinds are:
+///
+/// * [`SKIP_UNOPENABLE`]: the open failed;
+/// * [`SKIP_NOT_A_FILE`]: it is not a regular file;
+/// * [`SKIP_READ_FAILED`]: the read failed;
+/// * [`placeholder::PLACEHOLDER_REASON`]: it is a cloud placeholder, and
+///   reading it would download it.
+///
+/// A file that was read and holds no match is not in this list: it was
+/// searched, and it holds nothing.
 pub struct Skipped {
     /// The file's path, as the index spells it.
     pub path: Vec<u8>,
     /// Why it was not read.
     pub reason: &'static str,
 }
+
+/// Why a file the search could have read was not read: the open failed.
+///
+/// The open fails for the reasons every open fails for: the file is locked
+/// by another process, this process may not read it, or it is gone. One
+/// string covers them all -- the wire groups by the string, and a group of
+/// three causes is still one thing that happened.
+pub const SKIP_UNOPENABLE: &str = "it could not be opened; it is locked, unreadable, or gone";
+
+/// Why a file that is not a regular file was not read.
+///
+/// A folder, a pipe, a socket, a device: the search reads files, and this
+/// is not one. On Windows the open of a folder is refused before the
+/// question is asked -- a folder needs `FILE_FLAG_BACKUP_SEMANTICS`, which
+/// the search does not pass -- so there the reason is [`SKIP_UNOPENABLE`].
+pub const SKIP_NOT_A_FILE: &str = "it is not a regular file; it is a folder, a pipe, or a device";
+
+/// Why a file that was open was not read: the read itself failed.
+///
+/// The file was there and the open succeeded, and then the bytes did not
+/// come -- a disk that failed, a share that went away. The search could
+/// have read it and did not, so it is a hole, and the user is told.
+pub const SKIP_READ_FAILED: &str = "the read failed; the file could not be read to the end";
 
 /// Say on the standard error what was not read, and why.
 ///
@@ -2816,6 +2853,11 @@ pub struct Rendered {
 pub trait AdapterReader: Send + Sync {
     /// The documents the adapters rendered for `path`, or an empty vector
     /// when no adapter claims it: the plain path reads the file then.
+    ///
+    /// The trait has no error channel, and that is its shape: a rendering
+    /// that failed and a file no adapter claims are the same empty vector
+    /// here. The reader that answers it is the one that knows the
+    /// difference, and the search cannot report what it was not told.
     fn rendered(&self, path: &[u8]) -> Vec<Rendered>;
 }
 
@@ -2826,9 +2868,10 @@ pub trait AdapterReader: Send + Sync {
 /// ranking and reading stops as soon as the `limit`th match is in.
 pub fn verify(g: &Grep, paths: &[impl AsRef<[u8]> + Sync], limit: usize) -> GrepResult {
     let r = verify_paths(g, paths, limit);
-    // The daemon's protocol has no field for the skipped files, so the note
-    // on the standard error is where the user learns that a file was left
-    // unread -- and why.
+    // The note on the standard error is how a caller that owns no protocol
+    // learns that a file was left unread -- and why. The daemon's own
+    // protocol does have a field for them (`skips`), and the daemon fills
+    // it; this function is the one that has no wire to fill.
     note_skipped(&r.skipped);
     r
 }
@@ -2895,9 +2938,11 @@ fn verify_from<'a>(
                     }
                 }
                 Outcome::NoMatch => {}
-                // Not on this disk: it is reported, never read.
-                Outcome::Placeholder => {
-                    skipped.lock().unwrap().push(Skipped { path: p.to_vec(), reason: placeholder::PLACEHOLDER_REASON });
+                // Not read: the reason says which refusal it was. The
+                // path is copied here, and only here -- a file that was
+                // read costs nothing.
+                Outcome::Skipped(reason) => {
+                    skipped.lock().unwrap().push(Skipped { path: p.to_vec(), reason });
                 }
             }
         }
@@ -2942,9 +2987,13 @@ enum Outcome {
     Matches(Vec<FileMatches>),
     /// It was read, and it holds none.
     NoMatch,
-    /// It was not read: it is a cloud placeholder, and reading it would
-    /// download it.
-    Placeholder,
+    /// It was not read, and why.
+    ///
+    /// The reason is one of the fixed strings the wire groups by (see
+    /// [`Skipped`]), carried as it is and not formatted: the refusal
+    /// paths are the rare ones, and the path that matched must not pay
+    /// for them.
+    Skipped(&'static str),
 }
 
 fn match_file(g: &Grep, path: &[u8], attrs: &Attrs<'_>, adapter: Option<&dyn AdapterReader>) -> Outcome {
@@ -2970,13 +3019,23 @@ fn match_file(g: &Grep, path: &[u8], attrs: &Attrs<'_>, adapter: Option<&dyn Ada
         let (file, _size) = match open_sized_with(path, attrs) {
             Open::File(f, size) => (f, size),
             // A placeholder is never opened: the open is the download.
-            Open::Placeholder => return Outcome::Placeholder,
-            Open::Unreadable => return Outcome::NoMatch,
+            Open::Placeholder => return Outcome::Skipped(placeholder::PLACEHOLDER_REASON),
+            // The open refused it, and it says which refusal it was.
+            Open::Refused(reason) => return Outcome::Skipped(reason),
         };
         if file.take(MAX_FILE * 4).read_to_end(buf).ok().is_none() {
-            return Outcome::NoMatch;
+            // It was open and the bytes did not come: a hole, and the
+            // user is told which one it is.
+            return Outcome::Skipped(SKIP_READ_FAILED);
         }
         if rgx_core::memchr::memchr(0, &buf[..buf.len().min(8192)]).is_some() {
+            // Not a hole: the file was read, and it holds no text. The
+            // index build refuses the same files by the same rule -- a NUL
+            // in the first 8 KB -- so "binary" is a fact about the file and
+            // not about this run, and a file no adapter claims holds no
+            // text the search could have found. It is not reported: a tree
+            // of images and archives would bury the files that really went
+            // unread.
             return Outcome::NoMatch;
         }
         let lines = match g.literal.as_ref().filter(|l| !l.needs_regex(buf)) {
@@ -3826,13 +3885,14 @@ pub fn plan(
 pub fn open_regular(path: &[u8]) -> Option<std::fs::File> {
     match open_sized(path) {
         Open::File(f, _) => Some(f),
-        Open::Placeholder | Open::Unreadable => None,
+        Open::Placeholder | Open::Refused(_) => None,
     }
 }
 
 /// `open()` flags that keep a FIFO from hanging and refuse a symlink final
 /// component. ABI-stable per OS; values match the libc crate's tables
-/// (linux: O_NONBLOCK 0o4000, O_NOFOLLOW 0o400000; Darwin/BSD: 0x4/0x100).
+/// (linux: O_NONBLOCK 0o4000, O_NOFOLLOW 0o400000 on x86_64 and 0o100000
+/// on arm64; Darwin/BSD: 0x4/0x100).
 /// Declared here rather than pulled from libc — name-core carries no libc
 /// dependency.
 ///
@@ -3841,12 +3901,20 @@ pub fn open_regular(path: &[u8]) -> Option<std::fs::File> {
 /// silently finds nothing — the content tests only caught it when they
 /// first ran on a real Linux kernel (WSL). O_NOFOLLOW refuses a symlink
 /// with ELOOP and still opens regular files; O_DIRECTORY does the reverse.
+///
+/// The same trap has an architecture in it: `O_NOFOLLOW` is not one number
+/// on Linux either. `asm-generic/fcntl.h` gives 00400000, and arm64
+/// overrides it with 0100000 -- so the number that works on x86_64 is a
+/// bit the arm64 kernel does not know, and the open fails with EINVAL
+/// instead of opening the file.
 #[cfg(unix)]
 mod open_flags {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     pub const O_NONBLOCK: i32 = 0o4000;
-    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[cfg(all(any(target_os = "linux", target_os = "android"), target_arch = "x86_64"))]
     pub const O_NOFOLLOW: i32 = 0o400000;
+    #[cfg(all(any(target_os = "linux", target_os = "android"), target_arch = "aarch64"))]
+    pub const O_NOFOLLOW: i32 = 0o100000;
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     pub const O_NONBLOCK: i32 = 0x4;
     #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -3884,8 +3952,12 @@ enum Open {
     File(std::fs::File, u64),
     /// A cloud placeholder: reading it would download it, so it is not read.
     Placeholder,
-    /// Not a regular file, or unreadable.
-    Unreadable,
+    /// Not read, and why.
+    ///
+    /// The reason is carried here because this is where the refusal
+    /// happens: the open knows which refusal it is, and the search reports
+    /// the string the wire groups by.
+    Refused(&'static str),
 }
 
 /// `open_regular`, and the file's size.
@@ -3913,29 +3985,29 @@ fn open_sized_with(path: &[u8], attrs: &Attrs<'_>) -> Open {
             .open(std::ffi::OsStr::from_bytes(path))
         {
             Ok(f) => f,
-            Err(_) => return Open::Unreadable,
+            Err(_) => return Open::Refused(SKIP_UNOPENABLE),
         }
     };
     #[cfg(not(unix))]
     let f = {
         // No unix FIFOs to hang on and no O_NOFOLLOW in std; the is_file
         // check below is the guard against opening a symlink target's dir.
-        let Ok(p) = std::str::from_utf8(path) else { return Open::Unreadable };
+        let Ok(p) = std::str::from_utf8(path) else { return Open::Refused(SKIP_UNOPENABLE) };
         match std::fs::OpenOptions::new().read(true).open(std::path::Path::new(p)) {
             Ok(f) => f,
-            Err(_) => return Open::Unreadable,
+            Err(_) => return Open::Refused(SKIP_UNOPENABLE),
         }
     };
-    let Ok(m) = f.metadata() else { return Open::Unreadable };
+    let Ok(m) = f.metadata() else { return Open::Refused(SKIP_UNOPENABLE) };
     if !m.is_file() {
-        return Open::Unreadable;
+        return Open::Refused(SKIP_NOT_A_FILE);
     }
     Open::File(f, m.len())
 }
 
 /// The acceptance rule: a FIFO under the scan root
 /// must not hang `open()`. `O_NONBLOCK` turns the hang into `ENXIO` when no
-/// writer exists, so `open_sized` answers `Unreadable` — promptly. A regression
+/// writer exists, so `open_sized` refuses the path — promptly. A regression
 /// to the zero-flags arm turns this test into a hang instead of a failure.
 ///
 /// Runs wherever the flag arm is active (linux/macos/freebsd); on the
@@ -3943,7 +4015,7 @@ fn open_sized_with(path: &[u8], attrs: &Attrs<'_>) -> Open {
 #[cfg(test)]
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
 mod open_flags_tests {
-    use super::{Open, open_sized};
+    use super::{Open, SKIP_NOT_A_FILE, SKIP_UNOPENABLE, open_sized};
     use std::os::unix::ffi::OsStrExt;
 
     // mkfifo(3), declared rather than pulled from libc — name-core carries
@@ -3966,8 +4038,28 @@ mod open_flags_tests {
         let c = std::ffi::CString::new(p.as_os_str().as_bytes()).unwrap();
         let r = unsafe { mkfifo(c.as_ptr(), 0o600) };
         assert_eq!(r, 0, "mkfifo must succeed");
-        // No writer exists: ENXIO — not a block — is the pass condition.
-        assert!(matches!(open_sized(c.as_bytes()), Open::Unreadable), "a writerless FIFO must answer Unreadable, not hang or claim a size");
+        // The FIFO is refused, and the open does not hang: that is the
+        // property, and it is the one every kernel agrees on.
+        //
+        // **Which** refusal it is depends on the kernel, and both answers
+        // are honest. Most kernels answer `ENXIO` to `open(fifo,
+        // O_RDONLY|O_NONBLOCK)` when there is no writer, and the path was
+        // never opened: "it could not be opened". The Linux 7.x kernel the
+        // CachyOS box runs answers success instead, the file type check
+        // then refuses it, and the reason is "it is not a regular file" --
+        // which is the truer of the two, because a FIFO is a pipe.
+        //
+        // Measured on the box on 2026-10-30: `open(fifo, O_RDONLY|
+        // O_NONBLOCK|O_NOFOLLOW)` returns a readable descriptor there, and
+        // the engine refuses it as not a regular file.
+        match open_sized(c.as_bytes()) {
+            Open::Refused(reason) => assert!(
+                reason == SKIP_UNOPENABLE || reason == SKIP_NOT_A_FILE,
+                "a writerless FIFO must be refused as a pipe or as unopenable: {reason}"
+            ),
+            Open::File(..) => panic!("a writerless FIFO must be refused, not opened as a file"),
+            Open::Placeholder => panic!("a FIFO on the disk is not a cloud placeholder"),
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
@@ -4108,6 +4200,233 @@ mod placeholder_tests {
     }
 }
 
+/// The files the search did not read, and the reasons it gives.
+///
+/// The search reads a file and finds nothing in it: that is an answer, and
+/// the file is not among the files the search did not read. The search
+/// cannot read a file: that is a hole, and the answer says which hole it
+/// was. These tests pin both halves -- a hole that is reported, and an
+/// answer that is not turned into one.
+#[cfg(test)]
+mod skipped_tests {
+    use super::{Grep, SKIP_UNOPENABLE, verify_from};
+    use crate::name_query::GrepMode;
+    use alloc::string::String;
+    use alloc::vec::Vec;
+
+    /// A file with a needle in it, and its path as the tree spells paths.
+    fn temp_file(tag: &str) -> (std::path::PathBuf, Vec<u8>) {
+        let dir = std::env::temp_dir().join(format!("rgy_skip_{}_{}", std::process::id(), tag));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("doc.txt");
+        std::fs::write(&p, b"a needle in here\n").unwrap();
+        (dir, p.to_string_lossy().into_owned().into_bytes())
+    }
+
+    /// The search over one file, as the search itself runs it.
+    fn search_one(p: &[u8]) -> super::GrepResult {
+        let g = Grep::new("needle", GrepMode::Literal).unwrap();
+        let (r, _) =
+            verify_from(&g, 1, 10, 1, std::time::Instant::now(), |_| Some(p), |q| super::match_file(&g, q, &super::placeholder::attributes, None));
+        r
+    }
+
+    /// A file the process cannot open is a hole, and the answer says which
+    /// hole it was.
+    ///
+    /// The file is gone between the index naming it and the search reading
+    /// it -- the same shape as a file another process holds, and the same
+    /// code path: the open fails. A hole that is not reported is a file the
+    /// user believes was searched.
+    #[test]
+    fn a_file_the_process_cannot_open_is_reported_as_skipped() {
+        let dir = std::env::temp_dir().join(format!("rgy_skip_gone_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("gone.txt");
+        let path = p.to_string_lossy().into_owned().into_bytes();
+        // The file is not there: the open fails.
+        let r = search_one(&path);
+        assert!(r.files.is_empty(), "the file was not read, so it cannot have matched");
+        assert_eq!(r.skipped.len(), 1, "the hole must be reported, not swallowed");
+        assert_eq!(r.skipped[0].path, path, "the skip must name the file");
+        assert_eq!(r.skipped[0].reason, SKIP_UNOPENABLE, "the skip must say why");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file another process holds is a file this process cannot read, and
+    /// it is the case the user meets: a file open in an editor, a database
+    /// being written, a copy a backup has in hand.
+    ///
+    /// Windows: the file is held open with no sharing at all, so the
+    /// search's own open is refused with a sharing violation.
+    #[cfg(windows)]
+    #[test]
+    fn a_locked_file_is_reported_as_skipped() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let (dir, p) = temp_file("locked");
+        let on_disk = std::path::PathBuf::from(String::from_utf8(p.clone()).unwrap());
+        let _lock = std::fs::OpenOptions::new().read(true).share_mode(0).open(&on_disk).unwrap();
+        let r = search_one(&p);
+        assert!(r.files.is_empty(), "the file was not read, so it cannot have matched");
+        assert_eq!(r.skipped.len(), 1, "the hole must be reported, not swallowed");
+        assert_eq!(r.skipped[0].reason, SKIP_UNOPENABLE, "the skip must say why");
+        drop(_lock);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The same hole, the unix way: the file is there and this process may
+    /// not read it.
+    ///
+    /// The permissions are taken away, and the test says nothing where the
+    /// environment reads the file anyway -- root reads a file whose
+    /// permissions say otherwise, and there is no hole to report there.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_the_process_may_not_read_is_reported_as_skipped() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, p) = temp_file("noperm");
+        let on_disk = std::path::PathBuf::from(String::from_utf8(p.clone()).unwrap());
+        std::fs::set_permissions(&on_disk, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Whether the environment can read it anyway is asked **before** the
+        // permissions come back: a probe after they are restored always
+        // succeeds, and the test would then take the "root reads it" branch
+        // on every machine and prove nothing.
+        let readable = std::fs::File::open(&on_disk).is_ok();
+        let r = search_one(&p);
+        // The permissions back, or the file stays and the cleanup fails.
+        std::fs::set_permissions(&on_disk, std::fs::Permissions::from_mode(0o600)).unwrap();
+        if readable {
+            // The environment reads it anyway (root): there is no hole.
+            assert!(r.skipped.is_empty(), "a file that was read is not a hole");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        assert!(r.files.is_empty(), "the file was not read, so it cannot have matched");
+        assert_eq!(r.skipped.len(), 1, "the hole must be reported, not swallowed");
+        assert_eq!(r.skipped[0].reason, SKIP_UNOPENABLE, "the skip must say why");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The other half: a file that was read and holds none of the pattern
+    /// is an answer, not a hole.
+    ///
+    /// The search looked inside it and found nothing -- that is what "no
+    /// match" means -- and the file must not be counted among the files
+    /// the search did not read.
+    #[test]
+    fn a_file_that_was_read_and_does_not_match_is_not_skipped() {
+        let dir = std::env::temp_dir().join(format!("rgy_skip_nomatch_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("other.txt");
+        std::fs::write(&p, b"nothing to see here\n").unwrap();
+        let path = p.to_string_lossy().into_owned().into_bytes();
+        let r = search_one(&path);
+        assert!(r.files.is_empty(), "the file holds no needle");
+        assert!(r.skipped.is_empty(), "a file that was read is not a hole");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file that is not text was read too, and it holds no match: it is
+    /// not a hole.
+    ///
+    /// The plain text path refuses a file with a NUL in its first
+    /// kilobyte, and the index build refuses the same files by the same
+    /// rule -- so "binary" is a fact about the file and not about this
+    /// run. The bytes came in and were looked at; there was no text in
+    /// them. The formats that carry text are read through the adapters,
+    /// and a file an adapter claims never reaches this rule at all.
+    ///
+    /// Reporting it would be a choice, and the wrong one: a tree of
+    /// images and archives would bury the files that really went unread.
+    #[test]
+    fn a_binary_file_was_read_and_is_not_skipped() {
+        let dir = std::env::temp_dir().join(format!("rgy_skip_binary_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("blob.bin");
+        std::fs::write(&p, b"\x00\x01\x02 binary \xff bytes").unwrap();
+        let path = p.to_string_lossy().into_owned().into_bytes();
+        let r = search_one(&path);
+        assert!(r.files.is_empty(), "a binary file holds no text");
+        assert!(r.skipped.is_empty(), "a binary file was read, so it is not a hole");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A folder is not a file, and the search reads files.
+    ///
+    /// The reason is the platform's: on Windows the open of a folder is
+    /// refused before the question is asked -- a folder needs
+    /// `FILE_FLAG_BACKUP_SEMANTICS`, which the search does not pass -- so
+    /// there the answer is "it could not be opened"; on unix the open
+    /// succeeds and the path turns out not to be a file.
+    #[test]
+    fn a_folder_is_reported_as_skipped() {
+        #[cfg(unix)]
+        let want = {
+            use super::SKIP_NOT_A_FILE;
+            SKIP_NOT_A_FILE
+        };
+        #[cfg(not(unix))]
+        let want = SKIP_UNOPENABLE;
+        let dir = std::env::temp_dir().join(format!("rgy_skip_folder_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.to_string_lossy().into_owned().into_bytes();
+        let r = search_one(&path);
+        assert!(r.files.is_empty(), "a folder holds no lines");
+        assert_eq!(r.skipped.len(), 1, "a folder the search cannot read is a hole");
+        assert_eq!(r.skipped[0].reason, want, "the skip must say why");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The read failed: the file was open, and the bytes did not come.
+    ///
+    /// Linux has a file that says so on purpose -- `/proc/self/mem` reads
+    /// as an input/output error at an address that is not mapped. Where
+    /// the platform does not produce read failures there is nothing to
+    /// assert, and the test says so rather than pretending.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_file_whose_read_fails_is_reported_as_skipped() {
+        use super::SKIP_READ_FAILED;
+        use std::io::Read;
+        let Ok(f) = std::fs::File::open("/proc/self/mem") else { return };
+        let mut buf = Vec::new();
+        if f.take(1).read_to_end(&mut buf).is_ok() {
+            // The platform read it: no read failure to report.
+            return;
+        }
+        let r = search_one(b"/proc/self/mem");
+        assert!(r.files.is_empty(), "the file was not read, so it cannot have matched");
+        assert_eq!(r.skipped.len(), 1, "the hole must be reported, not swallowed");
+        assert_eq!(r.skipped[0].reason, SKIP_READ_FAILED, "the skip must say why");
+    }
+
+    /// The reason travels in the outcome, and the outcome is the size it
+    /// was: a read that matched must cost what it cost before.
+    ///
+    /// The reason is a pointer and a length, and the `Vec` variant left
+    /// the space for it -- so the outcome is no bigger than the one that
+    /// held the matches and nothing else.
+    #[test]
+    fn the_outcome_carries_the_reason_without_growing() {
+        /// The outcome as it was when the only refusal was the
+        /// placeholder's: the matches, or nothing. It is here to be
+        /// measured, and never built.
+        #[allow(dead_code)]
+        enum Before {
+            Matches(Vec<super::FileMatches>),
+            NoMatch,
+        }
+        let _ = Before::Matches(Vec::new());
+        let _ = Before::NoMatch;
+        assert_eq!(std::mem::size_of::<super::Outcome>(), std::mem::size_of::<Before>(), "the reason must not make the outcome bigger");
+    }
+}
+
 /// `open_regular` for a file about to be indexed, telling the kernel to
 /// start reading it now (as much as indexing reads).
 fn open_ahead(path: &[u8]) -> Option<std::fs::File> {
@@ -4121,7 +4440,7 @@ fn open_ahead_with(path: &[u8], attrs: &Attrs<'_>) -> Option<std::fs::File> {
         Open::File(f, len) => (f, len),
         // A placeholder is not opened here either: the index build reads
         // every candidate file, and that read is a download too.
-        Open::Placeholder | Open::Unreadable => return None,
+        Open::Placeholder | Open::Refused(_) => return None,
     }; // macOS F_RDADVISE: tell the kernel to start reading now. Elsewhere the
     // plain open is the whole story. Declared inline (no libc dep).
     #[cfg(target_os = "macos")]

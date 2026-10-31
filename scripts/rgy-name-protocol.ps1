@@ -14,20 +14,54 @@
 # Usage:
 #   pwsh scripts/rgy-name-protocol.ps1 -Scales 200000,5000000 `
 #        -Rounds 7 -Threads 16 -Out benchmark/rgy-name-transcript.md
-
-param(
-    [string]$Repo = (Split-Path $PSScriptRoot -Parent),
-    # Comma-joined on purpose: `pwsh -File` passes list arguments as one
-    # literal string, and the documented invocation must work in both
-    # `-File` and `-Command` modes.
-    [string]$Scales = '200000,5000000',
-    [int]$Rounds = 7,
-    [int]$Threads = 16,
-    [string]$Out = 'benchmark/rgy-name-transcript.md',
-    [string[]]$Queries = @('report', 'file', "'report_00000.pdf", '^src', 'dat$', 'mod', 'rep', 'f1')
-)
+#
+# The long spellings (--scales) and the PowerShell ones (-Scales) are the
+# same option, and an option neither of them knows is an error on both
+# platforms. -Queries may be given more than once, one query per
+# occurrence, and a value is never split on commas: "report,file" is one
+# query.
 
 $ErrorActionPreference = 'Stop'
+
+# The options, read by the helper the two twins share: the long spelling
+# and the PowerShell one are the same option, and an option neither of
+# them knows is an error on both platforms -- the same words, the same
+# exit code.
+. (Join-Path $PSScriptRoot "lib/options.ps1")
+$Repo = Split-Path $PSScriptRoot -Parent
+$Scales = '200000,5000000'
+$Rounds = 7
+$Threads = 16
+$Out = 'benchmark/rgy-name-transcript.md'
+$Queries = @()
+Read-RgyOptions -Values @{ "repo" = "Repo"; "scales" = "Scales"; "rounds" = "Rounds";
+                           "threads" = "Threads"; "out" = "Out"; "queries" = "Queries[]" } `
+                 -Positionals @{} `
+                 -Arguments $args
+
+# The default queries, when the caller named none: the list the protocol
+# was written for. A list the caller gave replaces them.
+if ($Queries.Count -eq 0) {
+    $Queries = @('report', 'file', "'report_00000.pdf", '^src', 'dat$', 'mod', 'rep', 'f1')
+}
+
+# The helper hands over plain text and the script wants numbers. A round
+# count or a thread count that is not an integer is an argument error, and
+# it is one before the scale list is even looked at -- the twin refuses it
+# with these words.
+function ConvertTo-RgyInt([string]$text, [string]$what) {
+    if ($text -notmatch '^[+-]?[0-9]+$') {
+        # The newline is the shell's, and not the host's: the two scripts are
+        # compared byte for byte, and a CRLF here is a byte the bash twin
+        # does not write.
+        [Console]::Error.Write("not an integer ${what}: '$text'`n")
+        exit 1
+    }
+    return [int]$text
+}
+$Rounds = ConvertTo-RgyInt $Rounds "round count"
+$Threads = ConvertTo-RgyInt $Threads "thread count"
+
 # RGY_NAME_SCALES overrides the parameter: environment variables survive
 # the argument marshalling of nested shells, which has been observed to
 # deliver a comma-joined list as one space-joined token.
@@ -39,8 +73,14 @@ if ($env:RGY_NAME_SCALES) { $Scales = $env:RGY_NAME_SCALES }
 # `-Scales 200000,5000000` argument as an array and the native command
 # line may deliver it joined by spaces instead of commas.
 $scaleList = @([regex]::Split($Scales, '[,\s]+') |
-    Where-Object { $_ } | ForEach-Object { [int]$_ })
-if ($scaleList.Count -eq 0) { throw "no scales parsed from '$Scales'" }
+    Where-Object { $_ } | ForEach-Object { ConvertTo-RgyInt $_ "scale" })
+if ($scaleList.Count -eq 0) {
+    # The twin says this in one line and leaves; a throw would print the
+    # script's own stack with it, and the two answers would not be the
+    # same text.
+    [Console]::Error.Write("no scales parsed from '$Scales'`n")
+    exit 1
+}
 Write-Host "name-tier protocol: scales=$($scaleList -join ', ') rounds=$Rounds threads=$Threads"
 $bin = Join-Path $Repo 'target\release\examples\name_proto.exe'
 if (!(Test-Path $bin)) {

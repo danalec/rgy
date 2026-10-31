@@ -49,15 +49,21 @@ UPSTREAM=""
 DRY_RUN=0
 PRUNE=0
 
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --upstream) UPSTREAM="$2"; shift 2 ;;
-        --dry-run)  DRY_RUN=1; shift ;;
-        --prune)    PRUNE=1; shift ;;
-        -h|--help)  sed -n '2,26p' "$0"; exit 0 ;;
-        *) echo "unknown argument: $1" >&2; exit 1 ;;
-    esac
-done
+here="$(cd "$(dirname "$0")" && pwd)"
+
+# The help, before the options are read: the script's own header, the way
+# the twin prints it.
+. "$here/lib/options.sh"
+if rgy_help_requested "$@"; then
+    sed -n '2,26p' "$0"
+    exit 0
+fi
+
+# The options, read by the helper the twins share: the long spelling and
+# the PowerShell one are the same option, and an option neither of them
+# knows is an error -- the same words, the same exit code. A sync that
+# ignores the option the caller asked for copies the trees anyway.
+rgy_read_options "dryrun=DRY_RUN prune=PRUNE" "upstream=UPSTREAM" "" "$@"
 
 if [ -z "$UPSTREAM" ]; then
     echo "no --upstream path given" >&2
@@ -575,11 +581,18 @@ if [ "$DRY_RUN" = 0 ]; then
         echo "#   4  kind        tree | patch."
         echo "#   5  note        why the row is here."
         echo "#"
-        echo "# The trees below are upstream rgx's crates, transported verbatim; the"
-        echo "# README says so and the licence follows upstream's. The per-file"
+        echo "# The trees below are upstream rgx's crates: the copy of them, with"
+        echo "# this repository's patches on top. The licence follows upstream's."
+        echo "# The per-file"
         echo "# specification provenance of those files is upstream's own manifest"
         echo "# (scripts/vendored-sources.tsv in the rgx checkout), and the"
         echo "# third-party notices are in NOTICE and the licence files at the root."
+        echo "#"
+        echo "# A patch row is a file of this repository that upstream does not"
+        echo "# have, or has differently: a divergence from upstream is a patch"
+        echo "# applied on top of the copy, and the patch is what says what the"
+        echo "# divergence is. A tree that carries patches is not upstream's"
+        echo "# verbatim, and the patch rows below it are the ones that say so."
         echo "#"
         echo "# A row whose note says the copy excludes paths is a tree that is"
         echo "# upstream's minus what rgy does not carry: upstream's benchmark"
@@ -604,11 +617,11 @@ if [ "$DRY_RUN" = 0 ]; then
     } > "$tmp_manifest"
 
     for crate in $CRATES; do
-        note="upstream rgx's crate, transported verbatim"
+        note="upstream rgx's crate: the copy of it, with the patches below on top"
         for prefix in $EXCLUDE; do
             case "$prefix" in
                 "crates/$crate/"*)
-                    note="upstream rgx's crate, transported verbatim except the paths the copy excludes"
+                    note="upstream rgx's crate: the copy of it less the paths the copy excludes, with the patches below on top"
                     ;;
             esac
         done
@@ -624,7 +637,12 @@ if [ "$DRY_RUN" = 0 ]; then
                 "$PATCH_DIR/$rel.patch" "$rel" "$upstream_commit" \
                 "a divergence from upstream: the patch is applied on top of the copy" \
                 >> "$tmp_manifest"
-        done < <(find "$PATCH_DIR" -name '*.patch' -type f | sed "s|^$repo_root/||" | sort)
+        # The rows are sorted ordinally, and not by the locale's habit: a
+        # locale-aware sort puts `sqlite_oracle.rs.patch` before
+        # `sqlite.rs.patch`, and the manifest is a file two machines
+        # generate and one reader compares. The order has to be the one
+        # every machine agrees on.
+        done < <(find "$PATCH_DIR" -name '*.patch' -type f | sed "s|^$repo_root/||" | LC_ALL=C sort)
     fi
 
     mv "$tmp_manifest" "$manifest"

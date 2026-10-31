@@ -1,6 +1,6 @@
 [package]
 name = "rgy-searchd"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
 description = "The merged search daemon: JSON-lines over stdio/pipe/UDS, plus the rgx --serve front"
@@ -18,21 +18,21 @@ name = "searchd"
 path = "src/main.rs"
 
 [dependencies]
-rgy-discovery = { path = "../../crates/discovery", version = "0.1.1" }
+rgy-discovery = { path = "../../crates/discovery", version = "0.1.2" }
 # The platform walk selector.
-rgy-discovery-dispatch = { path = "../../crates/discovery-dispatch", version = "0.1.1" }
-rgy-engine = { path = "../../crates/engine", version = "0.1.1" }
-rgy-name-core = { path = "../../crates/name-core", version = "0.1.1" }
+rgy-discovery-dispatch = { path = "../../crates/discovery-dispatch", version = "0.1.2" }
+rgy-engine = { path = "../../crates/engine", version = "0.1.2" }
+rgy-name-core = { path = "../../crates/name-core", version = "0.1.2" }
 # The parallelism's width: the user picks it, the environment can override
 # it, and every parallel path in the daemon agrees on it.
-rgy-par = { path = "../../crates/par", version = "0.1.1" }
-rgy-proto = { path = "../../crates/proto", version = "0.1.1" }
+rgy-par = { path = "../../crates/par", version = "0.1.2" }
+rgy-proto = { path = "../../crates/proto", version = "0.1.2" }
 # rgx --serve front reads argv arrays with rgx's own JSON parser.
 rgx-core = { path = "../../crates/rgx-core", version = "0.1.0" }
 # The adapter registry: the formats a search can read *into* — a PDF, a
 # .docx, a zip, a mail file. This is the second layer of the launcher, and
 # the reason the vendored adapters are here.
-rgy-adapters = { path = "../../crates/adapters", version = "0.1.1" }
+rgy-adapters = { path = "../../crates/adapters", version = "0.1.2" }
 # One allocator story (plan 4.4): mimalloc for the general heap —
 # MSVCRT's HeapAlloc serialises the parallel content readers on Windows.
 mimalloc = { version = "0.1", default-features = false }
@@ -41,10 +41,10 @@ mimalloc = { version = "0.1", default-features = false }
 # `rgy_discovery::Watch` for its OS. Pulled in per-platform so `open_watch` can
 # build the right one.
 [target.'cfg(windows)'.dependencies]
-rgy-discovery-windows = { path = "../../crates/discovery-windows", version = "0.1.1" }
+rgy-discovery-windows = { path = "../../crates/discovery-windows", version = "0.1.2" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-rgy-discovery-linux = { path = "../../crates/discovery-linux", version = "0.1.1" }
+rgy-discovery-linux = { path = "../../crates/discovery-linux", version = "0.1.2" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-rgy-discovery-macos = { path = "../../crates/discovery-macos", version = "0.1.1" }
+rgy-discovery-macos = { path = "../../crates/discovery-macos", version = "0.1.2" }

@@ -152,11 +152,32 @@ mod imp {
 
         /// Read only.
         pub(super) const O_RDONLY: c_int = 0;
-        /// `O_DIRECTORY`: the open has to be of a folder
-        /// (`asm-generic/fcntl.h`).
+        /// `O_DIRECTORY`: the open has to be of a folder.
+        ///
+        /// The number is the architecture's, and the architectures
+        /// disagree: x86_64 takes it from `asm-generic/fcntl.h` (00200000),
+        /// arm64 overrides it in its own `asm/fcntl.h` (0040000). The
+        /// kernel does not ignore a bit it does not know -- the open
+        /// fails with EINVAL and the folder stays shut -- so the number
+        /// that is right on the host is the number that is wrong on the
+        /// other one, and the whole tree reads nothing.
+        #[cfg(target_arch = "x86_64")]
         pub(super) const O_DIRECTORY: c_int = 0o200_000;
+        #[cfg(target_arch = "aarch64")]
+        pub(super) const O_DIRECTORY: c_int = 0o40_000;
         /// `O_CLOEXEC`: the descriptor does not outlive the process.
+        ///
+        /// The same number on both architectures (`asm-generic/fcntl.h`).
         pub(super) const O_CLOEXEC: c_int = 0o2_000_000;
+        /// The architectures the reader is declared for.
+        ///
+        /// The open flags and the metadata layout are the
+        /// architecture's, and they were measured on the two the tree
+        /// builds for. Another architecture gets a build error and not a
+        /// wrong answer: what it needs is the `struct stat` its own
+        /// headers describe, read the same way.
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        compile_error!("the Linux reader is declared for x86_64 and aarch64");
 
         /// `AT_FDCWD`: the folder the call is made against when the
         /// caller has none of its own.
@@ -191,11 +212,15 @@ mod imp {
             pub d_name: [u8; 256],
         }
 
-        /// What the platform writes for one file's metadata.
+        /// What the platform writes for one file's metadata, on x86_64.
         ///
         /// The whole struct, because the platform writes the whole
         /// struct: a field left out is not a shorter struct, it is a
         /// buffer the platform writes past.
+        ///
+        /// x86_64 puts the link count before the mode (`bits/stat.h`), so
+        /// the mode lands at 24 and the struct is 144 bytes long.
+        #[cfg(target_arch = "x86_64")]
         #[repr(C)]
         #[allow(dead_code)]
         pub struct PlatformStat {
@@ -219,14 +244,57 @@ mod imp {
             pub st_unused: [i64; 3],
         }
 
+        /// What the platform writes for one file's metadata, on arm64.
+        ///
+        /// The arm64 layout is not x86_64's: the mode comes **before**
+        /// the link count, the link count is 32 bits wide, and the whole
+        /// struct is 128 bytes rather than 144. The size and the time
+        /// land on the same offsets on both architectures; the mode does
+        /// not -- read at x86_64's offset it is the link count, and every
+        /// entry comes back as "other", which is a walk that sees
+        /// folders and files as neither.
+        #[cfg(target_arch = "aarch64")]
+        #[repr(C)]
+        #[allow(dead_code)]
+        pub struct PlatformStat {
+            pub st_dev: u64,
+            pub st_ino: u64,
+            pub st_mode: u32,
+            pub st_nlink: u32,
+            pub st_uid: u32,
+            pub st_gid: u32,
+            pub st_rdev: u64,
+            pub st_pad1: u64,
+            pub st_size: i64,
+            pub st_blksize: i64,
+            pub st_blocks: i64,
+            pub st_atime: i64,
+            pub st_atime_nsec: i64,
+            pub st_mtime: i64,
+            pub st_mtime_nsec: i64,
+            pub st_ctime: i64,
+            pub st_ctime_nsec: i64,
+            pub st_unused: u64,
+        }
+
         /// The struct is the platform's, and the platform writes all of
         /// it. The sizes and the offsets the reader reads at are pinned
         /// here: a layout that drifts fails the build and not the walk.
-        const _: () = assert!(core::mem::size_of::<PlatformStat>() == 144);
+        #[cfg(target_arch = "x86_64")]
+        const _: () = {
+            assert!(core::mem::size_of::<PlatformStat>() == 144);
+            assert!(core::mem::offset_of!(PlatformStat, st_mode) == 24);
+            assert!(core::mem::offset_of!(PlatformStat, st_size) == 48);
+            assert!(core::mem::offset_of!(PlatformStat, st_mtime) == 88);
+        };
+        #[cfg(target_arch = "aarch64")]
+        const _: () = {
+            assert!(core::mem::size_of::<PlatformStat>() == 128);
+            assert!(core::mem::offset_of!(PlatformStat, st_mode) == 16);
+            assert!(core::mem::offset_of!(PlatformStat, st_size) == 48);
+            assert!(core::mem::offset_of!(PlatformStat, st_mtime) == 88);
+        };
         const _: () = assert!(core::mem::size_of::<PlatformDirent>() == 280);
-        const _: () = assert!(core::mem::offset_of!(PlatformStat, st_mode) == 24);
-        const _: () = assert!(core::mem::offset_of!(PlatformStat, st_size) == 48);
-        const _: () = assert!(core::mem::offset_of!(PlatformStat, st_mtime) == 88);
         const _: () = assert!(core::mem::offset_of!(PlatformDirent, d_name) == 19);
 
         unsafe extern "C" {
@@ -408,6 +476,17 @@ mod imp {
         /// struct: a field left out is not a shorter struct, it is a
         /// buffer the platform writes past.
         ///
+        /// The widths are the header's (`sys/sys/stat.h`), and two of them
+        /// are not the widths a reader expects: `nlink_t` is 64 bits and
+        /// `dev_t` is 32. The link count therefore takes eight bytes
+        /// between the inode number and the mode, and `st_mode` sits at
+        /// offset 24 -- not at 18, which is where it sits when the link
+        /// count is read as the 16 bits an old header had. Reading the
+        /// mode from the wrong offset does not fail: it reads the low
+        /// half of the link count, the file-type bits come out as
+        /// something else, and every file in the tree arrives with the
+        /// kind "other" and is not indexed.
+        ///
         /// The tail is FreeBSD 14's (`st_filerev` and nine spare words);
         /// FreeBSD 12 and 13 have ten spare words there instead. Both
         /// are 224 bytes and both put the fields the reader reads at the
@@ -417,7 +496,7 @@ mod imp {
         pub struct PlatformStat {
             pub st_dev: u64,
             pub st_ino: u64,
-            pub st_nlink: u16,
+            pub st_nlink: u64,
             pub st_mode: u16,
             pub st_bsdflags: i16,
             pub st_uid: u32,
@@ -446,7 +525,7 @@ mod imp {
         /// here: a layout that drifts fails the build and not the walk.
         const _: () = assert!(core::mem::size_of::<PlatformStat>() == 224);
         const _: () = assert!(core::mem::size_of::<PlatformDirent>() == 280);
-        const _: () = assert!(core::mem::offset_of!(PlatformStat, st_mode) == 18);
+        const _: () = assert!(core::mem::offset_of!(PlatformStat, st_mode) == 24);
         const _: () = assert!(core::mem::offset_of!(PlatformStat, st_size) == 112);
         const _: () = assert!(core::mem::offset_of!(PlatformStat, st_mtime) == 64);
         const _: () = assert!(core::mem::offset_of!(PlatformDirent, d_name) == 24);

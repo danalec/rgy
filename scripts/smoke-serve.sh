@@ -10,14 +10,15 @@
 # query that answers a different count than the same search on the command
 # line is the bug this catches.
 #
-# The Windows script names the binary by its absolute path, in the sibling
-# rgx checkout. This one keeps that path as the default, because the twin
-# has to ask the same binary the same question, and falls back to that
-# checkout's own build where the absolute path is not there, and then to
-# the repository's own. RGX_BIN overrides all of them.
+# The binary to ask is named by the caller: `--bin <path>`, or the RGX_BIN
+# environment variable, or the sibling rgx checkout, or this repository's
+# own build. A path written into the script is a path that is wrong on the
+# machine that runs it, and a script that asks a binary that is not there
+# proves nothing -- so the twin refuses the same way, and says the same
+# thing, when there is no binary to ask.
 #
 # Usage:
-#   bash scripts/smoke-serve.sh <dir>
+#   bash scripts/smoke-serve.sh [--bin <path>] <dir>
 #
 # Exit codes:
 #   the serve mode's own -- the .ps1 is the last command in its pipeline,
@@ -26,29 +27,49 @@
 
 set -uo pipefail
 
-repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+here=$(cd "$(dirname "$0")" && pwd)
+repo_root="$(cd "$here/.." && pwd)"
 
-rgx_win='C:\Users\danalec\Documents\src\rgx\target\release\rgx.exe'
-case "$(uname -s)" in
-    MINGW*|MSYS*|CYGWIN*)
-        rgx_default="$(cygpath -u "$rgx_win" 2>/dev/null || printf '%s' "$rgx_win")" ;;
-    *)
-        rgx_default="$rgx_win" ;;
-esac
+# The directory is the only thing this script takes, and it is positional.
+# An option it does not know is an error, and so is a second directory: the
+# twin refuses both with the same words and the same exit code, because a
+# script that ignores what it does not understand does the real thing when
+# the caller asked for something else.
+. "$here/lib/options.sh"
+bin=""
+rgy_read_options "" "bin=bin" "dir=dir" "$@"
 
-rgx="${RGX_BIN:-}"
-if [ -z "$rgx" ]; then
-    if [ -x "$rgx_default" ]; then
-        rgx="$rgx_default"
-    elif [ -x "$(dirname "$repo_root")/rgx/target/release/rgx" ]; then
-        # The same sibling checkout, in the layout a unix box has it.
-        rgx="$(dirname "$repo_root")/rgx/target/release/rgx"
-    elif [ -x "$repo_root/target/release/rgx.exe" ]; then
-        rgx="$repo_root/target/release/rgx.exe"
-    elif [ -x "$repo_root/target/release/rgx" ]; then
-        rgx="$repo_root/target/release/rgx"
-    else
-        echo "no rgx binary at $rgx_default; build it first: cargo build --release" >&2
+# The binary to ask, in the order the question is asked:
+#
+#   1. the one the caller named (--bin, or RGX_BIN),
+#   2. the sibling rgx checkout, in the layout each platform has it,
+#   3. this repository's own build.
+#
+# The order is the same on both platforms, and so is the refusal: a smoke
+# that cannot ask the question says so and fails, instead of exiting 0
+# without having smoked anything.
+if [ -z "$bin" ] && [ -n "${RGX_BIN:-}" ]; then
+    bin="$RGX_BIN"
+fi
+if [ -n "$bin" ]; then
+    if [ ! -x "$bin" ]; then
+        echo "no rgx binary at $bin; build it first: cargo build --release" >&2
+        exit 1
+    fi
+else
+    bin=""
+    for candidate in \
+        "$(dirname "$repo_root")/rgx/target/release/rgx" \
+        "$(dirname "$repo_root")/rgx/target/release/rgx.exe" \
+        "$repo_root/target/release/rgx" \
+        "$repo_root/target/release/rgx.exe"; do
+        if [ -x "$candidate" ]; then
+            bin="$candidate"
+            break
+        fi
+    done
+    if [ -z "$bin" ]; then
+        echo "no rgx binary: build it first: cargo build --release" >&2
         exit 1
     fi
 fi
@@ -59,15 +80,22 @@ json_str() {
     printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
 }
 
-if [ $# -ge 1 ]; then
-    dir_json="\"$(json_str "$1")\""
+# The directory is set only when the caller gave one, and an empty
+# directory is a directory: the .ps1 hands a null to ConvertTo-Json when
+# there was no argument at all, and the twin hands the same null to the
+# serve mode.
+if [ "${dir+set}" = "set" ]; then
+    dir_json="\"$(json_str "$dir")\""
 else
-    # No argument at all: the .ps1 hands a null to ConvertTo-Json, and the
-    # twin hands the same null to the serve mode.
     dir_json='null'
 fi
 
+# The request is two JSON lines, and a line ends with a newline: the
+# daemon reads JSON lines, so the request is one line and the line ends
+# where the next one begins. The bytes here are the bytes the .ps1 twin
+# writes -- a newline and not a CRLF, and one request per line with no
+# empty line after it -- so the two platforms are asked the same question.
 {
     printf '["needle",%s]\n' "$dir_json"
     printf '["-c","needle",%s]\n' "$dir_json"
-} | "$rgx" --serve
+} | "$bin" --serve

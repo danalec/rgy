@@ -36,19 +36,40 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $repoRoot
 
-# The help, before the options are read: the script's own header, the
-# way the twin prints it.
-if ($args -contains "-h" -or $args -contains "--help") {
-    Get-Content $PSCommandPath | Select-Object -Skip 1 -First 39
+# usage -- what the two scripts are for, in the same words in both.
+function Write-Usage {
+    $lines = @(
+        "publish-crates [--dry-run]"
+        ""
+        "Publishes this repository's crates to crates.io in an order that keeps"
+        "every published crate installable: a crate goes out after every crate"
+        "it depends on, because crates.io resolves a dependency when a crate is"
+        "INSTALLED and not when it is published. The order is computed from the"
+        "manifests themselves (scripts/publish-plan.py), so it cannot be"
+        "forgotten."
+        ""
+        "A real run needs CARGO_REGISTRY_TOKEN in the environment. The vendored"
+        "rgx crates are upstream's and are never published here."
+        ""
+        "Exits 0 when every crate the plan names is published, 1 when the run"
+        "stops before that."
+    )
+    foreach ($line in $lines) { [Console]::Out.Write($line + "`n") }
+}
+
+# The help, before the options are read: the script's own usage, the way
+# the twin prints it.
+. (Join-Path $PSScriptRoot "lib/options.ps1")
+if (Test-RgyHelp -Arguments $args) {
+    Write-Usage
     exit 0
 }
 # The options, read by the helper the two twins share: the long spelling
 # and the PowerShell one are the same option, and an option neither of
 # them knows is an error on both platforms -- not a silent "do the real
 # thing", which in this directory means publishing to crates.io.
-. (Join-Path $PSScriptRoot "lib/options.ps1")
 $dryRun = $false
-Read-RgyOptions -Switches @{ "dryrun" = "dryRun" } -Arguments $args
+Read-RgyOptions -Switches @{ "dryrun" = "dryRun" } -Positionals @{} -Arguments $args
 
 # The plan is computed by a helper both twins call, so the two print the
 # same plan and not two plans that look alike.

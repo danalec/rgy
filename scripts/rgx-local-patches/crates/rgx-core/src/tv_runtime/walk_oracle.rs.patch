@@ -1,6 +1,6 @@
 --- /dev/null
 +++ b/crates/rgx-core/src/tv_runtime/walk_oracle.rs
-@@ -0,0 +1,618 @@
+@@ -0,0 +1,707 @@
 +// SPDX-License-Identifier: Apache-2.0
 +
 +//! The tree's own walker, held to the crate it replaced.
@@ -188,6 +188,42 @@
 +    write(root.join("sub").join("deep").join("b.txt"), b"b\n");
 +    write(root.join("sub").join("deep").join("plain.txt"), b"plain\n");
 +    write(root.join("sub").join("deep.txt"), b"deep\n");
++    // A name with a backslash in it. Only Unix can hold one: there the
++    // backslash is a letter of the name and not a separator, so the rule
++    // with a separator in it does not reach it.
++    #[cfg(unix)]
++    write(root.join("src\\main.rs"), b"fn main() {}\n");
++}
++
++/// The corpus of a repository that is BELOW the walk root, with a rule
++/// above it.
++///
++/// The rules of a repository are the ones of its own directory and of the
++/// directories under it: a `.gitignore` above the repository is a file of
++/// something else, and it does not reach into the repository. The corpus
++/// is here because the reference says so, and because the walker has to
++/// say the same.
++fn build_corpus_below(root: &Path) {
++    let write = |path: PathBuf, bytes: &[u8]| {
++        if let Some(parent) = path.parent() {
++            fs::create_dir_all(parent).unwrap();
++        }
++        fs::write(path, bytes).unwrap();
++    };
++    // A rule above the repository: it is not the repository's.
++    write(root.join(".gitignore"), b"*.txt\n");
++    // The repository, below the walk root.
++    fs::create_dir_all(root.join("repo").join(".git")).unwrap();
++    write(
++        root.join("repo").join(".git").join("HEAD"),
++        b"ref: refs/heads/main\n",
++    );
++    // The rules of the repository itself.
++    write(root.join("repo").join(".gitignore"), b"*.log\n");
++    // A file the rule above the repository would take out, and one the
++    // repository's own rule takes out.
++    write(root.join("repo").join("sub").join("x.txt"), b"x\n");
++    write(root.join("repo").join("sub").join("y.log"), b"y\n");
 +}
 +
 +/// The tree's own walker: the paths it finds.
@@ -273,6 +309,20 @@
 +    root
 +}
 +
++/// The corpus of a repository below the walk root, in a folder of its own.
++fn corpus_below(name: &str) -> PathBuf {
++    static COUNTER: AtomicUsize = AtomicUsize::new(0);
++    let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
++    let root = std::env::temp_dir().join(format!(
++        "rgy-walk-oracle-{}-{name}-{unique}",
++        std::process::id()
++    ));
++    let _ = fs::remove_dir_all(&root);
++    fs::create_dir_all(&root).unwrap();
++    build_corpus_below(&root);
++    root
++}
++
 +/// **The two walkers have to find the same entries.** Every flag, every
 +/// glob, every tree.
 +#[test]
@@ -348,6 +398,12 @@
 +        !all.contains(&root.join("src").join("a.txt")),
 +        "a class did not fire"
 +    );
++    // And the class reaches into the directories under it: a rule with no
++    // separator in it matches at any depth.
++    assert!(
++        !all.contains(&root.join("sub").join("deep").join("b.txt")),
++        "a class did not reach into a directory"
++    );
 +    assert!(
 +        !all.contains(&root.join("src").join("main.rs")),
 +        "a rule with a separator in it did not fire"
@@ -360,6 +416,39 @@
 +    assert!(
 +        all.contains(&root.join("sub").join("deep").join("plain.txt")),
 +        "a file is not in the walk"
++    );
++    // And a name with a backslash in it is one name, not two.
++    #[cfg(unix)]
++    assert!(
++        all.contains(&root.join("src\\main.rs")),
++        "a name with a backslash in it was read as a separator"
++    );
++    let _ = fs::remove_dir_all(&root);
++}
++
++/// **The rules above a repository are not the repository's.** A file the
++/// rule above the repository takes out is still part of the corpus, and
++/// the walkers have to agree about it.
++#[test]
++fn the_rules_above_a_repository_are_not_its_own() {
++    let root = corpus_below("below");
++    for config in configs() {
++        let ours = ours(&root, &config);
++        let theirs = theirs(&root, &config);
++        assert_eq!(
++            ours, theirs,
++            "the walkers disagree (hidden: {}, gitignore: {}, parents: {}, depth: {:?}, globs: {:?})",
++            config.hidden, config.gitignore, config.parents, config.max_depth, config.globs
++        );
++    }
++    let all = theirs(&root, &configs()[0]);
++    assert!(
++        all.contains(&root.join("repo").join("sub").join("x.txt")),
++        "a rule above the repository reached into it"
++    );
++    assert!(
++        !all.contains(&root.join("repo").join("sub").join("y.log")),
++        "the rule of the repository did not fire"
 +    );
 +    let _ = fs::remove_dir_all(&root);
 +}

@@ -56,6 +56,15 @@ const SCOPE_LIMIT: usize = 64;
 /// for this budget at all: the budget is what the **worker** gives up.
 pub const LAUNCHER_WINDOW: Duration = Duration::from_secs(2);
 
+/// The window the count is asked in.
+///
+/// The count is a fact about the daemon's index and not the question the
+/// user asked, so it gets a window of its own: a daemon that does not
+/// answer it in a quarter of a second leaves the count unknown, and an
+/// unknown count is a thing the header can say — which is better than a
+/// zero that claims an index nobody saw.
+const COUNT_WINDOW: Duration = Duration::from_millis(250);
+
 /// What the launcher shows about the last answer.
 ///
 /// It is shared with the window through a cell, because the window reads
@@ -84,6 +93,16 @@ pub struct Status {
     pub asked: bool,
     /// Whether the daemon has a pack store (`--tv-dir`).
     pub tv: bool,
+    /// How many entries the daemon's index holds.
+    ///
+    /// It is the daemon's own number — the one its status carries — and
+    /// not a count the client made: the client does not walk the tree
+    /// and cannot know the size of an index it does not have.
+    ///
+    /// `None` when the daemon has not said: a daemon that is not there
+    /// has no count, and a zero the client invented for it would claim
+    /// an empty index nobody ever saw.
+    pub indexed: Option<usize>,
     /// How many results there are.
     pub matches: usize,
 }
@@ -136,6 +155,20 @@ impl Failure {
         Failure {
             reason,
             presence: Presence::Gone,
+        }
+    }
+
+    /// The window ran out before the answer did.
+    ///
+    /// The launcher's own budget is gone, and the daemon may well be there
+    /// and busy. Only a daemon that could not be **reached** is gone, and
+    /// the window running out is not the daemon being gone: a launcher that
+    /// says "no connection to the daemon" about a daemon that is up is
+    /// saying a lie, and it drops a connection that is still good.
+    fn slow(reason: String) -> Failure {
+        Failure {
+            reason,
+            presence: Presence::Slow,
         }
     }
 }
@@ -380,6 +413,12 @@ impl DaemonSource {
                 st.asked = true;
                 st.connected = true;
                 st.tv = status.tv;
+                // The count is the daemon's own: how many entries its
+                // index holds. The terminal's header shows it, and the
+                // header would say "0" about an index of a thousand
+                // entries if the client answered for a daemon that did
+                // not.
+                st.indexed = Some(status.docs);
                 // The warning of the failure that is over: a daemon that
                 // is there does not carry the sentence that said it was
                 // not.
@@ -388,9 +427,29 @@ impl DaemonSource {
                 // feed that died leaves it answering on a snapshot, and a
                 // window that says "the daemon is there" is telling the
                 // user that a live tree is behind it.
-                if let Some(why) = feed_warning(&status.feed, self.lang) {
+                if let Some(why) = feed_warning(status.feed, self.lang) {
                     st.warnings.push(why);
                 }
+                // The status answer carries two more facts — where the
+                // journal is, and whether the index caught up by
+                // replaying the journal or by walking the tree again —
+                // and the window does not draw them.
+                //
+                // It does not draw them because there is no word for them:
+                // the vocabulary is the launcher's
+                // (`crates/launcher/src/text.rs`), it speaks two languages,
+                // and a sentence written here would be English-only in a
+                // launcher that is not. A number with no word to sit in is
+                // a number nobody sees, so the facts are read by the client
+                // and are on the wire for whoever asks for them; the window
+                // draws them when the vocabulary has the words — and the
+                // count is drawn, because the vocabulary has its words
+                // now.
+                //
+                // The feed is the exception that proves the rule: it has a
+                // word — "the tree is no longer followed by the daemon" —
+                // and it is drawn, because a daemon on a dead feed is a
+                // thing the user has to know about.
             }
             Err(e) => {
                 // The connection is dropped: the answer may still be on
@@ -442,20 +501,21 @@ impl DaemonSource {
         self.window = window;
     }
 
-    /// The connection, made on demand.
+    /// The connection, made on demand, inside the caller's window.
     ///
-    /// A client that gives up when the daemon is not there yet would fail
-    /// for good; the launcher is resident, and the daemon may come later.
-    fn client_mut(&mut self) -> Option<&mut Client> {
+    /// The deadline is the budget of the **whole** answer, and the connect
+    /// is part of the answer: a pipe that stayed busy for the whole window
+    /// is a window spent before the question was asked. So the connect is
+    /// measured against the deadline, and so is the count question that
+    /// follows it -- the count is a fact about the daemon's index and not
+    /// the question the user asked, and it does not get a window of its own
+    /// when the caller's window is the one that is left.
+    fn client_within(&mut self, deadline: Option<Instant>) -> Option<&mut Client> {
         if self.client.is_none() {
-            let client = match Client::connect(&self.endpoint) {
+            let client = match Client::connect_within(&self.endpoint, deadline) {
                 Ok(client) => client,
                 Err(e) => {
-                    let mut st = self.status.borrow_mut();
-                    st.asked = true;
-                    st.connected = false;
-                    st.warnings =
-                        vec![format!("{}: {e}", rgy_launcher::text::no_daemon(self.lang))];
+                    self.report_connect_failure(&e);
                     return None;
                 }
             };
@@ -463,11 +523,86 @@ impl DaemonSource {
             if let Some(client) = self.client.as_mut() {
                 client.set_session(self.session);
             }
+            // The daemon is here, so it can be asked how big its index
+            // is. The question is asked once — when the connection opens
+            // — and in a window of its own: a daemon that is not there
+            // when the launcher starts can be there by the first
+            // keystroke, and the header has to learn the count then.
+            self.learn_the_count(deadline);
             let mut st = self.status.borrow_mut();
             st.asked = true;
             st.connected = true;
         }
         self.client.as_mut()
+    }
+
+    /// The connect failed, and what that says about the daemon.
+    ///
+    /// A connect that failed is a daemon that could not be **reached**,
+    /// and that is one fact: the line says "no connection to the daemon",
+    /// and the flag is cleared. The one exception is a connect that ran
+    /// out of time: the pipe was busy, which means the daemon is there and
+    /// the window was spent waiting for it — so the daemon is up and slow,
+    /// and a launcher that says "no connection to the daemon" about it is
+    /// saying a lie.
+    ///
+    /// A daemon that answered badly cannot be a fact a connect knows: it
+    /// never got to answer.
+    fn report_connect_failure(&mut self, e: &std::io::Error) {
+        let mut st = self.status.borrow_mut();
+        st.asked = true;
+        let slow = e.kind() == std::io::ErrorKind::TimedOut;
+        st.connected = slow;
+        let text = Text::for_lang(self.lang);
+        st.warnings = vec![if slow {
+            text.daemon_slow.replace("{e}", &e.to_string())
+        } else {
+            format!("{}: {e}", rgy_launcher::text::no_daemon(self.lang))
+        }];
+    }
+
+    /// Ask the daemon how many entries its index holds.
+    ///
+    /// The number is the daemon's own answer: the client does not walk
+    /// the tree and cannot know the size of an index it does not have.
+    ///
+    /// A daemon that does not answer in the window leaves the count
+    /// unknown, and the unknown count stays unknown — it is not a zero,
+    /// and it is not a number the client made up.
+    ///
+    /// The connection is NOT dropped when the count question fails. The
+    /// question the user asked is still worth asking, and the connection
+    /// is the only way to ask it: a launcher that throws the connection
+    /// away after a question about the daemon's index has to open a new
+    /// one, and a daemon that is up and slow may not take a second
+    /// connection while it holds the first. The client knows when the
+    /// connection is spent, and it refuses the questions after it — and
+    /// that refusal is a timeout, which is what the daemon is.
+    fn learn_the_count(&mut self, deadline: Option<Instant>) {
+        // The count gets the window it is given, and no more: the caller's
+        // window is the budget of the whole answer, and the count is not
+        // the question the user asked.
+        let window = match deadline {
+            Some(deadline) => {
+                let left = left(deadline);
+                if left.is_zero() {
+                    return;
+                }
+                if left < COUNT_WINDOW {
+                    left
+                } else {
+                    COUNT_WINDOW
+                }
+            }
+            None => COUNT_WINDOW,
+        };
+        let answered = match self.client.as_mut() {
+            Some(client) => client.status_within(window).ok(),
+            None => None,
+        };
+        if let Some(status) = answered {
+            self.status.borrow_mut().indexed = Some(status.docs);
+        }
     }
 
     /// The answer failed: the connection is dropped, and the sentence is
@@ -510,7 +645,16 @@ impl DaemonSource {
         engine_query: &str,
         window: Duration,
     ) -> Result<(Vec<String>, Vec<String>), Failure> {
-        let saved = self.session;
+        // The session that is saved is the one the daemon named, and the
+        // daemon names one when the request does not carry one. The client
+        // keeps the name it was given, and the daemon takes it back — the
+        // ids the daemon hands out are unguessable, so the name is a
+        // capability and not a claim on somebody else's answer. Saving the
+        // window's own id instead would throw that name away — the
+        // window's id is None on the platforms where the launcher does not
+        // choose one — and the next keystroke would start a new session
+        // instead of re-ranking this answer.
+        let saved = self.client.as_ref().and_then(|c| c.session());
         if let Some(client) = self.client.as_mut() {
             client.set_session(None);
         }
@@ -523,6 +667,11 @@ impl DaemonSource {
                     // word the engine does not know is said here and
                     // nowhere else: the content answer is about the other
                     // half and cannot say it.
+                    //
+                    // The scope's own cap is not a warning: the scope is a
+                    // selection, not an answer the user reads, and the
+                    // answer that is on the screen is the content one —
+                    // which says whether it is whole.
                     (
                         out.hits
                             .into_iter()
@@ -545,10 +694,14 @@ impl DaemonSource {
     /// The names, from the daemon.
     fn search_names(&mut self, query: &str, limit: usize) -> Answer {
         let window = self.window;
-        let Some(client) = self.client_mut() else {
+        // The deadline is taken before the connect: the connect is part of
+        // the answer, and a window that starts after it is a window that
+        // stops answering for longer than the window it was given.
+        let deadline = Instant::now() + window;
+        let Some(client) = self.client_within(Some(deadline)) else {
             return Answer::empty();
         };
-        match client.search_within(query, limit, window) {
+        match client.search_within(query, limit, left(deadline)) {
             Ok(outcome) => {
                 let answer = Answer {
                     paths: outcome.hits.iter().map(|h| h.path.clone()).collect(),
@@ -562,7 +715,11 @@ impl DaemonSource {
                 {
                     let mut st = self.status.borrow_mut();
                     st.connected = true;
-                    st.warnings = outcome.warnings.clone();
+                    // The daemon's own warnings, and the sentence for an
+                    // answer that is not whole: the list on the screen is
+                    // the whole answer, or it is a page of a longer one,
+                    // and the window has to say which.
+                    st.warnings = name_warnings(&outcome);
                     st.took_us = outcome.took_us;
                     st.layer = Some(Layer::Names);
                     st.matches = answer.len();
@@ -621,8 +778,9 @@ impl DaemonSource {
         // is a window that stopped answering for four.
         let deadline = Instant::now() + self.window;
         // The daemon first, connected on demand: the launcher is resident
-        // and the daemon may have come up since the last keystroke.
-        let connected = self.client_mut().is_some();
+        // and the daemon may have come up since the last keystroke. The
+        // connect is inside the window: it is part of the answer.
+        let connected = self.client_within(Some(deadline)).is_some();
         // The scope is the names part of the query, in the **engine's**
         // words: the model did the rewrite, and the engine fails closed
         // on a word it does not know.
@@ -702,7 +860,12 @@ impl DaemonSource {
                 // The window is the budget of the whole answer and it is
                 // gone: the fallback would be a process started with no
                 // time to answer, and the sentence says what happened.
-                let reason = Failure::gone(String::from(Text::for_lang(self.lang).no_time_for_rgx));
+                //
+                // The daemon is not gone, though: the launcher's own budget
+                // ran out, and the daemon may well be there and busy. Only a
+                // daemon that could not be reached is gone, so the flag
+                // survives and the connection is not thrown away.
+                let reason = Failure::slow(String::from(Text::for_lang(self.lang).no_time_for_rgx));
                 self.fail(&reason);
                 failure = Some(reason);
             } else {
@@ -768,7 +931,10 @@ impl DaemonSource {
         limit: usize,
         window: Duration,
     ) -> Result<Answer, Failure> {
-        let Some(client) = self.client_mut() else {
+        // The connect is inside the window the caller gave: the window is
+        // the budget of the whole answer, and the connect is part of it.
+        let deadline = Instant::now() + window;
+        let Some(client) = self.client_within(Some(deadline)) else {
             return Err(Failure::gone(String::from(rgy_launcher::text::no_daemon(
                 self.lang,
             ))));
@@ -822,7 +988,10 @@ impl DaemonSource {
         limit: usize,
         window: Duration,
     ) -> Result<Answer, Failure> {
-        let Some(client) = self.client_mut() else {
+        // The connect is inside the window the caller gave: the window is
+        // the budget of the whole answer, and the connect is part of it.
+        let deadline = Instant::now() + window;
+        let Some(client) = self.client_within(Some(deadline)) else {
             return Err(Failure::gone(String::from(rgy_launcher::text::no_daemon(
                 self.lang,
             ))));
@@ -918,15 +1087,34 @@ impl DaemonSource {
     }
 }
 
+/// The warnings of a name answer.
+///
+/// The daemon's own warnings, and the sentence for an answer that is not
+/// whole. The content path says the same thing about the same answer, and
+/// a window that shows a short list without saying so shows an answer that
+/// looks whole.
+fn name_warnings(outcome: &rgy_proto::client::SearchOutcome) -> Vec<String> {
+    let mut out = outcome.warnings.clone();
+    out.extend(outcome.partial());
+    out
+}
+
 /// The warnings of a content answer.
 ///
 /// The daemon's own warnings, and the sentence for an answer that did not
 /// read everything. The command line says the same thing about the same
 /// answer, and a window that shows a short list without saying so shows
 /// an answer that looks whole.
+///
+/// The reasons are the daemon's own words: a file that was not read because
+/// it is a cloud placeholder and a file the budget never reached are two
+/// different things, and a count that does not say which of them it was
+/// leaves the user guessing. The sentence is the protocol's, so the window
+/// says what the daemon said and not what the window thinks of it.
 fn content_warnings(outcome: &rgy_proto::client::GrepOutcome) -> Vec<String> {
     let mut out = outcome.warnings.clone();
     out.extend(outcome.partial());
+    out.extend(outcome.skip_reasons());
     out
 }
 
@@ -936,12 +1124,16 @@ fn content_warnings(outcome: &rgy_proto::client::GrepOutcome) -> Vec<String> {
 /// sentences: a feed that died was there and is not, and a daemon that
 /// never had one answers on a snapshot from the start. `live` is not a
 /// warning at all.
-fn feed_warning(feed: &str, lang: Lang) -> Option<String> {
+///
+/// The feed is the protocol's own vocabulary and not a string: a reader
+/// that compared strings would have to spell the spelling again, and a
+/// spelling that drifts is a warning that stops being said.
+fn feed_warning(feed: rgy_proto::Feed, lang: Lang) -> Option<String> {
     let text = Text::for_lang(lang);
     match feed {
-        "gone" => Some(text.tree_not_followed.to_string()),
-        "none" => Some(text.tree_never_followed.to_string()),
-        _ => None,
+        rgy_proto::Feed::Gone => Some(text.tree_not_followed.to_string()),
+        rgy_proto::Feed::None => Some(text.tree_never_followed.to_string()),
+        rgy_proto::Feed::Live => None,
     }
 }
 
@@ -984,6 +1176,19 @@ fn content_line(file: &rgy_proto::GrepFile) -> String {
 }
 
 impl Source for DaemonSource {
+    /// How many entries the daemon's index holds.
+    ///
+    /// It is the daemon's own number — the one its status carries — and
+    /// not a count the client made: the client does not walk the tree
+    /// and cannot know the size of an index it does not have.
+    ///
+    /// `None` when the daemon has not said: a daemon that is not there
+    /// has no count, and a zero the client made up for it would claim an
+    /// empty index nobody ever saw.
+    fn indexed(&self) -> Option<usize> {
+        self.status.borrow().indexed
+    }
+
     fn search(&mut self, query: &str, limit: usize) -> Answer {
         // The model owns the split: the source asks it for the two
         // halves — the engine's question and the content layer's — and
@@ -1056,6 +1261,49 @@ mod tests {
         );
     }
 
+    /// The window says a name answer is not whole.
+    ///
+    /// The name layer could not say it before: the list on the screen looked
+    /// like the whole answer, and a list that reached the limit was the
+    /// same list as one that did not. The window says the words the
+    /// content path says, because it is the same kind of answer.
+    #[test]
+    fn the_window_says_a_name_answer_is_not_whole() {
+        let cut = rgy_proto::client::SearchOutcome {
+            complete: false,
+            ..Default::default()
+        };
+        let warnings = name_warnings(&cut);
+        assert!(
+            warnings.iter().any(|w| w.contains("limit")),
+            "the window does not say what cut the answer: {warnings:?}"
+        );
+
+        // The same words the content path says: the two layers cut their
+        // answers at the same place, and the window says one thing about
+        // it.
+        let content = rgy_proto::client::GrepOutcome {
+            complete: false,
+            skipped: 0,
+            ..Default::default()
+        };
+        assert_eq!(
+            warnings,
+            content_warnings(&content),
+            "the two layers say the same words about the same answer"
+        );
+
+        // A whole answer says nothing about being whole.
+        let whole = rgy_proto::client::SearchOutcome {
+            complete: true,
+            ..Default::default()
+        };
+        assert!(
+            name_warnings(&whole).is_empty(),
+            "a whole answer carries no sentence"
+        );
+    }
+
     /// An answer that stopped at the limit says that, and names no files.
     ///
     /// The daemon read what it was asked to read and the answer is still
@@ -1100,17 +1348,18 @@ mod tests {
     /// user that a live tree is behind it when there is none.
     #[test]
     fn a_daemon_that_does_not_follow_the_tree_says_so() {
-        let live = feed_warning("live", Lang::English);
+        let live = feed_warning(rgy_proto::Feed::Live, Lang::English);
         assert!(live.is_none(), "a live feed is not a warning: {live:?}");
-        for feed in ["gone", "none"] {
+        for feed in [rgy_proto::Feed::Gone, rgy_proto::Feed::None] {
             let warning = feed_warning(feed, Lang::English);
             assert!(
                 warning.as_deref().is_some_and(|w| !w.is_empty()),
-                "the feed {feed} is not warned about"
+                "the feed {feed:?} is not warned about"
             );
         }
         // And in the user's language.
-        let portuguese = feed_warning("none", Lang::Portuguese).unwrap_or_default();
+        let none = rgy_proto::Feed::None;
+        let portuguese = feed_warning(none, Lang::Portuguese).unwrap_or_default();
         assert!(
             portuguese.contains("não segue"),
             "the sentence is not in the user's language: {portuguese:?}"
@@ -1209,6 +1458,38 @@ mod tests {
         let st = source.status();
         assert!(!st.borrow().connected);
         assert!(!st.borrow().warnings.is_empty());
+    }
+
+    /// The count is the daemon's own number.
+    ///
+    /// The daemon's status carries how many entries its index holds, and
+    /// that is the number the terminal's header shows: the client does
+    /// not walk the tree and cannot know the size of an index it does
+    /// not have.
+    #[test]
+    fn the_count_is_the_daemons_own_number() {
+        let daemon = serve(answers_with_a_count);
+        let mut source = DaemonSource::new(daemon.endpoint.clone(), None, Lang::English);
+        assert!(source.connect(), "the daemon is there");
+        assert_eq!(source.indexed(), Some(1226));
+        drop(source);
+        daemon.join();
+    }
+
+    /// A source that has not heard from the daemon does not know the count.
+    ///
+    /// There is no daemon to ask, so there is no count — and a zero the
+    /// client made up for it would claim an empty index nobody ever saw.
+    #[test]
+    fn a_source_without_a_daemon_does_not_know_the_count() {
+        let mut source = DaemonSource::new(
+            Endpoint::Socket(std::path::PathBuf::from("/tmp/rgy-rgxy-no-count.sock")),
+            None,
+            Lang::English,
+        );
+        assert_eq!(source.indexed(), None);
+        let _ = source.search("invoice", 10);
+        assert_eq!(source.indexed(), None);
     }
 
     #[test]
@@ -1326,6 +1607,28 @@ mod tests {
             if request.contains("\"op\":\"status\"") {
                 let _ = peer.send(
                     b"{\"op\":\"status\",\"docs\":0,\"event_id\":0,\"catch_up\":\"replayed\",\"tv\":false}\n",
+                );
+            } else {
+                let _ = peer.send(b"{\"op\":\"hits\",\"hits\":[],\"took_us\":1}\n");
+                let _ = peer.send(b"{\"op\":\"done\",\"count\":0}\n");
+            }
+        }
+    }
+
+    /// A daemon that says how many entries its index holds.
+    ///
+    /// The number is the daemon's own, and it is the number the terminal's
+    /// header shows: a client that counted the entries itself would be
+    /// counting an index it does not have.
+    fn answers_with_a_count(peer: Peer) {
+        let mut peer = peer;
+        while let Ok(request) = peer.read_line() {
+            if request.is_empty() {
+                break;
+            }
+            if request.contains("\"op\":\"status\"") {
+                let _ = peer.send(
+                    b"{\"op\":\"status\",\"docs\":1226,\"event_id\":0,\"catch_up\":\"replayed\",\"tv\":false}\n",
                 );
             } else {
                 let _ = peer.send(b"{\"op\":\"hits\",\"hits\":[],\"took_us\":1}\n");

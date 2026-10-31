@@ -13,6 +13,27 @@ fn searchctl() -> std::path::PathBuf {
     bin("searchctl")
 }
 
+/// A path as the platform spells it: the long name, not the alias.
+///
+/// Some machines spell `%TEMP%` with the 8.3 short name of the
+/// profile folder (`C:\Users\RUNNER~1\...`), while the operating
+/// system answers with the long one (`C:\Users\runneradmin\...`).
+/// The daemon resolves its root before it says anything, so its
+/// answers carry the long name — and a test that compares one with
+/// the spelling the environment happened to use is comparing two
+/// spellings of one folder.
+fn as_the_platform_spells_it(path: &std::path::Path) -> String {
+    let canonical = std::fs::canonicalize(path).expect("the path resolves to itself");
+    let text = canonical.to_string_lossy().into_owned();
+    // The long-path prefix is how the platform spells a path, not what
+    // the caller wrote: it comes off, and a UNC path keeps the `\\`
+    // that says it is one.
+    match text.strip_prefix(r"\\?\UNC\") {
+        Some(rest) => format!(r"\\{rest}"),
+        None => text.strip_prefix(r"\\?\").unwrap_or(&text).to_string(),
+    }
+}
+
 // --- walk-style name queries ----------------------------------------------
 
 #[test]
@@ -675,11 +696,11 @@ fn the_daemon_flag_answers_from_the_daemons_tree() {
         "the daemon's tree answers; stdout={out} stderr={err}"
     );
     assert!(
-        out.contains(served.to_str().unwrap()),
+        out.contains(&as_the_platform_spells_it(served.path())),
         "the answer is the daemon's tree: {out}"
     );
     assert!(
-        !out.contains(other.to_str().unwrap()),
+        !out.contains(&as_the_platform_spells_it(other.path())),
         "the answer is not the local tree: {out}"
     );
     assert!(
@@ -730,5 +751,341 @@ fn the_daemon_flag_answers_the_content_layer() {
     assert!(
         out.contains("notes.md") && out.contains("zebra"),
         "the answer is the content: {out}"
+    );
+}
+
+// --- what the answer says about itself ---------------------------------------
+
+/// The sentence the CLI says about an answer that stopped at the limit.
+///
+/// The sentence is the protocol's own — `rgy_proto::client::ANSWER_STOPS_AT_THE_LIMIT`
+/// — and the tests crate does not link the protocol, so it is spelled here
+/// and the spelling is the assertion: a route that says something else
+/// about the same answer is a route that says something else.
+const STOPS_AT_THE_LIMIT: &str = "the answer stops at the limit";
+
+/// The local route says the answer stopped at the limit.
+///
+/// The name answer says whether it is whole, and the route that has no
+/// daemon to ask decides the fact with the protocol's own rule. It used to
+/// decide nothing: the local route dropped the flag, so a list that stopped
+/// at the limit was printed as if it were the whole list.
+#[test]
+fn the_local_route_says_the_answer_stopped_at_the_limit() {
+    let dir = fixture_dir("searchctl-note-local");
+    for i in 1..=5 {
+        std::fs::write(dir.join(format!("noteprobe{i}.txt")), "x\n").unwrap();
+    }
+    let root = dir.to_str().unwrap();
+
+    // Two hits out of five: the answer reached the limit, so it is a page
+    // of a longer list.
+    let (code, out, err) = run(
+        &searchctl(),
+        &["--root", root, "--limit", "2", "^noteprobe"],
+    );
+    assert_eq!(code, 0, "must match; stdout={out} stderr={err}");
+    assert_eq!(
+        out.lines().filter(|l| !l.trim().is_empty()).count(),
+        2,
+        "the answer holds the two hits; stdout={out}"
+    );
+    assert!(
+        err.contains(STOPS_AT_THE_LIMIT),
+        "the answer says it stopped at the limit; stderr={err}"
+    );
+
+    // Five out of five: fewer hits than the limit, so the answer is the
+    // whole answer, and the sentence is not said.
+    let (code, out, err) = run(
+        &searchctl(),
+        &["--root", root, "--limit", "50", "^noteprobe"],
+    );
+    assert_eq!(code, 0, "must match; stdout={out} stderr={err}");
+    assert_eq!(
+        out.lines().filter(|l| !l.trim().is_empty()).count(),
+        5,
+        "the answer holds every hit; stdout={out}"
+    );
+    assert!(
+        !err.contains(STOPS_AT_THE_LIMIT),
+        "a whole answer does not say it stopped at the limit; stderr={err}"
+    );
+}
+
+/// The daemon route says the answer stopped at the limit.
+///
+/// The daemon's answer carries the fact, and the CLI's daemon route used to
+/// drop it: a route that says nothing about a cut list says the list is
+/// whole. The sentence is the protocol's own, so the two routes say the
+/// same words about the same answer.
+#[test]
+fn the_daemon_route_says_the_answer_stopped_at_the_limit() {
+    let served = fixture_dir("searchctl-note-daemon");
+    for i in 1..=5 {
+        std::fs::write(served.join(format!("noteprobe{i}.txt")), "x\n").unwrap();
+    }
+    let daemon = harness::registered(&served);
+
+    // Two hits out of five: the answer reached the limit, so it is a page
+    // of a longer list.
+    let (code, out, err) = ask(&["--daemon", "--limit", "2", "^noteprobe"], &daemon.env);
+    assert_eq!(code, 0, "must match; stdout={out} stderr={err}");
+    assert_eq!(
+        out.lines().filter(|l| !l.trim().is_empty()).count(),
+        2,
+        "the answer holds the two hits; stdout={out}"
+    );
+    assert!(
+        err.contains(STOPS_AT_THE_LIMIT),
+        "the answer says it stopped at the limit; stderr={err}"
+    );
+
+    // Five out of five: fewer hits than the limit, so the answer is the
+    // whole answer, and the sentence is not said.
+    let (code, out, err) = ask(&["--daemon", "--limit", "50", "^noteprobe"], &daemon.env);
+    assert_eq!(code, 0, "must match; stdout={out} stderr={err}");
+    assert_eq!(
+        out.lines().filter(|l| !l.trim().is_empty()).count(),
+        5,
+        "the answer holds every hit; stdout={out}"
+    );
+    assert!(
+        !err.contains(STOPS_AT_THE_LIMIT),
+        "a whole answer does not say it stopped at the limit; stderr={err}"
+    );
+}
+
+// --- what the CLI asks the daemon --------------------------------------------
+
+/// The limit in a question on the wire.
+///
+/// The field is read as a number and not as a substring: `"limit":100000` is
+/// a prefix of `"limit":100000000`, and a test that matched the prefix
+/// would pass with the number the caller wrote.
+fn limit_in(request: &str) -> Option<u64> {
+    let at = request.find("\"limit\":")?;
+    let rest = &request[at + "\"limit\":".len()..];
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+
+/// A daemon of the test's own, on the endpoint the clients look for.
+///
+/// The CLI asks the *registered* endpoint: the named pipe that carries the
+/// user's name on Windows, the socket in the cache directory everywhere else.
+/// A test that wants to see what the CLI asks has to be the daemon — and the
+/// daemon the test is has to answer, or the CLI waits for an answer that is
+/// not coming.
+///
+/// The platform's calls are declared by hand, the way `rgy_proto`'s own
+/// tests declare them: the tree does not take the `windows` crate.
+struct Fake {
+    /// The questions the CLI asked.
+    asked: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    /// The environment the CLI has to see to find the daemon.
+    env: Vec<(&'static str, String)>,
+    /// The cache directory the socket lives in.
+    ///
+    /// It lives as long as the daemon does: a socket whose directory is
+    /// gone is a socket nobody can reach.
+    _cache: Option<harness::TempDir>,
+    /// The socket the fake bound, removed when the fake is dropped.
+    ///
+    /// A unix socket is a file on disk, and a file nobody removes is a
+    /// file the next run trips over: the bind fails with "the address is
+    /// already in use", for a socket no daemon is serving.
+    #[cfg(unix)]
+    _socket: Option<std::path::PathBuf>,
+}
+
+#[cfg(unix)]
+impl Drop for Fake {
+    fn drop(&mut self) {
+        if let Some(path) = &self._socket {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+impl Fake {
+    /// The questions the CLI asked.
+    fn questions(&self) -> Vec<String> {
+        self.asked.lock().unwrap().clone()
+    }
+}
+
+/// Serve one connection: take the question, answer it, and keep it.
+///
+/// The answer is the smallest one the protocol allows: no hits, and the
+/// `done` that closes the answer. The test is here for the question.
+fn serve(mut peer: impl std::io::Read + std::io::Write, asked: &std::sync::Mutex<Vec<String>>) {
+    use std::io::BufRead;
+    let mut line = String::new();
+    let _ = std::io::BufReader::new(&mut peer).read_line(&mut line);
+    asked.lock().unwrap().push(line.trim().to_string());
+    let _ = peer.write_all(
+        b"{\"op\":\"hits\",\"hits\":[],\"took_us\":0,\"complete\":true}\n\
+          {\"op\":\"done\",\"count\":0}\n",
+    );
+    let _ = peer.flush();
+}
+
+/// The pipe instance the fake daemon waits on.
+///
+/// The platform's own call: a named pipe is not a file, and the tree does
+/// not take the `windows` crate, so the call is declared here the way the
+/// tree declares its own.
+#[cfg(windows)]
+fn create_pipe(name: &str) -> std::fs::File {
+    use std::os::windows::io::FromRawHandle;
+    extern "system" {
+        fn CreateNamedPipeW(
+            name: *const u16,
+            open_mode: u32,
+            pipe_mode: u32,
+            max_instances: u32,
+            out_size: u32,
+            in_size: u32,
+            timeout: u32,
+            sec: *mut core::ffi::c_void,
+        ) -> *mut core::ffi::c_void;
+    }
+    const PIPE_ACCESS_DUPLEX: u32 = 0x3;
+    const PIPE_TYPE_BYTE: u32 = 0x0;
+    const PIPE_UNLIMITED_INSTANCES: u32 = 255;
+    let path = format!(r"\\.\pipe\{name}");
+    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+    let handle = unsafe {
+        CreateNamedPipeW(
+            wide.as_ptr(),
+            PIPE_ACCESS_DUPLEX,
+            PIPE_TYPE_BYTE,
+            PIPE_UNLIMITED_INSTANCES,
+            64 * 1024,
+            64 * 1024,
+            0,
+            core::ptr::null_mut(),
+        )
+    };
+    assert!(!handle.is_null(), "the pipe instance was created");
+    // The file owns the handle: dropping it closes the pipe, which is what
+    // tells the client the stream is over.
+    unsafe { std::fs::File::from_raw_handle(handle) }
+}
+
+/// Wait for the client on the pipe.
+///
+/// The instance is already there: the only thing left to wait for is the
+/// client that opens it.
+#[cfg(windows)]
+fn connect_named_pipe(file: &std::fs::File) {
+    use std::os::windows::io::AsRawHandle;
+    extern "system" {
+        fn ConnectNamedPipe(
+            pipe: *mut core::ffi::c_void,
+            overlapped: *mut core::ffi::c_void,
+        ) -> i32;
+    }
+    unsafe {
+        ConnectNamedPipe(file.as_raw_handle(), core::ptr::null_mut());
+    }
+}
+
+#[cfg(windows)]
+impl Fake {
+    /// A daemon on the pipe the clients look for.
+    fn start() -> Self {
+        let user = format!("rgy-e2e-fake-{}", harness::unique());
+        let pipe = format!("rgy-searchd-{user}");
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let file = create_pipe(&pipe);
+        let taken = asked.clone();
+        std::thread::spawn(move || {
+            connect_named_pipe(&file);
+            serve(file, &taken);
+        });
+        Fake {
+            asked,
+            env: vec![("USERNAME", user)],
+            _cache: None,
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Fake {
+    /// A daemon on the socket the clients look for.
+    fn start() -> Self {
+        let cache = harness::shared_cache_dir("searchctl-fake");
+        std::fs::create_dir_all(cache.join("rgy")).unwrap();
+        let path = cache.join("rgy").join("searchd.sock");
+        // The socket the client will look for. A path that does not fit
+        // the platform's `sun_path` is shortened, and the rule is the
+        // product's: the fake binds where the product binds, or the test
+        // proves nothing about the product at all.
+        let path = rgy_proto::endpoint::socket_path(&path).expect("the socket path fits");
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).expect("the socket's directory is there");
+        }
+        // A socket left behind by an earlier run is a socket nobody is
+        // serving, and the bind would refuse the address.
+        let _ = std::fs::remove_file(&path);
+        let listener = std::os::unix::net::UnixListener::bind(&path).expect("the socket binds");
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let taken = asked.clone();
+        std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                serve(stream, &taken);
+            }
+        });
+        Fake {
+            asked,
+            env: vec![("XDG_CACHE_HOME", cache.to_string_lossy().into_owned())],
+            _cache: Some(cache),
+            _socket: Some(path),
+        }
+    }
+}
+
+/// The CLI asks the daemon for at most the protocol's cap.
+///
+/// The limit is the caller's, and the protocol caps it: the daemon holds the
+/// whole index, and a request for a hundred million rows is a request to
+/// make the daemon materialise them. The cap is the protocol's, so the CLI
+/// applies it before the question goes out — a CLI that asked for a hundred
+/// million rows would ask the daemon for them, whatever the daemon does
+/// with the answer.
+///
+/// The cap is `rgy_proto::MAX_LIMIT`, and the test reads the number off the
+/// wire instead of off the source: the number the CLI wrote is the number
+/// the daemon was asked for.
+///
+/// The local route is not proved here, and it does not need to be: there is
+/// ONE limit in the CLI -- `opts.limit`, clamped once where the option is
+/// read -- and every route reads that one field, the local name route, the
+/// local content route and the daemon's request alike. The cap is proved
+/// where it is decided (the CLI's own unit test,
+/// `the_limit_is_clamped_to_the_protocol_cap`) and proved here, on the
+/// wire, where the number is visible at all. A local route that answered a
+/// bigger limit would have to be reading a different field.
+#[test]
+fn the_cli_asks_the_daemon_for_at_most_the_protocols_cap() {
+    let fake = Fake::start();
+    let (code, _out, err) = run_with(&["--daemon", "--limit", "100000000", "hello"], &fake.env);
+    assert_eq!(
+        code, 1,
+        "the fake daemon answers with no hits; stderr={err}"
+    );
+
+    let asked = fake.questions();
+    assert_eq!(asked.len(), 1, "the CLI asked once; got {asked:?}");
+    assert_eq!(
+        limit_in(&asked[0]),
+        Some(100_000),
+        "the question carries the protocol's cap, not the number the caller wrote; got {}",
+        asked[0]
     );
 }

@@ -3,6 +3,8 @@
 Whole-filesystem name search and content search in one stack, rgx's content engine,
 adapters and pack store.
 
+[![rgy -- a demo on YouTube](https://img.youtube.com/vi/bLDYOjMUQGs/hqdefault.jpg)](https://www.youtube.com/watch?v=bLDYOjMUQGs)
+
 **Which file?** — asked over the whole filesystem, then **what is inside
 it?** in the same query.
 
@@ -11,67 +13,74 @@ searchctl --root ~ "invoice ext:pdf"      # which file
 searchctl --root ~ "invoice grep:tesla"   # and what is inside it
 ```
 
+## See it work
+
+Two faces, one daemon. Click either one to watch it move.
+
+[![the rgxy window over the daemon: the query "invoice doc:", the results the daemon ranked, the timings, and the actions on the right](docs/screenshots/gui-filters.png)](docs/videos/gui-filters.mp4)
+
+[![the terminal interface on Linux, talking to a live daemon: the query "rs", the header's count of the daemon's index, the results the daemon ranked, and the timings](docs/screenshots/rgxy.png)](docs/videos/term-tui.mp4)
+
 ## Install
 
-**From crates.io, today:**
+The release is **0.1.2**. It is on [GitHub](https://github.com/danalec/rgy/releases/tag/rgy-v0.1.2), and the crates are on crates.io.
+
+**One line**, and it installs the tool, the daemon and the launcher:
 
 ```sh
-cargo install rgy-searchctl     # gives you `searchctl`
+# Windows
+irm https://raw.githubusercontent.com/danalec/rgy/main/install.ps1 | iex
+
+# Linux and macOS
+curl -fsSL https://raw.githubusercontent.com/danalec/rgy/main/install.sh | bash
 ```
 
-That is the whole install for the tool you actually type. It needs **Rust
-1.85 or newer** and a **C compiler** (the allocator is C), and it drops the
+The installer picks the archive that matches the machine, **checks its
+SHA256**, unpacks the binaries into `~/.local/bin` (Linux) or
+`%LOCALAPPDATA%\Programs\rgy` (Windows), adds that directory to your PATH,
+and registers the daemon — and the launcher — to start at login. The digest
+is pinned inside the installer, so a substituted download is refused before
+anything is unpacked — and an archive the release does not carry is refused
+too: **this release carries the two archives it was cut from** — Windows
+x86_64 and Linux x86_64. The CI builds the other nine on their own
+runners, the macOS ones on a Mac, and it publishes none of them, so on
+macOS and on aarch64 the installer says so and installs nothing.
+
+**From crates.io:**
+
+```sh
+cargo install rgy-search --version 0.1.2         # gives you `searchctl`
+```
+
+That is the whole install for the tool you actually type, and it drops the
 `searchctl` binary into `~/.cargo/bin` — already on your PATH if Rust was
-installed the usual way.
+installed the usual way. It needs **Rust 1.85 or newer** and a **C
+compiler** (the allocator is C); the release archives and the installers
+need neither.
 
-The other binaries are separate crates, because most people only want
-the first one:
+The other binaries are separate crates, because most people only want the
+first one:
 
 ```sh
-cargo install rgy-searchd       # the daemon: searchd
-cargo install rgy-autostart     # the login item: rgy-autostart
-cargo install rgy-rgxy          # the window: rgxy
+cargo install rgy-searchd --version 0.1.2       # the daemon: searchd
+cargo install rgy-autostart --version 0.1.2     # the login item: rgy-autostart
+cargo install rgy-rgxy --version 0.1.2          # the window: rgxy
 ```
 
-The **packages** — the winget manifest and the Homebrew formula — are called
-**rgy-search**, and not `rgy`, because `rgy` is taken on crates.io (a GameBoy
-emulator library from 2019). The crates are `rgy-searchctl`, `rgy-searchd`,
-`rgy-autostart` and `rgy-rgxy`, and the binaries keep the names they have
-everywhere else. The project itself is still rgy.
+**From the release** — the archive carries the four binaries, the `rgy`
+alias and the documents, and it needs neither Rust nor a compiler:
 
-### The packages that are not out yet
+| platform | archive |
+|---|---|
+| Windows x86_64 | `rgy-v0.1.2-x86_64-windows.zip` |
+| Linux x86_64 | `rgy-v0.1.2-x86_64-linux.tar.gz` |
 
-The packaging is in place — the winget manifest, the Homebrew formula, the
-release script, the one-line installers at the top of the repository — but
-the first release has not been pushed, so these install nothing today:
+The release page carries a `SHA256SUMS` beside the archives.
 
-| platform | package | command |
-|---|---|---|
-| Windows | winget | `winget install danalec.rgy-search` |
-| Windows | one-line installer | `irm https://raw.githubusercontent.com/danalec/rgy/main/install.ps1 \| iex` |
-| macOS | Homebrew | `brew tap danalec/rgy https://github.com/danalec/rgy` then `brew install danalec/rgy/rgy-search` |
-| macOS | one-line installer | `curl -fsSL https://raw.githubusercontent.com/danalec/rgy/main/install.sh \| bash` |
-| Linux | one-line installer | `curl -fsSL https://raw.githubusercontent.com/danalec/rgy/main/install.sh \| bash` |
-
-The installers download the release archive, **check its SHA256**, unpack the
-four binaries into `~/.local/bin` (Linux and macOS) or
-`%LOCALAPPDATA%\Programs\rgy` (Windows), add that directory to your PATH,
-and register the daemon — and the launcher — to start at login. The archive
-that matches the machine is the one that gets installed: the operating
-system and the architecture decide it. The digest is pinned inside the
-installer, so a substituted download is refused before anything is unpacked.
-
-**When they land, prefer them**: they carry the same four binaries and the
-documents, and they need neither Rust nor a compiler on the machine. Until
-then, `cargo install` is the way in.
-
-### Requirements
-
-Rust **1.85** or newer, and a C compiler. Nothing else — no runtime, no
-service, nothing to configure. The parts that differ per operating system
-(the Windows MFT walk, the Linux change feed, the macOS FSEvents feed) are
-compiled in and chosen by `cfg` at build time, so one package carries
-everything it needs.
+Nothing else: no runtime, no service, nothing to configure. The parts that
+differ per operating system (the Windows MFT walk, the Linux change feed, the
+macOS FSEvents feed) are compiled in and chosen by `cfg` at build time, so one
+package carries everything it needs.
 
 ## Your first five minutes
 
@@ -82,8 +91,9 @@ searchctl --root ~ "invoice"
 ```
 
 The first run walks the tree and builds an index of the names; every run
-after it reuses that index. The two progress lines go to **stderr**, so they
-never pollute the output you pipe:
+after it reuses that index for **30 minutes** — `--max-age` moves that
+window, and an index older than it is rebuilt. The two progress lines go to
+**stderr**, so they never pollute the output you pipe:
 
 ```
 searchctl: rebuilding — no index on disk
@@ -92,8 +102,9 @@ C:\Users\danalec\Documents\invoice_2024.pdf
 ```
 
 The index lives in the platform's cache folder — `%LOCALAPPDATA%\rgy` on
-Windows, `$XDG_CACHE_HOME/rgy` on Linux, `~/Library/Caches/rgy` on macOS.
-`RGY_INDEX_DIR` puts it somewhere else.
+Windows, `$XDG_CACHE_HOME/rgy` (or `~/.cache/rgy`) on Linux,
+`~/Library/Caches/rgy` on macOS. `RGY_INDEX_DIR` moves the cache base, and
+the `rgy` folder still goes inside it.
 
 ### The query
 
@@ -116,7 +127,7 @@ Those are the name matchers. These narrow by a property of the file:
 |---|---|---|
 | `ext:` | the file extension | `ext:pdf` |
 | `type:` | what kind of thing it is | `type:dir`, `type:link`, `type:image` |
-| `size:` | how big it is | `size:+10m` (bigger than 10 MB), `size:-1k` |
+| `size:` | how big it is | `size:+10m` (at least 10 MB), `size:-1k` (at most 1 KB) |
 | `dir:` | the folder it is in | `dir:documents` |
 | `in:` | where it is | `in:downloads` |
 | `mtime:` | when it changed | `mtime:-7d`, `mtime:today`, `mtime:2024-01-01` |
@@ -134,7 +145,9 @@ output — the shape `rg` prints:
 | `sym:` | the symbols in the file, for code |
 
 Two more things the query understands: `report|invoice` means "report" **or**
-"invoice", and `*.pdf` / `scan?` glob the name.
+"invoice", and a term with `*` or `?` globs the **whole path** — `*.pdf`
+reaches a PDF at any depth, and a path always starts with `/`, so the name
+alone is `*scan?`.
 
 An unknown `type:` fails closed: a warning on stderr, zero matches, exit 1.
 It never falls back to "search everything".
@@ -159,7 +172,11 @@ failed.
 | `rgxy` | the window: a floating launcher over the daemon |
 | `rgy-autostart` | puts the daemon in place at login, and takes it out again |
 
-`rgy` is another name for `searchctl` — the same binary.
+`rgy` is another name for `searchctl` — the same binary. The release
+archives and the installers put it there; `cargo install rgy-search`
+gives you `searchctl` and nothing else.
+
+### The daemon
 
 `searchctl` on its own is enough for everything you type by hand: it walks
 the tree, so it finds the files that were created while the machine was
@@ -200,12 +217,17 @@ named pipe on Windows. The daemon reads requests from standard input by
 default, and a login entry has no standard input — a daemon registered
 that way would start, walk the tree, and exit. `doctor` prints the line.
 
-### The window
+### The clients
 
 `rgxy` is the daemon's **client**: the index lives in `searchd`, and a
 keystroke is a question sent down a pipe. That is why the window is there
 in a few milliseconds — it is not building an index, it is asking one that
 is already built.
+
+It has two faces, and the binary is the same on every platform: a floating
+graphical window where there is a desktop (Windows), and the terminal
+interface where there is not (Linux and macOS). The two pictures at the top
+are the two faces.
 
 ```sh
 rgxy                  # the resident launcher: Control twice opens the window
@@ -230,6 +252,13 @@ window the keys are all of them: arrows, `Enter` to open, `Control+Enter`
 for the folder, `Escape` to close, `Control+C` to copy the path,
 `Control+P` to preview the file, `Control+K` for the actions.
 
+On Windows the launcher also leaves a magnifying glass in the notification
+area — the row of icons at the right of the taskbar — so that it can be
+found when the shortcut is not remembered. A click on the icon, or a double
+click, opens the window; the right button opens a menu with **Search** and
+**Quit**. The icon never closes the window: a double click is two clicks,
+and a window that opens and closes again is a window that is not there.
+
 The daemon's order is the relevance order and it rules; on top of it the
 launcher remembers what **you** opened, and a result you used recently comes
 up a few places — never more than three. It is a nudge and not a takeover:
@@ -250,7 +279,8 @@ user quits, so it quits — and the copy is the `>copy` command.
 - **No results, and a warning on stderr** — an unknown `type:`, or a filter
   that does not apply. It fails closed, on purpose.
 - **No results, no warning** — the name is not close to what you typed. Drop
-  the quotes to go fuzzy, and check the filter: `ext:pdf`, not `ext:.pdf`.
+  the quotes to go fuzzy, and check the spelling of the filter: `ext:pdf` and
+  `ext:.pdf` are the same filter, and the leading dot is optional.
 - **The first run is slow** — it is walking the tree. Every run after it is
   fast.
 - **A PDF search finds nothing** — the words are not in the file. `grep:` asks
@@ -258,6 +288,13 @@ user quits, so it quits — and the copy is the `>copy` command.
   adapter, so the words of a PDF are words the query can match. A **scanned**
   PDF has no text layer at all: its pages are images, and they are read only
   when `tesseract` is installed. See [FORMATS.md](FORMATS.md).
+- **A content answer that says it is partial** — the daemon says so, in the
+  answer: `the daemon did not read N file(s): the answer is partial` when a
+  budget ran out or a file was a cloud placeholder, and `the answer stops at
+  the limit` when the list was longer than the limit. The two are different
+  holes, and the sentence says which one it is. The answer carries the
+  reasons as well, so a reader knows whether the fix is a bigger budget or a
+  file that is not there yet.
 
 The [manual](MANUAL.md) has the whole query language, every flag, the daemon
 protocol and the pack store.
@@ -282,8 +319,8 @@ filesystem, then **what is inside it?** in the same query.
 | Name and content in one query | ✅ `report ext:pdf grep:tesla` | pattern + globs |
 | Drop-in `rg` (flags, output, exit codes) | exit codes only | ✅ |
 | Persistent index across runs | ✅ `--index` (pinned root, `--max-age`) | walk per run (pack store opt-in) |
-| Pack-store control | `searchd --tv-dir`, `rgx-tv build/search/update/inspect` | ✅ `--tv-build`, `--engine auto\|tv\|rgx` |
-| Forensic triage (magic ID, carving, strings, entropy, x509) | — | ✅ `inspect` adapter |
+| Pack-store control | `searchd --tv-dir`; a workspace build leaves `rgx-tv` in `target/release/` | ✅ `--tv-build`, `--engine auto\|tv\|rgx` |
+| Forensic triage (magic ID, carving, strings, entropy, x509) | ✅ the same adapter, read through the search path | ✅ |
 
 **The tech-savvy pick is rgx.** If you already think in `rg` flags and
 regexes, script against `--json` submatches, pick engines, build pack stores,
@@ -295,9 +332,11 @@ the whole filesystem in one plain query language — words, plus
 underneath and nothing to configure.
 
 > **Where the numbers live.** rgy's are targets until the per-OS
-> verification lands — name lookup **≤ 0.5 ms** median at 5M entries —
-> with measurements so far in [`benchmark/`](benchmark/). rgx's are measured and
-> dated in its
+> verification lands — name lookup **≤ 0.5 ms** median at 5M entries — and
+> the measurements so far do not meet that row: at 5M entries the broad
+> queries measure 1.1× to 2.5× it on the Windows host. The write-ups, with
+> the host and the date on every number, are in
+> [`benchmark/`](benchmark/). rgx's are measured and dated in its
 > [`benchmark/`](https://github.com/danalec/rgx/tree/main/benchmark); quote
 > them with their run date and host.
 
@@ -313,11 +352,11 @@ cargo build --release            # the whole workspace
 
 ```sh
 # name: fuzzy words, filters narrow, hits ranked
-cargo run --release -p rgy-searchctl -- --root crates "walk ext:rs"
+cargo run --release -p rgy-search -- --root crates "walk ext:rs"
 # content: `grep:` literal, `regex:`, `sym:` — output is path:line:text
-cargo run --release -p rgy-searchctl -- --root crates "grep:Listing"
+cargo run --release -p rgy-search -- --root crates "grep:Listing"
 # both in one query: the name narrows what is read, the content confirms
-cargo run --release -p rgy-searchctl -- --root crates "walk ext:rs grep:Listing"
+cargo run --release -p rgy-search -- --root crates "walk ext:rs grep:Listing"
 # the daemon: JSON lines in, hits frames out, index warm between queries
 echo '{"op":"grep","q":"regex:fn.list"}' | cargo run --release -p rgy-searchd -- --root crates
 # rgx --serve compat: one JSON argv-array per line, begin/end framing
@@ -331,37 +370,70 @@ stderr, zero matches, exit 1.
 
 ## Status
 
+The release is out: **0.1.2**, tagged `rgy-v0.1.2`, with the Windows and
+Linux archives beside a `SHA256SUMS`, and all twenty crates on crates.io.
+The release page is the changelog — it is
+[`docs/release-0.1.2.md`](docs/release-0.1.2.md), the file the release
+publishes.
+
+### The packages that are not out yet
+
+The **packages** — the winget manifest and the Homebrew formula — are called
+**rgy-search**, and not `rgy`, because `rgy` is taken on crates.io (a GameBoy
+emulator library from 2019). The command-line tool's crate carries the same
+name, so the package manager and the registry say one thing: beside it are
+`rgy-searchd`, `rgy-autostart` and `rgy-rgxy`, and the binaries keep the
+names they have everywhere else. The project itself is still rgy.
+
+Both manifests are in the repository; neither is in a package manager yet:
+
+| platform | package | state |
+|---|---|---|
+| Windows | winget | the manifest validates, but it is **not** in `microsoft/winget-pkgs` — `winget install danalec.rgy-search` installs nothing today |
+| macOS | Homebrew | the formula's digests are placeholders, and the tap is not published — `brew install danalec/rgy/rgy-search` installs nothing today |
+
 The merge is landed end to end: name search,
 content search, one daemon/CLI, and the polish layer — and now the
 window over the daemon, `rgxy`. What is left is
-verification on machines this host does not have — macOS above all: its
-code is clippy-checked from a Linux box, but it has never *run* there.
+verification on machines this host does not have — macOS above all: the CI
+builds and smokes it on a Mac, but the live feed — the FSEvents watcher
+that keeps the index current — has never run on one, and that is why the
+release carries no macOS archive.
 
-The perf gate fails a PR on a >20% regression against any
-[`benchmark/baseline-names.md`](benchmark/baseline-names.md) row.
+The perf gate fails a PR on a >20% regression against the gated
+[`benchmark/baseline-names.md`](benchmark/baseline-names.md) rows. A row whose
+measurement does not reproduce on the host is measured and reported instead.
 
-The crates are on crates.io, all fourteen at 0.1.0: `rgy-name-core`,
-`rgy-discovery`, `rgy-engine`, `rgy-proto` and the rest. They carry the
-`rgy-` prefix because `name-core`, `discovery`, `engine`, `proto`, `par`
-and `zen-rs` are taken on crates.io.
+### The crates
 
-Six crates are **not published yet**: `rgy-par`, `rgy-launcher`,
-`rgy-launcher-windows`, `rgy-pick`, `rgy-adapters` and `rgy-rgxy`. They
-arrive with the next release, and the release is what bumps the ones that
-are already out.
+All twenty are on crates.io at 0.1.2. Five are the programs — `rgy-search`,
+`rgy-searchd`, `rgy-autostart`, `rgy-rgxy` and `rgy-zen` — and fifteen are
+the libraries under them: `rgy-name-core`, `rgy-discovery`,
+`rgy-discovery-dispatch`, `rgy-discovery-linux`, `rgy-discovery-macos`,
+`rgy-discovery-freebsd`, `rgy-discovery-windows`, `rgy-engine`, `rgy-proto`,
+`rgy-launcher`, `rgy-launcher-windows`, `rgy-pick`, `rgy-adapters`,
+`rgy-par` and `rgy-search-ui`.
 
-**The order they go up in is not a detail.** crates.io resolves a
-dependency when a crate is *installed*, not when it is published, so a
-crate that depends on another one cannot be published first: `rgy-name-core`
-depends on `rgy-par`, and publishing it before `rgy-par` was on the
-registry would have shipped a crate that nobody could install. The order
-is computed from the manifests themselves, and the publish script follows
-it:
+They carry the `rgy-` prefix because `rgy`, `discovery`, `engine`, `proto`,
+`par`, `zen-rs` and `autostart` are taken on crates.io. The command-line
+tool's crate was published as `rgy-searchctl` first; `rgy-search` is the name
+the package managers already use, and the binary it installs is still
+`searchctl`. The old name stays in the index — a name on crates.io is
+permanent, and the only thing one can do with an old one is *yank* it. The
+[manual](MANUAL.md#the-library) says what each one gives you and how to
+depend on it.
 
-```sh
-bash scripts/publish-crates.sh --dry-run   # the plan, nothing published
-bash scripts/publish-crates.sh             # publish what the plan says
-```
+crates.io resolves a dependency when a crate is *installed*, not when it is
+published, so the order the crates go up in is computed from the manifests
+and followed by the publish script (`scripts/publish-crates.sh` and its
+PowerShell twin, `scripts/publish-crates.ps1`).
+
+The 0.1.1 numbers are taken as well, by an earlier build of this same
+project — the registry keeps what it keeps, and a version number is as
+permanent as a name. That build is not this tree: the protocol it shipped
+has neither the limits nor the count rules that 0.1.2 has, and a program
+pinned to it does not build against it. The version names the bytes, and
+this release is **0.1.2** because these are the bytes.
 
 ## Related projects
 
@@ -378,7 +450,10 @@ the tooling around it — the full map is in `COPYING`:
   `crates/engine`, `crates/proto`), the vendored rgx engine and adapters
   (`crates/rgx-*`, `crates/rar-codec`), the binaries (`bins/*`) and the e2e
   harness (`tests/`). Every file carries its `SPDX-License-Identifier:` header,
-  and the manifests state the same terms.
+  and the manifests state the same terms — with one exception named here so
+  the claim is not read as a claim about something else: `crates/name-core`
+  states `Apache-2.0 AND MIT`, because three of its files arrived from
+  `fsearch` under MIT and keep its terms.
 - **MIT OR Apache-2.0**: the tooling (`scripts/`, `tools/`, `benchmark/`).
   Commercial use is licensed under Apache-2.0; the MIT option remains for
   anyone who prefers its terms.
@@ -388,3 +463,14 @@ its terms; the vendored trees are Apache-2.0, and the layouts they encode that
 were learned from other projects are recorded in `NOTICE`.
 Full texts: `LICENSE-APACHE`, `LICENSE-MIT`. Third-party notices: `NOTICE`
 and the notice of the one upstream whose code is carried here, in `LICENSE-MIT-FSEARCH`.
+
+## Star history
+
+<a href="https://star-history.com/#danalec/rgy&Date">
+
+<picture>
+<source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=danalec/rgy&type=Date&theme=dark">
+<source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=danalec/rgy&type=Date">
+<img alt="Star History Chart" src="https://api.star-history.com/svg?repos=danalec/rgy&type=Date">
+</picture>
+</a>

@@ -392,8 +392,8 @@ mod tests {
         }
     }
 
-    /// The batch that carries a change, with the feed running on a thread
-    /// of its own.
+    /// The batch that carries the change the test is waiting for, with the
+    /// feed running on a thread of its own.
     ///
     /// The call blocks until a change arrives, so the watch has to run
     /// somewhere else and the test has to make the change from here.
@@ -404,15 +404,40 @@ mod tests {
     /// the touches was the one that was reported does not matter, and a
     /// test that waited for the *first* change would be a test that waited
     /// for a race.
-    fn wait_for(mut watch: RdcwWatch, touch: impl Fn() + Send + 'static) -> Vec<UsnRecord> {
+    ///
+    /// **The first batch is not the batch the test is about.** The feed
+    /// can report the watched folder's own change before the file's — the
+    /// folder's timestamp moved when the file was created inside it — and
+    /// the file's own notification then comes in a later batch. (Measured
+    /// on the CI runner: the first batch named the folder, not the file.)
+    /// So the batch is looked for in what the feed delivers, and the feed
+    /// is kept fed until it is found: `wanted` says which batch the test
+    /// is about.
+    fn wait_for(
+        mut watch: RdcwWatch,
+        touch: impl Fn() + Send + 'static,
+        wanted: impl Fn(&[UsnRecord]) -> bool,
+    ) -> Vec<UsnRecord> {
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(watch.next_batch());
+            // The feed keeps delivering: the test reads the batches one
+            // by one, and the thread stops when the test stops reading.
+            loop {
+                let batch = watch.next_batch();
+                let failed = batch.is_err();
+                if tx.send(batch).is_err() || failed {
+                    break;
+                }
+            }
         });
         for _ in 0..50 {
             touch();
             match rx.recv_timeout(Duration::from_millis(200)) {
-                Ok(Ok(ChangeBatch::Events(records))) => return records,
+                Ok(Ok(ChangeBatch::Events(records))) => {
+                    if wanted(&records) {
+                        return records;
+                    }
+                }
                 Ok(Ok(ChangeBatch::Rescan)) => {
                     panic!("the feed lost its history on a tree that did not overflow")
                 }
@@ -421,7 +446,7 @@ mod tests {
                 Err(mpsc::RecvTimeoutError::Disconnected) => panic!("the watch thread died"),
             }
         }
-        panic!("the watch delivered no change in ten seconds");
+        panic!("the watch delivered no change the test asked for in ten seconds");
     }
 
     /// A file created under the watched root is reported by its full path.
@@ -433,12 +458,17 @@ mod tests {
         let file = tree.join("alpha.txt");
 
         let watch = RdcwWatch::new(&root).expect("the watch opens");
-        let records = wait_for(watch, move || {
-            let _ = std::fs::write(&file, b"alpha");
-        });
+        let wanted = format!("{text}\\alpha.txt");
+        let named = wanted.clone();
+        let records = wait_for(
+            watch,
+            move || {
+                let _ = std::fs::write(&file, b"alpha");
+            },
+            move |records| records.iter().any(|r| r.name == named),
+        );
 
         let names: Vec<&str> = records.iter().map(|r| r.name.as_str()).collect();
-        let wanted = format!("{text}\\alpha.txt");
         assert!(
             names.contains(&wanted.as_str()),
             "the batch names the file that changed: {names:?}"
@@ -456,9 +486,13 @@ mod tests {
         let file = tree.join("alpha.txt");
 
         let watch = RdcwWatch::new(&root).expect("the watch opens");
-        let records = wait_for(watch, move || {
-            let _ = std::fs::write(&file, b"alpha");
-        });
+        let records = wait_for(
+            watch,
+            move || {
+                let _ = std::fs::write(&file, b"alpha");
+            },
+            |records| !records.is_empty(),
+        );
 
         assert!(!records.is_empty(), "the feed said something");
         for r in &records {
@@ -483,6 +517,13 @@ mod tests {
 
     /// A change in a subdirectory is reported with its path relative to
     /// the root: the watch is on the whole tree.
+    ///
+    /// The folder's own change can be the feed's first word about the
+    /// tree — and then the file's notification is in a later batch. The
+    /// test therefore waits for the batch that names the file: what it
+    /// proves is that the change in the subdirectory is reported
+    /// *relative to the root*, and that is what the batch that names the
+    /// file says.
     #[test]
     fn a_change_in_a_subdirectory_is_reported_relative_to_the_root() {
         let tree = TempTree::new("rgy-rdcw-sub");
@@ -492,12 +533,17 @@ mod tests {
         let file = tree.join("docs/deep.txt");
 
         let watch = RdcwWatch::new(&root).expect("the watch opens");
-        let records = wait_for(watch, move || {
-            let _ = std::fs::write(&file, b"deep");
-        });
+        let wanted = format!("{text}\\docs\\deep.txt");
+        let named = wanted.clone();
+        let records = wait_for(
+            watch,
+            move || {
+                let _ = std::fs::write(&file, b"deep");
+            },
+            move |records| records.iter().any(|r| r.name == named),
+        );
 
         let names: Vec<&str> = records.iter().map(|r| r.name.as_str()).collect();
-        let wanted = format!("{text}\\docs\\deep.txt");
         assert!(
             names.contains(&wanted.as_str()),
             "the batch names the file under the subdirectory: {names:?}"

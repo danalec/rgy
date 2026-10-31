@@ -261,6 +261,14 @@ fn install(options: &Options) -> Result<ExitCode, String> {
                  XDG_CACHE_HOME nor HOME is set",
             )?;
             let socket = socket_path_in(&cache);
+            // The socket the daemon will bind. A unix socket path is
+            // short by the platform's own rules -- `sun_path` is 104
+            // bytes on macOS and 108 on Linux -- and a path that does
+            // not fit is a daemon that cannot start at all. The rule is
+            // the protocol layer's, and the daemon shortens the same
+            // path the same way: a registration that named another socket
+            // would be a daemon nobody reaches.
+            let socket = rgy_proto::endpoint::socket_path(&socket).map_err(|e| e.to_string())?;
             // The directory has to be there before the daemon binds the
             // socket in it, and the daemon does not create it: a bind on a
             // missing directory is a daemon that exits and is restarted
@@ -269,18 +277,7 @@ fn install(options: &Options) -> Result<ExitCode, String> {
                 std::fs::create_dir_all(dir)
                     .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
             }
-            let text = display_path(&socket);
-            // A unix socket path is short by the platform's own rules: the
-            // address is 104 bytes on macOS and 108 on Linux, and a path
-            // that does not fit is a daemon that cannot bind.
-            if text.len() > 100 {
-                return Err(format!(
-                    "the socket path is too long for a unix socket ({} bytes): {text}\n  \
-                     pick a shorter one with: --args \"--listen uds:<path>\"",
-                    text.len()
-                ));
-            }
-            text
+            display_path(&socket)
         }
         Transport::NamedPipe => pipe_name(),
     };
@@ -952,6 +949,15 @@ fn doctor(options: &Options) -> Result<ExitCode, String> {
 ///
 /// The doctor asks a question and changes nothing: the connection is
 /// opened and closed, and no request is sent.
+///
+/// The endpoint is the **client's** endpoint, and it is asked for with the
+/// client's own two calls: `Endpoint::registered` names the place, and
+/// `Client::connect` opens it. The rule that names the place lives in
+/// `rgy-proto` (`rgy_proto::endpoint`), and the doctor reads it from
+/// there instead of spelling it out here -- a doctor that looked under a
+/// path of its own would say "no" on a machine where the daemon is up, and
+/// a diagnostic that lies about the one thing it exists for is worse than
+/// no diagnostic at all.
 fn daemon_is_up() -> Option<bool> {
     let endpoint = rgy_proto::endpoint::Endpoint::registered()?;
     Some(rgy_proto::Client::connect(&endpoint).is_ok())

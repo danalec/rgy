@@ -38,7 +38,7 @@ appears or if one of them stops being MIT.
     bins/searchd/                      the daemon
     bins/search-ui/                    the terminal UI
     bins/zen-rs/                       the zen CLI (NTFS indexer)
-    bins/rgxy/                         the launcher: the floating window over the daemon
+    bins/rgxy/                         the launcher over the daemon
     tests/                             the end-to-end harness over the user-facing bins
     .winget/                           the winget package manifests (parity row 4.15)
     Formula/                           the Homebrew formula (parity row 4.15)

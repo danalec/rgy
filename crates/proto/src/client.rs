@@ -66,7 +66,7 @@ use std::io::{Read, Write};
 use std::time::{Duration, Instant};
 
 use crate::endpoint::Endpoint;
-use crate::{Hit, LineError, Request, Response};
+use crate::{CatchUp, Feed, Hit, LineError, Request, Response};
 
 /// The window a client waits for the daemon's answer.
 ///
@@ -94,6 +94,14 @@ const MAX_LINE: usize = 8 * 1024 * 1024;
 /// It is the transport's own chunk: the socket and the pipe hand over what
 /// they have, and the line reader puts the pieces together.
 const CHUNK: usize = 16 * 1024;
+
+/// The sentence for an answer that stopped at the limit.
+///
+/// The name layer and the content layer cut their answers at the same
+/// place, and they say it the same way: the sentence lives here so that
+/// two clients that read the same daemon say the same words about the
+/// same answer, and a client that says nothing says the answer is whole.
+pub const ANSWER_STOPS_AT_THE_LIMIT: &str = "the answer stops at the limit";
 
 /// A connection to a daemon.
 ///
@@ -128,6 +136,20 @@ pub struct Client {
 impl Client {
     /// Connect to a daemon listening on `endpoint`.
     pub fn connect(endpoint: &Endpoint) -> std::io::Result<Client> {
+        Client::connect_within(endpoint, None)
+    }
+
+    /// Connect, with the waiting bounded by the caller's deadline.
+    ///
+    /// The deadline is the budget of the whole answer, and the connect is
+    /// part of the answer: a pipe that stayed busy for the whole window is
+    /// a pipe the window was spent on, and the question that was never
+    /// asked would have had no time left for it. `None` is the old
+    /// behaviour: the pipe waits out the busy case on its own.
+    pub fn connect_within(
+        endpoint: &Endpoint,
+        deadline: Option<Instant>,
+    ) -> std::io::Result<Client> {
         let (transport, writer): (Box<dyn Transport + Send>, Box<dyn Writer + Send>) =
             match endpoint {
                 // The standard output is the caller's own stream, and the
@@ -138,7 +160,7 @@ impl Client {
                     Box::new(ThreadWriter::new(Box::new(std::io::stdout()))),
                 ),
                 Endpoint::Socket(path) => socket_transport(path)?,
-                Endpoint::Pipe(name) => pipe_transport(name)?,
+                Endpoint::Pipe(name) => pipe_transport_within(name, deadline)?,
             };
         Ok(Client {
             transport,
@@ -295,6 +317,13 @@ impl Client {
                     }
                     // The stream ended in the middle of a line: the answer
                     // was cut, and what arrived is not an answer.
+                    //
+                    // The kind is the client's, and not the platform's: the
+                    // errno that says "the peer is gone" is the platform's
+                    // business — `ECONNRESET` on Linux, `EINVAL` on macOS —
+                    // and the outcome a caller reads has to be the same
+                    // everywhere. The transport maps both to the end of the
+                    // stream, and the reader turns that into this one kind.
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::UnexpectedEof,
                         "the daemon closed the connection in the middle of the answer",
@@ -336,9 +365,29 @@ impl Client {
         let mut out = SearchOutcome::default();
         for r in responses {
             match r {
-                Response::Hits { hits, took_us } => {
+                Response::Hits {
+                    hits,
+                    took_us,
+                    complete,
+                    session,
+                } => {
                     out.hits = hits;
                     out.took_us = took_us;
+                    out.complete = complete;
+                    // The session the answer was computed for. The client
+                    // keeps it and sends it back with the next question,
+                    // and the daemon re-ranks this answer instead of
+                    // walking the index again: that is the whole point of
+                    // the session, and it only works if the client knows
+                    // which session it is in.
+                    //
+                    // A daemon that does not say keeps the session the
+                    // client had: the answer is read as it was read
+                    // before the field existed.
+                    if let Some(id) = session {
+                        self.session = Some(id);
+                    }
+                    out.session = session;
                 }
                 Response::Warning { message } => out.warnings.push(message),
                 Response::Error { message } => return Err(std::io::Error::other(message)),
@@ -375,9 +424,9 @@ impl Client {
                 return Ok(DaemonStatus {
                     docs,
                     event_id,
-                    catch_up: catch_up.as_str().to_string(),
+                    catch_up,
                     tv,
-                    feed: feed.as_str().to_string(),
+                    feed,
                 });
             }
             if let Response::Error { message } = r {
@@ -387,6 +436,50 @@ impl Client {
         Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "the daemon answered the status with nothing that is a status",
+        ))
+    }
+
+    /// Resolve a path through the daemon's lookup surface.
+    ///
+    /// The five indexes answer it: the `file_path` and `folder_path` indexes
+    /// give the path of the entry, the `file_name` and `folder_name` indexes
+    /// the entries that carry a name, and the `folder_backend` index the
+    /// volume that owns a folder.
+    ///
+    /// The op was on the wire before any client could ask for it: the
+    /// daemon answered it and the protocol read it, and the one thing that
+    /// was missing was the branch that sends the question. This is that
+    /// branch.
+    pub fn resolve(&mut self, path: &str) -> std::io::Result<Resolved> {
+        self.resolve_within(path, READ_TIMEOUT)
+    }
+
+    /// The same, with the window the caller asks for.
+    pub fn resolve_within(&mut self, path: &str, window: Duration) -> std::io::Result<Resolved> {
+        let req = Request::Resolve {
+            path: path.to_string(),
+        };
+        let responses = self.request_within(&req, window)?;
+        for r in responses {
+            match r {
+                Response::Resolved {
+                    path,
+                    folder,
+                    backend,
+                } => {
+                    return Ok(Resolved {
+                        path,
+                        folder,
+                        backend,
+                    });
+                }
+                Response::Error { message } => return Err(std::io::Error::other(message)),
+                _ => {}
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "the daemon answered the resolve with nothing that is a resolution",
         ))
     }
 
@@ -443,11 +536,15 @@ impl Client {
         limit: usize,
         window: Duration,
     ) -> std::io::Result<GrepOutcome> {
+        // No session on the content request: the content route has none.
+        // The name session holds the name hits, and the content answer is
+        // the files on the disk — there is no result set to re-rank, and a
+        // session id on this request would be a promise the daemon cannot
+        // keep. The scope is the caller's and the scope is already here.
         let req = Request::Content {
             q: q.to_string(),
             paths: paths.to_vec(),
             limit,
-            session: self.session,
         };
         let responses = self.request_within(&req, window)?;
         Self::grep_outcome(responses)
@@ -467,11 +564,13 @@ impl Client {
                     took_us,
                     complete,
                     skipped,
+                    skips,
                 } => {
                     out.files = files;
                     out.took_us = took_us;
                     out.complete = complete;
                     out.skipped = skipped;
+                    out.skips = skips;
                 }
                 Response::Warning { message } => out.warnings.push(message),
                 Response::Error { message } => return Err(std::io::Error::other(message)),
@@ -488,6 +587,53 @@ pub struct SearchOutcome {
     pub hits: Vec<Hit>,
     pub took_us: u64,
     pub warnings: Vec<String>,
+    /// Whether the answer is whole.
+    ///
+    /// The answer is `false` until a daemon says otherwise: a search that
+    /// does not say it is whole did not say it is whole.
+    pub complete: bool,
+    /// The session the answer belongs to.
+    ///
+    /// The daemon names the session when the request does not, and the
+    /// client sends it back with the next question: that is what makes the
+    /// next keystroke a re-rank of this answer instead of a walk of the
+    /// index. `None` is an answer from a daemon that does not say — the
+    /// client keeps the session it had.
+    pub session: Option<u64>,
+}
+
+impl SearchOutcome {
+    /// The sentence for an answer that is not whole.
+    ///
+    /// A name answer that stopped at the limit is a page of a longer list,
+    /// and the client that shows it has to say so. It is the sentence the
+    /// content path says — the two layers cut their answers at the same
+    /// place, and two clients that read the same daemon have to say the
+    /// same words about the same answer.
+    pub fn partial(&self) -> Option<String> {
+        if self.complete {
+            return None;
+        }
+        Some(ANSWER_STOPS_AT_THE_LIMIT.to_string())
+    }
+}
+
+/// What a path resolved to.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Resolved {
+    /// The path, as the daemon spells it.
+    pub path: String,
+    /// Whether it is a folder.
+    ///
+    /// The index knows and the path does not say: a folder's path is
+    /// spelled like a file's.
+    pub folder: bool,
+    /// The volume that owns it.
+    ///
+    /// The `folder_backend` index's own id: a file has none of its own and
+    /// inherits the folder's, and `0` is the volume the index does not
+    /// name.
+    pub backend: u32,
 }
 
 /// What a content search answered.
@@ -503,7 +649,20 @@ pub struct GrepOutcome {
     /// everything.
     pub complete: bool,
     /// How many files the search did not read.
+    ///
+    /// The count is what the protocol has always carried, and it stays:
+    /// a reader that does not know the reasons keeps working.
     pub skipped: usize,
+    /// Why the search did not read them.
+    ///
+    /// The reasons are what make the count worth reading: a file that was
+    /// not read because it is a cloud placeholder is a file the user can
+    /// ask for, and a file the budget never reached is a file the user has
+    /// to ask for again. Their counts add up to [`GrepOutcome::skipped`] —
+    /// and the reader guarantees it: the count it reports is the count the
+    /// reasons make, so the sentence above and the sentences below are the
+    /// same number said twice.
+    pub skips: Vec<crate::Skip>,
 }
 
 impl GrepOutcome {
@@ -530,27 +689,96 @@ impl GrepOutcome {
             // answer, because that is what happened -- and it does not
             // say how many files are behind it, because the daemon does
             // not count the ones the limit left behind.
-            Some("the answer stops at the limit".to_string())
+            Some(ANSWER_STOPS_AT_THE_LIMIT.to_string())
         }
+    }
+
+    /// The sentences about the files the search did not read.
+    ///
+    /// One sentence per reason, with the count and — when the daemon knows
+    /// which file it is — one of the files. The count the answer carries
+    /// says how many; these say why, and a reader that shows only the
+    /// count leaves the user guessing whether the file was empty, locked,
+    /// or never there.
+    ///
+    /// Nothing when the daemon did not say: the reasons are additive, and
+    /// a daemon that does not say them is read as a daemon that does not
+    /// have them.
+    pub fn skip_reasons(&self) -> Vec<String> {
+        self.skips
+            .iter()
+            .map(|s| {
+                let file = match &s.path {
+                    Some(p) => format!(" (first: {p})"),
+                    None => String::new(),
+                };
+                format!(
+                    "the daemon did not read {} file(s): {}{file}",
+                    s.count, s.reason
+                )
+            })
+            .collect()
     }
 }
 
 /// What the daemon says about itself.
 #[derive(Debug, Clone)]
 pub struct DaemonStatus {
+    /// How many entries the daemon's live index holds.
+    ///
+    /// The daemon fills it — the status route counts the base index, minus
+    /// the entries that died, plus the ones the overlay holds — and the
+    /// client reads it here.
+    ///
+    /// The terminal launcher draws the count in its header, and the words
+    /// that carry it are the launcher's (`crates/launcher/src/text.rs`): a
+    /// sentence invented here would be English-only in a launcher that
+    /// speaks two languages. The fact is read and kept here so that the
+    /// client that grows the word has it, and the number is on the wire
+    /// for whoever asks for it.
+    ///
+    /// The number is never zero that the daemon did not say: the reader
+    /// refuses a status line without the count, because zero is a claim
+    /// about an index that plainly has entries, and the launcher has its
+    /// own "not known" for a count it was not given.
     pub docs: usize,
+    /// The journal position the daemon's index is current as of.
+    ///
+    /// The daemon resumes the journal at this position when it restarts,
+    /// and the position is what says where the index stopped: a reader
+    /// that wants to know how fresh the index is compares it with the
+    /// journal's own head.
+    ///
+    /// **No client shows it yet**, for the same reason as [`DaemonStatus::docs`]:
+    /// the window has no word for a journal position.
     pub event_id: u64,
     /// `replayed` or `relisted` — the two are different facts about the same
     /// index and the daemon is honest about which one it is.
-    pub catch_up: String,
+    ///
+    /// The daemon fills it, and the client reads it here.
+    ///
+    /// **No client shows it yet**, for the same reason as
+    /// [`DaemonStatus::docs`]: the window's vocabulary has no word for how
+    /// the index caught up, and the feed — which has one — is a different
+    /// fact. The fact is read and kept here so that the client that grows
+    /// the word has it.
+    ///
+    /// It is the protocol's own vocabulary and not a string: the wire
+    /// spells it, and a reader that compared strings would have to spell
+    /// the spelling again — and a spelling that drifts is a warning that
+    /// stops being said.
+    pub catch_up: CatchUp,
     /// Whether the daemon has a pack store (`--tv-dir`) — the corpus packed
     /// once and mmapped, which is the fastest content answer there is.
     pub tv: bool,
-    /// Whether the tree is still being followed: `live`, `gone` or `none`.
+    /// Whether the tree is still being followed.
     ///
     /// A feed that died leaves the daemon answering on a snapshot, and the
     /// reader has to know which of the two it is looking at.
-    pub feed: String,
+    ///
+    /// It is the protocol's own vocabulary and not a string, for the same
+    /// reason as [`DaemonStatus::catch_up`].
+    pub feed: Feed,
 }
 
 /// The response that ends the answer to `req`.
@@ -657,6 +885,39 @@ struct SocketTransport {
     pending: Pending,
 }
 
+/// `EINVAL`, the errno macOS gives when the peer is gone.
+///
+/// The number is 22 on Linux and on the BSDs as well: `EINVAL` is the
+/// same number on every platform this tree runs on.
+#[cfg(unix)]
+const EINVAL: i32 = 22;
+
+/// The platform said the peer is gone, in the platform's own words.
+///
+/// macOS says it with `EINVAL`, and it says it from two places: from
+/// `setsockopt` on a socket whose peer has already disconnected — the
+/// option is an invalid argument on a dead socket there — and from a
+/// read on a socket whose peer closed with bytes still in flight.
+/// Linux says the second thing with `ECONNRESET`, which Rust already
+/// names `ConnectionReset`.
+///
+/// The errno is the platform's and the kind is Rust's: `EINVAL` is 22
+/// everywhere this tree runs, and Rust names it `InvalidInput`.
+#[cfg(unix)]
+fn the_peer_is_gone(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::InvalidInput && e.raw_os_error() == Some(EINVAL)
+}
+
+/// The socket cannot take the question: the peer is gone.
+///
+/// The write says it with `EPIPE` on every platform, and macOS says it
+/// with `EINVAL` as well, where the socket options were refused before
+/// the write was even tried.
+#[cfg(unix)]
+fn the_connection_is_closed(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::BrokenPipe || the_peer_is_gone(e)
+}
+
 #[cfg(unix)]
 impl SocketTransport {
     /// The transport over an open socket.
@@ -675,11 +936,24 @@ impl Transport for SocketTransport {
         if now >= deadline {
             return Ok(Filled::Timeout);
         }
+        let left = (deadline - now).max(Duration::from_millis(1));
         // The socket's own timeout is the rest of the window, rounded up
         // to the millisecond: a timeout of zero is not "no time left" on a
         // socket, it is "wait forever".
-        let left = (deadline - now).max(Duration::from_millis(1));
-        self.stream.set_read_timeout(Some(left))?;
+        //
+        // macOS refuses the option on a socket whose peer has already
+        // gone: `setsockopt` on a dead socket is an invalid argument
+        // there. The refusal is not the end of the stream — the bytes
+        // that arrived before the peer went away are still in the
+        // buffer, and the read below is the one that has them — so the
+        // read goes on, and it goes on without a timeout of its own. A
+        // socket that is dead answers at once: what is left in the
+        // buffer, or the end of the stream.
+        match self.stream.set_read_timeout(Some(left)) {
+            Ok(()) => {}
+            Err(e) if the_peer_is_gone(&e) => {}
+            Err(e) => return Err(e),
+        }
         let mut chunk = [0u8; CHUNK];
         match self.stream.read(&mut chunk) {
             Ok(0) => Ok(Filled::Eof),
@@ -702,7 +976,22 @@ impl Transport for SocketTransport {
             // A socket that is reset says so with its own errno, and the
             // errno is the platform's business, not the client's: the
             // sentence the caller reads has to be the same everywhere.
+            //
+            // The two errnos are the platform's, and they are the two
+            // names for the same fact:
+            //
+            // * `ECONNRESET` on Linux, when the peer reset the socket
+            //   while bytes were still in flight;
+            // * `EINVAL` on macOS, where a read on a socket whose peer
+            //   closed with data still in the receive buffer is an invalid
+            //   argument.
+            //
+            // Both mean the peer is gone, and both are the end of the
+            // stream: the reader is the one that decides whether that was
+            // a cut answer or a clean end, and the caller reads one error
+            // on every platform.
             Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => Ok(Filled::Eof),
+            Err(e) if the_peer_is_gone(&e) => Ok(Filled::Eof),
             Err(e) => Err(e),
         }
     }
@@ -721,7 +1010,16 @@ impl Transport for SocketTransport {
 fn socket_transport(
     path: &std::path::Path,
 ) -> std::io::Result<(Box<dyn Transport + Send>, Box<dyn Writer + Send>)> {
-    let stream = std::os::unix::net::UnixStream::connect(path)?;
+    // The path the caller asked for is not always a path the platform can
+    // carry: `sun_path` is 104 bytes on macOS and 108 on Linux, and a
+    // deeper cache directory is a client that never reaches the daemon.
+    // The rule that shortens it lives in `endpoint`, because the daemon
+    // shortens the same path the same way — and a client that looked
+    // somewhere else than the daemon bound would wait for a socket that is
+    // not there.
+    let path = crate::endpoint::socket_path(path)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?;
+    let stream = std::os::unix::net::UnixStream::connect(&path)?;
     let write = stream.try_clone()?;
     Ok((
         Box::new(SocketTransport::new(stream)),
@@ -809,11 +1107,15 @@ impl Transport for PipeTransport {
 /// and the wait has no timeout: a pipe opened without
 /// `FILE_FLAG_OVERLAPPED` cannot be given one. The write goes on a thread
 /// of its own, and the thread is stopped when the client gives up on it.
+///
+/// The waiting for a busy pipe is bounded by the caller's deadline, when
+/// there is one.
 #[cfg(windows)]
-fn pipe_transport(
+fn pipe_transport_within(
     name: &str,
+    deadline: Option<Instant>,
 ) -> std::io::Result<(Box<dyn Transport + Send>, Box<dyn Writer + Send>)> {
-    let file = open_pipe(name)?;
+    let file = open_pipe_within(name, deadline)?;
     let write = file.try_clone()?;
     Ok((
         Box::new(PipeTransport::new(file)),
@@ -823,8 +1125,9 @@ fn pipe_transport(
 
 /// The named pipe is not a transport everywhere.
 #[cfg(not(windows))]
-fn pipe_transport(
+fn pipe_transport_within(
     name: &str,
+    _deadline: Option<Instant>,
 ) -> std::io::Result<(Box<dyn Transport + Send>, Box<dyn Writer + Send>)> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
@@ -973,26 +1276,51 @@ impl Transport for StdioTransport {
 /// `ERROR_PIPE_BUSY` means every instance of the pipe has a client on it.
 /// The daemon keeps a pool of acceptors precisely so this is rare, and a
 /// client that waited a moment is more useful than one that failed.
+///
+/// The waiting is bounded by the caller's deadline, when there is one: the
+/// wait for a busy pipe is a wait like any other, and the caller's window
+/// is the budget of the whole answer. A deadline that passes while the pipe
+/// is busy is a timeout, and a timeout says the daemon is there and slow --
+/// which is what it is.
 #[cfg(windows)]
-fn open_pipe(name: &str) -> std::io::Result<std::fs::File> {
+fn open_pipe_within(name: &str, deadline: Option<Instant>) -> std::io::Result<std::fs::File> {
     use std::fs::OpenOptions;
     const ERROR_PIPE_BUSY: i32 = 231;
     let path = format!(r"\\.\pipe\{name}");
-    let mut last: Option<std::io::Error> = None;
-    for _ in 0..80 {
+    let mut attempts = 0;
+    loop {
         match OpenOptions::new().read(true).write(true).open(&path) {
             Ok(f) => return Ok(f),
             Err(e) => {
-                let busy = e.raw_os_error() == Some(ERROR_PIPE_BUSY);
-                last = Some(e);
-                if !busy {
-                    return Err(last.expect("an error was just stored"));
+                if e.raw_os_error() != Some(ERROR_PIPE_BUSY) {
+                    return Err(e);
+                }
+                match deadline {
+                    // The wait ends when the caller's window does, and it
+                    // says so: a pipe that stayed busy until the window ran
+                    // out is a daemon that is there and slow, and the caller
+                    // has to be able to tell the two apart.
+                    Some(deadline) => {
+                        if Instant::now() >= deadline {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::TimedOut,
+                                "the named pipe stayed busy until the window ran out",
+                            ));
+                        }
+                    }
+                    // Without a deadline the wait is the old one: a fixed
+                    // number of moments, and then the error the pipe gave.
+                    None => {
+                        attempts += 1;
+                        if attempts >= 80 {
+                            return Err(e);
+                        }
+                    }
                 }
                 std::thread::sleep(Duration::from_millis(25));
             }
         }
     }
-    Err(last.unwrap_or_else(|| std::io::Error::other("the named pipe stayed busy")))
 }
 
 // --- the write ----------------------------------------------------------------
@@ -1071,7 +1399,15 @@ impl Writer for SocketWriter {
             // zero is not "no time left" on a socket, it is "wait
             // forever".
             let left = (deadline - now).max(Duration::from_millis(1));
-            self.stream.set_write_timeout(Some(left))?;
+            // The same refusal macOS makes on the read: `setsockopt` on
+            // a socket whose peer has gone is an invalid argument there.
+            // The write below is the one that says what happened, so
+            // the refusal is not the end of it.
+            match self.stream.set_write_timeout(Some(left)) {
+                Ok(()) => {}
+                Err(e) if the_peer_is_gone(&e) => {}
+                Err(e) => return Err(e),
+            }
             match self.stream.write(&bytes[sent..]) {
                 Ok(0) => return Err(closed_connection()),
                 Ok(n) => sent += n,
@@ -1086,6 +1422,11 @@ impl Writer for SocketWriter {
                 // The write was interrupted and nothing went out: it goes
                 // on.
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                // The peer is gone: the socket cannot take the question.
+                // That is the product's fact — the daemon is not there —
+                // and not the platform's errno that says it, so the
+                // sentence a caller reads is the same everywhere.
+                Err(e) if the_connection_is_closed(&e) => return Err(closed_connection()),
                 Err(e) => return Err(e),
             }
         }
@@ -1317,6 +1658,34 @@ mod tests {
             }
         }
 
+        /// Read the client's request, one line of it, and say what it said.
+        ///
+        /// The line is the question: a test that says what the client asked
+        /// has to be able to read it, and the read is the same read
+        /// `read_request` does — one byte at a time, until the newline.
+        fn read_request_line(&mut self) -> std::io::Result<String> {
+            let mut line: Vec<u8> = Vec::new();
+            let mut byte = [0u8; 1];
+            loop {
+                let read = match self {
+                    #[cfg(unix)]
+                    Peer::Socket(s) => s.read(&mut byte)?,
+                    #[cfg(windows)]
+                    Peer::Pipe(f) => f.read(&mut byte)?,
+                };
+                if read == 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "the client closed the connection before the request",
+                    ));
+                }
+                if byte[0] == b'\n' {
+                    return Ok(String::from_utf8_lossy(&line).into_owned());
+                }
+                line.push(byte[0]);
+            }
+        }
+
         /// Read what is left of the connection, and say whether it ended.
         ///
         /// The end is what the client dropping the connection looks like:
@@ -1513,6 +1882,256 @@ mod tests {
         assert!(said.contains("limit"), "the limit is what cut it: {said}");
     }
 
+    /// The name answer says the same words the content answer says.
+    ///
+    /// The name layer could not say it at all before and the content layer
+    /// could: two clients that read the same daemon have to say the same
+    /// thing about the same answer, and the two layers cut their answers
+    /// at the same place.
+    #[test]
+    fn a_name_answer_says_the_same_words_the_content_answer_says() {
+        let whole = SearchOutcome {
+            complete: true,
+            ..Default::default()
+        };
+        assert!(
+            whole.partial().is_none(),
+            "a whole answer says nothing about being whole"
+        );
+
+        let cut = SearchOutcome {
+            complete: false,
+            ..Default::default()
+        };
+        let said = cut.partial().expect("an answer that is not whole says so");
+        assert!(said.contains("limit"), "the limit is what cut it: {said}");
+
+        // The same words, from the two layers.
+        let content = GrepOutcome {
+            complete: false,
+            skipped: 0,
+            ..Default::default()
+        };
+        assert_eq!(
+            cut.partial(),
+            content.partial(),
+            "the two layers say the same thing about the same answer"
+        );
+    }
+
+    /// The fact comes off the wire.
+    ///
+    /// The daemon says whether the answer is whole and the client has to
+    /// hear it: an answer that does not say it is whole did not say it is
+    /// whole.
+    #[test]
+    fn a_search_reads_whether_the_answer_is_whole() {
+        let server = serve(|mut peer: Peer| {
+            let _ = peer.read_request();
+            let _ = peer.send(
+                b"{\"op\":\"hits\",\"hits\":[{\"path\":\"a\",\"score\":1}],\"took_us\":2,\"complete\":false}\n",
+            );
+            let _ = peer.send(b"{\"op\":\"done\",\"count\":1}\n");
+        });
+        let mut client = Client::connect(&server.endpoint).expect("the client connects");
+        let out = client.search("a", 10).expect("the daemon answers");
+        assert!(
+            !out.complete,
+            "the answer that was cut at the limit is not whole"
+        );
+        assert_eq!(
+            out.partial().as_deref(),
+            Some(ANSWER_STOPS_AT_THE_LIMIT),
+            "the client says the words the content path says"
+        );
+        server.join();
+    }
+
+    /// The client keeps the session the answer names.
+    ///
+    /// The session is the incremental-search id: the daemon keeps the answer
+    /// under it, and the next question that carries the same id is answered
+    /// from that answer instead of from the index. The client has to send it
+    /// back, so the client has to keep it — and the id has to reach the
+    /// client, which is why the answer names it.
+    #[test]
+    fn the_client_keeps_the_session_the_answer_names() {
+        let server = serve(|mut peer: Peer| {
+            // The first question asks with no session: the client has none
+            // to send.
+            let first = peer.read_request_line().expect("the request is read");
+            assert!(
+                !first.contains("session"),
+                "the first question carries no session: {first}"
+            );
+            let _ = peer.send(
+                b"{\"op\":\"hits\",\"hits\":[{\"path\":\"a\",\"score\":1}],\"took_us\":2,\"complete\":true,\"session\":7}\n",
+            );
+            let _ = peer.send(b"{\"op\":\"done\",\"count\":1}\n");
+            // The second question carries the session the first answer named.
+            let second = peer.read_request_line().expect("the request is read");
+            assert!(
+                second.contains("\"session\":7"),
+                "the second question carries the session: {second}"
+            );
+            let _ = peer.send(
+                b"{\"op\":\"hits\",\"hits\":[{\"path\":\"a\",\"score\":1}],\"took_us\":2,\"complete\":true,\"session\":7}\n",
+            );
+            let _ = peer.send(b"{\"op\":\"done\",\"count\":1}\n");
+        });
+        let mut client = Client::connect(&server.endpoint).expect("the client connects");
+        assert_eq!(client.session(), None, "the client has no session yet");
+        let out = client.search("a", 10).expect("the daemon answers");
+        assert_eq!(out.session, Some(7), "the answer names the session");
+        assert_eq!(client.session(), Some(7), "the client keeps it");
+        let _ = client.search("ab", 10).expect("the daemon answers again");
+        server.join();
+    }
+
+    /// A daemon that does not name the session leaves the client with the
+    /// session it had.
+    ///
+    /// The field is additive, and a daemon that does not say is a daemon that
+    /// does not change anything: the client that had a session keeps it, and
+    /// the client that had none has none.
+    #[test]
+    fn a_daemon_that_does_not_name_the_session_leaves_the_client_alone() {
+        let server = serve(|mut peer: Peer| {
+            let _ = peer.read_request();
+            let _ = peer.send(
+                b"{\"op\":\"hits\",\"hits\":[{\"path\":\"a\",\"score\":1}],\"took_us\":2,\"complete\":true}\n",
+            );
+            let _ = peer.send(b"{\"op\":\"done\",\"count\":1}\n");
+        });
+        let mut client = Client::connect(&server.endpoint).expect("the client connects");
+        client.set_session(Some(3));
+        let out = client.search("a", 10).expect("the daemon answers");
+        assert_eq!(out.session, None, "the answer names no session");
+        assert_eq!(client.session(), Some(3), "the client keeps its own");
+        server.join();
+    }
+
+    /// A daemon that names a session which is not one leaves the client
+    /// with the session it had.
+    ///
+    /// The rule is the same on both sides of the wire: a session that is
+    /// not one is no session at all. The reader used to cast the number,
+    /// and the cast made `-1` the session `0` — which is in the client's
+    /// own space, the space the daemon trusts — so the client kept it and
+    /// sent it back on the next question.
+    #[test]
+    fn a_daemon_that_names_a_session_which_is_not_one_leaves_the_client_alone() {
+        let server = serve(|mut peer: Peer| {
+            let _ = peer.read_request();
+            let _ = peer.send(
+                b"{\"op\":\"hits\",\"hits\":[{\"path\":\"a\",\"score\":1}],\"took_us\":2,\"complete\":true,\"session\":-1}\n",
+            );
+            let _ = peer.send(b"{\"op\":\"done\",\"count\":1}\n");
+        });
+        let mut client = Client::connect(&server.endpoint).expect("the client connects");
+        client.set_session(Some(3));
+        let out = client.search("a", 10).expect("the daemon answers");
+        assert_eq!(out.session, None, "the answer names no session");
+        assert_eq!(client.session(), Some(3), "the client keeps its own");
+        server.join();
+    }
+
+    /// The count and the reasons are the same number.
+    ///
+    /// The count and the reasons are one fact written twice, and the
+    /// protocol says the reasons add up to the count — so the reader reads
+    /// the count the reasons make. A daemon whose own two numbers disagree
+    /// does not make the client say two different things about the same
+    /// answer.
+    #[test]
+    fn the_count_and_the_reasons_are_the_same_number() {
+        let server = serve(|mut peer: Peer| {
+            let _ = peer.read_request();
+            let _ = peer.send(
+                b"{\"op\":\"grep-files\",\"files\":[],\"took_us\":3,\"complete\":false,\"skipped\":9,\"skips\":[{\"reason\":\"a cloud placeholder\",\"count\":2},{\"reason\":\"the search's budget ran out before it reached them\",\"count\":1}]}\n",
+            );
+            let _ = peer.send(b"{\"op\":\"done\",\"count\":0}\n");
+        });
+        let mut client = Client::connect(&server.endpoint).expect("the client connects");
+        let outcome = client.grep("a", 10).expect("the daemon answers");
+        assert_eq!(
+            outcome.skipped, 3,
+            "the count is the count the reasons make"
+        );
+        assert_eq!(
+            outcome.skips.iter().map(|s| s.count).sum::<usize>(),
+            outcome.skipped,
+            "the reasons add up to the count"
+        );
+        let said = outcome.partial().expect("the answer is not whole");
+        assert!(
+            said.contains("3 file(s)"),
+            "the sentence names the count: {said}"
+        );
+        server.join();
+    }
+
+    /// The client says why the files were not read.
+    ///
+    /// The count is what the protocol has always carried, and the reasons
+    /// are what make it worth reading: "skipped" alone leaves the user
+    /// wondering whether the file was empty, locked, or never there.
+    #[test]
+    fn the_client_says_why_the_files_were_not_read() {
+        let server = serve(|mut peer: Peer| {
+            let _ = peer.read_request();
+            let _ = peer.send(
+                b"{\"op\":\"grep-files\",\"files\":[],\"took_us\":3,\"complete\":false,\"skipped\":3,\"skips\":[{\"reason\":\"a cloud placeholder\",\"count\":2,\"path\":\"C:/a.txt\"},{\"reason\":\"the search's budget ran out before it reached them\",\"count\":1}]}\n",
+            );
+            let _ = peer.send(b"{\"op\":\"done\",\"count\":0}\n");
+        });
+        let mut client = Client::connect(&server.endpoint).expect("the client connects");
+        let out = client.grep("hello", 10).expect("the daemon answers");
+        assert_eq!(out.skipped, 3, "the count is the count");
+        assert_eq!(out.skips.len(), 2, "the reasons are the reasons");
+        let said = out.skip_reasons();
+        assert_eq!(said.len(), 2, "one sentence per reason: {said:?}");
+        assert!(
+            said[0].contains("a cloud placeholder") && said[0].contains("2 file(s)"),
+            "the reason and the count: {said:?}"
+        );
+        assert!(
+            said[0].contains("C:/a.txt"),
+            "the file the daemon named: {said:?}"
+        );
+        assert!(
+            said[1].contains("budget") && said[1].contains("1 file(s)"),
+            "the reason and the count: {said:?}"
+        );
+        server.join();
+    }
+
+    /// The resolve op has a branch now.
+    ///
+    /// The daemon answered the question and the protocol read the answer
+    /// before any client could ask it: the one thing that was missing was
+    /// the branch that sends the question, and a message a client can
+    /// receive but cannot ask for is a message nobody receives.
+    #[test]
+    fn a_resolve_asks_the_question_and_reads_the_answer() {
+        let server = serve(|mut peer: Peer| {
+            let request = peer.read_request_line().expect("the request is read");
+            assert!(
+                request.contains(r#""op":"resolve""#),
+                "the question is a resolve: {request}"
+            );
+            let _ = peer.send(
+                b"{\"op\":\"resolved\",\"path\":\"C:/a.txt\",\"folder\":false,\"backend\":3}\n",
+            );
+        });
+        let mut client = Client::connect(&server.endpoint).expect("the client connects");
+        let out = client.resolve("C:/a.txt").expect("the daemon answers");
+        assert_eq!(out.path, "C:/a.txt", "the path is the path");
+        assert!(!out.folder, "a file is not a folder");
+        assert_eq!(out.backend, 3, "the volume is the volume");
+        server.join();
+    }
+
     /// A daemon that hangs up.
     fn hangs_up(peer: Peer) {
         let mut peer = peer;
@@ -1698,8 +2317,46 @@ mod tests {
         server.join();
     }
 
+    /// The platform's word for "the peer is gone" is one number.
+    ///
+    /// macOS says it with `EINVAL`, and it says it from the socket
+    /// options as well as from the read: `setsockopt` on a socket whose
+    /// peer has already disconnected is an invalid argument there. The
+    /// client has to know that number, because the errno it sees is the
+    /// platform's and the sentence the caller reads is the product's.
+    #[test]
+    #[cfg(unix)]
+    fn the_peer_is_gone_is_einval() {
+        assert!(the_peer_is_gone(&std::io::Error::from_raw_os_error(EINVAL)));
+        // A broken pipe is the write's word for the same fact, and the
+        // write's rule is the wider one: a broken pipe is the peer gone
+        // too, and the client says so in its own words.
+        let broken = std::io::Error::from_raw_os_error(32);
+        assert!(!the_peer_is_gone(&broken));
+        assert!(the_connection_is_closed(&broken));
+        // And an error that is not the platform's is not the peer's.
+        assert!(!the_peer_is_gone(&std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "not the platform's",
+        )));
+    }
+
     /// A daemon that dies in the middle of the answer is an error, and not
     /// an answer with nothing in it.
+    ///
+    /// The kind is the product's own, and not one platform's errno: the
+    /// peer that goes away mid-answer says so with `ECONNRESET` on Linux
+    /// and with `EINVAL` on macOS, and the client maps both to the end of
+    /// the stream, which the reader turns into this one kind. A caller
+    /// that reads the kind reads the same thing on every platform.
+    ///
+    /// The macOS word comes from two places, and the client has to hear
+    /// both of them: the read on a socket whose peer closed with bytes
+    /// still in flight, and the socket options, which a dead socket
+    /// refuses on that platform. The half answer that arrived before the
+    /// peer went away is still in the buffer, and the client has to read
+    /// it: a client that threw it away would report a clean end where
+    /// the answer was cut.
     #[test]
     fn an_answer_cut_in_the_middle_is_an_error() {
         let server = serve(says_half);
@@ -1751,8 +2408,14 @@ mod tests {
     fn a_line_that_never_ends_is_refused() {
         let server = serve(says_too_much);
         let mut client = Client::connect(&server.endpoint).expect("the client connects");
+        // The deadline is a backstop, and it is not what this test proves:
+        // what it proves is that the client refuses the line itself. A
+        // deadline short enough to be reached on a slow machine turns the
+        // refusal into a timeout and the test fails about the machine --
+        // the line is eight megabytes, and reading them takes a while
+        // where the bytes are emulated rather than read.
         let err = client
-            .request_within(&Request::Status, Duration::from_secs(30))
+            .request_within(&Request::Status, Duration::from_secs(120))
             .expect_err("a line that never ends is not an answer");
         assert_eq!(
             err.kind(),
@@ -1763,6 +2426,21 @@ mod tests {
             err.to_string().contains("longer than"),
             "the reason says what happened: {err}"
         );
+        // The client stops reading the moment it refuses the line, so the
+        // daemon is still writing into a socket nobody drains any more.
+        // The client lets go of its end BEFORE the test waits for the
+        // daemon: a daemon that writes into a closed socket fails and
+        // stops, and the test's daemon does exactly that -- but a daemon
+        // that writes into an open socket nobody reads blocks in the
+        // write, and the test waits for that daemon.
+        //
+        // This is not a macOS quirk; it is a socket whose buffer was big
+        // enough to hold the rest of the line. Linux's held 208 KiB and
+        // the daemon finished anyway; the macOS runner's did not, and the
+        // test sat in that join until the job's timeout killed the whole
+        // run, an hour and a half later. The test is what was wrong: a
+        // test that waits for a peer it has stopped talking to.
+        drop(client);
         server.join();
     }
 

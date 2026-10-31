@@ -48,21 +48,37 @@
 [CmdletBinding()]
 $ErrorActionPreference = 'Stop'
 
-# The help, before the options are read: the script's own header, the way
+# usage -- what the two scripts are for, in the same words in both.
+function Write-Usage {
+    $lines = @(
+        "apply-vendored-edits [--upstream <path>] [--dry-run]"
+        ""
+        "Applies rgy's own divergences to the vendored rgx trees: every patch"
+        "under scripts/rgx-local-patches/ goes on top of the copy of upstream's"
+        "file, so the vendored tree carries rgy's fixes and nothing else."
+        "The copy is a copy — the script does not rewrite it."
+        ""
+        "Exits 0 when every patch applies, 1 when one does not."
+    )
+    foreach ($line in $lines) { [Console]::Out.Write($line + "`n") }
+}
+
+# The help, before the options are read: the script's own usage, the way
 # the twin prints it.
-if ($args -contains "-h" -or $args -contains "--help") {
-    Get-Content $PSCommandPath | Select-Object -Skip 1 -First 44
+. (Join-Path $PSScriptRoot "lib/options.ps1")
+if (Test-RgyHelp -Arguments $args) {
+    Write-Usage
     exit 0
 }
 # The options, read by the helper the two twins share: the long spelling
 # and the PowerShell one are the same option, and an option neither of
 # them knows is an error on both platforms -- not a silent "do the real
 # thing", which in this directory means patching the vendored trees.
-. (Join-Path $PSScriptRoot "lib/options.ps1")
 $Upstream = ""
 $DryRun = $false
 Read-RgyOptions -Switches @{ "dryrun" = "DryRun" } `
                  -Values   @{ "upstream" = "Upstream" } `
+                 -Positionals @{} `
                  -Arguments $args
 
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path

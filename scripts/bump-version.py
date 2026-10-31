@@ -26,8 +26,8 @@ keeps its `0.0.0`: it is not a published crate, and a number that
 looks published is a number somebody will try to publish.
 
 **Usage:**
-    python3 scripts/bump-version.py 0.1.1
-    python3 scripts/bump-version.py --check 0.1.1   # what would change
+    python3 scripts/bump-version.py 0.1.2
+    python3 scripts/bump-version.py --check 0.1.2   # what would change
 """
 
 from __future__ import annotations

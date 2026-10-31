@@ -1,9 +1,11 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.9.0.schema.json
 # SPDX-License-Identifier: Apache-2.0
-# STAGED: no release has been published yet. scripts/publish-release.ps1
-# rewrites the version and the release-notes URL when it publishes one.
+# STAGED: the release this manifest names exists -- rgy-v0.1.2 -- but the
+# manifest is not in microsoft/winget-pkgs yet.
+# scripts/publish-release.ps1 rewrites the version and the release-notes URL
+# when it publishes one.
 PackageIdentifier: danalec.rgy-search
-PackageVersion: 0.1.1
+PackageVersion: 0.1.2
 PackageLocale: en-US
 Publisher: danalec
 PublisherUrl: https://github.com/danalec
@@ -33,6 +35,6 @@ Tags:
   - fuzzy
   - filesystem
   - mft
-ReleaseNotesUrl: https://github.com/danalec/rgy/releases/tag/rgy-v0.1.1
+ReleaseNotesUrl: https://github.com/danalec/rgy/releases/tag/rgy-v0.1.2
 ManifestType: defaultLocale
 ManifestVersion: 1.9.0

@@ -6,7 +6,11 @@
 //! only modifier the user wants here is Control on its own. So the hotkey
 //! is a **low-level keyboard hook**: it sees the key before any window
 //! does, and the state machine that decides whether two presses were the
-//! gesture lives in the launcher's model, where it can be tested.
+//! gesture is in two halves, and both of them can be tested. Which Control
+//! keys are down is this module's `ControlKeys`: one bit per keycode, and
+//! not a flag for the three of them, because the hook hears three keys for
+//! one idea. The window between the two presses is the launcher's model,
+//! and the clock is the caller's — so a test decides what time it is.
 //!
 //! The hook does two things and no more: it counts the presses, and it
 //! posts a message to the window. It never touches the window itself —

@@ -1,6 +1,6 @@
 [package]
 name = "rgy-rgxy"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
 description = "rgxy: the floating launcher for the rgy search daemon"
@@ -21,19 +21,19 @@ path = "src/main.rs"
 
 [dependencies]
 # The launcher's model: the query, the rows, the actions, the geometry.
-rgy-launcher = { path = "../../crates/launcher", version = "0.1.1" }
+rgy-launcher = { path = "../../crates/launcher", version = "0.1.2" }
 # The client of the daemon, and the rule that says where the daemon is.
-rgy-proto = { path = "../../crates/proto", version = "0.1.1" }
+rgy-proto = { path = "../../crates/proto", version = "0.1.2" }
 # The terminal interface, for the machine that has no desktop.
-rgy-search-ui = { path = "../search-ui", version = "0.1.1" }
+rgy-search-ui = { path = "../search-ui", version = "0.1.2" }
 # The console's UTF-8 code page: the name is the product.
-rgy-engine = { path = "../../crates/engine", version = "0.1.1" }
+rgy-engine = { path = "../../crates/engine", version = "0.1.2" }
 # The picker: the results handed to the user's own fzf, the same way
 # `searchctl` hands them over.
-rgy-pick = { path = "../../crates/pick", version = "0.1.1" }
+rgy-pick = { path = "../../crates/pick", version = "0.1.2" }
 
 # The window is a platform thing, and it only exists on the platform that
 # has one. The binary is the same everywhere: the launcher falls back to
 # the terminal where there is no desktop.
 [target.'cfg(windows)'.dependencies]
-rgy-launcher-windows = { path = "../../crates/launcher-windows", version = "0.1.1" }
+rgy-launcher-windows = { path = "../../crates/launcher-windows", version = "0.1.2" }

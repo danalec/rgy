@@ -78,33 +78,68 @@ if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction Sile
 # thing", which in this directory means building an archive that a release
 # then publishes.
 . (Join-Path $PSScriptRoot "lib/options.ps1")
+. (Join-Path $PSScriptRoot "lib/digest.ps1")
 $Version = ""
 $SkipTests = $false
 $Target = ""
 $Variant = "portable"
 Read-RgyOptions -Switches @{ "skiptests" = "SkipTests" } `
                  -Values   @{ "version" = "Version"; "target" = "Target"; "variant" = "Variant" } `
+                 -Positionals @{} `
                  -Arguments $args
 
 $root = Split-Path $PSScriptRoot -Parent
 Set-Location $root
 
 function Get-ManifestVersion([string]$path) {
-    $m = Select-String -Path $path -Pattern '^version = "([^"]+)"' | Select-Object -First 1
+    $m = Select-String -Path $path -Pattern '^version[ \t]*=[ \t]*"([^"]*)"' -CaseSensitive | Select-Object -First 1
     if ($m) { return $m.Matches.Groups[1].Value }
+    return ""
+}
+
+# The line the version stands on, so a drift is found by its place and not
+# only by its number.
+function Get-ManifestVersionLine([string]$path) {
+    $m = Select-String -Path $path -Pattern '^version[ \t]*=[ \t]*"[^"]*"' -CaseSensitive | Select-Object -First 1
+    if ($m) { return $m.LineNumber }
+    return 0
+}
+
+# The requirement of a dependency line, the way the unix twin reads it: the
+# first `version = "..."` on the line, and the value ends at the first quote
+# after it.
+function Get-Requirement([string]$line) {
+    if ($line -cmatch 'version[ \t]*=[ \t]*"([^"]*)"') { return $matches[1] }
     return ""
 }
 
 # --- 1. the version ---------------------------------------------------------
 #
 # The workspace root is virtual: it has no version of its own. The crates
-# that carry a version have to agree -- and `rgy-autostart` is one of them,
-# because the release ships it: the archive carries searchctl, searchd,
+# that carry a version have to agree -- and every one of them has to, not
+# only the four the release ships: the archive carries searchctl, searchd,
 # rgy-autostart and rgxy, so a version drift in one of those crates is a
 # release carrying binaries that do not agree about which release they are.
-# Every manifest this repository owns. The vendored trees are upstream's:
-# they carry upstream's version, upstream publishes them, and a bump here
-# would be a fork. The harness is not published either.
+#
+# Every manifest this repository owns is checked, and not only the shipped
+# ones. A crate left at the old number is a crate the resolver can take
+# from the registry instead of from this tree, and `cargo build --locked`
+# -- which is the release build itself -- then refuses the lockfile. The
+# check names the manifest AND the line, because a bump that missed one
+# line of twenty manifests is found by the reader, not by the script.
+#
+# The manifests are the workspace's own: the crates this repository
+# publishes and the binaries it ships. The vendored trees (crates/rgx-*,
+# crates/rar-codec) are upstream rgx's -- they carry upstream's version,
+# upstream publishes them, and a bump here would be a fork. The e2e
+# harness is not published either, and keeps its 0.0.0.
+#
+# The version and the line it stands on are read the same way the unix
+# twin reads them: the [package] table is the first table in every
+# manifest of ours, so the first `version = "..."` line is the one. The
+# quoted value ends at the first quote after it -- a greedy read would
+# swallow the rest of the line, and the two twins would then read two
+# different versions out of the same manifest.
 $manifests = @(
     Get-ChildItem -Path "crates/*/Cargo.toml", "bins/*/Cargo.toml" |
         Where-Object { $_.FullName -notmatch '[\\/]crates[\\/]rgx-' -and $_.FullName -notmatch '[\\/]crates[\\/]rar-codec[\\/]' } |
@@ -112,7 +147,11 @@ $manifests = @(
         Sort-Object
 )
 if (-not $Version) { $Version = Get-ManifestVersion "bins/searchctl/Cargo.toml" }
-if (-not $Version) { throw "no version in bins/searchctl/Cargo.toml" }
+if (-not $Version) {
+    # The unix twin's sentence and the unix twin's exit code.
+    [Console]::Error.Write("no version in bins/searchctl/Cargo.toml`n")
+    exit 1
+}
 
 foreach ($m in $manifests) {
     $v = Get-ManifestVersion $m
@@ -120,27 +159,61 @@ foreach ($m in $manifests) {
         # Plain lines on stderr, not `Write-Error`: the POSIX twin writes
         # the same two lines with `echo >&2`, and an error record would
         # print the script's path and line number on top of them.
-        [Console]::Error.WriteLine("$m says version $v, but the release is $Version")
-        [Console]::Error.WriteLine("the crates must agree about their version")
+        $line = Get-ManifestVersionLine $m
+        [Console]::Error.Write("$($m):$line says version $v, but the release is $Version`n")
+        [Console]::Error.Write("the crates must agree about their version`n")
         exit 1
     }
 }
 
-# Every path dependency on a crate of this repository has to ask for the
-# version the release carries. A dependency that still asks for the old one
-# breaks `cargo build --locked`, and that is the release build itself.
+# Every requirement on one of our crates has to ask for the version the
+# release carries. A dependency that still asks for the old one breaks
+# `cargo build --locked`, and that is the release build itself.
+#
+# The names that start with `rgy-` are ours: the same rule
+# scripts/bump-version.py bumps by, so the check reads the lines the bump
+# writes, and a requirement the bump would not have touched is a
+# requirement the check does not read either. The requirement of an
+# upstream crate is not ours to write -- it names upstream's version, and
+# it stays where upstream put it.
+#
+# A dependency entry can span lines, and the requirement can be on one of
+# them, so the entry is read to its closing brace: a requirement the check
+# cannot see is a requirement it cannot vouch for.
 foreach ($m in $manifests) {
+    $dep = ""
+    $at = 0
     foreach ($line in Get-Content $m) {
-        if ($line -notmatch 'path\s*=') { continue }
-        $p = if ($line -match 'path\s*=\s*"([^"]*)"') { $matches[1] } else { "" }
-        if (-not $p) { continue }
-        if ($p -match 'rgx-' -or $p -match 'rar-codec') { continue }
-        $req = if ($line -match 'version\s*=\s*"([^"]*)"') { $matches[1] } else { "" }
-        if (-not $req) { continue }
-        if ($req -ne $Version -and $req -ne "^$Version") {
-            [Console]::Error.WriteLine("$m asks for $req where the release is $Version")
-            [Console]::Error.WriteLine("the dependency lines have to be bumped with the manifests")
-            exit 1
+        $at++
+        if (-not $dep) {
+            if ($line -cmatch '^[ \t]*(rgy-[a-z0-9-]+)[ \t]*=') {
+                $dep = $matches[1]
+                $req = Get-Requirement $line
+                if ($req -ne "") {
+                    if ($req -ne $Version -and $req -ne "^$Version") {
+                        [Console]::Error.Write("$($m):$at asks for $dep $req where the release is $Version`n")
+                        [Console]::Error.Write("the dependency lines have to be bumped with the manifests`n")
+                        exit 1
+                    }
+                    $dep = ""
+                } elseif ($line.Contains("{") -and -not $line.Contains("}")) {
+                    # The entry spans lines: the requirement is on one of them.
+                } else {
+                    $dep = ""
+                }
+            }
+            continue
+        }
+        $req = Get-Requirement $line
+        if ($req -ne "") {
+            if ($req -ne $Version -and $req -ne "^$Version") {
+                [Console]::Error.Write("$($m):$at asks for $dep $req where the release is $Version`n")
+                [Console]::Error.Write("the dependency lines have to be bumped with the manifests`n")
+                exit 1
+            }
+            $dep = ""
+        } elseif ($line.Contains("}")) {
+            $dep = ""
         }
     }
 }
@@ -162,7 +235,7 @@ switch ($Variant) {
     "avx2"     { $rustflags = "-C target-cpu=x86-64-v3" }
     "znver4"   { $rustflags = "-C target-cpu=znver4" }
     default    {
-        [Console]::Error.WriteLine("unknown variant: $Variant (portable, avx2, znver4)")
+        [Console]::Error.Write("unknown variant: $Variant (portable, avx2, znver4)`n")
         exit 2
     }
 }
@@ -178,7 +251,7 @@ function Get-AssetName([string]$target) {
         "aarch64-apple-darwin"      { return "aarch64-apple-darwin" }
         "x86_64-apple-darwin"       { return "x86_64-apple-darwin" }
         default {
-            [Console]::Error.WriteLine("unknown target: $target")
+            [Console]::Error.Write("unknown target: $target`n")
             exit 2
         }
     }
@@ -192,15 +265,15 @@ $asset = Get-AssetName $Target
 # the x86_64 targets have a tuned build; the others are tuned already.
 if ($Variant -ne "portable") {
     if (-not $asset.StartsWith("x86_64-")) {
-        [Console]::Error.WriteLine("the $Variant build needs an x86_64 target, and $Target is not one")
+        [Console]::Error.Write("the $Variant build needs an x86_64 target, and $Target is not one`n")
         exit 2
     }
     $asset = "$Variant-" + $asset.Substring("x86_64-".Length)
 }
 
-Write-Host "rgy release build: $Version ($asset)"
-Write-Host "target: $Target"
-Write-Host "variant: $Variant"
+[Console]::Out.Write("rgy release build: $Version ($asset)`n")
+[Console]::Out.Write("target: $Target`n")
+[Console]::Out.Write("variant: $Variant`n")
 
 # --- 3. the build -----------------------------------------------------------
 # The build comes before the tests, not after them. The e2e harness resolves
@@ -210,37 +283,57 @@ Write-Host "variant: $Variant"
 # target/release, so a test before a build would either exercise the
 # previous release's binary or stop the release for a reason that looks
 # like a test failure.
-# The host's build keeps the --target off, so its binaries land in
+# The host's PLAIN build keeps the --target off, so its binaries land in
 # target/release the way they always have: the harness, the benchmark
 # write-up and the mem-peak recipe all name that path. A build for
 # another target lands in target\<triple>\release, and the archive is
 # packed from there.
-if ($Target -eq $hostTriple) {
+#
+# The TUNED builds are the exception, and the reason is the build
+# scripts. A build script is a program that runs on THIS machine, and
+# cargo compiles it for the target it is building: a script compiled for
+# Zen 4 dies with an illegal instruction on a runner that has no
+# AVX-512, and the release stops with a message about mimalloc, which
+# says nothing about the tree. Naming the target is what tells cargo
+# that the build scripts are the host's and not the target's, and the
+# flags then reach the target's own artifacts and not the scripts. A
+# tuned build therefore lands in target\<triple>\release like any other
+# build for a named target, and the plain build keeps target\release.
+if (($Target -eq $hostTriple) -and (-not $rustflags)) {
     $buildArgs = @("build", "--release", "--locked", "--workspace")
     $exeDir = Join-Path $root "target\release"
 } else {
     $buildArgs = @("build", "--release", "--locked", "--workspace", "--target", $Target)
     $exeDir = Join-Path $root "target\$Target\release"
 }
-Write-Host "build: cargo $($buildArgs -join ' ')"
-if ($rustflags) { $env:RUSTFLAGS = $rustflags }
+[Console]::Out.Write("build: cargo $($buildArgs -join ' ')`n")
+if ($rustflags) {
+    # The per-target flags, and not RUSTFLAGS: the per-target ones are
+    # the flags of the target's own artifacts, and RUSTFLAGS reaches
+    # every compilation cargo does. The name is the triple, uppercased,
+    # with the dashes turned into underscores: x86_64-pc-windows-msvc
+    # is CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS.
+    $rustflagsVar = "CARGO_TARGET_" + ($Target.ToUpperInvariant() -replace '-', '_') + "_RUSTFLAGS"
+    [Console]::Out.Write("flags: $rustflagsVar=$rustflags`n")
+    [Environment]::SetEnvironmentVariable($rustflagsVar, $rustflags, "Process")
+}
 cargo @buildArgs
 $buildExit = $LASTEXITCODE
-if ($rustflags) { Remove-Item Env:RUSTFLAGS -ErrorAction SilentlyContinue }
-if ($buildExit -ne 0) { [Console]::Error.WriteLine("the build failed"); exit 1 }
+if ($rustflags) { [Environment]::SetEnvironmentVariable($rustflagsVar, $null, "Process") }
+if ($buildExit -ne 0) { [Console]::Error.Write("the build failed`n"); exit 1 }
 
 # --- 4. the gate ------------------------------------------------------------
 if (-not $SkipTests) {
-    Write-Host "gate: clippy, then the test suite"
+    [Console]::Out.Write("gate: clippy, then the test suite`n")
     cargo clippy --release --locked --workspace --all-targets -- -D warnings
     if ($LASTEXITCODE -ne 0) {
-        [Console]::Error.WriteLine("clippy warnings found; the workspace must stay warning-free")
+        [Console]::Error.Write("clippy warnings found; the workspace must stay warning-free`n")
         exit 1
     }
     cargo test --release --locked --workspace
-    if ($LASTEXITCODE -ne 0) { [Console]::Error.WriteLine("tests failed"); exit 1 }
+    if ($LASTEXITCODE -ne 0) { [Console]::Error.Write("tests failed`n"); exit 1 }
 } else {
-    Write-Host "gate: skipped (--skip-tests)"
+    [Console]::Out.Write("gate: skipped (--skip-tests)`n")
 }
 
 # --- 5. the smoke -----------------------------------------------------------
@@ -250,9 +343,11 @@ if (-not $SkipTests) {
 # (a fuzzy name query) and the content half (a literal search inside the
 # files). Both must answer with a non-empty count.
 #
-# A binary built for another target cannot run here, so the smoke is for
-# the host's build only: a cross build is checked by the suite on the
-# machine that owns that CPU.
+# A binary built for another target cannot run on the machine that built
+# it, so the smoke is for the host's build only -- with two exceptions the
+# CI covers: the musl build is static, so it starts on the runner that
+# built it, and the Intel Mac's build is checked for the architecture it
+# was built for, because there is no Intel Mac in the matrix.
 #
 # The index goes to a file under target\, not to the user's cache: a release
 # build has no business writing into somebody's home directory.
@@ -263,30 +358,75 @@ $smokeIndex = Join-Path $smokeIndexDir "rgy.idx"
 function Invoke-Smoke([string]$label, [string]$query) {
     # The index line ("rebuilding", "reusing index") goes to stderr, and it
     # is not an error: the exit code is.
+    #
+    # The stderr goes to a file next to the index, and the file is printed
+    # when the smoke fails: a smoke that says only "failed (exit 1)" says
+    # nothing about why, and the reason is the whole of the report.
+    $errFile = Join-Path $smokeIndexDir "stderr.txt"
     $saved = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     $out = & (Join-Path $exeDir "searchctl.exe") --root (Join-Path $root "crates") `
-        --index $smokeIndex --count $query 2> $null
+        --index $smokeIndex --count $query 2> $errFile
     $code = $LASTEXITCODE
     $ErrorActionPreference = $saved
     if ($code -ne 0) {
-        [Console]::Error.WriteLine("smoke: $label failed (exit $code)")
+        [Console]::Error.Write("smoke: $label failed (exit $code)`n")
+        if (Test-Path $errFile) {
+            $err = [IO.File]::ReadAllText($errFile)
+            if ($err) { [Console]::Error.Write($err) }
+        }
         exit 1
     }
     $text = ($out -join "`n")
-    $m = [regex]::Match($text, '\d+')
+    # The count is the first number in the answer, and the unix twin reads
+    # it the same way. `[0-9]` and not `\d`: the unicode class counts
+    # digits the unix twin does not, and the two twins have to count the
+    # same answer the same way.
+    $m = [regex]::Match($text, '[0-9]+')
     if (-not $m.Success -or [int]$m.Value -eq 0) {
-        [Console]::Error.WriteLine("smoke: $label answered with no hits")
+        [Console]::Error.Write("smoke: $label answered with no hits`n")
         exit 1
     }
-    Write-Host "smoke: $label -> $($m.Value) hits"
+    [Console]::Out.Write("smoke: $label -> $($m.Value) hits`n")
+}
+
+# The instructions the machine has.
+#
+# The twin of the unix script's check: the smoke runs the binary this
+# machine just built, so it can only run where the CPU has the
+# instructions the build asked for. The AVX2 build asks for AVX2 and the
+# Zen 4 build asks for AVX-512, and a machine without them answers with
+# SIGILL -- a red run that says nothing about the tree is worse than no
+# run.
+#
+# .NET answers the question itself.
+function Test-CpuHasAvx2 {
+    try {
+        return [System.Runtime.Intrinsics.X86.Avx2]::IsSupported
+    } catch {
+        return $false
+    }
+}
+
+function Test-CpuHasAvx512 {
+    try {
+        return [System.Runtime.Intrinsics.X86.Avx512F]::IsSupported
+    } catch {
+        return $false
+    }
 }
 
 if ($Target -eq $hostTriple) {
-    Invoke-Smoke "name query over crates/" "walk ext:rs"
-    Invoke-Smoke "content query over crates/" "grep:Listing"
+    if ($Variant -eq "znver4" -and -not (Test-CpuHasAvx512)) {
+        [Console]::Out.Write("smoke: skipped (this machine has no AVX-512, and the Zen 4 build asks for it)`n")
+    } elseif ($Variant -eq "avx2" -and -not (Test-CpuHasAvx2)) {
+        [Console]::Out.Write("smoke: skipped (this machine has no AVX2, and the AVX2 build asks for it)`n")
+    } else {
+        Invoke-Smoke "name query over crates/" "walk ext:rs"
+        Invoke-Smoke "content query over crates/" "grep:Listing"
+    }
 } else {
-    Write-Host "smoke: skipped (a binary for $Target does not run here)"
+    [Console]::Out.Write("smoke: skipped (a binary for $Target does not run here)`n")
 }
 
 # --- 6. the archive ---------------------------------------------------------
@@ -316,15 +456,116 @@ Copy-Item (Join-Path $exeDir "rgxy.exe") $stage
 # binary itself. It is a copy, and the copy is the price of the name:
 # winget only aliases an executable.
 Copy-Item (Join-Path $exeDir "searchctl.exe") (Join-Path $stage "rgy.exe")
-foreach ($doc in @("README.md", "MANUAL.md", "FORMATS.md", "COPYING", "NOTICE",
-        "LICENSE-APACHE", "LICENSE-MIT", "LICENSE-MIT-FSEARCH")) {
+# The documents the release carries, in ONE list: the build copies them into
+# the archive, and the build writes down their digests beside it. A list that
+# lives in two places is a list that drifts.
+$documents = @("README.md", "MANUAL.md", "FORMATS.md", "COPYING", "NOTICE",
+    "LICENSE-APACHE", "LICENSE-MIT", "LICENSE-MIT-FSEARCH")
+foreach ($doc in $documents) {
     if (Test-Path (Join-Path $root $doc)) { Copy-Item (Join-Path $root $doc) $stage }
+}
+
+# Every document the release promises is in the stage, or the build stops.
+#
+# The copy above is conditional -- a document the tree does not have is not
+# packed -- and the archive's member list names the documents either way, so
+# a tree without one produced an archive without it. A release archive without
+# a licence file is a release whose licence story is broken, and it was
+# announced as if it were whole.
+foreach ($doc in $documents) {
+    if (-not (Test-Path (Join-Path $stage $doc))) {
+        [Console]::Error.WriteLine("the release carries $doc and this tree does not have it: the archive would not")
+        [Console]::Error.WriteLine("  copy the document into the tree, or take it out of the release")
+        exit 1
+    }
+}
+
+# The picture the README shows travels with it.
+#
+# The archive carries the README, and the README points at the picture by
+# a relative path, so an archive without the picture has a README with a
+# hole in it: the link is broken exactly where the reader is offline.
+# The path inside the archive is the one the README uses, so the link
+# works where the README is.
+# The pictures and the clips the README points at.
+#
+# The archive carries the README, and the README points at these by a
+# relative path, so an archive without them has a README with holes in it:
+# the links are broken exactly where the reader is offline. The path inside
+# the archive is the one the README uses, so the links work where the README
+# is.
+#
+# ONE list, and three parts of the build read it: the copy below, the
+# archive's member list, and the digests the publish step compares with the
+# tree. A list that lives in three places is a list that drifts.
+$media = @(
+    "docs\screenshots\rgxy.png",
+    "docs\screenshots\gui-filters.png",
+    "docs\videos\gui-filters.mp4",
+    "docs\videos\term-tui.mp4"
+)
+foreach ($mediaFile in $media) {
+    $mediaPath = Join-Path $root $mediaFile
+    if (-not (Test-Path $mediaPath)) {
+        [Console]::Error.WriteLine("the release carries $mediaFile and this tree does not have it: the archive would not")
+        [Console]::Error.WriteLine("  the README points at it, and an archive without it is a README with a hole in it")
+        exit 1
+    }
+    $inStage = Join-Path $stage $mediaFile
+    New-Item -ItemType Directory -Force -Path (Split-Path $inStage -Parent) | Out-Null
+    Copy-Item $mediaPath $inStage
 }
 
 $archiveName = "rgy-v$Version-$asset.zip"
 $archive = Join-Path $out $archiveName
-Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $archive -Force
-Write-Host "packed: .dist/$archiveName"
+try {
+    Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $archive -Force -ErrorAction Stop
+} catch {
+    [Console]::Error.WriteLine("the archive was not packed: $($_.Exception.Message)")
+    [Console]::Error.WriteLine("  a release without its archive is no release")
+    exit 1
+}
+[Console]::Out.Write("packed: .dist/$archiveName`n")
+
+# The digests of the documents that went into the archive.
+#
+# The archive's own digest proves the archive is the one this build made. It
+# says nothing about what is INSIDE it: a release built before the README's
+# last edit carries the older README, and its digest matches perfectly.
+#
+# So the build writes down what it packed -- the digest of every document it
+# copied from the tree -- beside the archive, and the publish step reads it
+# back and compares each digest with the tree's. The digests are of the
+# tree's files, and the tree's files are the same on every machine: the text
+# files are LF (the .gitattributes say so) and the picture is binary. So the
+# file this build wrote here is the file the other platform's build wrote
+# there.
+$docsDir = Join-Path $out "documents"
+New-Item -ItemType Directory -Force -Path $docsDir | Out-Null
+$docsFile = Join-Path $docsDir "$archiveName.sha256"
+$docsRows = @()
+foreach ($doc in $documents) {
+    $docPath = Join-Path $root $doc
+    if (Test-Path $docPath) { $docsRows += "$(Get-RgySha256 $docPath)  $doc" }
+}
+foreach ($mediaFile in $media) {
+    $mediaPath = Join-Path $root $mediaFile
+    $docsRows += "$(Get-RgySha256 $mediaPath)  $($mediaFile -replace '\\', '/')"
+}
+# The ordinal order, so the two machines write the same bytes.
+$docsOrdered = [System.Collections.Generic.List[string]]::new()
+foreach ($row in $docsRows) {
+    $rowName = ($row -split '\s+', 2)[1]
+    $at = 0
+    while ($at -lt $docsOrdered.Count -and
+           [System.StringComparer]::Ordinal.Compare((($docsOrdered[$at] -split '\s+', 2)[1]), $rowName) -le 0) {
+        $at++
+    }
+    $docsOrdered.Insert($at, $row)
+}
+$docsText = (($docsOrdered) -join "`n") + "`n"
+[System.IO.File]::WriteAllText($docsFile, $docsText, [System.Text.UTF8Encoding]::new($false))
+[Console]::Out.Write("documents: .dist/documents/$archiveName.sha256 ($($docsOrdered.Count) files)`n")
 
 # --- 7. the digest ----------------------------------------------------------
 #
@@ -348,7 +589,7 @@ if (Test-Path $sums) { $lines = @(Get-Content $sums | ForEach-Object { $_.TrimEn
 # `sha256sum -c` then fails on a file the user never got.
 $lines = @($lines | Where-Object { $_ -match "  rgy-v$([regex]::Escape($Version))-" })
 $lines = @($lines | Where-Object { $_ -notmatch "  $([regex]::Escape($archiveName))$" })
-$sha = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLower()
+$sha = (Get-RgySha256 $archive)
 $lines += "$sha  $archiveName"
 # One line per asset, and the first one wins: a digests file that names the
 # same archive twice is a file nobody can read -- the reader takes the
@@ -377,7 +618,14 @@ foreach ($row in $deduped) {
 }
 $text = (($ordered) -join "`n") + "`n"
 [System.IO.File]::WriteAllText($sums, $text, [System.Text.UTF8Encoding]::new($false))
-Write-Host "checksum: .dist/SHA256SUMS ($sha  $archiveName)"
+[Console]::Out.Write("checksum: .dist/SHA256SUMS ($sha  $archiveName)`n")
 
-Write-Host ""
-Write-Host "built $archiveName"
+[Console]::Out.Write("`n")
+[Console]::Out.Write("built $archiveName`n")
+
+# The exit code, said out loud. A caller that invoked this script with the
+# call operator reads `$LASTEXITCODE`, and a script that ends without
+# saying anything leaves the last native command's value there -- which
+# can be non-zero even though the build succeeded. The build script says
+# its own, so the caller reads the truth.
+exit 0

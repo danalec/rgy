@@ -248,6 +248,11 @@ impl Adapter for DuckDb {
 /// The output is the schema and then every table: the schema first,
 /// because it is what says what the tables are, and the tables in the
 /// order the schema holds them.
+///
+/// A virtual table is the one table the dump leaves out: its rows live in
+/// a module, and a reader of the file has no module to run. The schema
+/// still names it, and the shadow tables the module keeps are ordinary
+/// tables, and those are dumped.
 #[cfg(feature = "sqlite")]
 fn dump_sqlite_in_memory(data: &[u8]) -> Result<Outcome> {
     let db = sqlite::Db::open(data).map_err(|e| rgx_core::anyhow!("sqlite: {e}"))?;
@@ -269,11 +274,12 @@ fn dump_sqlite_in_memory(data: &[u8]) -> Result<Outcome> {
     for table in &tables {
         if table.virtual_table {
             // A virtual table keeps its rows in a module, not in the
-            // file: there is nothing here to read.
-            return Err(rgx_core::anyhow!(
-                "sqlite: {} is a virtual table: its rows are not in the file",
-                table.name
-            ));
+            // file: SQLite runs the module to answer a question about
+            // it, and this reader has no module to run. The table is
+            // left out of the dump -- the schema above still names it --
+            // and the shadow tables the module keeps are ordinary
+            // tables, and those are dumped.
+            continue;
         }
         writeln!(out, "-- table: {} --", table.name)?;
         for (index, column) in table.columns.iter().enumerate() {

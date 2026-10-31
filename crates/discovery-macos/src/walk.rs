@@ -49,6 +49,7 @@ const ATTR_CMN_FLAGS: u32 = 0x0004_0000;
 const ATTR_CMN_ERROR: u32 = 0x2000_0000;
 const ATTR_DIR_ENTRYCOUNT: u32 = 0x0000_0002;
 const ATTR_DIR_MOUNTSTATUS: u32 = 0x0000_0004;
+const ATTR_DIR_DATALENGTH: u32 = 0x0000_0020;
 const ATTR_FILE_DATALENGTH: u32 = 0x0000_0200;
 
 // `FSOPT_NOFOLLOW`: do not follow a symbolic link. `sys/attr.h`.
@@ -471,7 +472,7 @@ fn list_fd(fd: i32, l: &mut Listing, buf: &mut [u8]) {
         | ATTR_CMN_OBJTYPE
         | ATTR_CMN_MODTIME
         | ATTR_CMN_FLAGS;
-    al.dirattr = ATTR_DIR_ENTRYCOUNT | ATTR_DIR_MOUNTSTATUS;
+    al.dirattr = ATTR_DIR_ENTRYCOUNT | ATTR_DIR_MOUNTSTATUS | ATTR_DIR_DATALENGTH;
     al.fileattr = ATTR_FILE_DATALENGTH;
     loop {
         let n = unsafe { getattrlistbulk(fd, &mut al, buf.as_mut_ptr().cast(), buf.len(), 0) };
@@ -512,8 +513,26 @@ fn parse_entry(b: &[u8], l: &mut Listing) {
     let dirattr = rd32_at(b, 12).unwrap_or(0);
     let fileattr = rd32_at(b, 16).unwrap_or(0);
     let mut f = 24;
+    // The error is the first attribute of the record: the kernel writes it
+    // before the name, and it writes it on every record it was asked for --
+    // a zero on the records it could describe, the code on the ones it
+    // could not. The name is the one attribute an entry that errored still
+    // carries. `bsd/vfs/vfs_attrlist.c` (`getattrlist_internal`,
+    // `get_error_attributes`).
+    let mut error = 0u32;
     if common & ATTR_CMN_ERROR != 0 {
+        let Some(e) = rd32_at(b, f) else {
+            return;
+        };
+        error = e;
         f += 4;
+    }
+    // An entry the platform could not describe is not an entry: the
+    // portable walk drops the ones whose metadata it cannot read, and this
+    // walk has to agree with it. The name it still carries is the name of
+    // something the platform would not tell us about.
+    if error != 0 {
+        return;
     }
     if common & ATTR_CMN_NAME == 0 {
         return;
@@ -591,13 +610,31 @@ fn parse_entry(b: &[u8], l: &mut Listing) {
         }
         f += 4;
     }
-    let mut size = 0u64;
+    // The length of a directory. The kernel writes the attribute groups
+    // in a fixed order -- the common one, then the directory one, then
+    // the file one -- and it writes the directory group only for a
+    // directory and the file group only for everything else.
+    // `bsd/vfs/vfs_attrlist.c` (`attr_pack_common`, `attr_pack_dir`,
+    // `attr_pack_file`).
+    let mut dir_size = None;
+    if dirattr & ATTR_DIR_DATALENGTH != 0 {
+        let Some(s) = rd64_at(b, f) else {
+            return;
+        };
+        dir_size = Some(s);
+        f += 8;
+    }
+    let mut file_size = None;
     if fileattr & ATTR_FILE_DATALENGTH != 0 {
         let Some(s) = rd64_at(b, f) else {
             return;
         };
-        size = s;
+        file_size = Some(s);
     }
+    // A directory's length is the one the directory group carries and a
+    // file's is the one the file group carries: the number `stat(2)`
+    // reports, which is what the portable walk lists.
+    let size = dir_size.or(file_size).unwrap_or(0);
     if name.is_empty() || name.len() > u16::MAX as usize {
         return;
     }

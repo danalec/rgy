@@ -79,8 +79,9 @@ variant="portable"
 # thing", which in this directory means building an archive that a release
 # then publishes.
 . "$here/lib/options.sh"
+. "$here/lib/digest.sh"
 rgy_read_options "skiptests=skip_tests" \
-                 "version=version target=target variant=variant" "$@"
+                 "version=version target=target variant=variant" "" "$@"
 
 command -v cargo > /dev/null 2>&1 || {
     echo "cargo not found; install Rust: https://rustup.rs" >&2
@@ -90,12 +91,44 @@ command -v cargo > /dev/null 2>&1 || {
 # --- 1. the version ---------------------------------------------------------
 #
 # The workspace root is virtual: it has no version of its own. The crates
-# that carry a version have to agree -- and `rgy-autostart` is one of them,
-# because the release ships it: the archive carries searchctl, searchd,
+# that carry a version have to agree -- and every one of them has to, not
+# only the four the release ships: the archive carries searchctl, searchd,
 # rgy-autostart and rgxy, so a version drift in one of those crates is a
 # release carrying binaries that do not agree about which release they are.
+#
+# Every manifest this repository owns is checked, and not only the shipped
+# ones. A crate left at the old number is a crate the resolver can take
+# from the registry instead of from this tree, and `cargo build --locked`
+# -- which is the release build itself -- then refuses the lockfile. The
+# check names the manifest AND the line, because a bump that missed one
+# line of twenty manifests is found by the reader, not by the script.
+#
+# The manifests are the workspace's own: the crates this repository
+# publishes and the binaries it ships. The vendored trees (crates/rgx-*,
+# crates/rar-codec) are upstream rgx's -- they carry upstream's version,
+# upstream publishes them, and a bump here would be a fork. The e2e
+# harness is not published either, and keeps its 0.0.0.
+#
+# The version and the line it stands on are read the same way the PowerShell
+# twin reads them: the [package] table is the first table in every manifest
+# of ours, so the first `version = "..."` line is the one. The quoted value
+# ends at the first quote after it -- a greedy read would swallow the rest
+# of the line, and the two twins would then read two different versions
+# out of the same manifest.
 read_manifest_version() {
-    sed -n 's/^version = "\(.*\)"/\1/p' "$1" | head -1
+    awk 'match($0, /^version[ \t]*=[ \t]*"[^"]*"/) {
+             v = substr($0, RSTART, RLENGTH)
+             sub(/^[^"]*"/, "", v)
+             sub(/"$/, "", v)
+             print v
+             exit
+         }' "$1"
+}
+
+# The line the version stands on, so a drift is found by its place and not
+# only by its number.
+manifest_version_line() {
+    awk '/^version[ \t]*=[ \t]*"[^"]*"/ { print NR; exit }' "$1"
 }
 
 # Every manifest this repository owns. The vendored trees are upstream's:
@@ -113,30 +146,77 @@ fi
 for m in $manifests; do
     v=$(read_manifest_version "$m")
     if [ "$v" != "$version" ]; then
-        echo "$m says version $v, but the release is $version" >&2
+        echo "$m:$(manifest_version_line "$m") says version $v, but the release is $version" >&2
         echo "the crates must agree about their version" >&2
         exit 1
     fi
 done
 
-# Every path dependency on a crate of this repository has to ask for the
-# version the release carries. A dependency that still asks for the old one
-# breaks `cargo build --locked`, and that is the release build itself.
+# Every requirement on one of our crates has to ask for the version the
+# release carries. A dependency that still asks for the old one breaks
+# `cargo build --locked`, and that is the release build itself.
+#
+# The names that start with `rgy-` are ours: the same rule
+# scripts/bump-version.py bumps by, so the check reads the lines the bump
+# writes, and a requirement the bump would not have touched is a
+# requirement the check does not read either. The requirement of an
+# upstream crate is not ours to write -- it names upstream's version, and
+# it stays where upstream put it.
+#
+# A dependency entry can span lines, and the requirement can be on one of
+# them, so the entry is read to its closing brace: a requirement the check
+# cannot see is a requirement it cannot vouch for.
+#
+# The findings come out as "line:dependency:requirement", and the shell
+# turns the first one into the sentence the reader reads.
 for m in $manifests; do
-    while IFS= read -r line; do
-        p=$(printf '%s' "$line" | sed -n 's/.*path[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p')
-        [ -n "$p" ] || continue
-        case "$p" in
-            *rgx-*|*rar-codec*) continue ;;
-        esac
-        req=$(printf '%s' "$line" | sed -n 's/.*version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p')
-        [ -n "$req" ] || continue
-        if [ "$req" != "$version" ] && [ "$req" != "^$version" ]; then
-            echo "$m asks for $req where the release is $version" >&2
-            echo "the dependency lines have to be bumped with the manifests" >&2
-            exit 1
-        fi
-    done < "$m"
+    for finding in $(awk -v release="$version" '
+        function req_of(line,   rest, v) {
+            if (!match(line, /version[ \t]*=[ \t]*/)) return ""
+            rest = substr(line, RSTART + RLENGTH)
+            if (!match(rest, /^"[^"]*"/)) return ""
+            v = substr(rest, 2, RLENGTH - 2)
+            return v
+        }
+        { lines[NR] = $0 }
+        END {
+            dep = ""
+            for (n = 1; n <= NR; n++) {
+                line = lines[n]
+                if (dep == "") {
+                    if (!match(line, /^[ \t]*(rgy-[a-z0-9-]+)[ \t]*=/)) continue
+                    dep = substr(line, RSTART, RLENGTH)
+                    sub(/[ \t]*=$/, "", dep)
+                    sub(/^[ \t]*/, "", dep)
+                    req = req_of(line)
+                    if (req != "") {
+                        if (req != release && req != "^" release) print n ":" dep ":" req
+                        dep = ""
+                    } else if (index(line, "{") > 0 && index(line, "}") == 0) {
+                        # The entry spans lines: the requirement is on one of them.
+                    } else {
+                        dep = ""
+                    }
+                    continue
+                }
+                req = req_of(line)
+                if (req != "") {
+                    if (req != release && req != "^" release) print n ":" dep ":" req
+                    dep = ""
+                } else if (index(line, "}") > 0) {
+                    dep = ""
+                }
+            }
+        }
+    ' "$m"); do
+        line=${finding%%:*}
+        rest=${finding#*:}
+        dep=${rest%%:*}
+        req=${rest#*:}
+        echo "$m:$line asks for $dep $req where the release is $version" >&2
+        echo "the dependency lines have to be bumped with the manifests" >&2
+        exit 1
+    done
 done
 
 # --- 2. the target and the flavour -----------------------------------------
@@ -197,12 +277,23 @@ echo "variant: $variant"
 # target/release, so a test before a build would either exercise the
 # previous release's binary or stop the release for a reason that looks
 # like a test failure.
-# The host's build keeps the --target off, so its binaries land in
+# The host's PLAIN build keeps the --target off, so its binaries land in
 # target/release the way they always have: the harness, the benchmark
 # write-up and the mem-peak recipe all name that path. A build for
 # another target lands in target/<triple>/release, and the archive is
 # packed from there.
-if [ "$target" = "$host" ]; then
+#
+# The TUNED builds are the exception, and the reason is the build
+# scripts. A build script is a program that runs on THIS machine, and
+# cargo compiles it for the target it is building: a script compiled for
+# Zen 4 dies with an illegal instruction on a runner that has no
+# AVX-512, and the release stops with a message about mimalloc, which
+# says nothing about the tree. Naming the target is what tells cargo
+# that the build scripts are the host's and not the target's, and the
+# flags then reach the target's own artifacts and not the scripts. A
+# tuned build therefore lands in target/<triple>/release like any other
+# build for a named target, and the plain build keeps target/release.
+if [ "$target" = "$host" ] && [ -z "$rustflags" ]; then
     build_cmd="cargo build --release --locked --workspace"
     exe_dir="$repo/target/release"
 else
@@ -211,7 +302,14 @@ else
 fi
 echo "build: $build_cmd"
 if [ -n "$rustflags" ]; then
-    RUSTFLAGS="$rustflags" $build_cmd || { echo "the build failed" >&2; exit 1; }
+    # The per-target flags, and not RUSTFLAGS: the per-target ones are
+    # the flags of the target's own artifacts, and RUSTFLAGS reaches
+    # every compilation cargo does. The name is the triple, uppercased,
+    # with the dashes turned into underscores: x86_64-unknown-linux-gnu
+    # is CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS.
+    rustflags_var="CARGO_TARGET_$(printf '%s' "$target" | tr 'a-z-' 'A-Z_')_RUSTFLAGS"
+    echo "flags: $rustflags_var=$rustflags"
+    env "$rustflags_var=$rustflags" $build_cmd || { echo "the build failed" >&2; exit 1; }
 else
     $build_cmd || { echo "the build failed" >&2; exit 1; }
 fi
@@ -235,9 +333,11 @@ fi
 # (a fuzzy name query) and the content half (a literal search inside the
 # files). Both must answer with a non-empty count.
 #
-# A binary built for another target cannot run here, so the smoke is for
-# the host's build only: a cross build is checked by the suite on the
-# machine that owns that CPU.
+# A binary built for another target cannot run on the machine that built
+# it, so the smoke is for the host's build only -- with two exceptions the
+# CI covers: the musl build is static, so it starts on the runner that
+# built it, and the Intel Mac's build is checked for the architecture it
+# was built for, because there is no Intel Mac in the matrix.
 #
 # The index goes to a file under target\, not to the user's cache: a release
 # build has no business writing into somebody's home directory.
@@ -245,12 +345,22 @@ smoke_index_dir="$repo/target/release-smoke"
 mkdir -p "$smoke_index_dir"
 
 smoke() {
-    local label="$1" query="$2" out count
-    out=$("$exe_dir/searchctl" --root "$repo/crates" --index "$smoke_index_dir/rgy.idx" --count "$query" 2> /dev/null) || {
+    local label="$1" query="$2" out count err
+    # The stderr of the binary goes to a file next to the index, and the
+    # file is printed when the smoke fails: a smoke that says only
+    # "failed (exit 1)" says nothing about why, and the reason is the
+    # whole of the report.
+    err="$smoke_index_dir/stderr.txt"
+    out=$("$exe_dir/searchctl" --root "$repo/crates" --index "$smoke_index_dir/rgy.idx" --count "$query" 2> "$err") || {
         echo "smoke: $label failed (exit $?)" >&2
+        cat "$err" >&2
         return 1
     }
-    count=$(printf '%s' "$out" | tr -dc '0-9')
+    # The count is the first number in the answer, and the PowerShell twin
+    # reads it the same way. `tr -dc '0-9'` kept every digit of every number
+    # in the answer, so an answer carrying two numbers was counted as their
+    # digits run together -- a count neither twin can vouch for.
+    count=$(printf '%s' "$out" | awk '{ if (match($0, /[0-9]+/)) { print substr($0, RSTART, RLENGTH); exit } }')
     if [ -z "$count" ] || [ "$count" -eq 0 ]; then
         echo "smoke: $label answered with no hits" >&2
         return 1
@@ -259,9 +369,42 @@ smoke() {
     return 0
 }
 
+# The instructions the machine has.
+#
+# The smoke runs the binary this machine just built, so it can only run
+# where the CPU has the instructions the build asked for. The AVX2 build
+# asks for AVX2 and the Zen 4 build asks for AVX-512, and a machine
+# without them answers with SIGILL: the smoke would fail on a runner that
+# never had the instructions, and a red run that says nothing about the
+# tree is worse than no run.
+#
+# Linux keeps the CPU's features in /proc/cpuinfo; macOS keeps them in
+# the kernel's answer to sysctl.
+cpu_has_avx2() {
+    if [ -r /proc/cpuinfo ]; then
+        grep -q 'avx2' /proc/cpuinfo 2> /dev/null
+    else
+        sysctl -n machdep.cpu.leaf7_features 2> /dev/null | grep -q 'AVX2'
+    fi
+}
+
+cpu_has_avx512() {
+    if [ -r /proc/cpuinfo ]; then
+        grep -q 'avx512' /proc/cpuinfo 2> /dev/null
+    else
+        sysctl -n machdep.cpu.leaf7_features 2> /dev/null | grep -q 'AVX512'
+    fi
+}
+
 if [ "$target" = "$host" ]; then
-    smoke "name query over crates/" "walk ext:rs" || exit 1
-    smoke "content query over crates/" "grep:Listing" || exit 1
+    if [ "$variant" = "znver4" ] && ! cpu_has_avx512; then
+        echo "smoke: skipped (this machine has no AVX-512, and the Zen 4 build asks for it)"
+    elif [ "$variant" = "avx2" ] && ! cpu_has_avx2; then
+        echo "smoke: skipped (this machine has no AVX2, and the AVX2 build asks for it)"
+    else
+        smoke "name query over crates/" "walk ext:rs" || exit 1
+        smoke "content query over crates/" "grep:Listing" || exit 1
+    fi
 else
     echo "smoke: skipped (a binary for $target does not run here)"
 fi
@@ -290,14 +433,101 @@ cp "$exe_dir/rgxy" "$stage/"
 # the user the name the project has. A copy of the binary would be a
 # second binary to keep in step with the first.
 ln -sf searchctl "$stage/rgy"
-for doc in README.md MANUAL.md FORMATS.md COPYING NOTICE LICENSE-APACHE LICENSE-MIT LICENSE-MIT-FSEARCH; do
+# The documents the release carries, in ONE list: the build copies them into
+# the archive, and the build writes down their digests beside it. A list that
+# lives in two places is a list that drifts.
+documents="README.md MANUAL.md FORMATS.md COPYING NOTICE LICENSE-APACHE LICENSE-MIT LICENSE-MIT-FSEARCH"
+for doc in $documents; do
     [ -f "$repo/$doc" ] && cp "$repo/$doc" "$stage/"
+done
+
+# Every document the release promises is in the stage, or the build stops.
+#
+# The copy above is conditional -- a document the tree does not have is not
+# packed -- and the archive's member list names the documents either way, so
+# a tree without one produced an archive without it. And tar's complaint was
+# ignored: this script says "set -u" and not "set -e", so the build carried
+# on and announced "packed" over an archive that was missing a licence file.
+#
+# A release archive without a licence file is a release whose licence story
+# is broken, and it was announced as if it were whole.
+for doc in $documents; do
+    if [ ! -f "$stage/$doc" ]; then
+        echo "the release carries $doc and this tree does not have it: the archive would not" >&2
+        echo "  copy the document into the tree, or take it out of the release" >&2
+        exit 1
+    fi
+done
+
+# The picture the README shows travels with it.
+#
+# The archive carries the README, and the README points at the picture by
+# a relative path, so an archive without the picture has a README with a
+# hole in it: the link is broken exactly where the reader is offline.
+# The path inside the archive is the one the README uses, so the link
+# works where the README is.
+# The pictures and the clips the README points at.
+#
+# The archive carries the README, and the README points at these by a
+# relative path, so an archive without them has a README with holes in it:
+# the links are broken exactly where the reader is offline. The path inside
+# the archive is the one the README uses, so the links work where the README
+# is.
+#
+# ONE list, and three parts of the build read it: the copy below, the
+# archive's member list, and the digests the publish step compares with the
+# tree. A list that lives in three places is a list that drifts.
+media="docs/screenshots/rgxy.png docs/screenshots/gui-filters.png docs/videos/gui-filters.mp4 docs/videos/term-tui.mp4"
+for media_file in $media; do
+    if [ ! -f "$repo/$media_file" ]; then
+        echo "the release carries $media_file and this tree does not have it: the archive would not" >&2
+        echo "  the README points at it, and an archive without it is a README with a hole in it" >&2
+        exit 1
+    fi
+    mkdir -p "$stage/$(dirname "$media_file")"
+    cp "$repo/$media_file" "$stage/$media_file"
 done
 
 archive_name="rgy-v$version-$asset.tar.gz"
 archive="$out/$archive_name"
-tar -czf "$archive" -C "$stage" searchctl searchd rgy-autostart rgxy rgy README.md MANUAL.md FORMATS.md COPYING NOTICE LICENSE-APACHE LICENSE-MIT LICENSE-MIT-FSEARCH
+files="searchctl searchd rgy-autostart rgxy rgy README.md MANUAL.md FORMATS.md COPYING NOTICE LICENSE-APACHE LICENSE-MIT LICENSE-MIT-FSEARCH"
+files="$files $media"
+if ! tar -czf "$archive" -C "$stage" $files; then
+    echo "the archive was not packed: tar failed, and a release without its archive is no release" >&2
+    exit 1
+fi
 echo "packed: .dist/$archive_name"
+
+# The digests of the documents that went into the archive.
+#
+# The archive's own digest proves the archive is the one this build made. It
+# says nothing about what is INSIDE it: a release built before the README's
+# last edit carries the older README, and its digest matches perfectly.
+#
+# So the build writes down what it packed -- the digest of every document it
+# copied from the tree -- beside the archive, and the publish step reads it
+# back and compares each digest with the tree's. The digests are of the
+# tree's files, and the tree's files are the same on every machine: the text
+# files are LF (the .gitattributes say so) and the picture is binary. So the
+# file this build wrote here is the file the other platform's build wrote
+# there.
+docs_dir="$out/documents"
+mkdir -p "$docs_dir"
+docs_file="$docs_dir/$archive_name.sha256"
+docs_tmp="$docs_file.tmp"
+: > "$docs_tmp"
+for doc in $documents; do
+    [ -f "$repo/$doc" ] || continue
+    printf '%s  %s\n' "$(rgy_sha256 "$repo/$doc")" "$doc" >> "$docs_tmp"
+done
+for media_file in $media; do
+    printf '%s  %s\n' "$(rgy_sha256 "$repo/$media_file")" "$media_file" >> "$docs_tmp"
+done
+# The ordinal order, so the two machines write the same bytes.
+LC_ALL=C sort -k2 "$docs_tmp" > "$docs_file"
+rm -f "$docs_tmp"
+docs_count=$(wc -l < "$docs_file" | tr -d '[:space:]')
+echo "documents: .dist/documents/$archive_name.sha256 ($docs_count files)"
 
 # --- 7. the digest ----------------------------------------------------------
 #
@@ -318,7 +548,7 @@ if [ -f "$sums" ]; then
     version_re=$(printf '%s' "$version" | sed 's/[.[\*^$\\]/\\&/g')
     grep "  rgy-v$version_re-" "$sums" | tr -d '\r' | grep -v "  $archive_name[[:space:]]*\$" >> "$tmp" || true
 fi
-sha=$(sha256sum "$archive" | cut -d' ' -f1)
+sha=$(rgy_sha256 "$archive")
 printf '%s  %s\n' "$sha" "$archive_name" >> "$tmp"
 # The order is the ordinal one, and not the locale's: the file is read by
 # `sha256sum -c` everywhere and compared byte for byte between the

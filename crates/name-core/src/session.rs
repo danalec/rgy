@@ -43,6 +43,21 @@
 //! the index as before -- which is right, because the next keystroke would
 //! have to look at all of them anyway.
 //!
+//! ## A refused query is refused here too
+//!
+//! A query the engine refuses -- an unknown `type:`, an uncompilable
+//! `re:` -- matches nothing on every route: the fresh search fails closed
+//! at its own door. The session fails closed the same way. It does not
+//! search the index, and it does not answer from the result set it
+//! holds: the refusal is a property of the query, not of the route that
+//! answers it, and a session that answered a refused query with hits
+//! would be a fail-open with the engine's own rule as the hole.
+//!
+//! The refusal is not part of the query's key, so a refused query can
+//! carry the key of the query before it -- which is exactly why the
+//! re-rank and the replay have to be told about it rather than found out
+//! from the key.
+//!
 //! ## What the session does not change
 //!
 //! The answers are the answers a fresh search gives: the same [`Searcher`],
@@ -153,7 +168,22 @@ impl Session {
     /// The session is filled with what the search matched, so the next
     /// keystroke can re-rank it. The answers are the same either way: the
     /// re-rank path is only taken when it is provably the same set.
+    ///
+    /// A query the engine refused answers nothing here too, the way it
+    /// answers nothing on the fresh path.
     pub fn search(&self, searcher: &Searcher<'_>, q: &Query) -> Vec<Hit> {
+        // Fail closed at the door, the way the fresh path does.
+        //
+        // The session is an optimisation, and an optimisation that answers
+        // a refused query is a fail-open: the fresh path answers nothing
+        // for a query with an unknown `type:` or an uncompilable `re:`,
+        // and this path searched the index and answered with the tree. A
+        // client that named a session got hits where a client that did
+        // not got none, and a refusal the engine made is a refusal of the
+        // query -- not of the route that answers it.
+        if q.never {
+            return self.fail_closed(searcher, q);
+        }
         // The session's entries are only good for the index they were
         // matched against. A different revision is a different index, and
         // the entries mean something else now.
@@ -180,6 +210,29 @@ impl Session {
                 hits
             }
         }
+    }
+
+    /// The answer to a query the engine refused, and what the session
+    /// keeps of it.
+    ///
+    /// The answer is the fresh path's own: the searcher is asked, and it
+    /// refuses at its own door ([`Searcher::search`]). There is no second
+    /// copy of the rule here to drift from the searcher's -- the session
+    /// asks the engine, and the engine says no.
+    ///
+    /// The session keeps nothing. A refused query matches nothing, so a
+    /// result set left behind is a result set a later query could be
+    /// answered from, and the refused query admitted no entry at all. The
+    /// next normal query is therefore answered fresh: the session gives
+    /// up its optimisation rather than keep it on a query that never
+    /// matched. The answer is the same either way -- that is the whole
+    /// promise the session makes.
+    fn fail_closed(&self, searcher: &Searcher<'_>, q: &Query) -> Vec<Hit> {
+        self.clear();
+        // The answer came from neither the session nor the index: it is
+        // the refusal itself.
+        self.reranked.store(false, core::sync::atomic::Ordering::Relaxed);
+        searcher.search(q)
     }
 
     /// The hits of `q`, re-ranked from the session's entries.
@@ -319,7 +372,16 @@ impl Session {
     /// replay. And it is the *whole* query that has to be the same: a
     /// query whose text changed has a different answer, and replaying the
     /// old one would be a stale answer.
+    ///
+    /// A query the engine refused is never replayed: it matches nothing,
+    /// and the previous answer is the answer of another query.
     pub fn search_replaying_facets(&self, searcher: &Searcher<'_>, q: &Query) -> Vec<Hit> {
+        // The refusal is not part of the key, so a refused query can carry
+        // the key of the query before it -- and the replay below would
+        // hand back that query's answer for a query that matches nothing.
+        if q.never {
+            return self.fail_closed(searcher, q);
+        }
         let key = SessionKey::of(q);
         // The whole query is the same and the index has not moved: the
         // previous answer is the answer.
@@ -749,5 +811,107 @@ mod tests {
         assert_ne!(a, c, "a different filter is a different selection");
         assert!(!a.is_empty(), "the selection has a filter in it");
         assert!(Facets::of(&q("entry")).is_empty(), "a query with no filters has an empty selection");
+    }
+
+    /// A query that fails closed answers nothing on the session path,
+    /// exactly as it answers nothing on the fresh path.
+    ///
+    /// The fresh path fails closed at the door, and the session path did
+    /// not: it searched the index and answered with the tree. A client
+    /// that named a session got hits where a client that did not got
+    /// none, and the refusal is a property of the query -- not of the
+    /// route that answers it.
+    #[test]
+    fn a_query_that_fails_closed_answers_nothing_on_the_session_path() {
+        let live = live(200);
+        let searcher = Searcher { live: &live };
+        let bad = q("invoice type:banana");
+        assert!(bad.never, "the query failed closed");
+        // A session with nothing in it.
+        let cold = Session::new(1);
+        assert_eq!(paths(&cold.search(&searcher, &bad)), paths(&searcher.search(&bad)), "an empty session refuses the query too");
+        // A session with a result set in it: the refusal has to hold
+        // in spite of it.
+        let session = Session::new(2);
+        let first = session.search(&searcher, &q("invoice"));
+        assert!(!first.is_empty(), "the session answered something");
+        let got = session.search(&searcher, &bad);
+        let fresh = searcher.search(&bad);
+        assert!(fresh.is_empty(), "the fresh path answers nothing");
+        assert_eq!(paths(&got), paths(&fresh), "the session path answers what the fresh path gives: {:?} vs {:?}", paths(&got), paths(&fresh));
+    }
+
+    /// A refused query is not answered from the previous result set.
+    ///
+    /// The re-rank answers from the session's entries without touching
+    /// the index, and the refusal is a property of the query: a query the
+    /// engine refuses matches nothing, and the previous result set is no
+    /// exception to that. The refusal is not part of the key either, so
+    /// the re-rank would have taken the refused query -- the key is the
+    /// key of the query before it.
+    #[test]
+    fn a_refused_query_is_not_answered_from_the_previous_result_set() {
+        let live = live(200);
+        let searcher = Searcher { live: &live };
+        let session = Session::new(1);
+        // A query with few hits: its result set is complete, so the next
+        // keystroke is answered from it.
+        session.search(&searcher, &q("invoice"));
+        assert!(session.is_complete(), "the result set is complete");
+        session.search(&searcher, &q("invoice.p"));
+        assert!(session.last_reranked(), "the narrowing query was re-ranked");
+        // The same query with a filter the engine refuses.
+        let bad = q("invoice.p type:banana");
+        assert!(bad.never, "the query failed closed");
+        let got = session.search(&searcher, &bad);
+        assert!(got.is_empty(), "a refused query is not answered from the previous result set");
+        assert!(!session.last_reranked(), "the answer came from neither the session nor the index");
+    }
+
+    /// A refused query is not answered by a replay.
+    ///
+    /// The replay hands back the previous answer when the whole query is
+    /// the same, and the refusal is not part of the query's key: the
+    /// refused query carries the key of the query before it, so the
+    /// replay would have handed back that query's answer.
+    #[test]
+    fn a_refused_query_is_not_answered_by_a_replay() {
+        let live = live(200);
+        let searcher = Searcher { live: &live };
+        let session = Session::new(1);
+        let first = session.search_replaying_facets(&searcher, &q("invoice.p ext:pdf"));
+        assert!(!first.is_empty(), "the search answered something");
+        // The same query with a filter the engine refuses.
+        let bad = q("invoice.p ext:pdf type:banana");
+        assert!(bad.never, "the query failed closed");
+        let got = session.search_replaying_facets(&searcher, &bad);
+        let fresh = searcher.search(&bad);
+        assert!(fresh.is_empty(), "the fresh path answers nothing");
+        assert_eq!(paths(&got), paths(&fresh), "the session path answers what the fresh path gives: {:?} vs {:?}", paths(&got), paths(&fresh));
+        assert!(got.is_empty(), "a refused query is not answered by a replay");
+    }
+
+    /// The session keeps nothing after a refused query, and the next
+    /// normal query still answers.
+    ///
+    /// The refusal leaves nothing behind: a result set kept under a
+    /// refused query is a result set a later query could be answered
+    /// from, and the refused query admitted no entry at all. The next
+    /// normal query is therefore answered fresh -- the same answer, and
+    /// that is what the session promises.
+    #[test]
+    fn a_refused_query_leaves_the_session_empty_and_the_next_query_answers() {
+        let live = live(200);
+        let searcher = Searcher { live: &live };
+        let session = Session::new(1);
+        session.search(&searcher, &q("invoice"));
+        assert!(!session.is_empty(), "the session holds its result set");
+        session.search(&searcher, &q("invoice type:banana"));
+        assert!(session.is_empty(), "a refused query leaves the session holding nothing");
+        assert_eq!(session.len(), 0, "a refused query leaves no entries behind");
+        let got = session.search(&searcher, &q("invoice"));
+        let fresh = searcher.search(&q("invoice"));
+        assert!(!got.is_empty(), "the session still answers");
+        assert_eq!(paths(&got), paths(&fresh), "the answer is the fresh one: {:?} vs {:?}", paths(&got), paths(&fresh));
     }
 }

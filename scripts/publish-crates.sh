@@ -60,19 +60,39 @@ say() {
 }
 
 dry_run=0
-# The help, before the options are read: the script's own header, the way
+
+# usage -- what the two scripts are for, in the same words in both.
+usage() {
+    printf '%s\n' "publish-crates [--dry-run]"
+    printf '\n'
+    printf '%s\n' \
+        "Publishes this repository's crates to crates.io in an order that keeps" \
+        "every published crate installable: a crate goes out after every crate" \
+        "it depends on, because crates.io resolves a dependency when a crate is" \
+        "INSTALLED and not when it is published. The order is computed from the" \
+        "manifests themselves (scripts/publish-plan.py), so it cannot be" \
+        "forgotten." \
+        "" \
+        "A real run needs CARGO_REGISTRY_TOKEN in the environment. The vendored" \
+        "rgx crates are upstream's and are never published here." \
+        "" \
+        "Exits 0 when every crate the plan names is published, 1 when the run" \
+        "stops before that."
+}
+
+# The help, before the options are read: the script's own usage, the way
 # the twin prints it.
-for _arg in "$@"; do
-    case "$_arg" in
-        -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
-    esac
-done
+. "$here/lib/options.sh"
+if rgy_help_requested "$@"; then
+    usage
+    exit 0
+fi
+
 # The options, read by the helper the two twins share: the long spelling
 # and the PowerShell one are the same option, and an option neither of
 # them knows is an error on both platforms -- not a silent "do the real
 # thing", which in this directory means publishing to crates.io.
-. "$here/lib/options.sh"
-rgy_read_options "dryrun=dry_run" "" "$@"
+rgy_read_options "dryrun=dry_run" "" "" "$@"
 
 # The plan is computed by a helper both twins call, so the two print the
 # same plan and not two plans that look alike.

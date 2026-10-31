@@ -498,9 +498,9 @@ fn draw_icon(hdc: HDC, icon: HICON, x: i32, y: i32, size: i32) {
     unsafe {
         DrawIconEx(
             hdc,
-            icon,
             x,
             y,
+            icon,
             size,
             size,
             0,

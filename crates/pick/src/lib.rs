@@ -61,10 +61,16 @@ extern crate std;
 // feature, and so are the imports it needs. A build without it carries
 // the vocabulary and the decisions, and not one line that touches the
 // machine: which picker, and what its exit status means.
-#[cfg(any(test, feature = "std"))]
+//
+// The gate is the feature and not `any(test, feature = "std")`: the test
+// target without the feature is a target that uses neither of these, and
+// an import that is there and unused is a warning in a build that is
+// supposed to be clean. The gate and the uses have to agree, and the
+// uses are all behind the feature.
+#[cfg(feature = "std")]
 use alloc::boxed::Box;
 use alloc::string::String;
-#[cfg(any(test, feature = "std"))]
+#[cfg(feature = "std")]
 use alloc::string::ToString;
 use alloc::vec::Vec;
 
@@ -89,6 +95,19 @@ pub const NUL_CAPABLE: &[&str] = &["fzf", "sk"];
 /// answer the NUL-separated list the crate writes. First hit on `PATH`
 /// wins.
 pub const CANDIDATES: &[&str] = NUL_CAPABLE;
+
+/// `ETXTBSY`, the errno a platform says "this file is open for writing".
+///
+/// It is 26 on Linux, on macOS and on the BSDs, so the number is the same
+/// on every platform this crate runs a picker on. Windows has no such a
+/// refusal — and 26 there is another error entirely — so the wait that
+/// uses it is a unix one.
+///
+/// The gate is the `std` feature as well: the number belongs to the wait,
+/// and the wait belongs to the machine.
+#[cfg(feature = "std")]
+#[cfg(unix)]
+const ETXTBSY: i32 = 26;
 
 /// How the picker reads its list and writes its selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -289,6 +308,46 @@ pub fn pick_records(search: Search, req: &Request<'_>) -> Result<(i32, Vec<Vec<u
     run(search, req, &plan)
 }
 
+/// Starts the picker, and waits for the platform to let it run.
+///
+/// A program that is open for writing cannot be executed: the kernel
+/// refuses with `ETXTBSY`, and a picker that somebody is writing — a
+/// script that is being edited, a file an installer is still copying —
+/// is a picker that is there. The refusal is the platform's timing and
+/// not the picker's absence, so the start is tried again for a moment:
+/// a caller that reads "the picker cannot run" about a picker that is
+/// being written is told a falsehood.
+///
+/// The window is short on purpose: the write that holds the file is
+/// released as soon as it is done, and a picker that stays busy for
+/// longer than this is busy for a reason the caller has to know about.
+#[cfg(feature = "std")]
+#[cfg(unix)]
+fn spawn(command: &mut std::process::Command) -> std::io::Result<std::process::Child> {
+    use std::time::{Duration, Instant};
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match command.spawn() {
+            Ok(child) => return Ok(child),
+            Err(e) if e.raw_os_error() == Some(ETXTBSY) && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Starts the picker.
+///
+/// Windows has no refusal of this kind: a program that is open for
+/// writing is run all the same.
+#[cfg(feature = "std")]
+#[cfg(not(unix))]
+fn spawn(command: &mut std::process::Command) -> std::io::Result<std::process::Child> {
+    command.spawn()
+}
+
 /// Runs the picker and reads back what it chose.
 #[cfg(feature = "std")]
 fn run(search: Search, req: &Request<'_>, plan: &Plan) -> Result<(i32, Vec<Vec<u8>>)> {
@@ -306,8 +365,7 @@ fn run(search: Search, req: &Request<'_>, plan: &Plan) -> Result<(i32, Vec<Vec<u
         // The picker draws on the terminal it opens for itself; its own
         // complaints belong on our stderr, not folded into a pipe.
         .stderr(Stdio::inherit());
-    let mut child = command
-        .spawn()
+    let mut child = spawn(&mut command)
         .map_err(|e| alloc::format!("the picker cannot run {}: {e}", plan.binary))?;
 
     let stdin = child.stdin.take().expect("stdin was piped");
@@ -435,10 +493,7 @@ impl<W: std::io::Write> Reflow<W> {
     /// not exist. A line reader strips the carriage return that ends a
     /// line too, so a record that carries one is not a line either.
     fn carryable(&self) -> bool {
-        match self.to {
-            Separator::Line => carries_line(&self.record),
-            Separator::Nul => !self.record.contains(&0),
-        }
+        carryable_in(self.to, &self.record)
     }
 
     /// How many records the picker could not be handed.
@@ -536,6 +591,30 @@ pub fn carries_line(record: &[u8]) -> bool {
     !record.contains(&b'\n') && !record.contains(&b'\r')
 }
 
+/// Whether a record can be handed over whole, in the separator it will be
+/// written with.
+///
+/// A record that carries the byte the reader separates on is one the reader
+/// cannot read whole, and half of a path is a path that does not exist. A
+/// line reader strips the carriage return that ends a line too, so a
+/// record that carries one is not a line either.
+///
+/// The rule is one rule for every separator: the list the picker is handed
+/// and the selection it hands back are read by the same reader, and a
+/// record that is left out of one and written in the other is a record the
+/// caller gets back broken.
+///
+/// The rule is public, and not behind the `std` feature: it is a rule
+/// about bytes, and the crate that carries it is `no_std`. A rule that
+/// only existed with an operating system under it would be a rule the
+/// embedded caller could not ask about.
+pub fn carryable_in(separator: Separator, record: &[u8]) -> bool {
+    match separator {
+        Separator::Line => carries_line(record),
+        Separator::Nul => !record.contains(&0),
+    }
+}
+
 /// The warning for the paths that could not be carried as lines.
 ///
 /// A path that is missing from the list is a path the user has to be
@@ -581,6 +660,12 @@ pub fn pick(search: Search, req: &Request<'_>) -> Result<i32> {
 /// that carries a line break would be two lines for whoever reads it
 /// back, and half of a path is a path that does not exist. Such a
 /// record is left out, and the count says how many were left out.
+///
+/// The rule is the separator's own: a record that carries the byte the
+/// reader separates on is one the reader cannot read whole, whichever
+/// separator that is. The list the picker was handed was filtered by the
+/// same rule, and a selection that is printed without it would hand back
+/// a record the caller cannot read.
 #[cfg(feature = "std")]
 fn print_selection<W: std::io::Write>(
     records: &[Vec<u8>],
@@ -589,7 +674,7 @@ fn print_selection<W: std::io::Write>(
 ) -> std::io::Result<()> {
     let mut dropped = 0;
     for record in records {
-        if req.separator == Separator::Line && !carries_line(record) {
+        if !carryable_in(req.separator, record) {
             dropped += 1;
             continue;
         }
@@ -924,6 +1009,38 @@ mod tests {
         assert!(text.contains("d.txt"), "{text:?}");
     }
 
+    /// The rule is the separator's own.
+    ///
+    /// A record that carries the byte the reader separates on is one the
+    /// reader cannot read whole: a line reader splits on the newline, and a
+    /// NUL reader splits on the NUL byte. The list the picker was handed is
+    /// filtered by the same rule, so a selection that was printed without it
+    /// would hand back a record the caller cannot read — and the caller
+    /// would read two records where there is one.
+    #[cfg(feature = "std")]
+    #[test]
+    fn a_selection_printed_as_nul_leaves_the_broken_records_out() {
+        let args: Vec<String> = Vec::new();
+        let mut req = Request::new(&args);
+        req.separator = Separator::Nul;
+        let mut out = Vec::new();
+        print_selection(
+            &[b"a.txt".to_vec(), b"b\0c.txt".to_vec(), b"d.txt".to_vec()],
+            &req,
+            &mut out,
+        )
+        .expect("the selection is printed");
+        let text = String::from_utf8(out).expect("the output is text");
+        assert_eq!(
+            text.split('\0').filter(|r| !r.is_empty()).count(),
+            2,
+            "one record for each record that fits: {text:?}"
+        );
+        assert!(text.contains("a.txt"), "{text:?}");
+        assert!(text.contains("d.txt"), "{text:?}");
+        assert!(!text.contains("b"), "{text:?}");
+    }
+
     #[cfg(feature = "std")]
     #[cfg(any(windows, unix))]
     struct Fake {
@@ -1050,6 +1167,58 @@ exit "$1"
             fake.lines(),
             ["src/a.txt".to_string(), "src/c.txt".to_string()],
             "the child must not receive a split record"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A picker that is being written is a picker that is there.
+    ///
+    /// The kernel refuses to execute a file that is open for writing, and
+    /// the refusal is the platform's timing and not the picker's absence:
+    /// the crate waits for the platform to let the picker run.
+    #[cfg(feature = "std")]
+    #[cfg(unix)]
+    #[test]
+    fn the_picker_runs_when_the_platform_was_holding_it() {
+        let dir = std::env::temp_dir().join(format!("rgy-pick-busy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("the test directory");
+        let script = dir.join("picker.sh");
+        std::fs::write(&script, "#!/bin/sh\necho PICKED\nexit 0\n").expect("the script");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let meta = std::fs::metadata(&script).expect("the script");
+            let mut perms = meta.permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script, perms).expect("the script runs");
+        }
+        // The file is held open for writing, the way a process that is
+        // still writing it holds it: the platform refuses to execute it
+        // while that lasts.
+        let held = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&script)
+            .expect("the hold");
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            drop(held);
+        });
+        let binary = script.to_string_lossy().into_owned();
+        let req = Request {
+            args: &[],
+            binary: Some(&binary),
+            separator: Separator::Nul,
+            order: Order::Sort,
+        };
+        let search: Search = Box::new(
+            |_out: &mut (dyn std::io::Write + Send + 'static)| -> Result<bool> { Ok(true) },
+        );
+        let (code, chosen) = pick_records(search, &req).expect("the picker runs");
+        release.join().expect("the hold is released");
+        assert_eq!(code, 0, "a picker that chose something exits 0");
+        assert!(
+            chosen.iter().any(|record| record.starts_with(b"PICKED")),
+            "the selection must come back; got {chosen:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

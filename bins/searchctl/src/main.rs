@@ -27,6 +27,7 @@
 use std::time::{Duration, Instant};
 
 use rgy_discovery::interrupt;
+use rgy_discovery::walk::KIND_DIR;
 use rgy_discovery_dispatch::source_for;
 use rgy_name_core::content::{self, Grep};
 use rgy_name_core::live::Live;
@@ -115,6 +116,17 @@ fn parse_age(s: &str) -> Option<std::time::Duration> {
         .map(|n| std::time::Duration::from_secs(n.saturating_mul(mult)))
 }
 
+/// The limit the CLI honours, on every route.
+///
+/// The limit is the caller's, but it is the same limit on both routes: the
+/// daemon's reader clamps the request to the protocol's cap, and a local
+/// route that honoured a bigger one would answer a question the daemon
+/// answers differently — the same flag, the same tool, two answers. The
+/// cap is the protocol's, so the two routes cannot drift apart again.
+fn clamp_limit(limit: usize) -> usize {
+    limit.min(rgy_proto::MAX_LIMIT)
+}
+
 fn main() {
     // The console decides how the UTF-8 bytes below are decoded, so it is
     // put into UTF-8 before anything is printed. A
@@ -155,6 +167,7 @@ fn main() {
                 limit = args
                     .get(i)
                     .and_then(|s| s.parse().ok())
+                    .map(clamp_limit)
                     .unwrap_or_else(|| usage(2));
             }
             "--index" => {
@@ -213,6 +226,14 @@ fn main() {
     if query.is_empty() {
         usage(2);
     }
+
+    // A path that begins with `~` names the home directory. A POSIX shell
+    // expands it before the command ever runs and Windows PowerShell does
+    // not, so the tree expands it here: a search of a folder literally
+    // named `~` answers about nothing and does not say so, which is the one
+    // failure a reader cannot tell apart from an empty tree.
+    let root = rgy_engine::paths::expand_home(&root);
+    let index = index.map(|p| rgy_engine::paths::expand_home(&p));
 
     let opts = Opts {
         root,
@@ -366,6 +387,117 @@ fn obtain_index(opts: &Opts) -> Result<Index, String> {
     Ok(idx)
 }
 
+/// The path of a hit inside the tree, as the index spells it.
+///
+/// An overlay hit already carries its own path; reading it back from the
+/// index instead would index `parent[u32::MAX]` -- out of bounds -- and
+/// panic.
+fn hit_rel(searcher: &Searcher, hit: &Hit, buf: &mut Vec<u8>) -> String {
+    match &hit.over {
+        Some(p) => rgy_engine::console::spell(p),
+        None => {
+            searcher.live.base.path(hit.idx as usize, buf);
+            rgy_engine::console::spell(buf)
+        }
+    }
+}
+
+/// The path of a hit, as the platform spells it: the searched tree, so a
+/// hit is clickable.
+///
+/// The bare path, and the path the picker is handed. What the picker
+/// hands back is what the CLI opens, so the mark the list prints is never
+/// glued to it.
+fn hit_path(rel: &str, root_disp: &str) -> String {
+    if rel.is_empty() {
+        root_disp.to_string()
+    } else {
+        let rel = rel.trim_start_matches(['/', '\\']);
+        format!("{root_disp}{}{rel}", std::path::MAIN_SEPARATOR)
+    }
+}
+
+/// Whether the hit is a folder.
+///
+/// The index knows and the path does not say: a folder's path is spelled
+/// like a file's. The base's kind byte says it for an indexed entry, and
+/// the overlay's own entry says it for the entries added since the last
+/// compaction.
+fn is_folder(live: &Live, hit: &Hit) -> bool {
+    match &hit.over {
+        Some(path) => live
+            .over
+            .get(path.as_slice())
+            .map_or_else(|| spelled_as_folder(path), |o| o.kind & 3 == KIND_DIR),
+        None => live.base.kind()[hit.idx as usize] & 3 == KIND_DIR,
+    }
+}
+
+/// Whether the path says it is a folder: it ends in the separator the
+/// platform spells a folder with.
+///
+/// The tree reads a path that way already -- `rgy_launcher`'s `IconKind`
+/// takes a trailing separator as a folder.
+fn spelled_as_folder(path: &[u8]) -> bool {
+    matches!(path.last(), Some(b'/') | Some(b'\\'))
+}
+
+/// The path as the list shows it.
+///
+/// A folder's path ends in the separator the platform spells a folder
+/// with, and a file's does not. The line is a path either way -- the same
+/// path, spelled the way the platform spells a folder -- so a script that
+/// reads the list still reads a path it can open, and the user tells a
+/// folder from a file without opening it.
+fn marked(path: &str, folder: bool) -> String {
+    if !folder || path.ends_with(['/', '\\']) {
+        return path.to_string();
+    }
+    format!("{path}{}", std::path::MAIN_SEPARATOR)
+}
+
+/// The JSON's folder field, in the wire's own spelling.
+///
+/// The field is additive: it is there only when the hit is a folder, so a
+/// reader that does not know it reads a hit without it as a file. The
+/// path in the JSON stays the path -- the field is what says the hit is a
+/// folder.
+fn folder_field(folder: bool) -> &'static str {
+    if folder { ",\"folder\":true" } else { "" }
+}
+
+/// What the CLI says about a name answer the daemon gave.
+///
+/// The daemon's answer carries the fact — whether it is whole — and the
+/// sentence is the protocol's own, the one the daemon's content answer
+/// says too: two clients that read the same daemon have to say the same
+/// words about the same answer. The command line's own search has no
+/// daemon to ask, so it decides the fact with the protocol's rule and says
+/// the same sentence.
+fn daemon_name_note(outcome: &rgy_proto::SearchOutcome) -> Option<&'static str> {
+    if outcome.complete {
+        None
+    } else {
+        Some(rgy_proto::client::ANSWER_STOPS_AT_THE_LIMIT)
+    }
+}
+
+/// What the CLI says about the name answer the command line produced.
+///
+/// The rule is the protocol's — the one every producer of a name answer
+/// follows: the daemon's whole tree and its scope, the fresh search and
+/// the session's re-rank, and this search too — and the sentence is the
+/// protocol's own, so the two routes say the same words about the same
+/// answer. A flag that changes where the answer comes from must not change
+/// what the answer says about itself.
+fn local_name_note(hits: usize, limit: usize) -> Option<&'static str> {
+    if rgy_proto::name_answer_is_complete(hits, limit) {
+        None
+    } else {
+        Some(rgy_proto::client::ANSWER_STOPS_AT_THE_LIMIT)
+    }
+}
+
 /// Hand the results to a picker and print what the user chose.
 ///
 /// The daemon first, when it answers: its index is warm, so the picker
@@ -415,15 +547,31 @@ fn run_pick(opts: &Opts, query: &str) -> Result<i32, String> {
         }
     };
 
+    // What the answer says about itself, when it is not the whole answer.
+    //
+    // The search runs on the picker's own thread, while the picker is up
+    // and owns the terminal: a note written then lands in the middle of
+    // its picture. So the fact is carried out of the search and said
+    // after the picker is done.
+    let note = std::sync::Arc::new(std::sync::Mutex::new(None::<&'static str>));
+
     if let Some(mut c) = client.take() {
         let limit = opts.limit;
         let q = query.to_string();
+        let carried = note.clone();
         rgy_engine::errln!("searchctl: asking the running daemon (its own tree, not --root)");
         let search = Box::new(
             move |out: &mut (dyn Write + Send + 'static)| -> Result<bool, String> {
                 let outcome = c.search(&q, limit).map_err(|e| e.to_string())?;
+                // The list the picker is given may be a page of a longer
+                // one, and the picker cannot say so: the user chooses from
+                // what it shows.
+                *carried.lock().unwrap() = daemon_name_note(&outcome);
                 let mut any = false;
                 for hit in &outcome.hits {
+                    // The record is the bare path: the picker hands the
+                    // line it chose back, and the CLI opens that. The
+                    // daemon's folder flag is not part of the path.
                     out.write_all(hit.path.as_bytes())
                         .map_err(|e| format!("the results could not reach the picker: {e}"))?;
                     out.write_all(&[0])
@@ -435,6 +583,9 @@ fn run_pick(opts: &Opts, query: &str) -> Result<i32, String> {
         );
         let (code, records) = rgy_pick::pick_records(search, &req)?;
         print_selection(&records);
+        if let Some(why) = *note.lock().unwrap() {
+            eprintln!("searchctl: {why}");
+        }
         return Ok(code);
     }
 
@@ -450,31 +601,23 @@ fn run_pick(opts: &Opts, query: &str) -> Result<i32, String> {
     }
     let root_disp = opts.root.trim_end_matches(['/', '\\']).to_string();
     let limit = opts.limit;
+    let carried = note.clone();
     let search = Box::new(
         move |out: &mut (dyn Write + Send + 'static)| -> Result<bool, String> {
             let searcher = Searcher { live: &live };
             let hits = searcher.search_alternatives(&alts.alts, limit);
+            // The list the picker is given may be a page of a longer one,
+            // and the picker cannot say so: the user chooses from what it
+            // shows.
+            *carried.lock().unwrap() = local_name_note(hits.len(), limit);
             let mut buf = Vec::new();
             let mut any = false;
             for h in &hits {
-                let owned;
-                let rel: &str = match &h.over {
-                    Some(p) => {
-                        owned = rgy_engine::console::spell(p);
-                        &owned
-                    }
-                    None => {
-                        searcher.live.base.path(h.idx as usize, &mut buf);
-                        owned = rgy_engine::console::spell(&buf);
-                        &owned
-                    }
-                };
-                let path = if rel.is_empty() {
-                    root_disp.clone()
-                } else {
-                    let rel = rel.trim_start_matches(['/', '\\']);
-                    format!("{root_disp}{}{rel}", std::path::MAIN_SEPARATOR)
-                };
+                // The record is the bare path, for the same reason the
+                // daemon's is: the picker hands the line back and the CLI
+                // opens it. The mark the list prints is not glued to it.
+                let rel = hit_rel(&searcher, h, &mut buf);
+                let path = hit_path(&rel, &root_disp);
                 out.write_all(path.as_bytes())
                     .map_err(|e| format!("the results could not reach the picker: {e}"))?;
                 out.write_all(&[0])
@@ -486,6 +629,9 @@ fn run_pick(opts: &Opts, query: &str) -> Result<i32, String> {
     );
     let (code, records) = rgy_pick::pick_records(search, &req)?;
     print_selection(&records);
+    if let Some(why) = *note.lock().unwrap() {
+        eprintln!("searchctl: {why}");
+    }
     Ok(code)
 }
 
@@ -575,6 +721,15 @@ fn run_daemon(opts: &Opts, query: &str) -> Result<(), String> {
             // answer that does not say so is an answer that looks whole.
             eprintln!("searchctl: {why}");
         }
+        // The reasons are the other half of the same fact: the count says
+        // how many files were not read, and the reasons say why, and which
+        // file it was when the daemon knows. The daemon's own client prints
+        // them, and a CLI that dropped them would leave the user guessing
+        // whether the file was empty, locked, or never there -- while the
+        // CLI's own route, one code path away, says it.
+        for reason in outcome.skip_reasons() {
+            eprintln!("searchctl: {reason}");
+        }
         if opts.explain {
             rgy_engine::errln!(
                 "searchctl: the running daemon answered the content layer in {} us",
@@ -600,6 +755,15 @@ fn run_daemon(opts: &Opts, query: &str) -> Result<(), String> {
             "searchctl: {}",
             rgy_pick::uncarryable_paths(printed.dropped)
         );
+    }
+    if let Some(why) = daemon_name_note(&outcome) {
+        // The daemon says whether its answer is whole, and the name route
+        // says it too: a name answer that stopped at the limit is a page
+        // of a longer list, and a page that does not say so reads as the
+        // whole list. The content route above already says it, and a flag
+        // that changes where the answer comes from must not change what
+        // the answer says about itself.
+        eprintln!("searchctl: {why}");
     }
     if opts.explain {
         rgy_engine::errln!(
@@ -634,6 +798,10 @@ struct Printed {
 /// query matched when the daemon could say which they were — the daemon
 /// leaves the span empty when it could not, and a span that guessed would
 /// be a lie in the place the user looks first.
+///
+/// The daemon says which of its hits are folders, and the answer says it
+/// too: a folder's path is spelled the way the platform spells a folder,
+/// and the JSON carries the wire's own field for it.
 fn daemon_name_lines(hits: &[rgy_proto::Hit], json: bool) -> Printed {
     let mut printed = Printed {
         lines: Vec::new(),
@@ -651,15 +819,21 @@ fn daemon_name_lines(hits: &[rgy_proto::Hit], json: bool) -> Printed {
                     .collect::<Vec<_>>()
                     .join(",")
             });
+            // The daemon says which of its hits are folders, and the JSON
+            // says it too: the field is the wire's own, and it is there
+            // only for a folder.
+            let folder = folder_field(hit.folder);
             printed.lines.push(match matched {
                 Some(m) => format!(
-                    "{{\"path\":\"{esc}\",\"score\":{},\"match\":[{m}]}}",
+                    "{{\"path\":\"{esc}\",\"score\":{},\"match\":[{m}]{folder}}}",
                     hit.score
                 ),
-                None => format!("{{\"path\":\"{esc}\",\"score\":{}}}", hit.score),
+                None => format!("{{\"path\":\"{esc}\",\"score\":{}{folder}}}", hit.score),
             });
         } else if rgy_pick::carries_line(path.as_bytes()) {
-            printed.lines.push(path.clone());
+            // The folder's path, spelled the way the platform spells a
+            // folder: the line is a path, and it says what it is.
+            printed.lines.push(marked(path, hit.folder));
         } else {
             // The path cannot be one line, and half of it is a path that
             // does not exist.
@@ -963,39 +1137,21 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
     // hit by scanning made it quadratic.
     let hits = searcher.search_alternatives(&alts.alts, limit);
 
-    if hits.is_empty() {
-        // rg convention: 0 = matches, 1 = none, 2 = error.
-        std::process::exit(1);
-    }
     let mut out = Vec::new();
     let root_disp = root.trim_end_matches(['/', '\\']);
     // The paths that cannot be one line: the line is one path, and a
     // path that carries a line break is not one line.
     let mut dropped = 0usize;
     for h in &hits {
-        // An overlay hit already carries its own path. Reading it back from
-        // the index instead would index `parent[u32::MAX]` -- out of bounds --
-        // and panic.
-        let owned;
-        let rel: &str = match &h.over {
-            Some(p) => {
-                owned = rgy_engine::console::spell(p);
-                &owned
-            }
-            None => {
-                searcher.live.base.path(h.idx as usize, &mut out);
-                owned = rgy_engine::console::spell(&out);
-                &owned
-            }
-        };
+        let rel = hit_rel(&searcher, h, &mut out);
         // `Index::path` reconstructs from the root's children; show the
         // searched tree so a hit is clickable.
-        let path = if rel.is_empty() {
-            root_disp.to_string()
-        } else {
-            let rel = rel.trim_start_matches(['/', '\\']);
-            format!("{root_disp}{}{rel}", std::path::MAIN_SEPARATOR)
-        };
+        let path = hit_path(&rel, root_disp);
+        // The index says which of its hits are folders, and the path does
+        // not: a folder's path is spelled like a file's.
+        let is_dir = is_folder(searcher.live, h);
+        // The field is the wire's own, and it is there only for a folder.
+        let folder = folder_field(is_dir);
         if json {
             let esc = rgy_proto::escape_json_string(&path);
             // The characters the query matched: the span the score came
@@ -1004,7 +1160,7 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
             // is left out.
             let matched = match alts.alts.as_slice() {
                 [one] => {
-                    let name = rel.rsplit(['/', '\\']).next().unwrap_or(rel);
+                    let name = rel.rsplit(['/', '\\']).next().unwrap_or(&rel);
                     let chars =
                         rgy_name_core::name_query::matched_chars(name.as_bytes(), &one.tokens);
                     (!chars.is_empty()).then(|| {
@@ -1019,13 +1175,17 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
             };
             match matched {
                 Some(m) => rgy_engine::outln!(
-                    "{{\"path\":\"{esc}\",\"score\":{},\"match\":[{m}]}}",
+                    "{{\"path\":\"{esc}\",\"score\":{},\"match\":[{m}]{folder}}}",
                     h.score()
                 ),
-                None => rgy_engine::outln!("{{\"path\":\"{esc}\",\"score\":{}}}", h.score()),
+                None => {
+                    rgy_engine::outln!("{{\"path\":\"{esc}\",\"score\":{}{folder}}}", h.score())
+                }
             }
         } else if rgy_pick::carries_line(path.as_bytes()) {
-            rgy_engine::outln!("{path}");
+            // The folder's path, spelled the way the platform spells a
+            // folder: the line is a path, and it says what it is.
+            rgy_engine::outln!("{}", marked(&path, is_dir));
         } else {
             // The path cannot be one line, and half of it is a path that
             // does not exist.
@@ -1037,6 +1197,19 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
         // A path that is missing from the list is a path the user has to
         // be told about.
         eprintln!("searchctl: {}", rgy_pick::uncarryable_paths(dropped));
+    }
+    if let Some(why) = local_name_note(hits.len(), limit) {
+        // The local route says what the daemon's route says: the answer is
+        // a page of a longer list, or it is the whole list, and the reader
+        // has to know which. The rule is the protocol's — the one every
+        // producer of a name answer follows — and so is the sentence, so
+        // the same query asked of the daemon and of the local index says
+        // the same thing about the same answer.
+        eprintln!("searchctl: {why}");
+    }
+    if hits.is_empty() {
+        // rg convention: 0 = matches, 1 = none, 2 = error.
+        std::process::exit(1);
     }
     Ok(())
 }
@@ -1105,6 +1278,51 @@ mod tests {
         assert_eq!(
             printed.lines,
             vec![r#"{"path":"C:/a/hello.txt","score":12}"#.to_string()]
+        );
+    }
+
+    /// A folder is printed as a folder.
+    ///
+    /// The daemon says which of its hits are folders and the path does
+    /// not: a folder's path is spelled like a file's. The list prints the
+    /// folder's path the way the platform spells a folder — with the
+    /// separator at the end — so the line says what it is and stays a
+    /// path the user can open.
+    #[test]
+    fn a_folder_is_printed_as_a_folder() {
+        let hits = vec![
+            rgy_proto::Hit::new("C:/a/docs".into(), 12).with_folder(true),
+            rgy_proto::Hit::new("C:/a/notes.txt".into(), 9),
+        ];
+        let printed = daemon_name_lines(&hits, false);
+        assert_eq!(
+            printed.lines,
+            vec![
+                format!("C:/a/docs{}", std::path::MAIN_SEPARATOR),
+                "C:/a/notes.txt".to_string(),
+            ]
+        );
+    }
+
+    /// The JSON says which hits are folders.
+    ///
+    /// The field is the wire's own spelling, and it is additive: it is
+    /// there only when the hit is a folder, so a reader that does not
+    /// know it reads a hit without it as a file. The path in the JSON
+    /// stays the path — the field is what says the hit is a folder.
+    #[test]
+    fn the_json_says_which_hits_are_folders() {
+        let hits = vec![
+            rgy_proto::Hit::new("C:/a/docs".into(), 12).with_folder(true),
+            rgy_proto::Hit::new("C:/a/notes.txt".into(), 9),
+        ];
+        let printed = daemon_name_lines(&hits, true);
+        assert_eq!(
+            printed.lines,
+            vec![
+                r#"{"path":"C:/a/docs","score":12,"folder":true}"#.to_string(),
+                r#"{"path":"C:/a/notes.txt","score":9}"#.to_string(),
+            ]
         );
     }
 
@@ -1185,5 +1403,193 @@ mod tests {
         let printed = daemon_content_lines(&files, false);
         assert_eq!(printed.found, 0);
         assert!(printed.lines.is_empty(), "{printed:?}");
+    }
+
+    /// A tree with a folder and a file in it, and the hits over it.
+    ///
+    /// The index is the tree's own: an entry's kind byte is what says it
+    /// is a folder, and the path says nothing.
+    fn a_tree_with_a_folder_and_a_file() -> (Live, Vec<Hit>) {
+        use rgy_discovery::walk::{KIND_FILE, Listing, NONE, RawEnt};
+        let names = b"docsdocs.txt".to_vec();
+        let ents = vec![
+            RawEnt {
+                name_off: 0,
+                name_len: 4,
+                kind: KIND_DIR,
+                size: 0,
+                mtime: 7,
+                child: NONE,
+            },
+            RawEnt {
+                name_off: 4,
+                name_len: 8,
+                kind: KIND_FILE,
+                size: 3,
+                mtime: 7,
+                child: NONE,
+            },
+        ];
+        let ls = vec![Listing { id: 0, names, ents }];
+        let live = Live::with_root(Index::build(ls, 0, 1, b"/"), b"/");
+        let searcher = Searcher { live: &live };
+        let alts = Alternatives::parse("docs", "").expect("the query parses");
+        let hits = searcher.search_alternatives(&alts.alts, 10);
+        (live, hits)
+    }
+
+    /// The index says which of its hits are folders.
+    ///
+    /// The path does not: a folder's path is spelled like a file's, and
+    /// the CLI prints paths. The kind byte is what says it, and the
+    /// daemon's answer says it in its own field.
+    #[test]
+    fn the_index_says_which_hits_are_folders() {
+        let (live, hits) = a_tree_with_a_folder_and_a_file();
+        let folders = hits.iter().filter(|h| is_folder(&live, h)).count();
+        let files = hits.iter().filter(|h| !is_folder(&live, h)).count();
+        assert_eq!(folders, 1, "the folder is the folder");
+        assert_eq!(files, 1, "the file is the file");
+    }
+
+    /// The picker is handed the bare path.
+    ///
+    /// The picker hands the line it chose back and the CLI opens it: a
+    /// mark glued to the record would be a path that does not exist. The
+    /// mark belongs to the line the list prints, and only there.
+    #[test]
+    fn the_picker_is_handed_the_bare_path() {
+        let (live, hits) = a_tree_with_a_folder_and_a_file();
+        let searcher = Searcher { live: &live };
+        let folder = hits
+            .iter()
+            .find(|h| is_folder(&live, h))
+            .expect("the folder is a hit");
+        let mut buf = Vec::new();
+        let rel = hit_rel(&searcher, folder, &mut buf);
+        let record = hit_path(&rel, ".");
+        // The record is the path, and the path is not the mark.
+        assert!(!record.ends_with(std::path::MAIN_SEPARATOR), "{record}");
+        assert!(record.ends_with("docs"), "{record}");
+        // The line the list prints is the mark.
+        assert!(marked(&record, true).ends_with(std::path::MAIN_SEPARATOR));
+    }
+
+    /// The daemon's name answer says whether it is whole.
+    ///
+    /// The daemon's answer carries the fact — whether it is whole — and the
+    /// CLI says it: an answer the daemon says was cut at the limit is
+    /// reported as cut, and one it says is whole is not reported at all.
+    /// The words are the protocol's own, the sentence the protocol's client
+    /// turns the flag into, so the CLI is not a second spelling of it.
+    #[test]
+    fn the_daemon_name_answer_is_reported_as_cut_when_the_daemon_says_so() {
+        let cut = rgy_proto::SearchOutcome {
+            complete: false,
+            ..Default::default()
+        };
+        assert_eq!(
+            daemon_name_note(&cut),
+            Some(rgy_proto::client::ANSWER_STOPS_AT_THE_LIMIT),
+            "an answer the daemon says was cut is reported as cut"
+        );
+        assert_eq!(
+            cut.partial().as_deref(),
+            daemon_name_note(&cut),
+            "the CLI says what the protocol's client says"
+        );
+
+        let whole = rgy_proto::SearchOutcome {
+            complete: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            daemon_name_note(&whole),
+            None,
+            "an answer the daemon says is whole is not reported"
+        );
+    }
+
+    /// The local answer says whether it is the whole answer.
+    ///
+    /// The tree has two entries that match "docs": a limit of one cuts the
+    /// answer and the CLI has to say so, and a limit of two does not. The
+    /// measure is the protocol's rule on the list the search returned —
+    /// the same rule the daemon applies to the list it sends.
+    #[test]
+    fn the_local_answer_is_reported_as_cut_when_it_reached_the_limit() {
+        let (live, hits) = a_tree_with_a_folder_and_a_file();
+        let searcher = Searcher { live: &live };
+        let alts = Alternatives::parse("docs", "").expect("the query parses");
+        assert_eq!(hits.len(), 2, "the tree has two entries that match");
+
+        let cut = searcher.search_alternatives(&alts.alts, 1);
+        assert_eq!(cut.len(), 1, "the answer is a page");
+        assert_eq!(
+            local_name_note(cut.len(), 1),
+            Some(rgy_proto::client::ANSWER_STOPS_AT_THE_LIMIT),
+            "an answer that reached the limit is reported as cut"
+        );
+
+        let whole = searcher.search_alternatives(&alts.alts, 10);
+        assert_eq!(whole.len(), 2, "the answer is the whole list");
+        assert_eq!(
+            local_name_note(whole.len(), 10),
+            None,
+            "an answer under the limit is not reported as cut"
+        );
+    }
+
+    /// The two routes say the same words about the same answer.
+    ///
+    /// The daemon's answer carries the fact and the command line's own
+    /// search decides it with the protocol's rule; the sentence is the
+    /// protocol's in both, so a flag that changes where the answer comes
+    /// from does not change what the answer says about itself.
+    #[test]
+    fn the_two_routes_say_the_same_words() {
+        let outcome = rgy_proto::SearchOutcome {
+            complete: false,
+            ..Default::default()
+        };
+        assert_eq!(
+            daemon_name_note(&outcome),
+            local_name_note(10, 10),
+            "the daemon's answer and the command line's own answer say the same thing"
+        );
+        let whole = rgy_proto::SearchOutcome {
+            complete: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            daemon_name_note(&whole),
+            local_name_note(9, 10),
+            "and an answer under the limit is not reported by either"
+        );
+    }
+
+    /// The limit is the protocol's cap, on every route.
+    ///
+    /// The daemon's reader clamps the request to the cap, so a local route
+    /// that honoured a bigger one would answer a question the daemon
+    /// answers differently: the same flag, the same tool, two answers.
+    #[test]
+    fn the_limit_is_clamped_to_the_protocol_cap() {
+        assert_eq!(clamp_limit(50), 50, "a limit under the cap is the limit");
+        assert_eq!(
+            clamp_limit(rgy_proto::MAX_LIMIT),
+            rgy_proto::MAX_LIMIT,
+            "the cap is the cap"
+        );
+        assert_eq!(
+            clamp_limit(rgy_proto::MAX_LIMIT + 1),
+            rgy_proto::MAX_LIMIT,
+            "a limit over the cap is the cap"
+        );
+        assert_eq!(
+            clamp_limit(usize::MAX),
+            rgy_proto::MAX_LIMIT,
+            "a limit the flag cannot hold is the cap"
+        );
     }
 }

@@ -87,4 +87,23 @@ pub trait Source {
     /// and the two implementations answer it the two ways they can — the
     /// daemon ranks the whole index, the local one walks it.
     fn search(&mut self, query: &str, limit: usize) -> Answer;
+
+    /// How many entries the source holds, when it can say.
+    ///
+    /// `None` is "I do not know", and it is not zero: a source that
+    /// cannot say how big its index is has no count to show, and a
+    /// header that says "0" about an index of a thousand entries is a
+    /// wrong fact — and a wrong fact is worse than no fact, because
+    /// nobody reads a number looking for a lie.
+    ///
+    /// The default is `None`, so a source that cannot answer is not
+    /// obliged to: the trait is a shape, and the shape lets a source
+    /// keep quiet about what it does not know.
+    ///
+    /// The number is the source's own: a source that does not walk the
+    /// tree cannot know how big an index it does not have, so it says
+    /// what the machine that holds the index said.
+    fn indexed(&self) -> Option<usize> {
+        None
+    }
 }

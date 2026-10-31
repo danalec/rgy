@@ -435,6 +435,15 @@ mod tests {
     /// UTF-8 cannot be spelled on either. The path is written anyway --
     /// it is the only spelling there is -- and the count is said, so
     /// that a path the user cannot open is a path they were told about.
+    ///
+    /// The gate is the feature and not the platform: `spell` is the
+    /// std-only half of the console -- it writes to stderr and it keeps
+    /// the count of the paths it could not spell -- so a build without
+    /// the feature has no `spell` to test, and a test module that names
+    /// it anyway does not compile in the crate's own `no_std`
+    /// configuration. The rule is the one the other crates follow: a
+    /// test of a std-only thing stands down with the thing.
+    #[cfg(feature = "std")]
     #[test]
     fn a_path_that_cannot_be_spelled_is_written_and_said() {
         assert_eq!(spell(b"C:/a/notas.txt"), "C:/a/notas.txt");

@@ -165,6 +165,19 @@ vocabulary! {
     screen_refused_the_surface => "the screen refused the translucent surface",
         "o ecrã recusou a superfície translúcida";
 
+    // --- the name in the header ----------------------------------------------
+    //
+    // The graphical window's title and the terminal's header are two
+    // faces of the same launcher, and two faces that carry two names
+    // are a launcher the user has to learn twice: the window says
+    // "rgxy", so the terminal says it too, or the two faces disagree
+    // about what they are.
+    //
+    // The other name belongs to the tool that keeps an index in its own
+    // process, and that tool says its own.
+    brand_launcher => "rgxy", "rgxy";
+    brand_index => "zen-rs", "zen-rs";
+
     // --- the clipboard -------------------------------------------------------
     clipboard_is_busy => "the clipboard is busy", "a área de transferência está ocupada";
     clipboard_is_empty => "the clipboard has no text", "a área de transferência não tem texto";
@@ -199,6 +212,18 @@ vocabulary! {
     binary_file => "binary file · {} bytes", "ficheiro binário · {} bytes";
     empty_file => "(empty file)", "(ficheiro vazio)";
 
+    // --- the notification area -----------------------------------------------
+    // The words of the icon the launcher leaves in the notification area:
+    // the tip the shell shows when the pointer rests on it, and the two
+    // items of the menu the right button opens.
+    //
+    // They are here and not in the Windows crate because the vocabulary is
+    // the product's: a word a user reads is a word of the table.
+    tray_tip => "rgxy — search files, apps or commands",
+        "rgxy — buscar arquivos, apps ou comandos";
+    tray_search => "Search", "Buscar";
+    tray_quit => "Quit", "Sair";
+
     // --- the terminal's own words --------------------------------------------
     // The terminal is the launcher without a desktop, so it says the same
     // words in the same language.
@@ -211,6 +236,17 @@ vocabulary! {
     notice_unknown_command => "unknown command", "comando desconhecido";
     terminal_prose_search => "every keystroke is a whole-disk search",
         "cada tecla é uma busca a todo o disco";
+
+    // The header's count: how many entries the index holds, and the
+    // sentence for a count nobody knows.
+    //
+    // The second one is not decoration. Zero is a fact — "there is
+    // nothing here" — and a source that cannot say how big its index is
+    // must not be read as an empty one: a header that says "0" about an
+    // index of a thousand entries is a wrong fact, and a wrong fact is
+    // worse than a sentence that says the number is not known.
+    terminal_files_and_folders => "{} files and folders", "{} ficheiros e pastas";
+    terminal_count_unknown => "count not known", "contagem desconhecida";
 
     // --- the window's own words -------------------------------------------------
     // The words the window shows that the model does not say: the line under
@@ -274,6 +310,35 @@ vocabulary! {
     the_window_is_windows_only =>
         "the floating window is Windows-only for now; the terminal interface is the alternative",
         "a janela flutuante é só no Windows por agora; a interface de terminal é a alternativa";
+}
+
+/// Which program is showing the interface.
+///
+/// The launcher has two faces — the floating window and the terminal —
+/// and the window's title carries the launcher's name, so the terminal's
+/// header carries it too. The tool that keeps an index in its own
+/// process is a different program, and it says its own name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Brand {
+    /// The launcher: the window, and the terminal that stands in for it
+    /// where there is no desktop.
+    Launcher,
+    /// The tool that owns an index in its own process.
+    Index,
+}
+
+impl Brand {
+    /// The name, in the language of the table.
+    ///
+    /// The two names are the same in every language — they are the names
+    /// of programs, not sentences — but they come from the table anyway,
+    /// because a word a user reads is a word of the table.
+    pub fn word(self, text: &Text) -> &'static str {
+        match self {
+            Brand::Launcher => text.brand_launcher,
+            Brand::Index => text.brand_index,
+        }
+    }
 }
 
 /// Fill the holes of a sentence, in order.
@@ -389,6 +454,10 @@ mod tests {
             assert!(!text.placeholder.is_empty(), "{lang:?}");
             assert!(!text.no_daemon.is_empty(), "{lang:?}");
             assert!(!text.menu_has_the_keyboard.is_empty(), "{lang:?}");
+            assert!(!text.terminal_files_and_folders.is_empty(), "{lang:?}");
+            assert!(!text.terminal_count_unknown.is_empty(), "{lang:?}");
+            assert!(!text.brand_launcher.is_empty(), "{lang:?}");
+            assert!(!text.brand_index.is_empty(), "{lang:?}");
         }
     }
 
@@ -417,6 +486,25 @@ mod tests {
         assert_ne!(Text::ENGLISH.open, Text::PORTUGUESE.open);
         assert_ne!(Text::ENGLISH.placeholder, Text::PORTUGUESE.placeholder);
         assert_eq!(Text::ENGLISH.rgx, Text::PORTUGUESE.rgx);
+    }
+
+    #[test]
+    fn the_brand_says_the_name_of_the_program_that_shows_the_interface() {
+        // The launcher has two faces — the floating window and the
+        // terminal — and one name, and the window's title carries it, so
+        // the terminal's header carries it too.
+        assert_eq!(Brand::Launcher.word(Text::for_lang(Lang::English)), "rgxy");
+        assert_eq!(Brand::Index.word(Text::for_lang(Lang::English)), "zen-rs");
+
+        // A name is a name in every language.
+        assert_eq!(
+            Brand::Launcher.word(Text::for_lang(Lang::Portuguese)),
+            "rgxy"
+        );
+        assert_eq!(
+            Brand::Index.word(Text::for_lang(Lang::Portuguese)),
+            "zen-rs"
+        );
     }
 
     #[test]

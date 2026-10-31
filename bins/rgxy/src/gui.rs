@@ -685,6 +685,24 @@ fn handle(state: &mut State, event: Event) -> Control {
                 Control::Hide
             }
         }
+        Event::Show => {
+            // The window comes up, and it does not go down. The icon in
+            // the notification area asks with this: a double click is two
+            // clicks, and a toggle would show the window and hide it
+            // again.
+            let was_up = state.app.is_visible();
+            state.app.show();
+            if !was_up {
+                // A new window is a new session: the previous window's
+                // result set is not the answer to a new question.
+                state.source.set_session(state.app.session());
+                // The window goes up **now**, before the daemon is asked,
+                // for the same reason the shortcut's window does.
+                state.waiting = state.waiting_for();
+                state.ask_daemon = true;
+            }
+            show(state)
+        }
         Event::Key(key) => on_key(state, key),
         Event::Tick => tick(state),
         Event::Resize => paint(state),
@@ -734,6 +752,22 @@ fn on_key(state: &mut State, key: Key) -> Control {
     // The menu has the keyboard while it is open.
     if state.app.mode() == Mode::Menu {
         return menu_key(state, key);
+    }
+
+    // The daemon is not there: the query does not grow.
+    //
+    // A query nobody will answer is a query the user typed into a field that
+    // only fills up: the characters go in, nothing comes back, and the field
+    // says nothing about why. The launcher KNOWS the daemon is not there --
+    // the answer said so, and a daemon that is up but slow is not a daemon
+    // that is not there -- so the characters and the paste are refused while
+    // it is not, and the line under the field says why.
+    //
+    // The keys that erase still work: the user typed something before the
+    // launcher learned the daemon was gone, and a field that cannot be
+    // emptied is a field the user is stuck with.
+    if state.status.asked && !state.status.connected && adds_to_the_query(key) {
+        return paint(state);
     }
 
     match key {
@@ -833,6 +867,16 @@ fn on_key(state: &mut State, key: Key) -> Control {
 
     // The query changed: the launcher asks its own question.
     changed(state)
+}
+
+/// Whether the key puts something in the query.
+///
+/// Two keys do: the characters and the paste. The others move the caret,
+/// move the selection, erase, run an action or close the window -- and a
+/// window with no daemon has nothing to select and nothing to open, but it
+/// has a field the user has to be able to empty.
+fn adds_to_the_query(key: Key) -> bool {
+    matches!(key, Key::Char(_) | Key::CtrlV)
 }
 
 /// The query changed: the launcher asks its own question.
@@ -1619,6 +1663,25 @@ mod tests {
         );
     }
 
+    /// The icon shows the window, and leaves it up.
+    ///
+    /// A double click is two clicks: a window that opens and closes again
+    /// is a window that is not there.
+    #[test]
+    fn the_icon_shows_the_window_and_leaves_it_up() {
+        let mut state = empty();
+        let control = handle(&mut state, Event::Show);
+        assert!(
+            matches!(control, Control::Show(..)),
+            "the window goes up: {control:?}"
+        );
+        let control = handle(&mut state, Event::Show);
+        assert!(
+            matches!(control, Control::Show(..)),
+            "the window stays up: {control:?}"
+        );
+    }
+
     #[test]
     fn the_window_is_hidden_when_the_launcher_closes() {
         let mut state = empty();
@@ -1757,6 +1820,79 @@ mod tests {
         let _ = handle(&mut state, Event::Tick);
         assert_eq!(asked.borrow().len(), 1, "the daemon was asked once");
         assert_eq!(asked.borrow()[0], "invoice", "the daemon was asked");
+    }
+
+    /// The search does not take typing while the daemon is not there.
+    ///
+    /// A query nobody will answer is a query the user typed into a field that
+    /// only fills up. The launcher knows the daemon is not there -- the answer
+    /// said so -- so the characters are refused, and the line under the field
+    /// says why.
+    ///
+    /// The control is the same key with the daemon there: the same key, the
+    /// same window, the character lands. A rule that is not about the daemon
+    /// is a rule that stops the typing always.
+    #[test]
+    fn the_search_does_not_take_typing_while_the_daemon_is_not_there() {
+        let (mut state, _) = recording();
+        state.status.asked = true;
+        state.status.connected = false;
+        let _ = on_key(&mut state, Key::Char('r'));
+        assert_eq!(
+            state.app.query().text(),
+            "",
+            "the character did not land: the daemon is not there"
+        );
+
+        // The control: the daemon is there, and the character lands.
+        let (mut state, _) = recording();
+        state.status.asked = true;
+        state.status.connected = true;
+        let _ = on_key(&mut state, Key::Char('r'));
+        assert_eq!(state.app.query().text(), "r", "the character landed");
+
+        // And the daemon nobody has asked about yet: the launcher does not
+        // know, so it does not pretend the daemon is gone.
+        let (mut state, _) = recording();
+        let _ = on_key(&mut state, Key::Char('r'));
+        assert_eq!(
+            state.app.query().text(),
+            "r",
+            "the character landed: nobody has said the daemon is gone"
+        );
+    }
+
+    /// The field can still be emptied while the daemon is not there.
+    ///
+    /// The user typed something before the launcher learned the daemon was
+    /// gone, and a field that cannot be emptied is a field the user is stuck
+    /// with. The paste is a typing too, and it is refused the same way.
+    #[test]
+    fn the_field_can_still_be_emptied_while_the_daemon_is_not_there() {
+        let (mut state, _) = recording_with("invoice");
+        state.status.asked = true;
+        state.status.connected = false;
+
+        // The paste does not land.
+        let _ = on_key(&mut state, Key::CtrlV);
+        assert_eq!(
+            state.app.query().text(),
+            "",
+            "the clipboard did not land: the daemon is not there"
+        );
+
+        // The characters that were typed before the launcher knew do not go
+        // away by themselves, and the user can take them away.
+        let (mut state, _) = recording();
+        state.status.asked = true;
+        state.status.connected = false;
+        state.app.insert('i');
+        state.app.insert('n');
+        let _ = on_key(&mut state, Key::Backspace);
+        assert_eq!(state.app.query().text(), "i", "the backspace worked");
+
+        let _ = on_key(&mut state, Key::CtrlU);
+        assert_eq!(state.app.query().text(), "", "the field was emptied");
     }
 
     /// The window keeps the meter's figures.

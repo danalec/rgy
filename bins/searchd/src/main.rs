@@ -36,12 +36,13 @@ use std::io::{BufRead, Write};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
+use rgy_discovery::walk::KIND_DIR;
 use rgy_discovery::{PortableSource, interrupt, walk::Cancelled};
 use rgy_engine::{keep_warm, warm_stop};
 use rgy_name_core::content::{self, Grep};
 use rgy_name_core::live::Live;
 use rgy_name_core::name_index::Index;
-use rgy_name_core::name_query::{Alternatives, Query, Searcher};
+use rgy_name_core::name_query::{Alternatives, Hit, Query, Searcher};
 use rgy_name_core::persist;
 use rgy_proto::{CatchUp, GrepFile, Hit as WireHit, Request, Response};
 
@@ -154,9 +155,97 @@ struct Ctx {
     sessions: std::sync::Mutex<
         std::collections::HashMap<u64, std::sync::Arc<rgy_name_core::session::Session>>,
     >,
+    /// The ids the daemon names itself.
+    ///
+    /// The session id is the client's to keep, and the daemon's to hand
+    /// out: a client that does not name one gets one from here, and the
+    /// answer says which — that is the round trip that lets the next
+    /// keystroke be answered from the previous answer instead of from the
+    /// index.
+    ///
+    /// The ids the daemon names live above the ones the clients name: a
+    /// client's id is a counter of its own (the launcher's starts at one),
+    /// and the daemon's has the top bit set. The two spaces cannot meet,
+    /// and a client that names an id the daemon would have named does not
+    /// land on a session of somebody else's.
+    sessions_next: std::sync::atomic::AtomicU64,
 }
 
 impl Ctx {
+    /// The daemon's own session ids live above the clients' and below the
+    /// wire's exactness limit.
+    ///
+    /// The two bounds are both real. The ids a client names are small
+    /// counters, and the daemon's own are above them, so the two spaces
+    /// cannot meet — a client that names a daemon id does not land on
+    /// somebody else's session. And the wire carries a number as an
+    /// `f64` (`rgy_proto`'s own JSON reader), so an integer above `2^53`
+    /// does not survive the round trip: the daemon's id would reach the
+    /// client as a different number, and the client would ask for the
+    /// re-rank of the wrong session. `2^52` and `2^53` are the two ends
+    /// of the space the daemon may name in.
+    const DAEMON_SESSIONS: u64 = 1 << 52;
+    /// The first id above the daemon's space: the wire's exactness limit.
+    const SESSION_LIMIT: u64 = 1 << 53;
+
+    /// A session id the daemon names.
+    ///
+    /// The id is the session the daemon keeps the answer under, and the
+    /// answer says which one it is: a client that does not name a session
+    /// gets one from here, sends it back with the next question, and the
+    /// daemon re-ranks the answer it already has.
+    ///
+    /// **The id is unguessable, and that is what makes the round trip
+    /// safe.** The id is a capability: a client that names it re-ranks the
+    /// answer the daemon keeps under it, and a client that guesses it
+    /// lands on somebody else's result set. The ids used to come out of a
+    /// counter, and a counter cannot be a capability — the second client
+    /// could name the first client's id, because the first client's id
+    /// was the first number after the line — so the daemon refused every
+    /// id in its own space, including the ones it had just issued. The
+    /// answer it put on the wire was a name it would not take back, and
+    /// the round trip the protocol promises never happened.
+    ///
+    /// The id comes from the process's own random seed instead, so a
+    /// client that holds one is holding a capability and a client that
+    /// does not hold one cannot reach the answer.
+    ///
+    /// The id is in the daemon's space, `[2^52, 2^53)`: above the ids a
+    /// client names and below the wire's exactness limit, so the number
+    /// the daemon sends is the number the daemon reads back.
+    fn new_session(&self) -> Option<u64> {
+        use std::collections::hash_map::RandomState;
+        use std::hash::{BuildHasher, Hasher};
+
+        // The entropy: the hash map's own hasher, which every process
+        // seeds differently and every call re-keys. The counter goes in
+        // so that two calls in the same process do not collide.
+        let n = self.sessions_next.fetch_add(1, Ordering::Relaxed);
+        let mut hasher = RandomState::new().build_hasher();
+        hasher.write_u64(n);
+        let raw = hasher.finish();
+
+        // Into the daemon's space: the line itself, and the 52 bits below
+        // it that the hash filled. The id is under the wire's limit, so it
+        // survives the round trip as the very number that was sent.
+        let width = Self::SESSION_LIMIT - Self::DAEMON_SESSIONS;
+        Some(Self::DAEMON_SESSIONS | (raw & (width - 1)))
+    }
+
+    /// Whether the daemon has issued this session and still keeps it.
+    ///
+    /// The sessions that have been idle for too long are trimmed away, so
+    /// an id the daemon issued can stop being one: the client that holds
+    /// it gets a fresh session, and the answer it was re-ranking is gone.
+    ///
+    /// This is the whole of the daemon's answer to "is this id yours?".
+    /// The ids are unguessable, so a client that names one of them is
+    /// holding it — and a client that names an id the daemon never issued
+    /// is refused, and given a fresh one.
+    fn has_session(&self, id: u64) -> bool {
+        self.sessions.lock().unwrap().contains_key(&id)
+    }
+
     /// How the index caught up after the last restart (the live-feed
     /// honesty rule).
     ///
@@ -205,6 +294,15 @@ impl Ctx {
     /// optimisation, not a different search -- so this is only about the
     /// work. An alternative (`|`) is searched on its own: a session holds
     /// one result set, and a query with alternatives is not one query.
+    ///
+    /// **A query that fails closed answers nothing on every route.** The
+    /// engine refuses a query with an unknown `type:` and answers it with
+    /// nothing. The session's path knows the flag too — it is a property of
+    /// the query, not of one caller's routing — so the route that named a
+    /// session answers with nothing like the route that did not. The
+    /// session route used to break the rule, and the workaround that hid
+    /// it is gone: the refusal now lives in the engine, where the fresh
+    /// path keeps it, and the two cannot drift.
     fn search_with_session(
         &self,
         id: u64,
@@ -479,6 +577,18 @@ fn main() {
         i += 1;
     }
 
+    // A path that begins with `~` names the home directory. A POSIX shell
+    // expands it before the command runs and Windows PowerShell does not,
+    // so the tree expands it here: a daemon that held a root of `~` would
+    // index a folder that does not exist, and answer about it as if it were
+    // a tree.
+    let root = rgy_engine::paths::expand_home(&root);
+    let index = index.map(|p| rgy_engine::paths::expand_home(&p));
+    let tv_dir = tv_dir.map(|p| {
+        let expanded = rgy_engine::paths::expand_home(&p.to_string_lossy());
+        std::path::PathBuf::from(expanded)
+    });
+
     // One spelling of the root, resolved once. The change feeds report
     // absolute paths (the macOS stream always does), and the live overlay
     // and the name index have to talk about the same file: one spelling of
@@ -529,6 +639,7 @@ fn main() {
         content: std::sync::Mutex::new(None),
         wants_content: std::sync::atomic::AtomicBool::new(false),
         sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
+        sessions_next: std::sync::atomic::AtomicU64::new(0),
     });
 
     // Keep the index fresh as the tree changes (the Watch thread); queries
@@ -1055,8 +1166,58 @@ fn handle(req: Request, ctx: &Ctx) -> Vec<Answer> {
                 // the session's previous result set: a
                 // query that narrows the previous one is re-ranked instead
                 // of walked again.
+                //
+                // The session is the client's to name and the daemon's to
+                // hand out: a request that names none gets one from here,
+                // and the answer carries it. That is the round trip that
+                // makes the next keystroke a re-rank of this answer — a
+                // client that cannot name the session it is in cannot ask
+                // for that.
+                //
+                // The daemon's own space is above the clients' — the ids a
+                // client names are small counters, and the daemon hands
+                // out ids above them. A client that named one above the
+                // line would meet a session the daemon handed to somebody
+                // else, and the two would share a result set. So the
+                // daemon does not trust the client on this: a name from
+                // the daemon's own space is not a session, it is a claim
+                // on somebody else's, and the daemon names a fresh one
+                // instead. The answer says which session it was computed
+                // for, so the client learns the name it has to use.
+                //
+                // **Unless the daemon issued it.** The ids the daemon
+                // hands out are unguessable, so a client that names one
+                // of them is holding it — that is the round trip the
+                // protocol promises, and it is the re-rank that makes the
+                // next keystroke cheap. The daemon used to refuse these
+                // ids too, and the answer it put on the wire was a name it
+                // would not take back: the ids came out of a counter, so
+                // a client could name somebody else's, and the daemon
+                // refused all of them to keep that from happening. The
+                // ids are random now, and the daemon takes back the ones
+                // it issued and only those.
+                //
+                // And both spaces stay under the wire's exactness limit,
+                // because the protocol carries a number as an `f64`: an
+                // id above `2^53` would reach the client as a different
+                // number, and the client would ask for the re-rank of the
+                // wrong session.
+                let session = match session {
+                    Some(id) if id >= Ctx::DAEMON_SESSIONS => {
+                        if ctx.has_session(id) {
+                            Some(id)
+                        } else {
+                            ctx.new_session()
+                        }
+                    }
+                    Some(id) => Some(id),
+                    None => ctx.new_session(),
+                };
                 let hits = match session {
                     Some(id) => ctx.search_with_session(id, &searcher, &alts.alts, limit),
+                    // No session to name: the answer is a whole search, and
+                    // it carries no session, so the client knows there is
+                    // nothing to re-rank.
                     None => searcher.search_alternatives(&alts.alts, limit),
                 };
                 let mut buf = Vec::new();
@@ -1112,22 +1273,20 @@ fn handle(req: Request, ctx: &Ctx) -> Vec<Answer> {
                             None => Vec::new(),
                         };
                         // Whether the hit is a folder, from the index's own
-                        // kind byte. The path does not say: a folder's path
-                        // is spelled like a file's, and an interface that
+                        // kind. The path does not say: a folder's path is
+                        // spelled like a file's, and an interface that
                         // shows a folder with a file's icon shows the
                         // wrong picture of the thing the user is about to
                         // open.
                         //
                         // An overlay hit is not in the base index, so the
-                        // base's kind byte is not its kind: it answers as
-                        // a file, which is what the overlay holds.
-                        let folder = match &h.over {
-                            Some(_) => false,
-                            None => {
-                                live_guard.base.kind()[h.idx as usize] & 3
-                                    == rgy_discovery::walk::KIND_DIR
-                            }
-                        };
+                        // base's kind byte is not its kind — the overlay
+                        // carries a kind of its own, and that is where the
+                        // answer comes from. The overlay holds folders as
+                        // well as files: a folder created since the last
+                        // compaction is an overlay entry, and answering it
+                        // as a file would draw a file's icon over a folder.
+                        let folder = is_folder(&live_guard, h);
                         WireHit {
                             path: full,
                             score: h.score(),
@@ -1141,18 +1300,62 @@ fn handle(req: Request, ctx: &Ctx) -> Vec<Answer> {
                 responses.push(Answer::Frame(Response::Hits {
                     hits: wire,
                     took_us: took,
+                    // The answer says whether it is whole: a list shorter
+                    // than the limit is the whole answer, and one that
+                    // reached the limit may have been cut short. The rule
+                    // is the one every route that answers a name query
+                    // follows — the whole tree and the scope, the fresh
+                    // search and the session's re-rank.
+                    complete: rgy_proto::name_answer_is_complete(count, limit),
+                    // The session the answer belongs to. The client sends
+                    // it back with the next question, and the daemon
+                    // re-ranks this answer instead of walking the index
+                    // again. It is absent when the daemon could not name
+                    // one, and an answer with no session on it says the
+                    // client has nothing to re-rank.
+                    session,
                 }));
                 responses.push(Answer::Frame(Response::Done { count }));
             }
         },
         Request::Grep { q, limit } => responses.extend(grep(&q, limit, ctx)),
-        Request::Content {
-            q, paths, limit, ..
-        } => responses.extend(scoped_content(&q, &paths, limit, ctx)),
+        // The content route has no session: the name session holds the
+        // name hits and the content answer is the files on the disk, so
+        // there is nothing to re-rank. The request does not carry one, and
+        // a request that does is read as the request it was before the
+        // field existed.
+        Request::Content { q, paths, limit } => {
+            responses.extend(scoped_content(&q, &paths, limit, ctx))
+        }
         Request::Resolve { path } => responses.push(resolve(&path, ctx)),
     }
     warm_stop();
     responses
+}
+
+/// Whether the hit is a folder.
+///
+/// The index knows and the path does not say: a folder's path is spelled
+/// like a file's. The base's kind byte says it for an indexed entry, and
+/// the overlay's own entry says it for the entries added since the last
+/// compaction.
+fn is_folder(live: &Live, hit: &Hit) -> bool {
+    match &hit.over {
+        Some(path) => live
+            .over
+            .get(path.as_slice())
+            .map_or_else(|| spelled_as_folder(path), |o| o.kind & 3 == KIND_DIR),
+        None => live.base.kind()[hit.idx as usize] & 3 == KIND_DIR,
+    }
+}
+
+/// Whether the path says it is a folder: it ends in the separator the
+/// platform spells a folder with.
+///
+/// The tree reads a path that way already -- `rgy_launcher`'s `IconKind`
+/// takes a trailing separator as a folder.
+fn spelled_as_folder(path: &[u8]) -> bool {
+    matches!(path.last(), Some(b'/') | Some(b'\\'))
 }
 
 /// A content search over a scope: the files a name search already chose.
@@ -1193,9 +1396,34 @@ fn scoped_content(q: &str, paths: &[String], limit: usize, ctx: &Ctx) -> Vec<Ans
         .collect();
     // The pattern and its mode, from the first alternative that carries
     // one. A bare word is a literal, and `regex:` asks for the engine.
+    //
+    // A rejected alternative carries no pattern the search may use: the
+    // query language refused it -- an unknown `type:` or a `re:` that does
+    // not compile -- and the reason was said above, so it matches nothing.
+    // The same rule the store route follows, so the same query is answered
+    // the same way by every route.
+    //
+    // And when every alternative was refused, the answer is no files at
+    // all: the query failed closed, and a search that ran anyway would be
+    // the "searches everything" the refusal exists to prevent.
+    let refused_every = !alts.alts.is_empty() && alts.alts.iter().all(|a| a.never);
+    if refused_every {
+        out.push(Answer::Frame(Response::GrepFiles {
+            files: Vec::new(),
+            took_us: t0.elapsed().as_micros() as u64,
+            // Nothing was read, and nothing was left out: the answer is
+            // whole because it is empty.
+            complete: true,
+            skipped: 0,
+            skips: Vec::new(),
+        }));
+        out.push(Answer::Frame(Response::Done { count: 0 }));
+        return out;
+    }
     let (pattern, mode) = alts
         .alts
         .iter()
+        .filter(|a| !a.never)
         .find_map(|a| a.grep.as_ref().map(|p| (p.clone(), a.grep_mode)))
         .unwrap_or_else(|| (q.to_string(), rgy_name_core::name_query::GrepMode::Literal));
 
@@ -1208,6 +1436,7 @@ fn scoped_content(q: &str, paths: &[String], limit: usize, ctx: &Ctx) -> Vec<Ans
             // Nothing was to be read, and nothing was left out.
             complete: true,
             skipped: 0,
+            skips: Vec::new(),
         }));
         out.push(Answer::Frame(Response::Done { count: 0 }));
         return out;
@@ -1217,9 +1446,42 @@ fn scoped_content(q: &str, paths: &[String], limit: usize, ctx: &Ctx) -> Vec<Ans
     if let Some(dir) = &ctx.tv_dir {
         return match rgy_engine::tv::grep_tv(dir, &pattern) {
             Ok(fs) => {
+                // The scope filters the store's answer and the limit cuts
+                // what is left — the store searched the corpus whole, the
+                // scope says which of those files the caller asked about,
+                // and the limit says how many of them the caller gets.
+                //
+                // The order is the contract: the limit bounds the ANSWER,
+                // so it comes after the scope and not before it. A limit
+                // that came first would cut the corpus-wide answer, and the
+                // scope would then filter what was left — a different
+                // answer, and one that is missing the scope's files.
+                //
+                // The scope is ALSO the same scope in the spelling the
+                // filesystem resolves it to. The store indexes its corpus
+                // under the canonical root — the root it resolved — and the
+                // caller's scope may spell that root the way the caller
+                // was given it. On Windows the two spellings are the same
+                // file and different bytes: `C:\Users\RUNNER~1\AppData\...`
+                // and `C:\Users\runneradmin\AppData\...` are one folder,
+                // and a scope that carried the first one matched nothing
+                // in a store that holds the second. The bytes are
+                // compared the cheap way first, and the resolved spelling
+                // is the fallback: the answer is the same file either
+                // way, and a scope that names a file that is not there
+                // resolves to nothing and falls back to its own bytes.
+                let resolved: Vec<Vec<u8>> = scope
+                    .iter()
+                    .map(|p| rgy_discovery::file::canonicalize(p).unwrap_or_else(|| p.clone()))
+                    .collect();
                 let files: Vec<GrepFile> = fs
                     .into_iter()
-                    .filter(|f| scope.iter().any(|s| same_path(s, f.path.as_bytes())))
+                    .filter(|f| {
+                        let path = f.path.as_bytes();
+                        scope.iter().any(|s| same_path(s, path))
+                            || resolved.iter().any(|s| same_path(s, path))
+                    })
+                    .take(limit)
                     .map(|f| GrepFile {
                         path: platform_path(f.path.as_bytes()),
                         lines: f.lines.into_iter().map(|(n, t)| (n as usize, t)).collect(),
@@ -1229,11 +1491,17 @@ fn scoped_content(q: &str, paths: &[String], limit: usize, ctx: &Ctx) -> Vec<Ans
                 out.push(Answer::Frame(Response::GrepFiles {
                     files,
                     took_us: t0.elapsed().as_micros() as u64,
-                    // The store searched the corpus whole, and the scope
-                    // is what its answer was filtered by: every file in
-                    // the scope was read.
-                    complete: true,
+                    // The store searched the corpus whole, and the scope is
+                    // what its answer was filtered by: every file in the
+                    // scope was read. **That is not what `complete` says.**
+                    // The flag is about the limit — the answer may have been
+                    // cut short by it — so it is the rule the other routes
+                    // follow: an answer with fewer files than the limit is
+                    // the whole answer, and one that reached the limit is a
+                    // page.
+                    complete: rgy_proto::name_answer_is_complete(count, limit),
                     skipped: 0,
+                    skips: Vec::new(),
                 }));
                 out.push(Answer::Frame(Response::Done { count }));
                 out
@@ -1268,7 +1536,7 @@ fn scoped_content(q: &str, paths: &[String], limit: usize, ctx: &Ctx) -> Vec<Ans
     // refused to download: the files the limit left behind are not among
     // them, because the limit is the caller's own.
     let scanned_complete = res.complete;
-    let skipped = unread_files(scope.len(), res.read, scanned_complete, res.skipped.len());
+    let (skipped, skips) = unread_files(scope.len(), res.read, scanned_complete, &res.skipped);
     let mut files: Vec<GrepFile> = Vec::new();
     for f in res.files {
         files.push(GrepFile {
@@ -1281,12 +1549,19 @@ fn scoped_content(q: &str, paths: &[String], limit: usize, ctx: &Ctx) -> Vec<Ans
     // The answer is whole when the search read everything it was given and
     // the limit did not cut it short -- the same rule the whole-tree grep
     // follows, so the two routes say the same thing about the same answer.
-    let complete = count < limit && scanned_complete;
+    //
+    // A file that was not read is a file the answer does not cover: the
+    // search was given it and could not open it, and an answer that says
+    // "whole" about a file nobody read is a wrong fact. The count of the
+    // files that were not read is on the wire next to the flag, and the
+    // flag has to agree with it.
+    let complete = content_answer_is_complete(count, limit, scanned_complete, skipped);
     out.push(Answer::Frame(Response::GrepFiles {
         files,
         took_us: t0.elapsed().as_micros() as u64,
         complete,
         skipped,
+        skips,
     }));
     out.push(Answer::Frame(Response::Done { count }));
     out
@@ -1363,22 +1638,92 @@ fn resolve(path: &str, ctx: &Ctx) -> Answer {
     })
 }
 
-/// The files the search did not read for a reason of its own.
+/// The files the search did not read for a reason of its own, and why.
 ///
 /// The ones a budget stopped it from reaching, and the placeholders it
 /// refused to download. The files the limit left behind are not among
 /// them: the limit is the caller's, and a search that stopped because it
 /// already had enough read what it was asked to read.
 ///
+/// The count is what the protocol has always carried, and it stays: a
+/// reader that does not know the reasons keeps working. The reasons are
+/// what make the count worth reading — "skipped" alone leaves the user
+/// wondering whether the file was empty, locked, or never there.
+///
+/// The files fall into two kinds, and the kinds are different facts:
+///
+/// * the files the search named and refused — a cloud placeholder it would
+///   have to download — carry their path and their reason;
+/// * the files the budget stopped the search from reaching were never
+///   named, so they carry the reason and no path: a path made up would be
+///   a path the user cannot open.
+///
 /// The whole-tree route and the scoped route both answer this, and the
 /// rule lives here so that the two cannot drift.
-fn unread_files(candidates: usize, read: usize, complete: bool, placeholders: usize) -> usize {
+fn unread_files(
+    candidates: usize,
+    read: usize,
+    complete: bool,
+    skipped: &[rgy_name_core::content::Skipped],
+) -> (usize, Vec<rgy_proto::Skip>) {
     let never_reached = if complete {
         0
     } else {
         candidates.saturating_sub(read)
     };
-    never_reached + placeholders
+    // The files the search named, grouped by the reason: a tree with a
+    // thousand placeholders is one thing that happened, and a thousand
+    // entries would be a thousand lines of wire for one fact.
+    let mut groups: Vec<(String, usize, Option<String>)> = Vec::new();
+    for s in skipped {
+        let path = Some(platform_path(&s.path));
+        match groups.iter_mut().find(|(reason, _, _)| reason == s.reason) {
+            Some((_, count, first)) => {
+                *count += 1;
+                if first.is_none() {
+                    *first = path;
+                }
+            }
+            None => groups.push((s.reason.to_string(), 1, path)),
+        }
+    }
+    let mut out: Vec<rgy_proto::Skip> = groups
+        .into_iter()
+        .map(|(reason, count, path)| rgy_proto::Skip {
+            reason,
+            count,
+            path,
+        })
+        .collect();
+    if never_reached > 0 {
+        out.push(rgy_proto::Skip {
+            reason: "the search's budget ran out before it reached them".to_string(),
+            count: never_reached,
+            path: None,
+        });
+    }
+    (never_reached + skipped.len(), out)
+}
+
+/// Whether the content answer is whole.
+///
+/// The answer is whole when the limit did not cut it and every candidate
+/// was read. A file that was not read is a file the answer does not
+/// cover: the search was given it and could not open it, and an answer
+/// that says "whole" about a file nobody read is a wrong fact. The count
+/// of the files that were not read is on the wire next to the flag, and
+/// the flag has to agree with it.
+///
+/// The rule lives here so that the scoped route and the whole-tree route
+/// cannot drift: they answered the same search two different ways when
+/// the flag was computed in two places.
+fn content_answer_is_complete(
+    count: usize,
+    limit: usize,
+    scanned_complete: bool,
+    skipped: usize,
+) -> bool {
+    rgy_proto::name_answer_is_complete(count, limit) && scanned_complete && skipped == 0
 }
 
 fn grep(q: &str, limit: usize, ctx: &Ctx) -> Vec<Answer> {
@@ -1445,8 +1790,11 @@ fn grep(q: &str, limit: usize, ctx: &Ctx) -> Vec<Answer> {
             took_us: took,
             // The store searched the corpus whole; the limit is what
             // can cut the answer short.
-            complete: count < limit,
+            complete: rgy_proto::name_answer_is_complete(count, limit),
             skipped: 0,
+            // The store read every file it was asked to read: there is
+            // nothing it did not read.
+            skips: Vec::new(),
         }));
         out.push(Answer::Frame(Response::Done { count }));
         return out;
@@ -1473,6 +1821,10 @@ fn grep(q: &str, limit: usize, ctx: &Ctx) -> Vec<Answer> {
             // of every alternative are the facts of the answer.
             let mut complete = true;
             let mut skipped = 0usize;
+            // Why the search did not read them, said the same way: the
+            // count alone left the user wondering whether the file was
+            // empty, locked, or never there.
+            let mut skips: Vec<rgy_proto::Skip> = Vec::new();
             // A pattern the engine refuses is said, not dropped. The
             // alternative it belonged to matches nothing, and the answer
             // says so: a query that answered with the other alternatives
@@ -1538,10 +1890,11 @@ fn grep(q: &str, limit: usize, ctx: &Ctx) -> Vec<Answer> {
                 r.read += rest.read;
                 // The placeholders the index's own scan refused, and the
                 // ones this scan refused: both are files the search did
-                // not read.
-                let plan_placeholders = r.skipped.len();
-                let scan_placeholders = rest.skipped.len();
-                r.skipped.extend(rest.skipped);
+                // not read. They are one list here so that the reasons
+                // come out of one place, and the count is the count it
+                // has always been.
+                let mut not_read = std::mem::take(&mut r.skipped);
+                not_read.extend(rest.skipped);
                 r.candidates = covered.len() + bare.len();
                 // The scan read everything it was given: that is this
                 // alternative's own fact. Whether the *answer* is whole is
@@ -1550,8 +1903,9 @@ fn grep(q: &str, limit: usize, ctx: &Ctx) -> Vec<Answer> {
                 // about it -- so the limit is settled at the end.
                 r.complete = rest.complete;
                 complete = complete && r.complete;
-                skipped += unread_files(bare.len(), rest.read, rest.complete, scan_placeholders)
-                    + plan_placeholders;
+                let (n, groups) = unread_files(bare.len(), rest.read, rest.complete, &not_read);
+                skipped += n;
+                skips.extend(groups);
                 for f in r.files {
                     files.push(GrepFile {
                         path: platform_path(&f.path),
@@ -1578,8 +1932,13 @@ fn grep(q: &str, limit: usize, ctx: &Ctx) -> Vec<Answer> {
                 // every scan read everything it was given. The same rule
                 // the other two routes follow, so the three routes say the
                 // same thing about the same answer.
-                complete: count < limit && complete,
+                //
+                // A file that was not read is a file the answer does not
+                // cover, and the count of them is on the wire next to the
+                // flag: the flag says "whole" only when it agrees with it.
+                complete: content_answer_is_complete(count, limit, complete, skipped),
                 skipped,
+                skips,
             }));
             out.push(Answer::Frame(Response::Done { count }));
             out
@@ -2245,11 +2604,41 @@ fn on_disk(root: &[u8], rel: &[u8]) -> Vec<u8> {
 #[cfg(unix)]
 fn serve_uds(path: &str, ctx: &std::sync::Arc<Ctx>, serve: bool) {
     use std::os::unix::net::UnixListener;
-    let _ = std::fs::remove_file(path);
-    let listener = match UnixListener::bind(path) {
+    // The path the caller asked for is not always a path the platform can
+    // carry: `sun_path` is 104 bytes on macOS and 108 on Linux, and a
+    // deeper cache directory is a daemon that cannot start at all. The
+    // rule that shortens it lives in `rgy_proto::endpoint`, because the
+    // client shortens the same path the same way — and a daemon that
+    // bound one path and a client that looked for another is a client
+    // that waits for a socket that is not there.
+    let path = match rgy_proto::endpoint::socket_path(std::path::Path::new(path)) {
+        Ok(p) => p,
+        Err(e) => {
+            rgy_engine::errln!("searchd: {e}");
+            std::process::exit(2);
+        }
+    };
+    // The socket's directory has to be there before the bind: a bind on a
+    // missing directory is a daemon that exits and is restarted for ever.
+    // The short path lives in the user's own cache, which the daemon may
+    // not have made yet.
+    //
+    // The two conditions are one: the folder is made when there is one to
+    // make, and the failure is the failure of making it. The two
+    // clippy versions in this house read the nested form differently --
+    // the older one asks for the collapsed one -- and the collapsed one
+    // is the one both of them accept.
+    if let Some(dir) = path.parent()
+        && let Err(e) = std::fs::create_dir_all(dir)
+    {
+        rgy_engine::errln!("searchd: create {}: {e}", dir.display());
+        std::process::exit(2);
+    }
+    let _ = std::fs::remove_file(&path);
+    let listener = match UnixListener::bind(&path) {
         Ok(l) => l,
         Err(e) => {
-            rgy_engine::errln!("searchd: bind {path}: {e}");
+            rgy_engine::errln!("searchd: bind {}: {e}", path.display());
             std::process::exit(2);
         }
     };
@@ -2593,6 +2982,7 @@ mod tests {
             content: std::sync::Mutex::new(None),
             wants_content: std::sync::atomic::AtomicBool::new(false),
             sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
+            sessions_next: std::sync::atomic::AtomicU64::new(0),
         });
         assert_eq!(ctx.catch_up(), CatchUp::Replayed);
 
@@ -2632,6 +3022,7 @@ mod tests {
             content: std::sync::Mutex::new(None),
             wants_content: std::sync::atomic::AtomicBool::new(false),
             sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
+            sessions_next: std::sync::atomic::AtomicU64::new(0),
         });
 
         // The file resolves, and it is a file.
@@ -2733,6 +3124,7 @@ mod tests {
             content: std::sync::Mutex::new(None),
             wants_content: std::sync::atomic::AtomicBool::new(false),
             sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
+            sessions_next: std::sync::atomic::AtomicU64::new(0),
         });
 
         let responses = handle(
@@ -2753,6 +3145,113 @@ mod tests {
         assert!(
             hits.iter().any(|h| h.path.ends_with("late.txt")),
             "the new file must be answered; hits={hits:?}"
+        );
+    }
+
+    /// A folder that appeared after the snapshot is a folder on the wire.
+    ///
+    /// The overlay holds the entries the base index does not have, and it
+    /// holds their kind: a folder created since the last compaction is an
+    /// overlay entry, and its kind says it is a folder. The base's kind
+    /// byte cannot say it — the base has no entry for it at all — so the
+    /// answer has to come from the overlay's own entry.
+    ///
+    /// The daemon used to answer every overlay hit as a file, on the
+    /// ground that the overlay holds files. It holds folders too, and an
+    /// interface that draws a file's icon over a folder shows the user
+    /// the wrong picture of the thing they are about to open.
+    #[test]
+    fn an_overlay_folder_is_a_folder_on_the_wire() {
+        let dir = TempTree::new("rgy-searchd-overlay-folder");
+        std::fs::write(dir.join("hello.txt"), b"hello\n").unwrap();
+        let root = dir.as_os_str().as_encoded_bytes().to_vec();
+
+        // The index as it was before the folder appeared.
+        let source = PortableSource::new(root.clone(), 2);
+        let mut live = Live::with_root(
+            Index::build(source.enumerate().expect("the walk"), 0, 1, b"/"),
+            &root,
+        );
+
+        // The folder appears, and the feed says the folder whose contents
+        // changed (what a directory-granular feed says).
+        std::fs::create_dir(dir.join("freshfolder")).unwrap();
+        live.apply_events(&[rgy_discovery::UsnRecord {
+            file_reference: 0,
+            parent_reference: 0,
+            usn: 0,
+            reason: 0,
+            file_attributes: rgy_discovery::FILE_ATTRIBUTE_DIRECTORY,
+            name: rgy_engine::console::spell(&root),
+        }]);
+
+        let ctx = std::sync::Arc::new(Ctx {
+            root: root.clone(),
+            home: String::new(),
+            tv_dir: None,
+            live: std::sync::RwLock::new(live),
+            catch_up: std::sync::atomic::AtomicU8::new(CATCH_UP_RELISTED),
+            feed: std::sync::atomic::AtomicU8::new(FEED_NONE),
+            changed: Changed::new(),
+            content: std::sync::Mutex::new(None),
+            wants_content: std::sync::atomic::AtomicBool::new(false),
+            sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
+            sessions_next: std::sync::atomic::AtomicU64::new(0),
+        });
+
+        let responses = handle(
+            Request::Search {
+                q: "freshfolder".to_string(),
+                limit: 10,
+                session: None,
+            },
+            &ctx,
+        );
+        let hits = responses
+            .iter()
+            .find_map(|r| match r {
+                Answer::Frame(Response::Hits { hits, .. }) => Some(hits),
+                _ => None,
+            })
+            .expect("a hits frame");
+        assert!(
+            hits.iter()
+                .any(|h| h.path.ends_with("freshfolder") && h.folder),
+            "the folder in the overlay must be answered as a folder; hits={hits:?}"
+        );
+    }
+
+    /// An overlay hit without an entry falls back to the path.
+    ///
+    /// The overlay's map is consulted by the path the hit carries, and a
+    /// hit can name a path the map does not hold: the entry was not there
+    /// when the answer was built. Then the path is all that is left, and a
+    /// path that ends in the separator is a folder's path.
+    ///
+    /// The rule is the CLI's, and the two sides of the tree have to agree:
+    /// the same hit, the same path, the same answer.
+    #[test]
+    fn an_overlay_hit_without_its_entry_falls_back_to_the_path() {
+        let live = Live::new(Index::build(Vec::new(), 0, 0, b"/"));
+        let folder = Hit {
+            key: rgy_name_core::rank::RankKey::default(),
+            idx: u32::MAX,
+            mtime: 0,
+            over: Some(b"/tree/gone/".to_vec()),
+        };
+        assert!(
+            is_folder(&live, &folder),
+            "a path that ends in the separator is a folder"
+        );
+        let file = Hit {
+            key: rgy_name_core::rank::RankKey::default(),
+            idx: u32::MAX,
+            mtime: 0,
+            over: Some(b"/tree/gone.txt".to_vec()),
+        };
+        assert!(
+            !is_folder(&live, &file),
+            "a path that does not end in the separator is not a folder"
         );
     }
 
@@ -2786,6 +3285,7 @@ mod tests {
             content: std::sync::Mutex::new(None),
             wants_content: std::sync::atomic::AtomicBool::new(false),
             sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
+            sessions_next: std::sync::atomic::AtomicU64::new(0),
         });
 
         let hits_of = |q: &str| {
@@ -2820,6 +3320,426 @@ mod tests {
         );
     }
 
+    /// The name answer says whether it is whole, and every route says it
+    /// the same way.
+    ///
+    /// A list of hits looks like the whole answer, and a list that reached
+    /// the limit is the same list as one that did not: the answer has to
+    /// say which it is, or the reader cannot tell a whole answer from a
+    /// page of a longer one.
+    ///
+    /// The routes are the whole tree, the scope and the session's re-rank,
+    /// and they are the same question with different starting points — so
+    /// they must not disagree about the same answer.
+    #[test]
+    fn a_name_answer_says_whether_it_is_whole() {
+        let dir = TempTree::new("rgy-searchd-complete");
+        // The scope is a folder of the tree, and its name is not a name the
+        // working directory has: the scope is a path in the index, and a
+        // path that resolved against the working directory would be a
+        // different question.
+        std::fs::create_dir_all(dir.join("rgy-scope")).unwrap();
+        for i in 0..3 {
+            std::fs::write(dir.join(format!("rgy-scope/hello{i}.txt")), b"hello\n").unwrap();
+        }
+        let root = dir.as_os_str().as_encoded_bytes().to_vec();
+
+        let source = PortableSource::new(root.clone(), 2);
+        let live = Live::with_root(
+            Index::build(source.enumerate().expect("the walk"), 0, 1, b"/"),
+            &root,
+        );
+        let ctx = std::sync::Arc::new(Ctx {
+            root: root.clone(),
+            home: String::new(),
+            tv_dir: None,
+            live: std::sync::RwLock::new(live),
+            catch_up: std::sync::atomic::AtomicU8::new(CATCH_UP_RELISTED),
+            feed: std::sync::atomic::AtomicU8::new(FEED_NONE),
+            changed: Changed::new(),
+            content: std::sync::Mutex::new(None),
+            wants_content: std::sync::atomic::AtomicBool::new(false),
+            sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
+            sessions_next: std::sync::atomic::AtomicU64::new(0),
+        });
+
+        // The answer of a route: how many hits it carried, and whether it
+        // said it was whole.
+        let answer = |q: &str, limit: usize, session: Option<u64>| {
+            let responses = handle(
+                Request::Search {
+                    q: q.to_string(),
+                    limit,
+                    session,
+                },
+                &ctx,
+            );
+            responses
+                .iter()
+                .find_map(|r| match r {
+                    Answer::Frame(Response::Hits { hits, complete, .. }) => {
+                        Some((hits.len(), *complete))
+                    }
+                    _ => None,
+                })
+                .expect("a hits frame")
+        };
+
+        // The routes that answer a name query.
+        let scope = "in:rgy-scope hello".to_string();
+        let routes: [(&str, &str, Option<u64>); 3] = [
+            ("the whole tree", "hello", None),
+            ("the scope", scope.as_str(), None),
+            ("the session", "hello", Some(7)),
+        ];
+
+        for (what, q, session) in routes {
+            // Below the limit: the whole answer.
+            let (hits, complete) = answer(q, 10, session);
+            assert_eq!(hits, 3, "{what} found the three files: {hits}");
+            assert!(complete, "{what} says a whole answer is not whole");
+
+            // At the limit: the answer may have been cut short.
+            let (hits, complete) = answer(q, 3, session);
+            assert_eq!(hits, 3, "{what} found the three files: {hits}");
+            assert!(!complete, "{what} says a cut answer is whole");
+        }
+    }
+
+    /// The answer names the session it belongs to.
+    ///
+    /// The session is the incremental-search id: the daemon keeps the answer
+    /// under it and the next request that carries the same id is answered
+    /// from that answer instead of from the index. A client that cannot
+    /// name the session it is in cannot ask for that — so the id is on the
+    /// answer, and the daemon names one when the request does not.
+    #[test]
+    fn a_name_answer_names_the_session_it_belongs_to() {
+        let dir = TempTree::new("rgy-searchd-session");
+        std::fs::write(dir.join("hello.txt"), b"hello\n").unwrap();
+        let root = dir.as_os_str().as_encoded_bytes().to_vec();
+
+        let source = PortableSource::new(root.clone(), 2);
+        let live = Live::with_root(
+            Index::build(source.enumerate().expect("the walk"), 0, 1, b"/"),
+            &root,
+        );
+        let ctx = std::sync::Arc::new(Ctx {
+            root: root.clone(),
+            home: String::new(),
+            tv_dir: None,
+            live: std::sync::RwLock::new(live),
+            catch_up: std::sync::atomic::AtomicU8::new(CATCH_UP_RELISTED),
+            feed: std::sync::atomic::AtomicU8::new(FEED_NONE),
+            changed: Changed::new(),
+            content: std::sync::Mutex::new(None),
+            wants_content: std::sync::atomic::AtomicBool::new(false),
+            sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
+            sessions_next: std::sync::atomic::AtomicU64::new(0),
+        });
+
+        // The session the answer was computed for.
+        let session_of = |session: Option<u64>| {
+            handle(
+                Request::Search {
+                    q: "hello".to_string(),
+                    limit: 10,
+                    session,
+                },
+                &ctx,
+            )
+            .iter()
+            .find_map(|r| match r {
+                Answer::Frame(Response::Hits { session, .. }) => Some(*session),
+                _ => None,
+            })
+            .expect("a hits frame")
+        };
+
+        // A request that names no session gets one from the daemon: the
+        // client has no way to name a session it was never given.
+        let first = session_of(None);
+        assert!(first.is_some(), "the daemon names the session");
+        // And the id it names is its own: the clients' ids are small
+        // counters, and the two spaces must not meet.
+        assert!(
+            first.unwrap() >= Ctx::DAEMON_SESSIONS,
+            "the daemon's own ids live above the clients': {first:?}"
+        );
+        // And under the wire's limit: the protocol carries a number as an
+        // `f64`, and an id above `2^53` would reach the client as a
+        // different number — the client would then ask for the re-rank of
+        // somebody else's session.
+        assert!(
+            first.unwrap() < Ctx::SESSION_LIMIT,
+            "the daemon's own ids live under the wire's limit: {first:?}"
+        );
+        // A second request that names no session gets a session of its own:
+        // two clients that never name a session do not share one.
+        let second = session_of(None);
+        assert_ne!(first, second, "each answer names its own session");
+        // A request that names a session gets that session back: the
+        // client's id is the session's id, and the answer says which.
+        assert_eq!(session_of(Some(7)), Some(7));
+    }
+
+    /// A query the engine refuses answers nothing, on every route.
+    ///
+    /// The unknown `type:` fails closed: the engine refuses the whole
+    /// alternative and the answer is empty. The session's path knows the
+    /// flag too — the refusal is a property of the query, not of one
+    /// caller's routing — so the route that named a session answers with
+    /// nothing like the route that did not. The session route used to
+    /// answer with hits where the route without a session answered with
+    /// nothing, and the daemon worked around it by routing around the
+    /// session; the workaround is gone and the rule is in the engine.
+    #[test]
+    fn a_query_that_fails_closed_answers_nothing_with_a_session_too() {
+        let dir = TempTree::new("rgy-searchd-never");
+        std::fs::write(dir.join("hello.txt"), b"hello\n").unwrap();
+        let root = dir.as_os_str().as_encoded_bytes().to_vec();
+
+        let source = PortableSource::new(root.clone(), 2);
+        let live = Live::with_root(
+            Index::build(source.enumerate().expect("the walk"), 0, 1, b"/"),
+            &root,
+        );
+        let ctx = std::sync::Arc::new(Ctx {
+            root: root.clone(),
+            home: String::new(),
+            tv_dir: None,
+            live: std::sync::RwLock::new(live),
+            catch_up: std::sync::atomic::AtomicU8::new(CATCH_UP_RELISTED),
+            feed: std::sync::atomic::AtomicU8::new(FEED_NONE),
+            changed: Changed::new(),
+            content: std::sync::Mutex::new(None),
+            wants_content: std::sync::atomic::AtomicBool::new(false),
+            sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
+            sessions_next: std::sync::atomic::AtomicU64::new(0),
+        });
+
+        // The query the engine refuses, and the query it does not: the
+        // refused one is the whole difference.
+        let hits_of = |q: &str, session: Option<u64>| {
+            handle(
+                Request::Search {
+                    q: q.to_string(),
+                    limit: 10,
+                    session,
+                },
+                &ctx,
+            )
+            .iter()
+            .find_map(|r| match r {
+                Answer::Frame(Response::Hits { hits, .. }) => Some(hits.len()),
+                _ => None,
+            })
+            .expect("a hits frame")
+        };
+
+        assert_eq!(hits_of("hello", None), 1, "the query that is asked for");
+        assert_eq!(
+            hits_of("hello", Some(7)),
+            1,
+            "the same query, with a session"
+        );
+        // And the refused one answers nothing on both routes.
+        assert_eq!(
+            hits_of("hello type:banana", None),
+            0,
+            "the refused query answers nothing"
+        );
+        assert_eq!(
+            hits_of("hello type:banana", Some(7)),
+            0,
+            "the refused query answers nothing with a session too"
+        );
+    }
+
+    /// The daemon takes back the sessions it issued, and only those.
+    ///
+    /// The ids the daemon hands out live above the top bit, and the ids a
+    /// client names are supposed to be small counters. A client that named
+    /// one above the line would meet a session the daemon handed to
+    /// somebody else, and the two would share a result set — one client's
+    /// answer re-ranked against another's.
+    ///
+    /// The ids are unguessable, so a client that names one of them is
+    /// holding it: that is the round trip the protocol promises, and it
+    /// is the re-rank that makes the next keystroke cheap. The daemon
+    /// takes back the ids it issued and refuses the ones it did not, and
+    /// a client that does not hold one is given a fresh session.
+    ///
+    /// The daemon used to refuse all of them — the ids came out of a
+    /// counter then, so a client could name somebody else's — and the
+    /// answer it put on the wire was a name it would not take back. The
+    /// round trip never happened, and the failure was silent: the same
+    /// answers, slower.
+    #[test]
+    fn the_daemon_takes_back_the_sessions_it_issued() {
+        let dir = TempTree::new("rgy-searchd-session-space");
+        std::fs::write(dir.join("hello.txt"), b"hello\n").unwrap();
+        let root = dir.as_os_str().as_encoded_bytes().to_vec();
+
+        let source = PortableSource::new(root.clone(), 2);
+        let live = Live::with_root(
+            Index::build(source.enumerate().expect("the walk"), 0, 1, b"/"),
+            &root,
+        );
+        let ctx = std::sync::Arc::new(Ctx {
+            root: root.clone(),
+            home: String::new(),
+            tv_dir: None,
+            live: std::sync::RwLock::new(live),
+            catch_up: std::sync::atomic::AtomicU8::new(CATCH_UP_RELISTED),
+            feed: std::sync::atomic::AtomicU8::new(FEED_NONE),
+            changed: Changed::new(),
+            content: std::sync::Mutex::new(None),
+            wants_content: std::sync::atomic::AtomicBool::new(false),
+            sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
+            sessions_next: std::sync::atomic::AtomicU64::new(0),
+        });
+
+        let session_of = |session: Option<u64>| {
+            handle(
+                Request::Search {
+                    q: "hello".to_string(),
+                    limit: 10,
+                    session,
+                },
+                &ctx,
+            )
+            .iter()
+            .find_map(|r| match r {
+                Answer::Frame(Response::Hits { session, .. }) => Some(*session),
+                _ => None,
+            })
+            .expect("a hits frame")
+        };
+
+        // The daemon names one when the client names none.
+        let named = session_of(None).expect("the daemon names a session");
+        assert!(
+            (Ctx::DAEMON_SESSIONS..Ctx::SESSION_LIMIT).contains(&named),
+            "the daemon's own id lives in its own space and under the wire's limit: {named}"
+        );
+
+        // **The round trip.** The client sends it back and the answer is
+        // computed for the same session: that is the re-rank, and it is
+        // what the protocol promises.
+        assert_eq!(
+            session_of(Some(named)),
+            Some(named),
+            "the daemon takes back the session it issued"
+        );
+
+        // And an id the daemon never issued is refused, and a fresh one
+        // is named instead: a client that guesses cannot reach somebody
+        // else's answer.
+        let guessed = named.wrapping_add(1_000_003) % (Ctx::SESSION_LIMIT - Ctx::DAEMON_SESSIONS)
+            + Ctx::DAEMON_SESSIONS;
+        assert_ne!(
+            session_of(Some(guessed)),
+            Some(guessed),
+            "a client cannot take a session the daemon never issued"
+        );
+
+        // The small counters are still the client's to name.
+        assert_eq!(session_of(Some(7)), Some(7));
+
+        // And two sessions the daemon named are two different sessions:
+        // the ids are not a counter, so one client cannot walk into
+        // another's by naming the next number.
+        let first = session_of(None).expect("a session");
+        let second = session_of(None).expect("a session");
+        assert_ne!(first, second, "the daemon's own ids are not a counter");
+    }
+
+    /// The reader and the daemon, proven together.
+    ///
+    /// The bug this pairs with lived in the space BETWEEN the two: the
+    /// reader cast the session number to `u64`, and a cast saturates — a
+    /// client that sent `-1` was read as the session `0`, which is in the
+    /// *client's* space, the space the daemon trusts. The test that paired
+    /// with it built its request in Rust, where a negative id is not even
+    /// representable, so the reader was not in the path and the bug was
+    /// invisible to it.
+    ///
+    /// So this one goes through the wire: the JSON line is built, the
+    /// protocol's own reader parses it, and the request the reader made is
+    /// the request the daemon answers. A `-1` on the wire must not reach
+    /// the daemon as the session `0`.
+    #[test]
+    fn the_reader_never_hands_the_daemon_a_session_it_would_trust() {
+        let dir = TempTree::new("rgy-searchd-wire-session");
+        std::fs::write(dir.join("hello.txt"), b"hello\n").unwrap();
+        let root = dir.as_os_str().as_encoded_bytes().to_vec();
+
+        let source = PortableSource::new(root.clone(), 2);
+        let live = Live::with_root(
+            Index::build(source.enumerate().expect("the walk"), 0, 1, b"/"),
+            &root,
+        );
+        let ctx = std::sync::Arc::new(Ctx {
+            root: root.clone(),
+            home: String::new(),
+            tv_dir: None,
+            live: std::sync::RwLock::new(live),
+            catch_up: std::sync::atomic::AtomicU8::new(CATCH_UP_RELISTED),
+            feed: std::sync::atomic::AtomicU8::new(FEED_NONE),
+            changed: Changed::new(),
+            content: std::sync::Mutex::new(None),
+            wants_content: std::sync::atomic::AtomicBool::new(false),
+            sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
+            sessions_next: std::sync::atomic::AtomicU64::new(0),
+        });
+
+        // The line a client sends, and the reader that reads it.
+        let on_the_wire = |session: &str| {
+            let line = format!(r#"{{"op":"search","q":"hello","limit":10,"session":{session}}}"#);
+            rgy_proto::Request::from_json(&line).expect("the line reads back")
+        };
+        let answered = |req: &Request| {
+            handle(req.clone(), &ctx)
+                .iter()
+                .find_map(|r| match r {
+                    Answer::Frame(Response::Hits { session, .. }) => Some(*session),
+                    _ => None,
+                })
+                .expect("a hits frame")
+        };
+
+        // A negative id is not an id: the reader refuses it, and what the
+        // daemon is handed is a request that names no session at all.
+        let refused = on_the_wire("-1");
+        assert_eq!(
+            refused.session(),
+            None,
+            "a negative id is not a session: the reader refuses it"
+        );
+        let named = answered(&refused);
+        assert_ne!(
+            named,
+            Some(0),
+            "a `-1` on the wire must not become the session `0` in the daemon's hand"
+        );
+        assert!(
+            named.is_some_and(|id| id >= Ctx::DAEMON_SESSIONS),
+            "a request that names no session is answered with one of the daemon's own: {named:?}"
+        );
+
+        // And the session a client legitimately holds still survives the
+        // wire: the reader does not mangle what it can carry, and the
+        // daemon takes the id back.
+        let held = on_the_wire("7");
+        assert_eq!(held.session(), Some(7), "the session reaches the daemon");
+        assert_eq!(
+            answered(&held),
+            Some(7),
+            "the daemon takes back the session the client holds"
+        );
+    }
+
     /// A content search answers the same with a content index as without it.
     ///
     /// The index is the trigram postings: with it the search opens the
@@ -2850,6 +3770,7 @@ mod tests {
             content: std::sync::Mutex::new(None),
             wants_content: std::sync::atomic::AtomicBool::new(false),
             sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
+            sessions_next: std::sync::atomic::AtomicU64::new(0),
         });
         let names = |rs: Vec<Answer>| -> Vec<String> {
             rs.iter()
@@ -2900,12 +3821,85 @@ mod tests {
     fn the_files_the_search_did_not_read_are_the_ones_it_never_reached() {
         // It read everything it was asked to read: the limit stopped it,
         // and the limit is the caller's.
-        assert_eq!(unread_files(100, 100, true, 0), 0);
+        assert_eq!(unread_files(100, 100, true, &[]).0, 0);
         // The placeholders are files it did not read, whoever stopped it.
-        assert_eq!(unread_files(100, 100, true, 2), 2);
+        assert_eq!(unread_files(100, 100, true, &placeholders(2)).0, 2);
         // A budget that ran out: the files it never reached are missing.
-        assert_eq!(unread_files(100, 40, false, 0), 60);
-        assert_eq!(unread_files(100, 40, false, 3), 63);
+        assert_eq!(unread_files(100, 40, false, &[]).0, 60);
+        assert_eq!(unread_files(100, 40, false, &placeholders(3)).0, 63);
+    }
+
+    /// The answer is whole only when every file was read.
+    ///
+    /// A file that could not be opened was not read, and an answer that
+    /// says "whole" about a file nobody read is a wrong fact: the client
+    /// reads the flag as "the search read every candidate it was given",
+    /// and the count of the files it did not read is on the wire next to
+    /// it.
+    #[test]
+    fn an_answer_that_left_a_file_unread_is_not_whole() {
+        // Everything was read: the answer is whole.
+        assert!(content_answer_is_complete(3, 10, true, 0));
+        // The limit cut it short: a page, not the whole answer.
+        assert!(!content_answer_is_complete(10, 10, true, 0));
+        // A file that could not be opened was not read.
+        assert!(!content_answer_is_complete(3, 10, true, 1));
+        // The budget ran out before it reached them all.
+        assert!(!content_answer_is_complete(3, 10, false, 0));
+    }
+
+    /// The count is not enough: the answer says why.
+    ///
+    /// A file that was not read because it is a cloud placeholder is a file
+    /// the user can ask for, and a file the budget never reached is a file
+    /// the user has to ask for again — and a count that does not say which
+    /// of the two it was leaves the reader guessing.
+    #[test]
+    fn the_answer_says_why_the_files_were_not_read() {
+        // The placeholders the search named carry their path and their
+        // reason.
+        let (n, skips) = unread_files(100, 100, true, &placeholders(2));
+        assert_eq!(n, 2);
+        assert_eq!(skips.len(), 1, "one thing happened: {skips:?}");
+        assert_eq!(skips[0].count, 2);
+        assert_eq!(
+            skips[0].reason, "a cloud placeholder",
+            "the reason is the daemon's own: {skips:?}"
+        );
+        // The path is spelled the way the platform spells it: the answer's
+        // own files are spelled that way, and one file spelled two ways is
+        // two files to the reader.
+        let spelled = platform_path(b"C:/placeholder0.txt");
+        assert_eq!(skips[0].path.as_deref(), Some(spelled.as_str()), "the file");
+
+        // The files the budget stopped the search from reaching were never
+        // named, so they carry the reason and no path: a path made up would
+        // be a path the user cannot open.
+        let (n, skips) = unread_files(100, 40, false, &[]);
+        assert_eq!(n, 60);
+        assert_eq!(skips.len(), 1);
+        assert_eq!(skips[0].count, 60);
+        assert_eq!(skips[0].path, None, "no file was named");
+
+        // The counts add up to the count: every file the search did not
+        // read is in one of the groups.
+        let (n, skips) = unread_files(100, 40, false, &placeholders(3));
+        assert_eq!(n, 63);
+        assert_eq!(
+            skips.iter().map(|s| s.count).sum::<usize>(),
+            n,
+            "the reasons account for every file: {skips:?}"
+        );
+    }
+
+    /// The placeholders a search refused, for the rule above.
+    fn placeholders(n: usize) -> Vec<rgy_name_core::content::Skipped> {
+        (0..n)
+            .map(|i| rgy_name_core::content::Skipped {
+                path: format!("C:/placeholder{i}.txt").into_bytes(),
+                reason: "a cloud placeholder",
+            })
+            .collect()
     }
 
     /// An answer cut short by the limit names no files.
@@ -2942,6 +3936,7 @@ mod tests {
             content: std::sync::Mutex::new(None),
             wants_content: std::sync::atomic::AtomicBool::new(false),
             sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
+            sessions_next: std::sync::atomic::AtomicU64::new(0),
         });
 
         let answer = grep("hello", 1, &ctx);
@@ -2964,6 +3959,151 @@ mod tests {
             "the daemon read what it was asked to read, so it skipped nothing"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The pack store's answer is a page when the limit cuts it.
+    ///
+    /// The store searched the corpus whole and the scope filtered its
+    /// answer — every file in the scope was read, and that is true — but
+    /// the limit cuts what the caller gets, and the answer has to say so.
+    /// The route used to ignore the limit and to claim the answer was
+    /// whole: a caller that asked for one file got every file in the scope
+    /// and was told it had seen them all.
+    #[test]
+    fn the_pack_store_answer_is_a_page_when_the_limit_cuts_it() {
+        // A tree of three files that all carry the needle.
+        let tree = TempTree::new("rgy-searchd-tv-scope");
+        let mut scope = Vec::new();
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            let path = tree.join(name);
+            std::fs::write(&path, b"the needle is here\n").unwrap();
+            scope.push(path.to_string_lossy().into_owned());
+        }
+        // And the pack store over it.
+        let store = TempTree::new("rgy-searchd-tv-store");
+        rgx_core::tv_runtime::builder::build_store(
+            &tree,
+            &store,
+            &rgx_core::tv_runtime::builder::BuildConfig::default(),
+        )
+        .expect("the pack store is built");
+
+        let ctx = std::sync::Arc::new(Ctx {
+            root: tree.as_os_str().as_encoded_bytes().to_vec(),
+            home: String::new(),
+            tv_dir: Some(store.0.clone()),
+            live: std::sync::RwLock::new(Live::new(Index::build(Vec::new(), 0, 0, b"/"))),
+            catch_up: std::sync::atomic::AtomicU8::new(CATCH_UP_RELISTED),
+            feed: std::sync::atomic::AtomicU8::new(FEED_NONE),
+            changed: Changed::new(),
+            content: std::sync::Mutex::new(None),
+            wants_content: std::sync::atomic::AtomicBool::new(false),
+            sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
+            sessions_next: std::sync::atomic::AtomicU64::new(0),
+        });
+
+        let answer = |limit: usize| {
+            scoped_content("grep:needle", &scope, limit, &ctx)
+                .iter()
+                .find_map(|r| match r {
+                    Answer::Frame(Response::GrepFiles {
+                        files, complete, ..
+                    }) => Some((files.len(), *complete)),
+                    _ => None,
+                })
+                .expect("the answer carries the files")
+        };
+
+        // The scope holds three files and the caller asks for one: the
+        // answer is a page, and it says so.
+        let (files, complete) = answer(1);
+        assert_eq!(files, 1, "the limit is the limit");
+        assert!(!complete, "an answer cut short is not whole");
+
+        // And the whole scope is whole when the limit is above it: the
+        // store read every file in the scope, and the limit left the
+        // answer alone.
+        let (files, complete) = answer(10);
+        assert_eq!(files, 3, "every file in the scope is in the answer");
+        assert!(complete, "an answer under the limit is the whole answer");
+    }
+
+    /// The scope names the file however the path is spelled.
+    ///
+    /// The store indexes its corpus under the root it resolved, and the
+    /// caller spells the scope the way the caller was given it. Two
+    /// spellings of one folder — a link, an alias, a short name — are
+    /// bytes that differ, and a scope that did not resolve matched
+    /// nothing: the answer came back empty, and it said it was whole.
+    ///
+    /// The Windows runner is where this bites by itself: its temporary
+    /// directory is spelled the short way (`C:\Users\RUNNER~1\...`) and the
+    /// store holds the long one (`C:\Users\runneradmin\...`), because the
+    /// store resolves the root and the caller does not.
+    #[test]
+    fn the_scope_matches_the_store_however_the_path_is_spelled() {
+        // A tree of two files that carry the needle.
+        let tree = TempTree::new("rgy-searchd-tv-spelling");
+        let mut scope = Vec::new();
+        for name in ["a.txt", "b.txt"] {
+            let path = tree.join(name);
+            std::fs::write(&path, b"the needle is here\n").unwrap();
+            scope.push(path.to_string_lossy().into_owned());
+        }
+        // And the pack store over it.
+        let store = TempTree::new("rgy-searchd-tv-spelling-store");
+        rgx_core::tv_runtime::builder::build_store(
+            &tree,
+            &store,
+            &rgx_core::tv_runtime::builder::BuildConfig::default(),
+        )
+        .expect("the pack store is built");
+
+        let ctx = std::sync::Arc::new(Ctx {
+            root: tree.as_os_str().as_encoded_bytes().to_vec(),
+            home: String::new(),
+            tv_dir: Some(store.0.clone()),
+            live: std::sync::RwLock::new(Live::new(Index::build(Vec::new(), 0, 0, b"/"))),
+            catch_up: std::sync::atomic::AtomicU8::new(CATCH_UP_RELISTED),
+            feed: std::sync::atomic::AtomicU8::new(FEED_NONE),
+            changed: Changed::new(),
+            content: std::sync::Mutex::new(None),
+            wants_content: std::sync::atomic::AtomicBool::new(false),
+            sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
+            sessions_next: std::sync::atomic::AtomicU64::new(0),
+        });
+
+        let count = |scope: &[String]| {
+            scoped_content("grep:needle", scope, 10, &ctx)
+                .iter()
+                .find_map(|r| match r {
+                    Answer::Frame(Response::GrepFiles { files, .. }) => Some(files.len()),
+                    _ => None,
+                })
+                .expect("the answer carries the files")
+        };
+
+        // The scope as the caller spells it.
+        assert_eq!(count(&scope), 2, "the scope names the files it lists");
+
+        // And the same scope through a link to the tree: the same folder,
+        // spelled another way. The store holds the tree it resolved, and
+        // the scope holds the link.
+        #[cfg(unix)]
+        {
+            let link = tree.with_extension("link");
+            let _ = std::fs::remove_dir_all(&link);
+            // The tree is handed over as the path it is: the tree borrows
+            // a path, and `&TempTree` is not a path the operating system
+            // is asked to make a link to.
+            std::os::unix::fs::symlink(&*tree, &link).expect("a link to the tree");
+            let through = vec![link.join("a.txt").to_string_lossy().into_owned()];
+            assert_eq!(
+                count(&through),
+                1,
+                "the scope names the file through the link to it"
+            );
+        }
     }
 
     /// An answer that several alternatives filled is not whole.
@@ -2999,6 +4139,7 @@ mod tests {
             content: std::sync::Mutex::new(None),
             wants_content: std::sync::atomic::AtomicBool::new(false),
             sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
+            sessions_next: std::sync::atomic::AtomicU64::new(0),
         });
 
         // Three files match the first alternative and one the second: the
@@ -3090,6 +4231,7 @@ mod tests {
             content: std::sync::Mutex::new(None),
             wants_content: std::sync::atomic::AtomicBool::new(false),
             sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
+            sessions_next: std::sync::atomic::AtomicU64::new(0),
         });
 
         let count = |q: &str, limit: usize| {
@@ -3146,6 +4288,7 @@ mod tests {
             content: std::sync::Mutex::new(None),
             wants_content: std::sync::atomic::AtomicBool::new(false),
             sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
+            sessions_next: std::sync::atomic::AtomicU64::new(0),
         });
 
         let warnings = |answers: &[Answer]| -> Vec<String> {
@@ -3242,6 +4385,7 @@ mod tests {
             content: std::sync::Mutex::new(None),
             wants_content: std::sync::atomic::AtomicBool::new(false),
             sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
+            sessions_next: std::sync::atomic::AtomicU64::new(0),
         });
 
         let responses = handle(

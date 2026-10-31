@@ -820,6 +820,25 @@ fn relative(base: &Path, path: &Path) -> Vec<u8> {
 }
 
 /// The path in the spelling the patterns use: `/` between the parts.
+///
+/// On Windows the separator of the platform is a backslash and a pattern
+/// says `/`, so the backslash becomes one. On Unix the separator already
+/// is `/` and a backslash is a letter of a name -- the reference keeps it,
+/// and git keeps it too, so the tree keeps it as well: a name that says
+/// `src\\main.rs` is one name and not two.
+#[cfg(unix)]
+fn normalize(path: &Path) -> Vec<u8> {
+    path.as_os_str().as_encoded_bytes().to_vec()
+}
+
+/// The path in the spelling the patterns use: `/` between the parts.
+///
+/// On Windows the separator of the platform is a backslash and a pattern
+/// says `/`, so the backslash becomes one. On Unix the separator already
+/// is `/` and a backslash is a letter of a name -- the reference keeps it,
+/// and git keeps it too, so the tree keeps it as well: a name that says
+/// `src\\main.rs` is one name and not two.
+#[cfg(not(unix))]
 fn normalize(path: &Path) -> Vec<u8> {
     let bytes = path.as_os_str().as_encoded_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -1181,8 +1200,12 @@ fn add_level(chain: &Chain, dir: &Path, opts: &Options) -> Chain {
             chain.has_git = true;
             // The `.gitignore` files above the repository are not the
             // repository's: the rules of a repository are the ones of its
-            // own directory and of the directories under it.
-            chain.gitignore.retain(|level| dir.starts_with(&level.base));
+            // own directory and of the directories under it. A level is
+            // kept when its own directory is at or below the repository's
+            // -- `base.starts_with(dir)`, and not the other way round,
+            // which would keep the files above the repository and drop the
+            // ones under it.
+            chain.gitignore.retain(|level| level.base.starts_with(dir));
             if opts.git_exclude {
                 let exclude = git.join("info").join("exclude");
                 if let Ok(bytes) = fs::read(&exclude) {

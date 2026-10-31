@@ -21,7 +21,7 @@
 # What this script does NOT do
 # ----------------------------
 # It does not rewrite the copy. The transforms it used to apply are gone,
-# and the header of the PowerShell twin said why they were false:
+# and the reasons they were false are worth keeping in the record:
 #
 #   * `alloc::` -> `std::` -- both projects are `#![no_std]` + `alloc` now,
 #     so there is nothing to rewrite.
@@ -41,6 +41,9 @@
 # current content plus the patch, so running it twice changes nothing, and
 # running it after a sync restores a file the sync overwrote.
 #
+# The PowerShell counterpart is scripts/apply-vendored-edits.ps1, and the
+# two are twins: same text, same order, same exit code, on the same input.
+#
 # Exit codes: 0 all patches applied, 1 at least one failed.
 
 set -uo pipefail
@@ -51,19 +54,32 @@ repo=$(cd "$here/.." && pwd)
 upstream=""
 dry_run=0
 
-# The help, before the options are read: the script's own header, the way
+# usage -- what the two scripts are for, in the same words in both.
+usage() {
+    printf '%s\n' "apply-vendored-edits [--upstream <path>] [--dry-run]"
+    printf '\n'
+    printf '%s\n' \
+        "Applies rgy's own divergences to the vendored rgx trees: every patch" \
+        "under scripts/rgx-local-patches/ goes on top of the copy of upstream's" \
+        "file, so the vendored tree carries rgy's fixes and nothing else." \
+        "The copy is a copy — the script does not rewrite it." \
+        "" \
+        "Exits 0 when every patch applies, 1 when one does not."
+}
+
+# The help, before the options are read: the script's own usage, the way
 # the twin prints it.
-for _arg in "$@"; do
-    case "$_arg" in
-        -h|--help) sed -n '2,45p' "$0"; exit 0 ;;
-    esac
-done
+. "$here/lib/options.sh"
+if rgy_help_requested "$@"; then
+    usage
+    exit 0
+fi
+
 # The options, read by the helper the two twins share: the long spelling
 # and the PowerShell one are the same option, and an option neither of
 # them knows is an error on both platforms -- not a silent "do the real
 # thing", which in this directory means patching the vendored trees.
-. "$here/lib/options.sh"
-rgy_read_options "dryrun=dry_run" "upstream=upstream" "$@"
+rgy_read_options "dryrun=dry_run" "upstream=upstream" "" "$@"
 
 if [ -z "$upstream" ]; then
     # Relative to the repository root, and printed as given, so that the

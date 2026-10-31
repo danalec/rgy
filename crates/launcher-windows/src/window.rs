@@ -120,6 +120,14 @@ pub enum Event {
     Resize,
     /// The hotkey fired: show the window, or hide it if it is already up.
     Toggle,
+    /// The search window was asked for: show it, and leave it up.
+    ///
+    /// The icon in the notification area asks with this and not with a
+    /// toggle. A double click is two clicks, and a toggle would show the
+    /// window and hide it again — a window that flickers is a window that
+    /// is not there — and the shell sends the same click twice when the
+    /// user double-clicks.
+    Show,
     /// The window was closed.
     Quit,
     /// The clock ticked: the host decides whether the typing has settled.
@@ -294,6 +302,25 @@ struct State {
     /// message on its own drops the character — the field would not
     /// move while the user typed an emoji.
     pending_char: Option<u16>,
+    /// Why the notification area has no icon, when it has none.
+    ///
+    /// The launcher works without the icon — the hotkey does not go through
+    /// the notification area — so a launcher that could not have the icon
+    /// is not a launcher that could not start. But it IS a launcher with no
+    /// face, and the reason is kept so that the question can be asked
+    /// instead of guessed at.
+    tray_error: Option<String>,
+    /// The mouse's message the shell sent, waiting for the pump.
+    ///
+    /// The shell **sends** the notification area's clicks to the window's
+    /// procedure: the message is not posted, so it never comes out of the
+    /// message queue and the pump never sees it. The procedure is the only
+    /// place it arrives, so the procedure keeps it and the pump asks for it.
+    ///
+    /// The mouse's own message is in the low word of the word the shell
+    /// sent — the icon's place is in the high word — and the word is taken
+    /// out before it is read.
+    tray_click: Option<UINT>,
 }
 
 /// The window's own pixels, for a window that paints its own alpha.
@@ -627,6 +654,15 @@ pub struct Window {
     model: (i32, i32),
     /// The scale of the monitor the window is on, in per cent.
     scale: u32,
+    /// The icon in the notification area, when the shell took it.
+    ///
+    /// The window is a tool window on purpose — it is not in the taskbar
+    /// and not in the alt-tab list — so the icon is the launcher's face
+    /// while it waits. The shell can refuse it, and a launcher whose face
+    /// was refused still answers the keyboard: the hotkey does not go
+    /// through the notification area, and a launcher that refused to start
+    /// because a tray was busy would be a worse answer than no icon.
+    tray: Option<crate::tray::Tray>,
 }
 
 impl Window {
@@ -682,6 +718,8 @@ impl Window {
             fonts: Fonts::new(SCALE_PERCENT),
             scale: SCALE_PERCENT,
             pending_char: None,
+            tray_error: None,
+            tray_click: None,
         }));
         let state = match NonNull::new(raw) {
             Some(state) => state,
@@ -731,7 +769,15 @@ impl Window {
                 height: 80,
                 model: (600, 80),
                 scale: SCALE_PERCENT,
+                tray: None,
             };
+            // The icon goes into the notification area now that the window
+            // exists: the shell's record holds the window's own handle, and
+            // a record with no window behind it is a record of nothing.
+            match crate::tray::Tray::new(hwnd, Text::for_lang(Lang::English)) {
+                Ok(tray) => w.tray = Some(tray),
+                Err(why) => w.state_mut().tray_error = Some(why),
+            }
             // The window exists: the platform says what a unit is worth
             // on the monitor it is on, and the picture is drawn at that
             // size.
@@ -781,7 +827,22 @@ impl Window {
     pub fn with_lang(mut self, lang: Lang) -> Window {
         self.state_mut().lang = lang;
         self.state_mut().view.placeholder = Text::for_lang(lang).placeholder.to_string();
+        // The icon's tip is a word the user reads too, and the shell is
+        // showing the old language's one until it is told otherwise.
+        if let Some(tray) = self.tray.as_mut() {
+            tray.set_tip(Text::for_lang(lang).tray_tip);
+        }
         self
+    }
+
+    /// Why the notification area has no icon, when it has none.
+    ///
+    /// The launcher works without the icon — the hotkey does not go through
+    /// the notification area — so the reason is not a failure the user is
+    /// shown. It is the answer to "why is there no icon?", which is a
+    /// question a reader of the tree can ask and a test can check.
+    pub fn tray_error(&self) -> Option<&str> {
+        self.state().tray_error.as_deref()
     }
 
     /// Make the window composite itself.
@@ -1453,6 +1514,17 @@ impl Window {
                         break;
                     }
                 }
+                // The notification area: the shell sends its clicks to the
+                // window's procedure, and the pump is where the answer is
+                // given — the menu is a modal loop, and a modal loop
+                // inside a window procedure is a modal loop inside a
+                // window procedure.
+                if let Some(mouse) = self.state_mut().tray_click.take() {
+                    let control = self.tray_clicked(mouse, &mut on_event);
+                    if !self.apply(control) {
+                        break;
+                    }
+                }
             }
         }
         Ok(())
@@ -1494,6 +1566,21 @@ impl Window {
             if msg.message == WM_TOGGLE {
                 return on_event(Event::Toggle);
             }
+            // The notification area's clicks are NOT answered here: the
+            // shell sends them to the window's procedure, and a message
+            // that is sent never comes out of the queue. The procedure
+            // keeps them and the pump answers them.
+            // The shell was made again — it forgot every icon it was given,
+            // and the launcher's face goes back into the notification area.
+            // Without this the icon is there until the next restart of the
+            // explorer, and the launcher that has no face is the launcher
+            // the user cannot find.
+            if let Some(tray) = self.tray.as_ref()
+                && msg.message == tray.taskbar_created()
+            {
+                let _ = tray.restore();
+                return Control::None;
+            }
             if (msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN)
                 && let Some(key) = translate_key(msg, control_down())
             {
@@ -1524,6 +1611,38 @@ impl Window {
             DispatchMessageW(msg);
         }
         Control::None
+    }
+
+    /// What the user did with the icon in the notification area.
+    ///
+    /// The left button opens the window, and so does the double click:
+    /// both ask for the window to be **shown**, and showing a window that
+    /// is already up leaves it up. A toggle would be the wrong answer
+    /// twice over — the shell sends the click again when the user
+    /// double-clicks, and a toggle would open the window and close it.
+    ///
+    /// The right button opens the menu, and the menu says which of the two
+    /// things the user wants: the window, or the end of the program.
+    fn tray_clicked(
+        &mut self,
+        mouse: UINT,
+        on_event: &mut impl FnMut(Event) -> Control,
+    ) -> Control {
+        if mouse == WM_LBUTTONUP || mouse == WM_LBUTTONDBLCLK {
+            return on_event(Event::Show);
+        }
+        if mouse != WM_RBUTTONUP && mouse != WM_CONTEXTMENU {
+            return Control::None;
+        }
+        let lang = self.state().lang;
+        let Some(tray) = self.tray.as_ref() else {
+            return Control::None;
+        };
+        match tray.menu(self.hwnd, Text::for_lang(lang)) {
+            Some(crate::tray::Command::Search) => on_event(Event::Show),
+            Some(crate::tray::Command::Quit) => on_event(Event::Quit),
+            None => Control::None,
+        }
     }
 }
 
@@ -1798,6 +1917,28 @@ unsafe extern "system" fn wnd_proc(
                         state.focus_lost = true;
                     }
                 }
+            }
+            0
+        }
+        // The shell **sends** the notification area's clicks to the
+        // window's procedure: the message is not posted, so it never comes
+        // out of the message queue and the pump never sees it. The window
+        // procedure is the only place it arrives — and a click that the
+        // procedure hands to the default procedure is a click that is
+        // lost, which is an icon that does not answer when it is clicked.
+        //
+        // So the procedure keeps the mouse's message and wakes the pump,
+        // and the pump answers it: the answer belongs to the host, and the
+        // host is asked where the host is not inside a platform call.
+        crate::tray::WM_TRAY => {
+            if let Some(state) = unsafe { state_of(hwnd) } {
+                unsafe {
+                    (*state).tray_click = Some(crate::tray::mouse_message(lparam));
+                }
+                // The pump is asleep in the queue: the nudge is what wakes
+                // it, so the answer is given now and not at the next key
+                // press.
+                unsafe { PostMessageW(hwnd, WM_NULL, 0, 0) };
             }
             0
         }
@@ -2185,6 +2326,57 @@ mod tests {
     fn the_compositor_takes_the_window_picture() {
         let window = Window::new("rgxy-test").expect("the window was made");
         assert_eq!(window.compositor(), Compositor::Accepted);
+    }
+
+    /// The icon goes into the notification area.
+    ///
+    /// The window is a tool window on purpose: it is not in the taskbar and
+    /// not in the alt-tab list, so the icon in the notification area is the
+    /// launcher's face while it waits for the next Control. An icon that
+    /// the shell refuses is a launcher with no face, and the refusal is
+    /// said out loud here rather than swallowed: the launcher still works
+    /// without the icon, and a launcher that is not there is a launcher the
+    /// user cannot find.
+    #[test]
+    fn the_icon_goes_into_the_notification_area() {
+        let window = Window::new("rgxy-test").expect("the window was made");
+        assert!(
+            window.tray_error().is_none(),
+            "the notification area refused the icon: {:?}",
+            window.tray_error()
+        );
+    }
+
+    /// The icon's click asks for the window, and so does the double click.
+    ///
+    /// A double click on the notification area's icon is two clicks, and a
+    /// toggle would show the window on the first and hide it on the
+    /// second: a window that opens and closes again is a window that is
+    /// not there. So the click asks for the window to be **shown**.
+    #[test]
+    fn the_icons_click_asks_for_the_window() {
+        extern crate std;
+        let mut window = Window::new("rgxy-test").expect("the window was made");
+        let asked: std::cell::RefCell<Vec<Event>> = std::cell::RefCell::new(Vec::new());
+        let mut answer = |event: Event| {
+            asked.borrow_mut().push(event);
+            Control::None
+        };
+
+        window.tray_clicked(WM_LBUTTONUP, &mut answer);
+        assert_eq!(
+            asked.borrow().as_slice(),
+            &[Event::Show],
+            "the click asks for the window"
+        );
+
+        asked.borrow_mut().clear();
+        window.tray_clicked(WM_LBUTTONDBLCLK, &mut answer);
+        assert_eq!(
+            asked.borrow().as_slice(),
+            &[Event::Show],
+            "the double click asks too"
+        );
     }
 
     /// Two windows at once are two windows.

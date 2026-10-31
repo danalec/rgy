@@ -171,20 +171,29 @@ native_path() {
     fi
 }
 
+# The help, before the options are read: the script's own header, the way
+# the twin prints it.
+. "$here/lib/options.sh"
+if rgy_help_requested "$@"; then
+    usage
+    exit 0
+fi
+
+# The options, read by the helper the two twins share: the long spelling
+# and the PowerShell one are the same option, and an option neither of
+# them knows is an error on both platforms -- not a silent "check
+# something else", which in a drift gate is a gate that did not run.
 upstream=""
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --upstream) upstream="$2"; shift 2 ;;
-        --pin|--for)
-            complaint "--pin is gone: the pin column is written by scripts/sync-rgx-upstream.sh,"
-            complaint "which pins every row to the commit the whole sync was taken from."
-            complaint "Re-pin by running the sync."
-            exit 1
-            ;;
-        -h|--help) usage; exit 0 ;;
-        *) complaint "unknown argument: $1"; exit 1 ;;
-    esac
-done
+pin=0
+for_value=""
+rgy_read_options "pin=pin" "upstream=upstream for=for_value" "" "$@"
+
+if [ "$pin" -eq 1 ] || [ -n "$for_value" ]; then
+    complaint "--pin is gone: the pin column is written by scripts/sync-rgx-upstream.sh,"
+    complaint "which pins every row to the commit the whole sync was taken from."
+    complaint "Re-pin by running the sync."
+    exit 1
+fi
 
 manifest="$here/vendored-sources.tsv"
 if [ ! -f "$manifest" ]; then

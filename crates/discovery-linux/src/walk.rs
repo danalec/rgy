@@ -19,6 +19,8 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use core::ffi::c_long;
+
 use rgy_discovery::path;
 use rgy_discovery::walk::{
     KIND_DIR, KIND_FILE, KIND_LINK, KIND_OTHER, Listing, NONE, RawEnt, blocked,
@@ -34,12 +36,26 @@ mod sys {
 
     /// Read only.
     pub(super) const O_RDONLY: c_int = 0;
-    /// `O_DIRECTORY`: the open has to be of a folder
-    /// (`asm-generic/fcntl.h`).
+    /// `O_DIRECTORY`: the open has to be of a folder.
+    ///
+    /// The number is the architecture's: x86_64 takes it from
+    /// `asm-generic/fcntl.h` (00200000) and arm64 overrides it in its own
+    /// `asm/fcntl.h` (0040000). A bit the kernel does not know is not
+    /// ignored -- the open fails with EINVAL and the folder stays shut,
+    /// so the walk finds nothing at all.
+    #[cfg(target_arch = "x86_64")]
     pub(super) const O_DIRECTORY: c_int = 0o200_000;
+    #[cfg(target_arch = "aarch64")]
+    pub(super) const O_DIRECTORY: c_int = 0o40_000;
     /// `O_NOFOLLOW`: the open is of the folder itself, not of what it
     /// points at.
+    ///
+    /// The architecture's, for the same reason: `asm-generic/fcntl.h`
+    /// gives 00400000 on x86_64 and arm64 overrides it with 0100000.
+    #[cfg(target_arch = "x86_64")]
     pub(super) const O_NOFOLLOW: c_int = 0o400_000;
+    #[cfg(target_arch = "aarch64")]
+    pub(super) const O_NOFOLLOW: c_int = 0o100_000;
 
     /// `getdents64`'s syscall number, which is the architecture's.
     ///
@@ -122,7 +138,21 @@ fn list_dir(dir: &[u8]) -> Option<Listing> {
     loop {
         // getdents64 is a raw syscall (the C library does not wrap it);
         // the buffer of linux_dirent64 rows is parsed below.
-        let n = unsafe { sys::syscall(sys::SYS_GETDENTS64, fd, buf.as_mut_ptr(), buf.len()) };
+        let n = unsafe {
+            // The descriptor is passed as the width the call reads it at.
+            // `syscall` is variadic and it reads every argument as a
+            // `long`; a 32-bit `int` in a variadic slot leaves the upper
+            // half of the register unspecified (AAPCS64, C.14), and the
+            // call would then be made with a descriptor nobody can name.
+            // The call is declared here by hand, so the width is stated
+            // here too.
+            sys::syscall(
+                sys::SYS_GETDENTS64,
+                fd as c_long,
+                buf.as_mut_ptr(),
+                buf.len(),
+            )
+        };
         if n <= 0 {
             break;
         }

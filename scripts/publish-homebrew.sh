@@ -38,7 +38,7 @@ CORE_FORK="danalec/homebrew-core"
 # them knows is an error on both platforms -- not a silent "do the real
 # thing", which in this directory means opening a pull request.
 . "$ROOT/scripts/lib/options.sh"
-rgy_read_options "dryrun=DRY_RUN" "version=VERSION formula=FORMULA" "$@"
+rgy_read_options "dryrun=DRY_RUN" "version=VERSION formula=FORMULA" "" "$@"
 
 formula_file="Formula/$FORMULA.rb"
 if [ ! -f "$formula_file" ]; then

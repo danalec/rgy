@@ -13,6 +13,28 @@ fn searchd() -> std::path::PathBuf {
     bin("searchd")
 }
 
+/// A path as the platform spells it: the long name, not the alias.
+///
+/// Some machines spell `%TEMP%` with the 8.3 short name of the
+/// profile folder (`C:\Users\RUNNER~1\...`), while the operating
+/// system answers with the long one (`C:\Users\runneradmin\...`).
+/// The daemon resolves its root before it says anything, and the pack
+/// store indexes the corpus under its canonical root, so their answers
+/// carry the long name — and a test that compares one with the
+/// spelling the environment happened to use is comparing two spellings
+/// of one folder.
+fn as_the_platform_spells_it(path: &std::path::Path) -> String {
+    let canonical = std::fs::canonicalize(path).expect("the path resolves to itself");
+    let text = canonical.to_string_lossy().into_owned();
+    // The long-path prefix is how the platform spells a path, not what
+    // the caller wrote: it comes off, and a UNC path keeps the `\\`
+    // that says it is one.
+    match text.strip_prefix(r"\\?\UNC\") {
+        Some(rest) => format!(r"\\{rest}"),
+        None => text.strip_prefix(r"\\?\").unwrap_or(&text).to_string(),
+    }
+}
+
 // --- proto framing (JSON lines) -------------------------------------------
 
 #[test]
@@ -346,6 +368,11 @@ fn bad_invocation_exits_two() {
 /// front: rg prints the paths of the platform it runs on. The whole-tree
 /// answer came out with the tree's form and the scoped answer with the
 /// caller's, so one front said one file two ways.
+///
+/// The caller asks with the platform's spelling — the long name of every
+/// folder, the one the daemon resolved its root to — so the two answers
+/// are the same string: the front says one file one way, and the way it
+/// says it is the way the platform spells a path.
 #[test]
 fn the_compat_front_says_a_path_one_way() {
     let root = fixture_dir("serve-spelling");
@@ -353,10 +380,7 @@ fn the_compat_front_says_a_path_one_way() {
     let root_arg = root.to_str().unwrap();
     // The path goes into a JSON string, so its separators are escaped on
     // the way in.
-    let file = root
-        .join("hello.txt")
-        .to_string_lossy()
-        .replace('\\', "\\\\");
+    let file = as_the_platform_spells_it(&root.join("hello.txt")).replace('\\', "\\\\");
 
     // The whole tree: the path comes from the tree.
     let (code, wide, err) = run_stdin(
@@ -688,4 +712,443 @@ fn path_of(frame: &str) -> String {
         }
     }
     out
+}
+
+// --- what the answer says about itself ---------------------------------------
+
+/// The daemon's own session space.
+///
+/// The ids the daemon names itself live above the ids the clients name and
+/// below the wire's exactness limit, so the two spaces cannot meet and the
+/// number the daemon sends is the number the daemon reads back.
+const DAEMON_SESSION_SPACE: std::ops::Range<u64> = (1 << 52)..(1 << 53);
+
+/// The frame of a kind in an answer.
+///
+/// The answer is JSON lines and a frame is one line, so the frame is the
+/// line that names itself. The fixtures hold no quotes in their paths, so a
+/// frame cannot be confused with the text of another one.
+fn frame_of(out: &str, op: &str) -> String {
+    out.lines()
+        .find(|l| l.contains(op))
+        .unwrap_or_else(|| panic!("the answer carries a {op} frame; got {out}"))
+        .to_string()
+}
+
+/// The name answer of an answer.
+fn hits_frame(out: &str) -> String {
+    frame_of(out, "\"op\":\"hits\"")
+}
+
+/// The content answer of an answer.
+fn grep_frame(out: &str) -> String {
+    frame_of(out, "\"op\":\"grep-files\"")
+}
+
+/// The session an answer names.
+///
+/// The field is the last one in the frame, so the last one in the text is
+/// the field: a path in the answer cannot be mistaken for it.
+fn session_of(frame: &str) -> Option<u64> {
+    let at = frame.rfind("\"session\":")?;
+    let rest = &frame[at + "\"session\":".len()..];
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+
+/// The scope of a scoped request: the paths, as the JSON on the wire.
+///
+/// The paths go into a JSON string, so their separators are escaped on the
+/// way in.
+///
+/// The scope is spelled the way the platform spells it — the long name of
+/// every folder, not the 8.3 alias the environment happens to spell
+/// `%TEMP%` with. The pack store indexes the corpus under its canonical
+/// root and the daemon resolves its own root before it answers, so the
+/// scope has to be asked for in the same spelling they hold it in: a scope
+/// spelled with an alias is a scope the store does not have.
+fn scope_of(dir: &std::path::Path, names: &[&str]) -> String {
+    names
+        .iter()
+        .map(|name| {
+            let path = as_the_platform_spells_it(&dir.join(name)).replace('\\', "\\\\");
+            format!("\"{path}\"")
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// A daemon that serves over stdio and stays up between questions.
+///
+/// The session round trip needs two questions, and the second one has to
+/// carry the id the first answer named -- and the id is only known once the
+/// first answer has come back. A daemon that is fed its whole script at
+/// once cannot do that.
+struct Stdio {
+    child: std::process::Child,
+    stdin: std::process::ChildStdin,
+    reader: std::io::BufReader<std::process::ChildStdout>,
+    /// The cache the daemon writes its index into.
+    ///
+    /// It lives as long as the daemon does: a daemon whose cache was taken
+    /// away underneath it would answer from nothing, and the test would be
+    /// measuring the removal instead of the answer.
+    _cache: harness::TempDir,
+}
+
+impl Stdio {
+    /// A daemon over `root`, serving on its standard input.
+    fn start(root: &str) -> Self {
+        let cache = harness::shared_cache_dir("serve-stdio");
+        let mut child = std::process::Command::new(searchd())
+            .args(["--root", root])
+            .env("RGY_INDEX_DIR", &cache)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("the daemon starts");
+        let stdin = child.stdin.take().expect("the daemon's stdin");
+        let reader = std::io::BufReader::new(child.stdout.take().expect("the daemon's stdout"));
+        Stdio {
+            child,
+            stdin,
+            reader,
+            _cache: cache,
+        }
+    }
+
+    /// Ask one question and read the answer it gets.
+    fn ask(&mut self, request: &str) -> String {
+        use std::io::{BufRead, Write};
+        writeln!(self.stdin, "{request}").expect("the question is written");
+        self.stdin.flush().expect("the question is flushed");
+        let mut answer = String::new();
+        loop {
+            let mut line = String::new();
+            let read = self
+                .reader
+                .read_line(&mut line)
+                .expect("the answer is read");
+            assert!(read > 0, "the daemon answered {request}");
+            answer.push_str(&line);
+            if line.contains("\"op\":\"done\"") || line.contains("\"op\":\"error\"") {
+                break;
+            }
+        }
+        answer
+    }
+}
+
+impl Drop for Stdio {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// The name answer says whether it is the whole answer.
+///
+/// A list of hits looks like the whole answer, and a list that reached the
+/// limit is the same list as one that did not: the answer has to say which
+/// it is, or the reader cannot tell a whole answer from a page of a longer
+/// one.
+///
+/// The routes are the whole tree and the scope, and they are the same
+/// question with different starting points -- so they must not disagree
+/// about the same answer. The flag was in the protocol and not in the
+/// answers: every route dropped it, and the command line never computed it,
+/// so a truncated list was printed as if it were the whole list.
+///
+/// The rule is the protocol's own: fewer hits than the limit is the whole
+/// answer, and an answer that reached the limit may have been cut short.
+#[test]
+fn every_route_says_whether_the_name_answer_is_whole() {
+    let dir = fixture_dir("dwhole");
+    // The scope is a folder of the tree, and its name is not a name the
+    // working directory has: the scope is a path in the index, and a path
+    // that resolved against the working directory would be a different
+    // question.
+    std::fs::create_dir_all(dir.join("rgy-scope")).unwrap();
+    for i in 0..3 {
+        std::fs::write(dir.join(format!("rgy-scope/hello{i}.txt")), "hello\n").unwrap();
+    }
+    let root = dir.to_str().unwrap();
+
+    // The routes that answer a name query, and the question each of them
+    // answers.
+    let routes: [(&str, &str); 2] = [
+        ("the whole tree", "hello"),
+        ("the scope", "in:rgy-scope hello"),
+    ];
+
+    for (what, q) in routes {
+        // Below the limit: the whole answer.
+        let (code, out, err) = run_stdin(
+            &searchd(),
+            &["--root", root],
+            &format!("{{\"op\":\"search\",\"q\":\"{q}\",\"limit\":10}}\n"),
+        );
+        assert_eq!(code, 0, "{what}: stderr={err}");
+        let frame = hits_frame(&out);
+        assert_eq!(
+            frame.matches("\"path\":").count(),
+            3,
+            "{what} found the three files; got {frame}"
+        );
+        assert!(
+            frame.contains("\"complete\":true"),
+            "{what} says a whole answer is not whole; got {frame}"
+        );
+
+        // At the limit: the answer may have been cut short.
+        let (code, out, err) = run_stdin(
+            &searchd(),
+            &["--root", root],
+            &format!("{{\"op\":\"search\",\"q\":\"{q}\",\"limit\":2}}\n"),
+        );
+        assert_eq!(code, 0, "{what}: stderr={err}");
+        let frame = hits_frame(&out);
+        assert_eq!(
+            frame.matches("\"path\":").count(),
+            2,
+            "{what} answered with the two hits that were asked for; got {frame}"
+        );
+        assert!(
+            frame.contains("\"complete\":false"),
+            "{what} says a cut answer is whole; got {frame}"
+        );
+    }
+}
+
+/// A session the daemon issued is taken back.
+///
+/// The session is the incremental-search id: the daemon keeps the answer
+/// under it, and the next question that carries the same id is answered from
+/// that answer instead of from the index. The id is a capability -- the
+/// daemon's own ids are unguessable -- and the daemon takes back the ones
+/// it issued and only those.
+///
+/// The daemon used to refuse every id in its own space, including the ones
+/// it had just issued: the answer it put on the wire was a name it would not
+/// take back, and the round trip the protocol promises never happened.
+#[test]
+fn a_session_the_daemon_issued_is_taken_back() {
+    let dir = fixture_dir("dtakeback");
+    for i in 0..3 {
+        std::fs::write(dir.join(format!("hello{i}.txt")), "hello\n").unwrap();
+    }
+    let root = dir.to_str().unwrap();
+
+    let mut daemon = Stdio::start(root);
+    // The first question names no session, so the daemon names one and the
+    // answer says which.
+    let first = daemon.ask(r#"{"op":"search","q":"hello","limit":10}"#);
+    let session = session_of(&hits_frame(&first)).expect("the answer names a session");
+    assert!(
+        DAEMON_SESSION_SPACE.contains(&session),
+        "the daemon names a session of its own; got {session} in {first}"
+    );
+
+    // The second question carries it, and the answer carries it too: the
+    // daemon took the session back and answered from the answer it keeps.
+    let second = daemon.ask(&format!(
+        r#"{{"op":"search","q":"hello","limit":10,"session":{session}}}"#
+    ));
+    assert_eq!(
+        session_of(&hits_frame(&second)),
+        Some(session),
+        "the session the daemon issued is taken back; got {second}"
+    );
+
+    // And the re-ranked answer says whether it is whole, like every other
+    // route: the flag does not depend on where the answer came from.
+    let cut = daemon.ask(&format!(
+        r#"{{"op":"search","q":"hello","limit":2,"session":{session}}}"#
+    ));
+    let frame = hits_frame(&cut);
+    assert_eq!(
+        frame.matches("\"path\":").count(),
+        2,
+        "the re-ranked answer holds the two hits that were asked for; got {frame}"
+    );
+    assert!(
+        frame.contains("\"complete\":false"),
+        "the re-ranked answer says a cut answer is whole; got {frame}"
+    );
+}
+
+/// A session that is not a session is no session at all.
+///
+/// The session id is a number the wire carries exactly: not negative, and at
+/// or below `2^53`. A negative id and an id above the line name no session,
+/// and the daemon must answer them as fresh questions -- it must not take
+/// back an id it never issued, and it must not re-rank anything for them.
+///
+/// The reader used to cast the number to `u64`, and a cast saturates: `-1`
+/// arrived as the id `0`, which is in the *client's* space -- the space the
+/// daemon trusts -- and the daemon kept the answer under it. The next
+/// question with that id was answered from the answer before, and the caller
+/// never knew it had not asked again.
+///
+/// The ids that name no session are three, and they are three different
+/// rules: `-1` is not a number the wire carries, `2^54` is a number above
+/// the line the wire carries exactly, and `2^52` is a number in the
+/// daemon's own space -- an id of the space the daemon names its own, which
+/// the daemon did not issue, and which is therefore a claim on somebody
+/// else's session and not a session.
+///
+/// The id above the line is `2^54` and not `2^53 + 1`: the wire carries a
+/// number as an `f64`, and `2^53 + 1` is a number the reader reads back as
+/// `2^53` -- which is a session, and the last one the wire can carry.
+#[test]
+fn a_session_that_is_not_one_is_no_session() {
+    let dir = fixture_dir("dnosession");
+    for i in 0..3 {
+        std::fs::write(dir.join(format!("hello{i}.txt")), "hello\n").unwrap();
+    }
+    let root = dir.to_str().unwrap();
+
+    // The ids that name no session, as the wire carries them.
+    for id in ["-1", "18014398547409984", "4503599627370496"] {
+        let mut daemon = Stdio::start(root);
+        let first = daemon.ask(&format!(
+            r#"{{"op":"search","q":"hello","limit":10,"session":{id}}}"#
+        ));
+        let second = daemon.ask(&format!(
+            r#"{{"op":"search","q":"hello","limit":10,"session":{id}}}"#
+        ));
+        let named = session_of(&hits_frame(&first)).expect("the answer names a session");
+        let again = session_of(&hits_frame(&second)).expect("the answer names a session");
+        assert_ne!(
+            named.to_string(),
+            id,
+            "the daemon does not answer with the id it was asked about; got {named} in {first}"
+        );
+        assert!(
+            DAEMON_SESSION_SPACE.contains(&named),
+            "the daemon answers a session that is not one with a session of its own; \
+             got {named} in {first}"
+        );
+        assert_ne!(
+            named, again,
+            "each question was a fresh one: nothing was taken back; got {first} and {second}"
+        );
+    }
+}
+
+/// The scoped content route honours the limit, and says whether it cut.
+///
+/// The scoped request answers with the `grep-files` frame, and the limit is
+/// the caller's: the scope says which files the caller asked about, and the
+/// limit says how many of them the caller gets. The answer says which it
+/// is -- an answer with fewer files than the limit is the whole answer, and
+/// an answer that reached the limit is a page.
+///
+/// The route used to answer `complete: true` whatever the limit was, so a
+/// caller that asked for one file was told it had them all, and the list it
+/// printed was a page wearing a whole list's clothes.
+#[test]
+fn the_scoped_content_route_honours_the_limit() {
+    let dir = fixture_dir("dscoped");
+    for i in 1..=3 {
+        std::fs::write(dir.join(format!("scopeprobe{i}.txt")), "needle here\n").unwrap();
+    }
+    let root = dir.to_str().unwrap();
+    let scope = scope_of(
+        &dir,
+        &["scopeprobe1.txt", "scopeprobe2.txt", "scopeprobe3.txt"],
+    );
+
+    // One file asked for out of three: the answer reached the limit, and it
+    // says so. The request is spelled both ways the protocol reads it.
+    for op in ["content", "grep-scoped"] {
+        let (code, out, err) = run_stdin(
+            &searchd(),
+            &["--root", root],
+            &format!("{{\"op\":\"{op}\",\"q\":\"grep:needle\",\"paths\":[{scope}],\"limit\":1}}\n"),
+        );
+        assert_eq!(code, 0, "{op}: stderr={err}");
+        let frame = grep_frame(&out);
+        assert_eq!(
+            frame.matches("\"path\":").count(),
+            1,
+            "{op} answered with the one file that was asked for; got {frame}"
+        );
+        assert!(
+            frame.contains("\"complete\":false"),
+            "{op} says a cut answer is whole; got {frame}"
+        );
+    }
+
+    // Three asked for out of three: fewer files than the limit, so the
+    // answer is the whole answer.
+    let (code, out, err) = run_stdin(
+        &searchd(),
+        &["--root", root],
+        &format!("{{\"op\":\"content\",\"q\":\"grep:needle\",\"paths\":[{scope}],\"limit\":10}}\n"),
+    );
+    assert_eq!(code, 0, "stderr={err}");
+    let frame = grep_frame(&out);
+    assert_eq!(
+        frame.matches("\"path\":").count(),
+        3,
+        "the answer holds every file in the scope; got {frame}"
+    );
+    assert!(
+        frame.contains("\"complete\":true"),
+        "an answer shorter than the limit is the whole answer; got {frame}"
+    );
+}
+
+/// The pack store's scoped content route honours the limit too.
+///
+/// The store searched the corpus whole, the scope says which of those files
+/// the caller asked about, and the limit says how many of them the caller
+/// gets. The order is the contract: the limit bounds the answer, so it
+/// comes after the scope and not before it.
+///
+/// The branch used to ignore the limit entirely and answer
+/// `complete: true`, so a caller that asked for one file of the scope was
+/// told it had them all.
+///
+/// The scope is asked for in the spelling the store holds the files in:
+/// the store indexes the corpus under its canonical root, and the scope
+/// is compared with the index byte for byte, so a scope spelled with the
+/// 8.3 alias of a folder is a scope the store does not have.
+#[test]
+fn the_pack_store_scoped_content_route_honours_the_limit() {
+    let dir = fixture_dir("dtvscope");
+    for i in 1..=3 {
+        std::fs::write(dir.join(format!("scopeprobe{i}.txt")), "needle here\n").unwrap();
+    }
+    let root = dir.to_str().unwrap();
+
+    let store = fixture_dir("dtvscopestore");
+    let config = rgx_core::tv_runtime::builder::BuildConfig::default();
+    rgx_core::tv_runtime::builder::build_store(&dir, &store, &config)
+        .expect("the pack store is built");
+    let scope = scope_of(
+        &dir,
+        &["scopeprobe1.txt", "scopeprobe2.txt", "scopeprobe3.txt"],
+    );
+
+    let (code, out, err) = run_stdin(
+        &searchd(),
+        &["--root", root, "--tv-dir", store.to_str().unwrap()],
+        &format!("{{\"op\":\"content\",\"q\":\"grep:needle\",\"paths\":[{scope}],\"limit\":1}}\n"),
+    );
+    assert_eq!(code, 0, "stderr={err}");
+    let frame = grep_frame(&out);
+    assert_eq!(
+        frame.matches("\"path\":").count(),
+        1,
+        "the store answered with the one file that was asked for; got {frame}"
+    );
+    assert!(
+        frame.contains("\"complete\":false"),
+        "the store says a cut answer is whole; got {frame}"
+    );
 }

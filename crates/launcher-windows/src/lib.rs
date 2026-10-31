@@ -33,6 +33,12 @@ pub mod session;
 
 pub mod window;
 
+// The notification area is the window's own business: the icon is not an
+// API of this crate, and a public function that takes the platform's own
+// handle is a public function that says the platform is this crate's
+// business.
+mod tray;
+
 mod win;
 
 pub use window::{Awareness, Compositor, Event, Key, View, Window};

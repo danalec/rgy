@@ -33,6 +33,7 @@ $Formula = "rgy-search"
 $DryRun = $false
 Read-RgyOptions -Switches @{ "dryrun" = "DryRun" } `
                  -Values   @{ "version" = "Version"; "formula" = "Formula" } `
+                 -Positionals @{} `
                  -Arguments $args
 
 $root = Split-Path $PSScriptRoot -Parent

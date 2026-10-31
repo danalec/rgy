@@ -477,31 +477,80 @@ mod tests {
         String::from_utf8_lossy(s).into_owned()
     }
 
+    /// A listing built from its entries: the name, and the id of the
+    /// listing it names (`NONE` for an entry that names no directory).
+    fn listing(id: u32, rows: &[(&str, u32)]) -> Listing {
+        let mut names = Vec::new();
+        let mut ents = Vec::new();
+        for (name, child) in rows {
+            ents.push(RawEnt {
+                name_off: names.len() as u32,
+                name_len: name.len() as u16,
+                kind: 0,
+                size: 0,
+                mtime: 0,
+                child: *child,
+            });
+            names.extend_from_slice(name.as_bytes());
+        }
+        Listing { id, names, ents }
+    }
+
     /// The same normalization `parallel_walk_matches_sequential_oracle`
     /// uses: directory path -> rows, so the comparison does not depend on
     /// the order a directory happened to be read in.
+    ///
+    /// The listings are addressed by their **id**, not by their position in
+    /// the vector: a backend that walks in parallel hands its listings back
+    /// in completion order, and the id is what a parent's `child` link
+    /// points at. The production index maps the same way.
     fn normalize(ls: &[Listing]) -> Rows {
-        let mut paths: Vec<Option<String>> = vec![None; ls.len()];
         if ls.is_empty() {
             return BTreeMap::new();
         }
-        paths[0] = Some(String::new());
-        for id in 0..ls.len() {
-            let Some(base) = paths[id].clone() else {
-                continue;
-            };
-            for ent in &ls[id].ents {
-                let child = ent.child as usize;
-                if ent.child == NONE || child >= ls.len() {
-                    continue;
+        // The listings by id, and the parent of every listing: the entry
+        // of the parent that names it.
+        let mut by_id: BTreeMap<u32, usize> = BTreeMap::new();
+        for (i, l) in ls.iter().enumerate() {
+            by_id.insert(l.id, i);
+        }
+        let mut parent_of: BTreeMap<u32, (u32, usize)> = BTreeMap::new();
+        for l in ls.iter() {
+            for (ei, ent) in l.ents.iter().enumerate() {
+                if ent.child != NONE {
+                    parent_of.insert(ent.child, (l.id, ei));
                 }
-                paths[child] = Some(format!("{base}/{}", name_of(&ls[id], ent)));
             }
         }
+        // The path of every listing, by id: the chain of parents up to the
+        // root, then back down.
+        let mut path_of: BTreeMap<u32, String> = BTreeMap::new();
+        for l in ls.iter() {
+            let mut chain: Vec<(u32, usize)> = Vec::new();
+            let mut id = l.id;
+            // A tree with a cycle in it has no root: the walk up stops at
+            // the length of the tree.
+            while chain.len() < ls.len() {
+                let Some(&(pid, ei)) = parent_of.get(&id) else {
+                    break;
+                };
+                chain.push((pid, ei));
+                id = pid;
+            }
+            let mut path = String::new();
+            for &(pid, ei) in chain.iter().rev() {
+                let Some(&pi) = by_id.get(&pid) else {
+                    continue;
+                };
+                let parent = &ls[pi];
+                path.push('/');
+                path.push_str(&name_of(parent, &parent.ents[ei]));
+            }
+            path_of.insert(l.id, path);
+        }
         ls.iter()
-            .enumerate()
-            .map(|(id, l)| {
-                let base = paths[id].clone().unwrap_or_default();
+            .map(|l| {
+                let base = path_of.get(&l.id).cloned().unwrap_or_default();
                 let rows = l
                     .ents
                     .iter()
@@ -514,7 +563,7 @@ mod tests {
                             if e.child == NONE {
                                 None
                             } else {
-                                paths.get(e.child as usize).cloned().flatten()
+                                path_of.get(&e.child).cloned()
                             },
                         )
                     })
@@ -522,6 +571,30 @@ mod tests {
                 (base, rows)
             })
             .collect()
+    }
+
+    /// The child links are resolved by the listing's **id**, not by its
+    /// position in the vector: a backend that walks in parallel hands its
+    /// listings back in completion order, and a reader that takes the
+    /// position for the id attributes a directory's contents to the wrong
+    /// parent.
+    #[test]
+    fn the_child_links_are_resolved_by_id() {
+        // The listings in the order the walk finished them: the root,
+        // then `b`, then `a`. The ids say which is which.
+        let ls = vec![
+            listing(0, &[("a", 1), ("b", 2)]),
+            listing(2, &[("two.txt", NONE)]),
+            listing(1, &[("one.txt", NONE)]),
+        ];
+        let rows = normalize(&ls);
+        let root = rows.get("").expect("the root has rows");
+        assert_eq!(root[0].4.as_deref(), Some("/a"), "the root's `a` is `/a`");
+        assert_eq!(root[1].4.as_deref(), Some("/b"), "the root's `b` is `/b`");
+        let a = rows.get("/a").expect("`a` has rows");
+        assert_eq!(a[0].0, "one.txt", "`a` holds what `a` holds");
+        let b = rows.get("/b").expect("`b` has rows");
+        assert_eq!(b[0].0, "two.txt", "`b` holds what `b` holds");
     }
 
     /// The acceptance rule: the selected backend matches the sequential oracle

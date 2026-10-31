@@ -30,20 +30,27 @@ REF="main"
 # from being read by everybody. Set both.
 HOST="${RGY_RELEASE_HOST:-}"
 FORGEJO_URL="${RGY_FORGEJO_URL:-}"
-if [ -z "$HOST" ] || [ -z "$FORGEJO_URL" ]; then
-    echo "RGY_RELEASE_HOST and RGY_FORGEJO_URL must both be set" >&2
-    echo "e.g. RGY_RELEASE_HOST=user@host RGY_FORGEJO_URL=http://host:3000" >&2
+
+# The options, read by the helper the twins share: the long spelling and
+# the PowerShell one are the same option, and an option neither of them
+# knows is an error -- the same words, the same exit code. The ref is
+# positional: it is the thing being released, not an option, and an unknown
+# option is not a ref.
+. "$ROOT/scripts/lib/options.sh"
+rgy_read_options "" "host=HOST" "ref=REF" "$@"
+
+if [ -z "$HOST" ]; then
+    echo "RGY_RELEASE_HOST is not set: the Linux artifact is built on a Linux host" >&2
+    echo "set it, or pass --host user@host" >&2
+    exit 1
+fi
+if [ -z "$FORGEJO_URL" ]; then
+    echo "RGY_FORGEJO_URL is not set: the forgejo that hosts the release is not in this repository" >&2
+    echo "set it to the forgejo's base URL, e.g. RGY_FORGEJO_URL=http://host:3000" >&2
     exit 1
 fi
 FORGEJO="${FORGEJO_URL%/}/danalec/rgy.git"
 REMOTE="/tmp/rgy-release"
-
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --host) HOST=${2:-}; shift 2 ;;
-        *) REF="$1"; shift ;;
-    esac
-done
 
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' bins/searchctl/Cargo.toml | head -1)"
 [ -n "$VERSION" ] || { echo "no version in bins/searchctl/Cargo.toml" >&2; exit 1; }

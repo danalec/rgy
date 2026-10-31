@@ -3,13 +3,13 @@
 # upstream, and every vendored file declares its source.
 #
 # The bash twin of scripts/check-vendoring.ps1. The two are twins, not
-# cousins: same five checks, same messages, same order, same exit code. A
+# cousins: same six checks, same messages, same order, same exit code. A
 # check that says "ok" on one platform and "FAIL" on another is worse than
 # no check at all, so the text is identical, not merely equivalent.
 #
 # rgy copies code out of upstream; it never depends on it. This script fails
 # if that ever stops being true, so the rule is checked rather than
-# remembered. Five checks:
+# remembered. Six checks:
 #
 #   1. No upstream reference in any Cargo manifest, Cargo.lock, or
 #      .cargo/config.toml. Provenance comments in *other* files are fine
@@ -31,6 +31,13 @@
 #      version-only dependency would resolve to the registry copy instead
 #      of the tree -- silently, and with cargo having nothing to say about
 #      it.
+#   6. The vendored manifest (scripts/vendored-sources.tsv) still describes
+#      the tree: every path it names is there, every vendored crate and
+#      every local patch has a row of its own, the header is the one the
+#      sync writes, and every row is pinned to the commit that header
+#      names. A manifest that falls behind the tree it describes reads as
+#      "nothing to do here", which is the one thing a manifest must never
+#      do.
 #
 # The list of known-remaining dependencies is the same list, with the same
 # notes, as the Windows script holds: it is the ledger of what is left to
@@ -61,12 +68,24 @@ script_dir=${script_path%/*}
 [ "$script_dir" = "$script_path" ] && script_dir=.
 here=$(cd "$script_dir" && pwd)
 repo_root=$(cd "$here/.." && pwd)
+
+# This script takes no options, and an argument it does not know is an
+# error: the twin refuses it with the same words and the same exit code. A
+# check that quietly ignores half its command line is a check that ran
+# something else.
+. "$here/lib/options.sh"
+rgy_read_options "" "" "" "$@"
+
 cd "$repo_root" || exit 1
 
-# The .ps1 prints paths the way PowerShell renders them: the repository root
-# as a native absolute path, and relative paths behind a ".\" on Windows
-# ("./" on Unix). Git Bash and WSL are Windows shells in a POSIX costume, so
-# they print the Windows form; cygpath and wslpath do the translation.
+# The .ps1 prints the repository root as a native absolute path, and
+# relative paths behind a ".\" on Windows ("./" on Unix). Git Bash and WSL
+# are Windows shells in a POSIX costume, so they print the Windows form;
+# cygpath and wslpath do the translation.
+#
+# The prefix is unconditional — a path whose first segment starts with a
+# dot keeps it (".\.cargo\config.toml") — because the .ps1 twin spells the
+# path the same way, and the two have to agree on the bytes.
 if command -v cygpath >/dev/null 2>&1; then
     native_root() { cygpath -w "$repo_root"; }
     rel_prefix='.\'
@@ -90,7 +109,7 @@ else
     rel_sep='/'
 fi
 
-# rel_path <repo-relative path> -- the .ps1's Resolve-Path -Relative form.
+# rel_path <repo-relative path> — the .ps1's Get-RgyRelativePath form.
 rel_path() {
     local p=${1//\//$rel_sep}
     printf '%s%s' "$rel_prefix" "$p"
@@ -133,9 +152,29 @@ walk_sort() {
     tr '/' '\001' | LC_ALL=C sort | tr '\001' '/'
 }
 
-# find_files <name> -- every file with that name, outside target/.
+# find_files <name> -- every file with that name, outside target/ and .git/.
+#
+# The rule is relative to the root, and that is the whole of it: a
+# DIRECTORY named target below the root is build output, and a checkout that
+# lives under a directory called target is still the tree. The walk starts
+# at the root, so the root's own ancestors never enter the question -- which
+# is what the .ps1 twin does too, and what it did NOT do when its filter
+# read the absolute path (a checkout under a directory named target hid the
+# whole tree from it, and the two twins answered differently about the same
+# files).
+#
+# The directory named .git is left alone for the same reason and for a
+# sharper one: it holds the repository's own metadata -- the objects, the
+# refs, the index -- and none of that is a file of the project. A checkout's
+# .git holds objects, and a developer's holds whatever they left in it: a
+# scratch copy of the tree, a probe, a published crate. A gate that reads a
+# developer's scratch is a gate that gets turned off, and a gate that reads
+# a copy of the tree cannot tell the copy from the tree. So the walk does
+# not descend into it, and the rule is still relative to the root: a
+# directory called .git BELOW the root is skipped, and the root's own
+# ancestors never enter the question.
 find_files() {
-    find . -type d -name target -prune -o -type f -name "$1" -print | sed 's|^\./||'
+    find . -type d \( -name target -o -name .git \) -prune -o -type f -name "$1" -print | sed 's|^\./||'
 }
 
 manifests=()
@@ -173,7 +212,7 @@ done
 # inherit. All three are forbidden. Comments that merely mention the
 # provenance are acceptable in Cargo.toml, so only the non-comment part
 # of a line is inspected.
-say_head "[1/5] no upstream in manifests"
+say_head "[1/6] no upstream in manifests"
 for f in ${manifests[@]+"${manifests[@]}"}; do
     rel=$(rel_path "$f")
     while IFS=$'\t' read -r line_no text; do
@@ -199,7 +238,7 @@ if [ "$failures" -eq 0 ]; then
 fi
 
 # --- 2. no [patch] in .cargo/config.toml ----------------------------------
-say_head "[2/5] no [patch] redirects"
+say_head "[2/6] no [patch] redirects"
 cfg="$repo_root/.cargo/config.toml"
 if [ -f "$cfg" ]; then
     if grep -Eqi '^[[:space:]]*\[patch' "$cfg"; then
@@ -231,7 +270,7 @@ fi
 # tree, the rgx-core codecs, the RAR codec and the memmap2 tree. Two of
 # them were missing here until 2026-10-30, so the gate was looking at three
 # of the five trees the record names.
-say_head "[3/5] vendored trees declare provenance"
+say_head "[3/6] vendored trees declare provenance"
 # The roots are spelled with backslashes, as the .ps1 spells them: the
 # failure messages quote them the same way, and a message that says
 # crates\rar-codec\src on one platform and crates/rar-codec/src on the
@@ -301,7 +340,7 @@ known_external=$(printf '%s\t%s\n' \
     'regex' 'rgx ships its own engine (syntax + Thompson NFA + Pike VM) and that engine is the confirm in crates/name-core/src/content.rs. The product does not link the crate: a pattern the byte engine refuses is a refusal the search says. In rgx-core it is a dev-dependency only -- the oracle the capture groups are measured against (54/54 on the permanent corpus)' \
     'rusqlite' 'the SQLite adapter of rgx-adapters-tabular reads the file format itself; the crate is a dev-dependency only -- the oracle the in-house reader is measured against, over a corpus of real databases')
 
-say_head "[4/5] no unexpected external crates"
+say_head "[4/6] no unexpected external crates"
 
 # known_desc <name> -- what replaces it, or nothing if the crate is unknown.
 # The lookup is case-insensitive, because a PowerShell hashtable is.
@@ -485,7 +524,7 @@ fi
 # lock file resolves one of them from a registry. The scan covers every
 # manifest in the tree, not only the vendored ones: the offending
 # declaration would sit in rgy's own crate, not in the vendored tree.
-say_head "[5/5] the vendored crates come from the tree"
+say_head "[5/6] the vendored crates come from the tree"
 
 # Every manifest in the tree, and every lock file.
 all_manifests=()
@@ -620,6 +659,202 @@ done <<< "$(printf '%s' "$vendored_failures" | LC_ALL=C sort)"
 if [ -z "$vendored_failures" ]; then
     say "  ok: $vendored_count vendored dependency declarations, all by path"
     say "  ok: no lock file resolves a vendored crate from a registry"
+fi
+
+# --- 6. the vendored manifest matches the tree --------------------------------
+# scripts/vendored-sources.tsv is the record of the vendored trees: which
+# upstream crate each copy came from, which commit it was taken from, and
+# which local patch sits on top of it. The sync writes it, the drift check
+# reads it, and nothing on the GitHub side checked that it still describes
+# the tree it is about -- so a manifest that fell behind the tree reads as
+# "nothing to do here", which is the one thing a manifest must never do.
+#
+# The questions the tree can answer:
+#
+#   * does every path the manifest names exist -- the trees and the patches
+#     alike?
+#   * does every vendored crate in crates/ have a row of its own, and every
+#     patch file under scripts/rgx-local-patches/ one?
+#   * is the header the one the sync writes, and does the commit it names
+#     pin every row?
+#
+# The commit is checked for its shape -- forty hex characters, the shape of
+# a git object id -- and for the rows agreeing with it. It is NOT checked
+# against the upstream: this check has no upstream checkout and no way to
+# ask, so "the rows agree with the header" is the whole of what it can say.
+# The question "is that commit still there?" is the drift check's, and it
+# runs where the upstream is.
+#   * is a path the manifest excludes really absent? The sync removes those
+#     on every run, so one that is here is a divergence.
+#
+# The paths in the messages are the manifest's own, spelled the way the
+# manifest spells them, so the two twins print the same bytes.
+say_head "[6/6] the vendored manifest matches the tree"
+
+manifest_failures=""
+manifest_fault() {
+    manifest_failures="$manifest_failures$1
+"
+}
+
+manifest="scripts/vendored-sources.tsv"
+manifest_trees=""
+manifest_patches=""
+manifest_tree_count=0
+manifest_patch_count=0
+header_pin=""
+
+if [ ! -f "$manifest" ]; then
+    manifest_fault "scripts/vendored-sources.tsv is missing; the sync writes it"
+else
+    # The header the sync writes. The first line says what the file is, and
+    # the commit line says what the copy was taken from; every row carries
+    # that same commit, because the sync takes the whole vendoring from one
+    # commit.
+    #
+    # The header is read BEFORE the rows, and the rows are compared with it
+    # where they are read. The first version of this check read the rows
+    # into one string, joined with \001, and split them again in a second
+    # loop -- and the macOS runner's bash (3.2, the last one Apple shipped)
+    # does not split a `read` on that separator at all: every row arrived
+    # whole in the first variable and the second one was empty, so all
+    # forty rows were reported as pinned to nothing. The gate was green on
+    # Ubuntu and on Windows and red on macOS, and the reason was the shell,
+    # not the tree.
+    #
+    # So the comparison happens where the row is read, and nothing is
+    # carried from one loop to another through a separator the shell has to
+    # be asked to split. The PowerShell twin reads the rows into two arrays
+    # and compares the same two values, and this is the same comparison in
+    # the same order.
+    header_first=$(awk 'NR == 1 { sub(/\r$/, ""); print; exit }' "$manifest")
+    header_pin=$(awk '/^# The upstream commit the copy was taken from: / { sub(/\r$/, ""); print $NF; exit }' "$manifest")
+    if [ "$header_first" != '# Vendored-source manifest. Read by scripts/check-drift.*, which asks' ]; then
+        manifest_fault "scripts/vendored-sources.tsv does not start with the header the sync writes"
+    fi
+    if [ -z "$header_pin" ]; then
+        manifest_fault "scripts/vendored-sources.tsv does not name the commit the copy was taken from"
+    elif ! printf '%s' "$header_pin" | grep -Eq '^[0-9a-f]{40}$'; then
+        manifest_fault "scripts/vendored-sources.tsv names a commit that is not a commit id: $header_pin"
+    fi
+
+    # The rows: tab separated, five columns. A comment line is not a row,
+    # and a blank line is not a row either.
+    while IFS=$'\t' read -r rgx up pin kind note; do
+        [ -n "$rgx" ] || continue
+        # A line with fewer than four columns is not a row. The shell's own
+        # split leaves the kind empty when the columns are short, and the
+        # twin reads the same line the same way -- a malformed row is
+        # reported, not silently read as something else.
+        if [ -z "$kind" ]; then
+            manifest_fault "scripts/vendored-sources.tsv has a row with fewer than four columns"
+            continue
+        fi
+        case "$kind" in
+            tree)
+                manifest_trees="$manifest_trees$rgx
+"
+                manifest_tree_count=$((manifest_tree_count + 1))
+                ;;
+            patch)
+                manifest_patches="$manifest_patches$rgx
+"
+                manifest_patch_count=$((manifest_patch_count + 1))
+                ;;
+            *)
+                manifest_fault "scripts/vendored-sources.tsv has a row of an unknown kind: $kind"
+                ;;
+        esac
+        # Every row is pinned to the commit the header names. The pin is the
+        # third column of the row, and the header named the commit before
+        # the first row was read -- so the two are compared here, with the
+        # two values in hand.
+        if [ -n "$header_pin" ] && [ "$pin" != "$header_pin" ]; then
+            manifest_fault "scripts/vendored-sources.tsv pins $rgx to $pin, and the header names $header_pin"
+        fi
+    done < <(awk -F'\t' '
+        {
+            sub(/\r$/, "")
+            if ($0 ~ /^#/ || $0 ~ /^[[:space:]]*$/) next
+            print
+        }
+    ' "$manifest")
+
+    # Every tree the manifest names is in the tree.
+    while IFS= read -r rgx; do
+        [ -n "$rgx" ] || continue
+        if [ ! -d "$repo_root/$rgx" ]; then
+            manifest_fault "scripts/vendored-sources.tsv names a tree that is not in the tree: $rgx"
+        fi
+    done <<< "$manifest_trees"
+
+    # Every vendored crate in the tree has a row of its own. The names are
+    # upstream's crates: rgx-core, rar-codec and the rgx-adapters-* family.
+    # rgy's own crates are not vendored and are not in here.
+    for d in "$repo_root"/crates/*/; do
+        [ -d "$d" ] || continue
+        base=${d%/}
+        base=${base##*/}
+        case "$base" in
+            rgx-*|rar-codec) ;;
+            *) continue ;;
+        esac
+        rel="crates/$base"
+        case "
+$manifest_trees
+" in
+            *"
+$rel
+"*) ;;
+            *) manifest_fault "$rel is a vendored tree and the manifest does not name it" ;;
+        esac
+    done
+
+    # Every patch the manifest names is in the tree.
+    while IFS= read -r rgx; do
+        [ -n "$rgx" ] || continue
+        if [ ! -f "$repo_root/$rgx" ]; then
+            manifest_fault "scripts/vendored-sources.tsv names a patch that is not in the tree: $rgx"
+        fi
+    done <<< "$manifest_patches"
+
+    # Every patch file in the tree has a row of its own. A patch the
+    # manifest does not name is a divergence nobody wrote down, and the
+    # sync would apply it without the manifest saying so.
+    while IFS= read -r p; do
+        [ -n "$p" ] || continue
+        rel=${p#"$repo_root"/}
+        case "
+$manifest_patches
+" in
+            *"
+$rel
+"*) ;;
+            *) manifest_fault "$rel is a patch and the manifest does not name it" ;;
+        esac
+    done < <(find "$repo_root/scripts/rgx-local-patches" -type f -name '*.patch' 2>/dev/null | LC_ALL=C sort)
+
+    # The paths the manifest excludes are upstream's files this repository
+    # does not carry. The sync removes them on every run, so one that is
+    # here is a divergence from the rule the manifest states.
+    while IFS= read -r ex; do
+        [ -n "$ex" ] || continue
+        if [ -e "$repo_root/$ex" ]; then
+            manifest_fault "scripts/vendored-sources.tsv excludes $ex, and the tree has it"
+        fi
+    done < <(awk '/^# exclude: / { sub(/\r$/, ""); print substr($0, 12) }' "$manifest")
+fi
+
+# The failures are sorted, not printed as they are found: the two twins walk
+# the tree in the same order but a reader comparing the two outputs should
+# not have to know that.
+while IFS= read -r msg; do
+    [ -n "$msg" ] || continue
+    fail "$msg"
+done <<< "$(printf '%s' "$manifest_failures" | LC_ALL=C sort)"
+
+if [ -z "$manifest_failures" ]; then
+    say "  ok: $manifest_tree_count vendored trees and $manifest_patch_count patches, all pinned to $header_pin"
 fi
 
 # --- result ----------------------------------------------------------------

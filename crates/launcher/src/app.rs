@@ -24,8 +24,10 @@
 //! and it can be there while the user is still typing. Esc closes it, and
 //! then closes the window.
 
+use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::actions::Action;
 use crate::commands;
@@ -88,6 +90,168 @@ pub struct Preview {
     pub lines: Vec<String>,
 }
 
+/// The line the ids a client names stay under.
+///
+/// The client's space is `[0, 2^52)`: below the daemon's and below the
+/// wire's. An id above the wire's line would reach the daemon as a
+/// different number, and the daemon would keep the answer under a key the
+/// launcher never named.
+const CLIENT_SESSIONS: u64 = 1 << 52;
+
+/// The line the daemon's own session ids live above.
+///
+/// The daemon's space is `[2^52, 2^53)`: the ids it names are above the
+/// ones a client names and below the wire's limit, and the two spaces
+/// cannot meet — a client that names an id the daemon would have named
+/// does not land on a session of somebody else's.
+const DAEMON_SESSIONS: u64 = 1 << 52;
+
+/// The line the wire's numbers stay under.
+///
+/// The protocol's JSON reader has no integer and reads a number as an
+/// `f64`, and an integer above `2^53` is not exactly representable there:
+/// a session id above it reaches the peer as a different number. Both
+/// spaces stay under this line — the client's and the daemon's.
+const WIRE_SESSIONS: u64 = 1 << 53;
+
+/// How many bits the window's own number takes.
+///
+/// A counter of the windows this process has opened: a million of them is
+/// a launcher opened once a second for twelve days.
+const COUNTER_BITS: u32 = 20;
+
+/// The mask of the counter's bits.
+const COUNTER_MASK: u64 = (1 << COUNTER_BITS) - 1;
+
+/// The mask of the seed's bits: the ones above the counter's, up to the
+/// client's line.
+///
+/// The client's space is `[0, 2^52)` and the counter takes the low 20 of
+/// its bits, so the seed has the 32 above them: the seed is in
+/// `[1, 2^32)` — never zero, because zero is the marker of a seed that has
+/// not been computed — and a session id is in `[2^20, 2^52)`.
+const SEED_MASK: u64 = (CLIENT_SESSIONS >> COUNTER_BITS) - 1;
+
+// The two spaces must not meet: the client's ends where the daemon's
+// begins, and the daemon's ends below the wire's `2^53` — a number above
+// that does not survive the JSON round trip, and an id the launcher never
+// named would keep the answer under a key nobody can name again. Checked
+// here, where the lines are written down, so that a line that moves
+// cannot break the rule quietly.
+const _: () = assert!(CLIENT_SESSIONS <= DAEMON_SESSIONS);
+const _: () = assert!(DAEMON_SESSIONS <= WIRE_SESSIONS);
+
+/// The seed of this process: the part of a session id that says which
+/// launcher named it.
+///
+/// Zero means "not computed yet" — the seed is never zero, because an
+/// un-computed seed and a zero one cannot be told apart.
+static SEED: AtomicU64 = AtomicU64::new(0);
+
+/// The counter of the windows this process has opened.
+///
+/// It is the counter of the **process** and not of the window: two models
+/// in one process take their numbers from the same counter, so two
+/// windows never land on the same session.
+static COUNTER: AtomicU64 = AtomicU64::new(1);
+
+/// Something with an address, for the seed to read.
+///
+/// A static in this crate: the image is loaded at a random base where the
+/// loader relocates it, and two processes of the same binary do not get
+/// the same base. The address of a static is the address of the image.
+static ANCHOR: u8 = 0;
+
+/// A session id this process has not named before.
+///
+/// The id is the seed above and the counter below: the high bits say
+/// which launcher named the session, and the low bits say which window it
+/// is. Two launchers therefore name different sessions for the same
+/// window, and two windows of one launcher name different sessions too.
+///
+/// The id is in `[2^20, 2^52)`: the client's own space, and under the
+/// wire's limit, so the daemon reads the very number that was sent.
+///
+/// The daemon keys its result sets by this id, so two launchers that
+/// named the same one would share a result set: one launcher's answer
+/// would be re-ranked against the other's, and the answer to a question
+/// would come back as the answer to another.
+fn next_session() -> u64 {
+    let counter = COUNTER.fetch_add(1, Ordering::Relaxed) & COUNTER_MASK;
+    let seed = seed() & SEED_MASK;
+    (seed << COUNTER_BITS) | counter
+}
+
+/// The seed of this process, computed once.
+///
+/// The first caller computes it and the rest read it: the seed is the
+/// same for every window of the process, and a seed that changed from one
+/// window to the next would put two windows of one launcher in two spaces.
+fn seed() -> u64 {
+    let taken = SEED.load(Ordering::Relaxed);
+    if taken != 0 {
+        return taken;
+    }
+    // The low bit is set so that the seed is never zero: zero is the
+    // marker of a seed that has not been computed yet.
+    let computed = process_seed() | 1;
+    match SEED.compare_exchange(0, computed, Ordering::Relaxed, Ordering::Relaxed) {
+        Ok(_) => computed,
+        Err(taken) => taken,
+    }
+}
+
+/// The seed of this process, out of the addresses the loader gave it.
+///
+/// Two launcher processes must not name the same session: the daemon keys
+/// its result sets by the id, and one launcher's answer re-ranked against
+/// the other's is an answer to somebody else's question.
+///
+/// The addresses are where the uniqueness comes from. The loader puts the
+/// stack at a random address, the heap at another, and the image at a
+/// third where it relocates it — and two processes of the same binary do
+/// not get the same three. The mixture of them is what the seed is.
+///
+/// There is no clock and no process id in it, and no call to either: this
+/// crate is `no_std`, and the tree's seam (`rgy_discovery`) is not this
+/// crate's to call — a platform call in the model would be a call the
+/// tree does not declare. The addresses are what `core` has on every
+/// platform the launcher runs on, and the seed is computed once per
+/// process, so the cost is one small allocation.
+///
+/// The entropy is the loader's, and the loader's is not the same on every
+/// platform: on a host that randomizes none of the three, two processes
+/// would take the same seed and the ids would meet. The three sources are
+/// mixed because they are randomized apart from each other — a host that
+/// randomizes one of them is enough.
+fn process_seed() -> u64 {
+    // The address of a local: the stack is at a random address, and two
+    // processes of one binary do not get the same one.
+    let here = 0u8;
+    let stack = core::ptr::addr_of!(here) as usize as u64;
+    // The address of a block on the heap: the heap is randomized apart
+    // from the stack, and this is another randomizer again.
+    let block = Box::new(0u8);
+    let heap = &*block as *const u8 as usize as u64;
+    // The address of a static in this crate: the image is loaded at a
+    // random base where the loader relocates it.
+    let image = core::ptr::addr_of!(ANCHOR) as usize as u64;
+    mix(stack) ^ mix(heap.rotate_left(21)) ^ mix(image.rotate_left(42))
+}
+
+/// The mixer: the bits of an address into the bits of a seed.
+///
+/// The splitmix64 finalizer — a multiply, a shift and a multiply — and
+/// every bit of the address reaches every bit of the seed. The seed is
+/// cut to its own bits afterwards, so the bits that are kept are the
+/// mixed ones and not the raw address.
+fn mix(value: u64) -> u64 {
+    let mut z = value.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
 /// The launcher's state.
 #[derive(Debug, Clone)]
 pub struct App {
@@ -100,6 +264,14 @@ pub struct App {
     /// A new one every time the window opens: the previous window's result
     /// set is not the answer to a new question, and a stale session would
     /// make the daemon re-rank against it.
+    ///
+    /// The id is this process's seed above the window's own number, so two
+    /// launcher processes never name the same session: they would share a
+    /// result set in the daemon, and one launcher's answer would be
+    /// re-ranked against the other's.
+    ///
+    /// Zero is the session of a window that has not opened yet: a real one
+    /// is never zero, because the seed is never zero.
     session: u64,
     /// The warnings the last answer carried.
     warnings: Vec<String>,
@@ -156,7 +328,7 @@ impl App {
     /// selected, and a new window selects a new one.
     pub fn show(&mut self) {
         if self.mode == Mode::Hidden {
-            self.session = self.session.wrapping_add(1);
+            self.session = next_session();
         }
         self.mode = Mode::Typing;
         self.preview = None;
@@ -514,6 +686,127 @@ mod tests {
         // And the same window keeps its session while it is open.
         app.show();
         assert_eq!(app.session(), second);
+    }
+
+    /// Two windows of one launcher do not share a session.
+    ///
+    /// The window's own number is the counter's, and the counter moves on
+    /// every time a window opens: a window that took a number another one
+    /// has taken would share a result set in the daemon, and the answer to
+    /// one question would come back re-ranked against the other's.
+    #[test]
+    fn two_windows_of_one_launcher_do_not_share_a_session() {
+        let mut app = App::new();
+        app.show();
+        let first = app.session();
+        app.hide();
+        app.show();
+        let second = app.session();
+        assert_ne!(first, second, "two windows are two sessions");
+    }
+
+    /// The session ids stay in the client's own space.
+    ///
+    /// The client's space is `[0, 2^52)` and the daemon's is
+    /// `[2^52, 2^53)`: the two cannot meet, and a client that names an id
+    /// the daemon would have named does not land on a session of somebody
+    /// else's.
+    ///
+    /// They stay below the wire's line as well: the protocol's JSON reader
+    /// has no integer and reads a number as an `f64`, and an integer above
+    /// `2^53` is not exactly representable there — the daemon would keep
+    /// the answer under a key the launcher never named.
+    #[test]
+    fn the_sessions_stay_in_the_clients_own_space() {
+        let mut app = App::new();
+        for _ in 0..8 {
+            app.show();
+            let session = app.session();
+            assert!(
+                session < DAEMON_SESSIONS,
+                "the session is in the daemon's own space: {session}"
+            );
+            assert!(
+                session < CLIENT_SESSIONS,
+                "the session is not in the client's own space: {session}"
+            );
+            assert!(
+                session < WIRE_SESSIONS,
+                "the session does not survive the wire exactly: {session}"
+            );
+            app.hide();
+        }
+    }
+
+    /// The child: it says which session it named, and it says it where the
+    /// parent can read it.
+    ///
+    /// It is ignored in an ordinary run and is run by the test below, which
+    /// is the one that sets the variable that says where to write.
+    #[test]
+    #[ignore]
+    fn the_child_process_names_a_session() {
+        extern crate std;
+        let Some(path) = std::env::var_os("RGY_LAUNCHER_SESSION_FILE") else {
+            return;
+        };
+        let mut app = App::new();
+        app.show();
+        std::fs::write(path, app.session().to_string()).expect("the session is written");
+    }
+
+    /// Two launchers in two processes do not name the same session.
+    ///
+    /// The invariant is about **processes**, so the test is about
+    /// processes: the test binary runs again as a child, the child names a
+    /// session of its own, and the two ids must not be the same. A counter
+    /// on its own cannot show this — two processes would both start at
+    /// one — and this is the test that shows what the seed is for.
+    ///
+    /// What it shows: two processes of this binary, on this machine, name
+    /// different sessions. What it does not show: that every pair of
+    /// processes on every machine does — the seed is the loader's address
+    /// randomization, and a host that randomizes none of the three
+    /// addresses the seed is mixed from would give two processes the same
+    /// seed. The three are randomized apart from each other.
+    #[test]
+    fn two_launchers_in_two_processes_do_not_name_the_same_session() {
+        extern crate std;
+        let dir = std::env::temp_dir().join(alloc::format!(
+            "rgy-launcher-session-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("the folder is made");
+        let file = dir.join("session");
+        let exe = std::env::current_exe().expect("the test binary");
+        let child = std::process::Command::new(exe)
+            .args([
+                "--ignored",
+                "--exact",
+                "app::tests::the_child_process_names_a_session",
+            ])
+            .env("RGY_LAUNCHER_SESSION_FILE", &file)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("the test binary runs");
+        let out = child.wait_with_output().expect("the child finishes");
+        assert!(
+            out.status.success(),
+            "the child must succeed; stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let said = std::fs::read_to_string(&file).expect("the child said which session it named");
+        let theirs: u64 = said
+            .trim()
+            .parse()
+            .expect("the child's session is a number");
+        let mut app = App::new();
+        app.show();
+        let ours = app.session();
+        assert_ne!(ours, theirs, "two launchers named the same session: {ours}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

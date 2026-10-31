@@ -1,6 +1,6 @@
 [package]
 name = "rgy-discovery"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
 description = "Platform discovery seam (Source/Watch) and the shared change vocabulary"
@@ -28,7 +28,7 @@ std = ["rgy-par/std"]
 # stays as the correctness oracle the differential test compares against.
 # The pool is `rgy-par`'s: no `rayon`, no dependency, and a width the
 # caller names.
-rgy-par = { path = "../par", version = "0.1.1", default-features = false }
+rgy-par = { path = "../par", version = "0.1.2", default-features = false }
 
 # The seam has no dependency of its own. The unix reader (`openat`,
 # `fdopendir`, `readdir`, `fstatat`) needs the `dirent` and `stat`

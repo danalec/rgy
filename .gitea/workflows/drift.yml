@@ -1,11 +1,10 @@
-# The drift check: has the vendored code fallen behind its upstream?
+# The drift check: has the vendored code fallen behind their upstream?
 #
 # It lives here and not in .github/workflows/ci.yml because of where the
-# upstream is. rgx is a private repository on the forgejo, on the LAN:
-# github.com/danalec/rgx does not exist, and a runner that cannot reach the
-# forgejo cannot clone it. A drift check that could not reach the upstream
-# would fail on every push, and a check that fails on every push teaches
-# everybody to ignore it.
+# upstream is. rgx is on the LAN, on the forgejo, and a runner that cannot
+# reach the forgejo cannot clone it. A drift check that could not reach the
+# upstream would fail on every push, and a check that fails on every push
+# teaches everybody to ignore it.
 #
 # Gitea reads .gitea/workflows/; GitHub reads .github/workflows/ and never
 # sees this file. So this job waits for a runner on the LAN, and the
@@ -19,21 +18,67 @@
 #
 # The vendoring rules are checked in .github/workflows/ci.yml, which Gitea
 # reads as well: they need nothing but the tree, so they gate everywhere.
+#
+# This workflow runs on a push to main and on nothing else. The job below
+# says why -- it is the one that has to answer for the runner's
+# credential.
 name: drift
 
 on:
   push:
     branches: [main]
-  pull_request:
+
+# The same directives the GitHub workflow carries, for the same reasons:
+# the baseline is a read-only token, and nothing here writes to the
+# repository.
+permissions:
+  contents: read
+
+# A push supersedes the run it replaces, and the run it replaces is
+# minutes of the owner's LAN.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   drift:
     name: the vendored trees have not fallen behind their upstream
+    # No pull request reaches this job, and the reason is not a gate
+    # written in this file: a pull request runs this workflow from the
+    # pull request's own merge commit, so the check that would keep it
+    # out would have to live in the file the pull request controls -- and
+    # a stranger's fork can edit that check away. A defence that can be
+    # edited away is not a defence.
+    #
+    # What is on the other side of that gate is not a token but a
+    # machine: this job runs the tree's own scripts/check-drift.sh on the
+    # owner's LAN runner, and that runner holds the forgejo credential
+    # for the upstream in its own credential store. A fork that reached
+    # it would put a fork's code and a fork's script on a runner that can
+    # reach the upstream.
+    #
+    # So the design is that no pull request reaches the job at all: the
+    # only trigger is a push to main.
+    #
+    # What is lost: the drift check no longer runs on pull requests. That
+    # is the right trade -- the upstream is on the LAN, and the question
+    # the check answers is "has the vendored tree fallen behind", which
+    # is a question about the merged tree. The alternative, running it on
+    # a stranger's branch, would put a fork's code and a fork's script on
+    # a credentialed runner to answer a question about a branch nobody
+    # merged.
+    #
     # The LAN runner. This job needs the upstream, and the upstream is on
     # the forgejo, on the LAN.
     runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The checkout's token is not used by anything here: the upstream
+          # is cloned with the runner's own credential, in the step below.
+          # A token left in the checkout is a token a later step can read.
+          persist-credentials: false
       - name: the upstream, and the drift against it
         run: |
           set -eu

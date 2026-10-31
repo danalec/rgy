@@ -6,7 +6,7 @@
 .DESCRIPTION
     rgx copies code out of upstream; it never depends on it. This script fails
     if that ever stops being true, so the rule is checked rather than
-    remembered. Five checks:
+    remembered. Six checks:
 
       1. No upstream reference in any Cargo manifest, Cargo.lock, or
          .cargo/config.toml. Provenance comments in *other* files are
@@ -28,14 +28,106 @@
          version, so a version-only dependency would resolve to the
          registry copy instead of the tree -- silently, and with cargo
          having nothing to say about it.
+      6. The vendored manifest (scripts/vendored-sources.tsv) still
+         describes the tree: every path it names is there, every vendored
+         crate and every local patch has a row of its own, the header is
+         the one the sync writes, and every row is pinned to the commit
+         that header names. A manifest that falls behind the tree it
+         describes reads as "nothing to do here", which is the one thing
+         a manifest must never do.
 
     Run from the repo root:  powershell -File scripts/check-vendoring.ps1
     Exits 1 on any violation.
 #>
 
 $ErrorActionPreference = 'Stop'
+
+# This script takes no options, and an argument it does not know is an
+# error: the twin refuses it with the same words and the same exit code. A
+# check that quietly ignores half its command line is a check that ran
+# something else.
+. (Join-Path $PSScriptRoot "lib/options.ps1")
+Read-RgyOptions -Positionals @{} -Arguments $args
+
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $repoRoot
+
+# Get-RgyRelativePath <full path> — the relative path of a file, in the
+# spelling the shell twin gives it.
+#
+# The shell twin builds this with its rel_path helper: a ".\" prefix and a
+# "\" separator — the Windows form, because Git Bash and WSL are Windows
+# shells in a POSIX costume, and they translate their paths with cygpath
+# and wslpath. The two twins are compared byte for byte on the developer's
+# machine, so this one has to spell the path the way the shell twin spells
+# it, and not the way PowerShell would.
+#
+# Resolve-Path -Relative is not that spelling: it drops the leading ".\"
+# when the first segment of the path starts with a dot, so a file under
+# .cargo came back as ".cargo\config.toml" where the shell twin writes
+# ".\.cargo\config.toml". The same violation then printed two different
+# bytes on the two platforms — which is the one thing a pair of twins may
+# not do.
+function Get-RgyRelativePath([string]$fullName) {
+    $rel = $fullName
+    if ($fullName.StartsWith($repoRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        $rel = $fullName.Substring($repoRoot.Length).TrimStart([char[]]@('\', '/'))
+    }
+    return '.\' + $rel.Replace('/', '\')
+}
+
+# The .sh twin prunes a DIRECTORY named target below the root, and the rule
+# is relative to the root on purpose: a directory named target IN the tree is
+# build output, and a checkout that LIVES under a directory called target is
+# still the tree.
+#
+# The filter here used to look at the absolute path, so the checkout's own
+# ancestors counted -- and a checkout under a directory named target hid the
+# whole tree from this script, while the shell twin walked it in full and
+# answered for it. The two twins then said different things about the same
+# files, which is the one thing a pair of twins may not do.
+#
+# So the rule is the shell twin's, spelled for PowerShell: the directories
+# above the file are read one segment at a time, and a segment that is
+# exactly "target" is build output. A file whose own name holds "target" is
+# not build output, and the shell twin sees it.
+#
+# The segment named ".git" is left out for the same reason and for a sharper
+# one: it holds the repository's own metadata -- the objects, the refs, the
+# index -- and none of that is a file of the project. A checkout's .git
+# holds objects, and a developer's holds whatever they left in it: a
+# scratch copy of the tree, a probe, a published crate. A gate that reads a
+# developer's scratch is a gate that gets turned off, and a gate that reads
+# a copy of the tree cannot tell the copy from the tree. So the walk does
+# not descend into it, and the rule is still relative to the root: a
+# directory called .git BELOW the root is skipped, and the root's own
+# ancestors never enter the question.
+function Test-RgyInTree([string]$fullName) {
+    $rel = $fullName
+    if ($fullName.StartsWith($repoRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        $rel = $fullName.Substring($repoRoot.Length).TrimStart([char[]]@('\', '/'))
+    }
+    $dir = Split-Path -Parent $rel
+    if ([string]::IsNullOrEmpty($dir)) { return $true }
+    foreach ($seg in ($dir -split '[\\/]')) {
+        if ($seg -eq 'target' -or $seg -eq '.git') { return $false }
+    }
+    return $true
+}
+
+# The walk the shell twin performs with find's -prune. Get-ChildItem
+# -Recurse has no prune, so the tree is walked a top-level directory at a
+# time and the repository's own metadata is left out of it; a .git nested
+# deeper in the tree is caught by the filter above.
+function Get-RgyTreeFiles([string]$name) {
+    $files = New-Object System.Collections.Generic.List[System.IO.FileInfo]
+    foreach ($f in Get-ChildItem -Path . -Filter $name -File) { $files.Add($f) }
+    foreach ($d in Get-ChildItem -Path . -Directory) {
+        if ($d.Name -eq 'target' -or $d.Name -eq '.git') { continue }
+        foreach ($f in Get-ChildItem -Path $d.FullName -Filter $name -Recurse -File) { $files.Add($f) }
+    }
+    return $files
+}
 
 $failures = New-Object System.Collections.Generic.List[string]
 
@@ -51,19 +143,19 @@ Write-Host "checking vendoring rules in $repoRoot" -ForegroundColor Cyan
 # inherit. All three are forbidden. Comments that merely mention the
 # provenance are acceptable in Cargo.toml, so only the non-comment part
 # of a line is inspected.
-Write-Host "`n[1/5] no upstream in manifests" -ForegroundColor Cyan
+Write-Host "`n[1/6] no upstream in manifests" -ForegroundColor Cyan
 # Scope to crates/rar-codec, crates/rgx-core, crates/rgx-adapters-* only: rgy's own crates (rgy-name-core, rgy-discovery*, rgy-engine, rgy-proto, bins/*) are not vendored-from-upstream and would false-positive.
 $scope = '[\\/]crates[\\/](?:rar-codec|rgx-core|rgx-adapters-[^\\/]+)(?:[\\/]|$)'
 $manifests = @()
-$manifests += Get-ChildItem -Path . -Filter 'Cargo.toml' -Recurse -File |
-    Where-Object { $_.FullName -notmatch '[\\/]target[\\/]' -and $_.FullName -match $scope }
-$manifests += Get-ChildItem -Path . -Filter 'Cargo.lock' -Recurse -File |
-    Where-Object { $_.FullName -notmatch '[\\/]target[\\/]' -and $_.FullName -match $scope }
-$manifests += Get-ChildItem -Path . -Filter 'config.toml' -Recurse -File |
-    Where-Object { $_.FullName -like '*\.cargo\*' -and $_.FullName -notmatch '[\\/]target[\\/]' }
+$manifests += Get-RgyTreeFiles 'Cargo.toml' |
+    Where-Object { (Test-RgyInTree $_.FullName) -and $_.FullName -match $scope }
+$manifests += Get-RgyTreeFiles 'Cargo.lock' |
+    Where-Object { (Test-RgyInTree $_.FullName) -and $_.FullName -match $scope }
+$manifests += Get-RgyTreeFiles 'config.toml' |
+    Where-Object { $_.FullName -like '*\.cargo\*' -and (Test-RgyInTree $_.FullName) }
 
 foreach ($f in $manifests) {
-    $rel = Resolve-Path -Relative $f.FullName
+    $rel = Get-RgyRelativePath $f.FullName
     $lineNo = 0
     foreach ($line in Get-Content $f.FullName) {
         $lineNo++
@@ -79,7 +171,7 @@ if ($failures.Count -eq 0) {
 }
 
 # --- 2. no [patch] in .cargo/config.toml ----------------------------------
-Write-Host "`n[2/5] no [patch] redirects" -ForegroundColor Cyan
+Write-Host "`n[2/6] no [patch] redirects" -ForegroundColor Cyan
 $cfg = Join-Path $repoRoot '.cargo\config.toml'
 if (Test-Path $cfg) {
     if ((Get-Content $cfg -Raw) -match '(?m)^\s*\[patch') {
@@ -111,7 +203,7 @@ if (Test-Path $cfg) {
 # tree, the rgx-core codecs, the RAR codec and the memmap2 tree. Two of
 # them were missing here until 2026-10-30, so the gate was looking at three
 # of the five trees the record names.
-Write-Host "`n[3/5] vendored trees declare provenance" -ForegroundColor Cyan
+Write-Host "`n[3/6] vendored trees declare provenance" -ForegroundColor Cyan
 $vendoredRoots = @('crates\rgx-adapters-archive\src\sevenz', 'crates\rgx-adapters-archive\src\lz4', 'crates\rgx-core\src\compress', 'crates\rar-codec\src', 'crates\rgx-core\src\memmap2')
 $checked = 0
 foreach ($vroot in $vendoredRoots) {
@@ -161,7 +253,7 @@ $knownExternal = @{
     'rusqlite'          = 'the SQLite adapter of rgx-adapters-tabular reads the file format itself; the crate is a dev-dependency only -- the oracle the in-house reader is measured against, over a corpus of real databases'
 }
 
-Write-Host "`n[4/5] no unexpected external crates" -ForegroundColor Cyan
+Write-Host "`n[4/6] no unexpected external crates" -ForegroundColor Cyan
 
 # A dependency section is any [..dependencies] table, including
 # target-specific ones. Everything else is not a dependency list.
@@ -174,12 +266,12 @@ $external = New-Object System.Collections.Generic.List[object]
 # crates are not vendored from upstream -- and it is the wrong scope here:
 # the externals of rgy's own crates would not be seen at all.
 $allManifests = @()
-$allManifests += Get-ChildItem -Path . -Filter 'Cargo.toml' -Recurse -File |
-    Where-Object { $_.FullName -notmatch '[\\/]target[\\/]' }
+$allManifests += Get-RgyTreeFiles 'Cargo.toml' |
+    Where-Object { Test-RgyInTree $_.FullName }
 
 foreach ($f in $allManifests) {
     if ($f.Name -ne 'Cargo.toml') { continue }
-    $rel = Resolve-Path -Relative $f.FullName
+    $rel = Get-RgyRelativePath $f.FullName
     $section = ''
     $lineNo = 0
     foreach ($line in Get-Content $f.FullName) {
@@ -265,19 +357,19 @@ if ($remainingOracle.Count -gt 0) {
 # lock file resolves one of them from a registry. The scan covers every
 # manifest in the tree, not only the vendored ones: the offending
 # declaration would sit in rgy's own crate, not in the vendored tree.
-Write-Host "`n[5/5] the vendored crates come from the tree" -ForegroundColor Cyan
+Write-Host "`n[5/6] the vendored crates come from the tree" -ForegroundColor Cyan
 
 $vendoredRe = '^(rgx-core|rgx-adapters-[a-z0-9-]+|rar-codec)$'
 $vendoredFails = New-Object System.Collections.Generic.List[string]
 $vendoredCount = 0
 
-$allManifests = @(Get-ChildItem -Path . -Filter 'Cargo.toml' -Recurse -File |
-    Where-Object { $_.FullName -notmatch '[\\/]target[\\/]' })
-$allLocks = @(Get-ChildItem -Path . -Filter 'Cargo.lock' -Recurse -File |
-    Where-Object { $_.FullName -notmatch '[\\/]target[\\/]' })
+$allManifests = @(Get-RgyTreeFiles 'Cargo.toml' |
+    Where-Object { Test-RgyInTree $_.FullName })
+$allLocks = @(Get-RgyTreeFiles 'Cargo.lock' |
+    Where-Object { Test-RgyInTree $_.FullName })
 
 foreach ($f in $allManifests) {
-    $rel = Resolve-Path -Relative $f.FullName
+    $rel = Get-RgyRelativePath $f.FullName
     $lines = @(Get-Content $f.FullName)
     $depSection = $false
     $namedDep = $null
@@ -327,7 +419,7 @@ foreach ($f in $allManifests) {
 }
 
 foreach ($f in $allLocks) {
-    $rel = Resolve-Path -Relative $f.FullName
+    $rel = Get-RgyRelativePath $f.FullName
     $lines = @(Get-Content $f.FullName)
     $inPackage = $false
     $pkgName = ''
@@ -360,6 +452,165 @@ foreach ($m in $sortedFails) { Add-Failure $m }
 if ($vendoredFails.Count -eq 0) {
     Write-Host "  ok: $vendoredCount vendored dependency declarations, all by path" -ForegroundColor Green
     Write-Host "  ok: no lock file resolves a vendored crate from a registry" -ForegroundColor Green
+}
+
+# --- 6. the vendored manifest matches the tree --------------------------------
+# scripts/vendored-sources.tsv is the record of the vendored trees: which
+# upstream crate each copy came from, which commit it was taken from, and
+# which local patch sits on top of it. The sync writes it, the drift check
+# reads it, and nothing on the GitHub side checked that it still describes
+# the tree it is about -- so a manifest that fell behind the tree reads as
+# "nothing to do here", which is the one thing a manifest must never do.
+#
+# The questions the tree can answer:
+#
+#   * does every path the manifest names exist -- the trees and the patches
+#     alike?
+#   * does every vendored crate in crates/ have a row of its own, and every
+#     patch file under scripts/rgx-local-patches/ one?
+#   * is the header the one the sync writes, and does the commit it names
+#     pin every row?
+#
+# The commit is checked for its shape -- forty hex characters, the shape of
+# a git object id -- and for the rows agreeing with it. It is NOT checked
+# against the upstream: this check has no upstream checkout and no way to
+# ask, so "the rows agree with the header" is the whole of what it can say.
+# The question "is that commit still there?" is the drift check's, and it
+# runs where the upstream is.
+#   * is a path the manifest excludes really absent? The sync removes those
+#     on every run, so one that is here is a divergence.
+#
+# The paths in the messages are the manifest's own, spelled the way the
+# manifest spells them, so the two twins print the same bytes.
+Write-Host "`n[6/6] the vendored manifest matches the tree" -ForegroundColor Cyan
+
+$manifestFails = New-Object System.Collections.Generic.List[string]
+$manifestTrees = New-Object System.Collections.Generic.List[string]
+$manifestPatches = New-Object System.Collections.Generic.List[string]
+$pinPaths = New-Object System.Collections.Generic.List[string]
+$pinValues = New-Object System.Collections.Generic.List[string]
+$headerPin = ''
+
+$manifestFile = Join-Path $repoRoot 'scripts/vendored-sources.tsv'
+if (-not (Test-Path $manifestFile)) {
+    $manifestFails.Add('scripts/vendored-sources.tsv is missing; the sync writes it')
+} else {
+    $manifestLines = @(Get-Content $manifestFile)
+    # The rows: tab separated, five columns. A comment line is not a row,
+    # and a blank line is not a row either.
+    foreach ($line in $manifestLines) {
+        if ($line.StartsWith('#')) { continue }
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        # The shell twin's split, spelled out: a run of tabs is one
+        # separator and the ends do not count. PowerShell's own -split
+        # keeps the empty fields, and the two twins then read a malformed
+        # row differently -- one as a row of an unknown kind, the other as
+        # no row at all.
+        $cols = @($line -split '\t+' | Where-Object { $_ -ne '' })
+        # A line with fewer than four columns is not a row, and the shell
+        # twin says so with the same words.
+        if ($cols.Count -lt 4) {
+            $manifestFails.Add('scripts/vendored-sources.tsv has a row with fewer than four columns')
+            continue
+        }
+        $rgx = $cols[0]
+        $pin = $cols[2]
+        $kind = $cols[3]
+        switch ($kind) {
+            'tree' { $manifestTrees.Add($rgx) }
+            'patch' { $manifestPatches.Add($rgx) }
+            default { $manifestFails.Add("scripts/vendored-sources.tsv has a row of an unknown kind: $kind") }
+        }
+        $pinPaths.Add($rgx)
+        $pinValues.Add($pin)
+    }
+
+    # The header the sync writes. The first line says what the file is, and
+    # the commit line says what the copy was taken from; every row carries
+    # that same commit, because the sync takes the whole vendoring from one
+    # commit.
+    $headerFirst = ''
+    if ($manifestLines.Count -gt 0) { $headerFirst = $manifestLines[0] }
+    foreach ($line in $manifestLines) {
+        if ($line -match '^# The upstream commit the copy was taken from: (\S+)') {
+            $headerPin = $matches[1]
+            break
+        }
+    }
+    if ($headerFirst -ne '# Vendored-source manifest. Read by scripts/check-drift.*, which asks') {
+        $manifestFails.Add('scripts/vendored-sources.tsv does not start with the header the sync writes')
+    }
+    if ([string]::IsNullOrEmpty($headerPin)) {
+        $manifestFails.Add('scripts/vendored-sources.tsv does not name the commit the copy was taken from')
+    } elseif ($headerPin -notmatch '^[0-9a-f]{40}$') {
+        $manifestFails.Add("scripts/vendored-sources.tsv names a commit that is not a commit id: $headerPin")
+    }
+
+    # Every tree the manifest names is in the tree.
+    foreach ($rgx in $manifestTrees) {
+        if (-not (Test-Path (Join-Path $repoRoot $rgx) -PathType Container)) {
+            $manifestFails.Add("scripts/vendored-sources.tsv names a tree that is not in the tree: $rgx")
+        }
+    }
+
+    # Every vendored crate in the tree has a row of its own. The names are
+    # upstream's crates: rgx-core, rar-codec and the rgx-adapters-* family.
+    # rgy's own crates are not vendored and are not in here.
+    $crateDirs = @(Get-ChildItem -Path (Join-Path $repoRoot 'crates') -Directory |
+        Where-Object { $_.Name -like 'rgx-*' -or $_.Name -eq 'rar-codec' })
+    foreach ($d in $crateDirs) {
+        $rel = "crates/$($d.Name)"
+        if (-not $manifestTrees.Contains($rel)) {
+            $manifestFails.Add("$rel is a vendored tree and the manifest does not name it")
+        }
+    }
+
+    # Every patch the manifest names is in the tree.
+    foreach ($rgx in $manifestPatches) {
+        if (-not (Test-Path (Join-Path $repoRoot $rgx) -PathType Leaf)) {
+            $manifestFails.Add("scripts/vendored-sources.tsv names a patch that is not in the tree: $rgx")
+        }
+    }
+
+    # Every patch file in the tree has a row of its own. A patch the
+    # manifest does not name is a divergence nobody wrote down, and the
+    # sync would apply it without the manifest saying so.
+    $patchFiles = @(Get-ChildItem -Path (Join-Path $repoRoot 'scripts/rgx-local-patches') -Recurse -File -Filter '*.patch' -ErrorAction SilentlyContinue)
+    foreach ($p in $patchFiles) {
+        $rel = $p.FullName.Substring($repoRoot.Length + 1).Replace('\', '/')
+        if (-not $manifestPatches.Contains($rel)) {
+            $manifestFails.Add("$rel is a patch and the manifest does not name it")
+        }
+    }
+
+    # Every row is pinned to the commit the header names.
+    for ($i = 0; $i -lt $pinPaths.Count; $i++) {
+        if ($headerPin -ne '' -and $pinValues[$i] -ne $headerPin) {
+            $manifestFails.Add("scripts/vendored-sources.tsv pins $($pinPaths[$i]) to $($pinValues[$i]), and the header names $headerPin")
+        }
+    }
+
+    # The paths the manifest excludes are upstream's files this repository
+    # does not carry. The sync removes them on every run, so one that is
+    # here is a divergence from the rule the manifest states.
+    foreach ($line in $manifestLines) {
+        if ($line -match '^# exclude: (.+)$') {
+            $ex = $matches[1].Trim()
+            if (Test-Path (Join-Path $repoRoot $ex)) {
+                $manifestFails.Add("scripts/vendored-sources.tsv excludes $ex, and the tree has it")
+            }
+        }
+    }
+}
+
+# The failures are sorted, not printed as they are found: the two twins walk
+# the tree in the same order but a reader comparing the two outputs should
+# not have to know that.
+$sortedManifestFails = [string[]]$manifestFails.ToArray()
+[Array]::Sort($sortedManifestFails, [StringComparer]::Ordinal)
+foreach ($m in $sortedManifestFails) { Add-Failure $m }
+if ($manifestFails.Count -eq 0) {
+    Write-Host "  ok: $($manifestTrees.Count) vendored trees and $($manifestPatches.Count) patches, all pinned to $headerPin" -ForegroundColor Green
 }
 
 # --- result ----------------------------------------------------------------

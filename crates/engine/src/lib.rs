@@ -42,6 +42,14 @@ pub mod console;
 /// See the module docs for why the namespace is rgy's to begin with.
 pub mod adapter_view;
 
+/// The paths the user typed, and the home directory a `~` names.
+///
+/// A `~` at the front of a path is the home, on every platform and in every
+/// shell — the shell expands it on a POSIX one and does not on Windows, and
+/// the tree expands it itself so the two agree. See the module docs for why
+/// the disagreement it ended was silent, and therefore the worst kind.
+pub mod paths;
+
 /// TV pack store glue (the daemon corpus store).
 #[cfg(feature = "std")]
 pub mod tv;

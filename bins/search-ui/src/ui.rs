@@ -24,7 +24,7 @@ use crate::preview;
 use crate::term::{self, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, Paint};
 use rgy_launcher::Action as LauncherAction;
 use rgy_launcher::latency::{LatencyMeter, duration};
-use rgy_launcher::text::{Lang, Text};
+use rgy_launcher::text::{Brand, Lang, Text};
 use rgy_name_core::live::Live;
 use rgy_name_core::name_query::{Alternatives, Hit, Searcher};
 use std::io::Write;
@@ -203,10 +203,27 @@ struct App {
     /// words in the same language; the words are the launcher's, and the
     /// language is a byte the caller hands over.
     lang: Lang,
+    /// The name the header carries.
+    ///
+    /// The terminal is one face of the launcher and the graphical window
+    /// is the other, and the window's title says "rgxy", so the header
+    /// says it too: two faces that carry two names are a launcher the
+    /// user has to learn twice.
+    ///
+    /// The tool that keeps an index in its own process is a different
+    /// program, and it says its own name.
+    brand: Brand,
     /// The fsearch name index + overlay, the same searcher `searchctl` uses.
     /// Volume root, shown in the header.
     root: String,
-    indexed: usize,
+    /// How many entries the index holds, when the source can say.
+    ///
+    /// `None` is "not known", and it is not zero: zero is a fact —
+    /// "there is nothing here" — and a header that says "0" about an
+    /// index of a thousand entries is a wrong fact. A source that cannot
+    /// say how big its index is leaves the header saying that it does
+    /// not know.
+    indexed: Option<usize>,
     input: String,
     /// Caret offset into `input`, counted in `char`s.
     caret: usize,
@@ -416,9 +433,12 @@ impl App {
     fn new(live: Live, root: String, indexed: usize) -> Self {
         let mut app = App {
             lang: Lang::English,
+            // The index is this process's own, so the header says the name
+            // of the program that owns it.
+            brand: Brand::Index,
             live: Some(live),
             root,
-            indexed,
+            indexed: Some(indexed),
             input: String::new(),
             caret: 0,
             results: Vec::new(),
@@ -440,11 +460,21 @@ impl App {
 
     /// An app that asks a source instead of the index in this process.
     fn with_source(source: Box<dyn rgy_launcher::Source>, root: String) -> Self {
+        // The count is the source's: the daemon says how many entries its
+        // index holds, and a source that cannot say leaves the header
+        // saying that the count is not known. It is asked here and asked
+        // again after every search, because a daemon that was not there
+        // when the launcher started can be there by the first keystroke.
+        let indexed = source.indexed();
         let mut app = App {
             lang: Lang::English,
+            // The source is the daemon's, and this is the launcher's
+            // terminal face: the header says the launcher's name, which
+            // is the name the floating window's title carries too.
+            brand: Brand::Launcher,
             live: None,
             root,
-            indexed: 0,
+            indexed,
             input: String::new(),
             caret: 0,
             results: Vec::new(),
@@ -490,6 +520,10 @@ impl App {
             self.total = self.results.len();
             self.selected = 0;
             self.top = 0;
+            // The count is the source's, and the source can learn it: the
+            // daemon answers with the size of its index, and the header
+            // has to say it as soon as the daemon has said it.
+            self.indexed = source.indexed();
             self.meter.record(started.elapsed().as_micros());
             return;
         }
@@ -746,14 +780,28 @@ impl App {
 
         // The layout: brand in bold white, two spaces, then a dim
         // subtitle that carries the volume and the entry count.
+        //
+        // The count is the source's own: the daemon says how many entries
+        // its index holds, and a source that cannot say leaves the header
+        // saying that the count is not known. The sentence is not there
+        // for the looks — a header that says "0" about an index of a
+        // thousand entries is a wrong fact, and a wrong fact is worse
+        // than no fact.
+        let text = Text::for_lang(self.lang);
+        let count = match self.indexed {
+            Some(n) => text
+                .terminal_files_and_folders
+                .replace("{}", &thousands(n, self.lang)),
+            None => text.terminal_count_unknown.to_string(),
+        };
         let subtitle = format!(
-            "{} · {} files and folders",
+            "{} · {}",
             self.root.as_str().with(palette::dim()),
-            thousands(self.indexed).with(palette::dim())
+            count.as_str().with(palette::dim())
         );
         rows.push(format!(
             "{}  {}",
-            "zen-rs".with(palette::ink()).bold(),
+            self.brand.word(text).with(palette::ink()).bold(),
             subtitle
         ));
 
@@ -1459,12 +1507,20 @@ fn truncate_visible(s: &str, width: usize) -> String {
 }
 
 /// Group digits in threes: 5151234 -> "5,151,234".
-fn thousands(n: usize) -> String {
+///
+/// The separator is the language's: English groups with a comma and
+/// Portuguese with a dot. A number spelled the other way round is a
+/// number the reader has to read twice.
+fn thousands(n: usize, lang: Lang) -> String {
+    let separator = match lang {
+        Lang::English => ',',
+        Lang::Portuguese => '.',
+    };
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, c) in digits.chars().enumerate() {
         if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(',');
+            out.push(separator);
         }
         out.push(c);
     }
@@ -1889,10 +1945,13 @@ mod tests {
 
     #[test]
     fn thousands_groups_digits() {
-        assert_eq!(thousands(0), "0");
-        assert_eq!(thousands(999), "999");
-        assert_eq!(thousands(1_000), "1,000");
-        assert_eq!(thousands(5_151_234), "5,151,234");
+        assert_eq!(thousands(0, Lang::English), "0");
+        assert_eq!(thousands(999, Lang::English), "999");
+        assert_eq!(thousands(1_000, Lang::English), "1,000");
+        assert_eq!(thousands(5_151_234, Lang::English), "5,151,234");
+        // The separator is the language's: a number spelled the other way
+        // round is a number the reader has to read twice.
+        assert_eq!(thousands(1_226, Lang::Portuguese), "1.226");
     }
 
     #[test]
@@ -2149,11 +2208,27 @@ mod tests {
     #[derive(Clone, Default)]
     struct Recorder {
         queries: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+        /// What the source says about the size of its index.
+        ///
+        /// `None` is the default: a source that cannot say does not have
+        /// to, and the header that shows it has to cope with the not
+        /// knowing. The cell is shared so a test can let the source learn
+        /// the count later — a daemon that was not there when the
+        /// launcher started can be there by the first keystroke.
+        indexed: std::rc::Rc<std::cell::Cell<Option<usize>>>,
     }
 
     impl Recorder {
         fn asked(&self) -> Vec<String> {
             self.queries.borrow().clone()
+        }
+
+        /// A source that says how many entries its index holds.
+        fn with_count(count: usize) -> Self {
+            Recorder {
+                indexed: std::rc::Rc::new(std::cell::Cell::new(Some(count))),
+                ..Recorder::default()
+            }
         }
     }
 
@@ -2162,6 +2237,118 @@ mod tests {
             self.queries.borrow_mut().push(query.to_string());
             rgy_launcher::Answer::empty()
         }
+
+        fn indexed(&self) -> Option<usize> {
+            self.indexed.get()
+        }
+    }
+
+    /// The header row off a screen.
+    ///
+    /// The header is the first row, and a frame is a difference — so the
+    /// screen is what a run of frames leaves, and the row is read from it.
+    fn header_row(screen: &Screen) -> String {
+        screen
+            .rows()
+            .into_iter()
+            .find(|(row, _)| *row == 1)
+            .map(|(_, text)| text)
+            .expect("the header is the first row")
+    }
+
+    /// The terminal face of the launcher says the launcher's name.
+    ///
+    /// The floating window's title says "rgxy", and the terminal stands in
+    /// for that window where there is no desktop: two faces of the same
+    /// launcher that carry two names are a launcher the user has to learn
+    /// twice.
+    ///
+    /// The tool that keeps an index in its own process says its own name
+    /// instead — it is a different program, and it is the one whose index
+    /// the header counts.
+    #[test]
+    fn the_launchers_terminal_face_says_the_launchers_name() {
+        let mut app = App::with_source(Box::new(Recorder::default()), "C:\\".to_string());
+        let mut screen = Screen::default();
+        screen.apply(&frame(&mut app, 100, 10));
+        let header = header_row(&screen);
+        assert!(header.contains("rgxy"), "{header}");
+        assert!(!header.contains("zen-rs"), "{header}");
+
+        // And the tool that owns the index says its own.
+        let mut app = app_new();
+        let mut screen = Screen::default();
+        screen.apply(&frame(&mut app, 100, 10));
+        let header = header_row(&screen);
+        assert!(header.contains("zen-rs"), "{header}");
+        assert!(!header.contains("rgxy"), "{header}");
+    }
+
+    /// The header says the count the source gives.
+    ///
+    /// The daemon knows how many entries its index holds, and the header
+    /// is where the user reads it: a header that says "0" under an index
+    /// of a thousand entries is a wrong fact, and nobody reads a number
+    /// looking for a lie.
+    #[test]
+    fn the_header_says_the_count_the_source_gives() {
+        let mut app = App::with_source(Box::new(Recorder::with_count(1226)), "C:\\".to_string());
+        let mut screen = Screen::default();
+        screen.apply(&frame(&mut app, 100, 10));
+        let header = header_row(&screen);
+        assert!(header.contains("1,226 files and folders"), "{header}");
+
+        // And the number is spelled the language's way.
+        app.lang = Lang::Portuguese;
+        let mut screen = Screen::default();
+        screen.apply(&frame(&mut app, 100, 10));
+        let header = header_row(&screen);
+        assert!(header.contains("1.226 ficheiros e pastas"), "{header}");
+    }
+
+    /// A source that cannot say how big its index is does not say zero.
+    ///
+    /// Zero is a fact — "there is nothing here" — and a source that does
+    /// not know the size of its index must not be read as an empty one.
+    /// The sentence that says the count is not known is better than a
+    /// number that is not true.
+    #[test]
+    fn a_source_that_cannot_say_does_not_say_zero() {
+        let mut app = App::with_source(Box::new(Recorder::default()), "C:\\".to_string());
+        let mut screen = Screen::default();
+        screen.apply(&frame(&mut app, 100, 10));
+        let header = header_row(&screen);
+        assert!(header.contains("count not known"), "{header}");
+        assert!(!header.contains("0 files and folders"), "{header}");
+    }
+
+    /// The header says the count as soon as the source knows it.
+    ///
+    /// A daemon that is not there when the launcher starts can be there by
+    /// the first keystroke, and the header has to learn the count then: a
+    /// header that keeps saying "not known" under a daemon that has
+    /// answered is a header that is wrong the other way.
+    #[test]
+    fn the_header_follows_the_source_when_it_learns_the_count() {
+        let source = Recorder::default();
+        let mut app = App::with_source(Box::new(source.clone()), "C:\\".to_string());
+        let mut screen = Screen::default();
+        screen.apply(&frame(&mut app, 100, 10));
+        assert!(
+            header_row(&screen).contains("count not known"),
+            "{}",
+            header_row(&screen)
+        );
+
+        // The daemon answered: it says how many entries its index holds.
+        source.indexed.set(Some(1226));
+        app.search();
+        screen.apply(&frame(&mut app, 100, 10));
+        assert!(
+            header_row(&screen).contains("1,226 files and folders"),
+            "{}",
+            header_row(&screen)
+        );
     }
 
     /// A command line is not a question for the daemon.

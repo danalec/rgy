@@ -1091,6 +1091,31 @@ impl<'a> Sql<'a> {
                 self.at += 1;
                 Some(out)
             }
+            Some(b'\'') => {
+                // SQLite writes the name of a shadow table in single
+                // quotes -- `CREATE TABLE 'vt_data'(...)` -- so a schema
+                // that carries a virtual table has to be read.
+                self.at += 1;
+                let mut out = String::new();
+                loop {
+                    match self.text.get(self.at) {
+                        Some(b'\'') => {
+                            if self.text.get(self.at + 1) == Some(&b'\'') {
+                                out.push('\'');
+                                self.at += 2;
+                            } else {
+                                self.at += 1;
+                                return Some(out);
+                            }
+                        }
+                        Some(byte) => {
+                            out.push(*byte as char);
+                            self.at += 1;
+                        }
+                        None => return Some(out),
+                    }
+                }
+            }
             _ => {
                 let word = self.word()?;
                 self.at += word.len();

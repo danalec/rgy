@@ -48,41 +48,83 @@ everything with it.
 
 ## 2. Install it
 
-**Nothing has been published yet.** The packaging is in place — the winget
-manifest, the Homebrew formula, the script that builds the archives and
-uploads them — but the first release has not been pushed, so the commands
-below do not install anything today.
+The release is **0.1.2**. It is on
+[GitHub](https://github.com/danalec/rgy/releases/tag/rgy-v0.1.2), and the
+crates are on crates.io.
 
-What the packages will be:
+### From crates.io
 
-| platform | package | command |
-|---|---|---|
-| Windows | winget | `winget install danalec.rgy-search` |
-| Windows | one-line installer | `irm https://raw.githubusercontent.com/danalec/rgy/main/install.ps1 \| iex` |
-| macOS | Homebrew | `brew tap danalec/rgy https://github.com/danalec/rgy` then `brew install danalec/rgy/rgy-search` |
-| macOS | Homebrew core, once the pull request is merged | `brew install rgy-search` |
-| macOS | one-line installer | `curl -fsSL https://raw.githubusercontent.com/danalec/rgy/main/install.sh \| bash` |
-| Linux | one-line installer | `curl -fsSL https://raw.githubusercontent.com/danalec/rgy/main/install.sh \| bash` |
+```sh
+cargo install rgy-search --version 0.1.2         # gives you `searchctl`
+```
 
-The one-line installer picks the archive that matches the machine: the
-operating system and the architecture decide it, and an aarch64 machine
-never gets the x86_64 binary.
+That is the whole install for the tool you actually type. It needs **Rust
+1.85 or newer** and a **C compiler** (the allocator is C), and it drops the
+binary into `~/.cargo/bin` — already on your PATH if Rust was installed the
+usual way.
 
-The package is called **rgy-search** because `rgy` is taken on crates.io
-(a GameBoy emulator library from 2019). The binaries inside keep the names
-they have everywhere else, and the project itself is still rgy.
+The other binaries are separate crates, because most people only want the
+first one:
 
-The one-line installers download the release archive, check its digest, put
-the four binaries in `~/.local/bin` (Linux and macOS) or
-`%LOCALAPPDATA%\Programs\rgy` (Windows), add that directory to your PATH,
-and register the daemon — and the launcher — to start at login. The digest
+```sh
+cargo install rgy-searchd --version 0.1.2       # the daemon: searchd
+cargo install rgy-autostart --version 0.1.2     # the login item: rgy-autostart
+cargo install rgy-rgxy --version 0.1.2          # the window: rgxy
+cargo install rgy-zen --version 0.1.2           # the zen CLI: zen-rs (Windows)
+```
+
+### From the release
+
+The archive carries the four binaries, the `rgy` alias and the documents, and
+it needs neither Rust nor a compiler. The `rgy` alias is `searchctl` under
+the project's name: a copy of the binary on Windows — a link there needs an
+administrator — and a symlink on Linux and macOS:
+
+| platform | archive |
+|---|---|
+| Windows x86_64 | `rgy-v0.1.2-x86_64-windows.zip` |
+| Linux x86_64 | `rgy-v0.1.2-x86_64-linux.tar.gz` |
+
+The release page carries a `SHA256SUMS` beside the archives. The archive
+that matches the machine is the one that gets installed: the operating
+system and the architecture decide it, and an aarch64 machine never gets the
+x86_64 binary.
+
+### With the one-line installer
+
+```sh
+# Windows
+irm https://raw.githubusercontent.com/danalec/rgy/main/install.ps1 | iex
+
+# Linux and macOS
+curl -fsSL https://raw.githubusercontent.com/danalec/rgy/main/install.sh | bash
+```
+
+The installer downloads the release archive, checks its digest, puts the four
+binaries in `~/.local/bin` (Linux and macOS) or
+`%LOCALAPPDATA%\Programs\rgy` (Windows), adds that directory to your PATH,
+and registers the daemon — and the launcher — to start at login. The digest
 is **pinned in the installer**: the installer carries the digest of the one
 artifact it is allowed to install, so a substituted download is refused
 before anything is unpacked. The pins are release data — the release flow
 rewrites them from the archive it has just built.
 
-Each package carries four binaries, the documents, and the command the
-project is named after:
+An archive the release does not carry is refused too, and the installer says
+which one it wanted. **There is no macOS archive yet** — it needs a Mac to
+build — and no aarch64 one, so on those the installer installs nothing.
+
+### What is not out yet
+
+| platform | package | state |
+|---|---|---|
+| Windows | winget | the manifest is in the repository and validates, but it is not in `microsoft/winget-pkgs`: `winget install danalec.rgy-search` installs nothing today |
+| macOS | Homebrew | the formula is in the repository with its digests as placeholders, and the tap is not published: `brew install danalec/rgy/rgy-search` installs nothing today |
+
+The packages are called **rgy-search** because `rgy` is taken on crates.io
+(a GameBoy emulator library from 2019). The binaries inside keep the names
+they have everywhere else, and the project itself is still rgy.
+
+### The binaries
 
 | binary | what it does |
 |---|---|
@@ -94,6 +136,45 @@ project is named after:
 | command | what it is |
 |---|---|
 | `rgy` | another name for `searchctl` — the same binary |
+
+`cargo install rgy-search` gives you `searchctl` and nothing else: the
+`rgy` alias is in the release archives and in what the installers unpack.
+
+### The library
+
+The crates are on crates.io too, all twenty at 0.1.2, and fifteen of them are
+the library:
+
+| crate | what it gives you |
+|---|---|
+| `rgy-name-core` | the name index, the query filters, the ranking |
+| `rgy-discovery` | the discovery seam: the walk, the change feed |
+| `rgy-discovery-dispatch` | the per-platform walk selector |
+| `rgy-discovery-linux` | the Linux backend: `getdents64` and inotify |
+| `rgy-discovery-macos` | the macOS backend: `getattrlistbulk` and FSEvents |
+| `rgy-discovery-freebsd` | the FreeBSD backend |
+| `rgy-discovery-windows` | the Windows backend: the MFT walk and the USN journal |
+| `rgy-engine` | the orchestration: the keep-warm index, the console |
+| `rgy-proto` | the wire: the request and response types, the client |
+| `rgy-launcher` | the launcher's model: the query, the rows, the actions |
+| `rgy-launcher-windows` | the window on Windows, drawn with GDI |
+| `rgy-pick` | handing the results to an external picker |
+| `rgy-adapters` | the registry that orders the format adapters |
+| `rgy-par` | the parallelism the tree carries |
+| `rgy-search-ui` | the terminal interface |
+
+```sh
+cargo add rgy-name-core       # the index and the query language
+cargo add rgy-proto           # the wire
+cargo add rgy-discovery       # the walk, behind the seam
+```
+
+The library tree is `no_std` + `alloc`. What needs an operating system sits
+behind a `std` feature, on by default; `default-features = false` is what
+makes a crate linkable into something with no operating system at all. Two
+crates are `std` outright, on purpose: `rgy-adapters`, because the upstream
+format families it orders are `std`, and `rgy-search-ui`, because a terminal
+is a machine.
 
 ### Starting the daemon at login
 
@@ -113,8 +194,8 @@ rgy-autostart uninstall    # take it out
 
 `install` needs nothing: the daemon is the `searchd` beside the tool, and
 the tree it indexes is your home directory. The one-line installers do this
-for you; the winget package cannot, so run `rgy-autostart install` once
-after it.
+for you; every other way in leaves it to you, so run `rgy-autostart install`
+once after installing by hand.
 
 What gets registered depends on the operating system: a Task Scheduler task
 (or the `HKCU` run value) on Windows, a systemd **user** unit on Linux, a
@@ -135,16 +216,24 @@ The entry also names where the daemon listens, and that is not decoration.
 The daemon's own default reads its requests from standard input, and a
 login entry has no standard input: the daemon would start, walk the tree,
 and exit — registered, and gone. So the registered daemon listens on a
-socket (`~/.cache/rgy/searchd.sock` on Linux and macOS) or on a named pipe
+socket (`$XDG_CACHE_HOME/rgy/searchd.sock`, or `~/.cache/rgy/searchd.sock`
+on Linux; `~/Library/Caches/rgy/searchd.sock` on macOS) or on a named pipe
 (`\\.\pipe\rgy-searchd-<you>` on Windows). `doctor` prints the line, so a
 client knows where to reach the daemon:
 
 ```
+platform:   linux
+daemon:     /home/you/.local/bin/searchd (next to this tool)
 registered: yes (systemd user unit)
+entry:      /home/you/.config/systemd/user/rgy-searchd.service
 running:    yes
 root:       /home/you
 listens:    uds:/home/you/.cache/rgy/searchd.sock
+path:       /home/you/.local/bin is on the PATH
 ```
+
+`doctor` also prints a `fix:` line when something is not right — the command
+that repairs it.
 
 ## 3. Build it
 
@@ -152,15 +241,17 @@ Rust **1.85** or newer.
 
 ```sh
 cargo build --release            # the whole workspace
-cargo build --release -p rgy-searchctl   # just the command-line tool
+cargo build --release -p rgy-search       # just the command-line tool
 cargo build --release -p rgy-searchd     # just the daemon
 ```
 
 The binaries land in `target/release/`. On Windows that is
 `target\release\searchctl.exe`.
 
-If you also want the pack store tool (section 8), it needs one extra flag,
-because it is not part of a default build:
+The pack store tool (section 9) is `rgx-tv`, and a default build already
+makes it: the engine's `std` feature asks for `rgx-core/tv-runtime`, and that
+feature is what carries the binary. `cargo build --release` therefore leaves
+`rgx-tv` in `target/release/` as well. To build that one binary on its own:
 
 ```sh
 cargo build --release -p rgx-core --bin rgx-tv --features tv-runtime
@@ -213,6 +304,11 @@ matched, counted from the start of the name. A name that matched through a
 typo, or through its reading in another script, has no `match`: the span
 would be in another text.
 
+A hit that is a folder carries `"folder":true`. The path does not say it — a
+folder's path is spelled like a file's — and a script that paints a file's
+icon on a folder paints the wrong picture of the thing the user is about to
+open.
+
 ## 5. The query language
 
 A query is a list of words. Every word narrows the answer, and a file has
@@ -249,13 +345,16 @@ A filter narrows by a property of the file, not by its name.
 | filter | means | example |
 |---|---|---|
 | `ext:` | the file extension | `ext:pdf` |
-| `dir:` | the folder it is in | `dir:documents` |
 | `type:` | what kind of thing it is | `type:dir`, `type:link`, `type:image` |
-| `size:` | how big it is | `size:+10m` (bigger than 10 MB), `size:-1k` |
+| `size:` | how big it is | `size:+10m` (at least 10 MB), `size:-1k` (at most 1 KB) |
 | `mtime:` | when it changed | `mtime:-7d` (in the last week), `mtime:today`, `mtime:week`, `mtime:month`, `mtime:year`, `mtime:older`, `mtime:2024-01-01` (that day), `mtime:<2024-01-01` (before it) |
-| `in:` | where it is | `in:downloads` |
+| `in:` | the scope: the folder the search is limited to | `in:downloads` |
 | `re:` | the path as a regular expression | `re:\.rs$` |
 | `limit:` | how many hits | `limit:20` |
+
+`in:` is also spelled `dir:` — the two are one filter, the scope. The value
+is resolved to a real folder (`~` works) and the search looks only inside it.
+The folder *axis*, the part of the path a word matches, is `folder:` (below).
 
 A bare extension goes in `ext:`; `type:` names kinds.
 
@@ -302,8 +401,9 @@ Some places are worth more than others. A file in your `Documents` is worth
 more than the same name in a build directory, and rgy says so without
 being asked — the priority of a place is a rule.
 
-The rules live in a file beside the index, `<index>.rules`, and the index
-is built with them:
+The rules live in a file beside the index — the index is `<digest>.idx` and
+the rules are `<digest>.rules`, the extension replaced, not extended — and
+the index is built with them:
 
 ```
 # <level> <regex> [flags]
@@ -334,8 +434,14 @@ new index (`--reindex`).
 | you write | means |
 |---|---|
 | `report\|invoice` | "report" **or** "invoice" |
-| `*.pdf` | any file whose name ends in `.pdf` |
-| `scan?` | any name with "scan" and one more character |
+| `*.pdf` | any path ending in `.pdf`, at any depth — a folder included |
+| `*scan?` | any path ending in "scan" and one more character |
+
+A term carrying `*` or `?` is a **whole-path glob**: it has to match the path
+from its first byte to its last, and an indexed path always starts with `/`.
+So `*.pdf` reaches a PDF at any depth, while `scan?` on its own asks for a
+path spelled exactly `scan` plus one byte — which no indexed path is. Write
+`*scan?` for the name.
 
 ### Searching inside a file
 
@@ -384,21 +490,43 @@ in [FORMATS.md](FORMATS.md) with their state.
 | flag | what it does |
 |---|---|
 | `--root <dir>` | the tree to search (default: the current folder) |
-| `--limit <n>` | how many hits to show (default: 50) |
+| `--limit <n>` | how many hits to show (default: 50; capped at 100 000) |
 | `--count` | print the count instead of the list |
 | `--json` | one JSON object per hit, for scripts |
-| `--index <file>` | where to keep the name index (default: the platform's cache folder) |
+| `--index <file>` | the file that holds the name index (default: `<cache>/rgy/<digest>.idx`) |
 | `--reindex` | rebuild the index even if a usable one exists |
-| `--max-age <dur>` | rebuild an index older than this (`30m`, `2h`, `7d`) |
+| `--max-age <dur>` | rebuild an index older than this (default `30m`; `0` never reuses) |
 | `--explain` | print the query plan on stderr — what rgy did with your query |
 | `--threads <n>` | how many workers to use, for the scan and for the query |
+| `--pick` | hand the results to a picker and print the choice |
+| `--fzf-binary <p>` | the picker to run (default: the first of `fzf` or `sk` on the PATH) |
+| `--fzf-arg <arg>` | one argument for the picker, repeatable |
 | `--daemon` | ask the running `searchd` instead of walking the tree yourself |
+| `-h, --help` | what the command does — it prints it and stops |
+| `-V, --version` | the version — it prints it and stops |
+
+A path that begins with `~` is the home directory — in `--root`, in
+`--index`, everywhere. The tree expands it and not only the shell does: a
+POSIX shell expands `~` before the command runs and Windows PowerShell does
+not, so `--root ~` is the home on every platform.
 
 `--daemon` asks the daemon that is already running, and it never falls
 back: if the daemon is not there, the command says so and stops. The
 daemon answers about the tree it was started on, which is not the tree
 `--root` names — so the two commands answer two different questions,
-and the flag says which one you asked.
+and the flag says which one you asked. `--count` is one of the things the
+daemon cannot answer: a count taken from a page is a preview wearing a
+count's clothes, so the command says that instead of guessing.
+
+`--pick` hands the list to a picker and prints what you chose. The default
+picker is `fzf` or `sk` — the two that read a list separated by NUL. A picker
+named with `--fzf-binary` that cannot read one (`peco`, `fz`) gets the list
+one path per line.
+
+```sh
+searchctl --root ~ --pick "invoice"           # fzf or sk, whichever is there
+searchctl --root ~ --pick --fzf-binary peco "invoice"
+```
 
 The index is what makes the name half of the query fast. rgy keeps it
 between runs and rebuilds it when it is older than `--max-age`.
@@ -406,8 +534,30 @@ between runs and rebuilds it when it is older than `--max-age`.
 The default folder is the platform's own cache folder, with an `rgy`
 folder inside it: `%LOCALAPPDATA%\rgy` on Windows,
 `$XDG_CACHE_HOME/rgy` (or `~/.cache/rgy`) on Linux, and
-`~/Library/Caches/rgy` on macOS. Set `RGY_INDEX_DIR` to keep the index
-somewhere else.
+`~/Library/Caches/rgy` on macOS. `RGY_INDEX_DIR` moves the cache base and
+the `rgy` folder still goes inside it, so the index lands in
+`$RGY_INDEX_DIR/rgy/<digest>.idx`.
+
+### The exit codes
+
+`searchctl` follows the convention `rg` set, so a script that knows one knows
+the other:
+
+| code | what it means |
+|---|---|
+| 0 | the query matched something |
+| 1 | the query matched nothing, the daemon reported an error, or the picker failed |
+| 2 | the command could not run: an unknown option, `--daemon` with no daemon to ask, `--count --daemon` |
+
+`rgxy` answers the same way, with two differences: a command line it cannot
+make sense of is 1 there and not 2, and a write that did not reach the caller
+— a closed pipe — is 2 as well.
+
+| code | what it means |
+|---|---|
+| 0 | the paths were printed |
+| 1 | the answer was empty, or the command line was wrong |
+| 2 | the picker failed, or the output did not arrive |
 
 ### How many workers
 
@@ -447,23 +597,122 @@ you are searching repeatedly, or if a script is.
 searchd --root ~                  # one JSON request per line on stdin
 ```
 
+| flag | what it does |
+|---|---|
+| `--root <dir>` | the tree to hold the index for (default: the current folder) |
+| `--index <file>` | the file that holds the name index (default: `<cache>/rgy/<digest>.idx`, the same file `searchctl` keeps) |
+| `--reindex` | rebuild the index even if a usable one exists |
+| `--max-age <dur>` | rebuild an index older than this (default `30m`; `0` never reuses) |
+| `--threads <n>` | how many workers to use |
+| `--tv-dir <dir>` | where the pack store lives |
+| `--listen <where>` | answer on a socket instead of stdin (default `stdio`): `uds:<path>` or `pipe:<name>` |
+| `--serve` | the rgx-compatible front: one JSON argv-array per line in, `rg --json` match lines out |
+| `-h, --help` | what the daemon does — it prints it and stops |
+| `-V, --version` | the version — it prints it and stops |
+
+A path that begins with `~` is the home directory, in `--root`, in `--index`
+and in `--tv-dir` alike.
+
 The root is resolved once, at startup: an absolute path, with the symlinks
 resolved. That is the spelling the change feed reports, and the answers
 carry it — so a path in an answer is the path to open, whatever the root
 was written as.
 
-The four requests:
+The five requests:
 
 ```json
 {"op":"search","q":"invoice ext:pdf","limit":50}
 {"op":"grep","q":"regex:fn\\s+list"}
+{"op":"grep-scoped","q":"tesla","paths":["/home/you/Documents/invoice.pdf"]}
 {"op":"resolve","path":"/home/you/Documents/invoice.pdf"}
 {"op":"status"}
 ```
 
+`grep` searches the whole tree. `grep-scoped` searches **only** the paths it
+is given — the files a name search already chose, and the question is what
+is inside them. It answers to two names: `grep-scoped` and `content` are
+the same request, and a client may send either. Its `q` and its `paths` are
+both required — a request that names no scope is refused, never widened
+into a search of the whole tree, because a scope that is quietly dropped is
+a search that answers with the whole tree and says nothing about it.
+
 ```sh
 echo '{"op":"search","q":"invoice"}' | searchd --root ~
 ```
+
+A search answers with the hits it ranked, and with two facts about the
+answer:
+
+```json
+{"op":"hits","hits":[{"path":"invoices/2026-07.pdf","score":42}],"took_us":1234,"complete":true,"session":4523615625714364}
+```
+
+A hit carries the path and the score, and two fields that are there only when
+they say something:
+
+```json
+{"path":"invoices/2026-07.pdf","score":42,"span":[0,7],"folder":true}
+```
+
+`span` is the character positions of the **name** that matched, so an interface
+can underline what matched; `folder` says the hit is a folder, which the path
+does not say — a folder's path is spelled like a file's. A hit without `span`
+has no highlight to offer, and a hit without `folder` is a file.
+
+`complete` says the answer is whole. The rule is the number of hits: fewer
+hits than the limit is the whole answer, and a list that reached the limit
+may have been cut short. It is additive — a reader that does not know it
+keeps working, and a line without it reads as "not complete", the answer
+that promises the least.
+
+The limit is capped at **100 000** hits, and a request that asks for more
+is clamped to the cap: the daemon holds the whole index, and a request for
+the whole index is a request to make it materialise the whole index. A
+request that names no limit at all gets 50. A clamped limit is not a lie —
+the answer says whether it was cut short, so a caller that asked for a
+million and got the cap knows the answer is the first hundred thousand and
+not all of them.
+
+`session` names the answer, and it is the number the next request carries
+back. The daemon keeps the result set under it, so a query that narrows
+the previous one is answered by re-ranking that one instead of walking the
+index again. The daemon names the session when the request does not, and
+the answer says which session it was computed for: a client that cannot
+name the session it is in cannot ask for the re-rank, and a session the
+client cannot name is a session the client cannot use.
+
+The two spaces cannot meet. The daemon's own sessions are in
+`[2^52, 2^53)` and the ids a client names are below `2^52`, so the two
+kinds of session never land on each other by accident. The session in the
+example above is one of the daemon's own: `4523615625714364` is in the
+daemon's space, and it is the kind of number the daemon puts on the wire.
+
+The ids the daemon names are **unguessable**, and that is what makes the
+round trip safe. The name is a capability: the client that holds it asks
+for the re-rank of the answer the daemon keeps under it. A client that
+names an id in the daemon's space that the daemon did not issue is
+refused one and given a fresh session instead — a client cannot land on
+somebody else's result set, because it cannot guess the name of one. The
+ids used to come out of a counter, and a counter cannot be a capability:
+the second client could name the first client's id, so the daemon refused
+every id in its own space, including the ones it had just issued, and the
+name on the wire was one the daemon would not take back.
+
+Both spaces are under `2^53` for a second reason: the protocol carries a
+number as an `f64`, and an integer above `2^53` does not survive the trip
+exactly. The limit is `2^53` itself, inclusive — a power of two is exactly
+representable — and a session that breaks the rule is **no session at
+all**. The reader drops three kinds: a negative id is not an id, neither
+is a number that reads as one above the limit, and neither is a number
+that is not a whole one — the cast truncates, and a peer that sent `1.5`
+would have been read as the id `1`, a session the peer never named. The
+request that carried one names no session, and the daemon answers it as a
+fresh question — not an error, and not a different id: there is no
+session, and the answer is the answer of a fresh search.
+
+The content route has no session. The name search has one because the
+daemon keeps the previous result set; the content answer is the files on
+the disk, it is read and not kept, and there is nothing to re-rank.
 
 `{"op":"resolve"}` answers with the path of an entry, whether it is a folder,
 and the volume that owns it:
@@ -500,7 +749,7 @@ A content search answers with the files it read and says whether it read
 all of them:
 
 ```json
-{"op":"grep-files","files":[{"path":"/home/you/notes.txt","lines":[[12,"invoice"]]}],"took_us":1234,"complete":true,"skipped":0}
+{"op":"grep-files","files":[{"path":"/home/you/notes.txt","lines":[[12,"invoice"]]}],"took_us":1234,"complete":true,"skipped":0,"skips":[]}
 ```
 
 `complete` says the search read every candidate it was given, and
@@ -508,6 +757,115 @@ all of them:
 whole one are different answers, and the difference used to be invisible.
 The two fields are additive: a reader that does not know them sees the
 files and the time, exactly as before.
+
+`skips` says **why** the files were not read, and it is the count that
+turns a number into an answer — a budget that ran out and a file that is a
+cloud placeholder are different problems, and the reader can only fix one
+of them:
+
+```json
+{"op":"grep-files","files":[],"took_us":8,"complete":false,"skipped":3,"skips":[{"reason":"a cloud placeholder; reading it would download it","count":2,"path":"C:/a.txt"},{"reason":"the search's budget ran out before it reached them","count":1}]}
+```
+
+The counts in `skips` add up to `skipped`. A group with one file carries
+the file's path, and a group of files the search never reached does not —
+there is no single file to name. The field is additive, like the two
+beside it.
+
+A stream of hits ends with a terminator:
+
+```json
+{"op":"done","count":1}
+```
+
+`count` is the number of entries the answer carried — the hits on the name
+stream, the files on the content stream. The frame is the end of the
+stream, and it is the only thing that says there is nothing more coming: a
+client that does not know it cannot tell a finished answer from a partial
+one. A `status` and a `resolve` answer on their own frame — there is one
+thing in them — and an `error` ends the stream too.
+
+The count is a count of things, so it is a whole number, and a count the
+reader cannot vouch for is refused: a frame that carries `1.5` names a
+number that cannot be true, and the cast that would have read it as `1`
+would have reported a count the peer never stated. A terminator without a
+count is refused for the same reason — the reader has no slot for "not
+known" in a `usize`, and a zero would be a claim the peer never made.
+
+A refusal travels with the answer as a frame of its own, and it comes
+before the answer it belongs to:
+
+```json
+{"op":"warning","message":"unknown type: pdf"}
+```
+
+`warning` is a fail-closed refusal: an unknown `type:`, a `re:` that does not
+compile. The alternative it belongs to matches nothing, and the daemon keeps
+serving — the warning is part of the answer, not the end of it. The frame is
+additive: a reader that does not know it reads the answer and finds nothing
+where the refusal was, which claims less than the answer holds.
+
+### What the answer says about itself
+
+An answer that did not read everything says so, in the answer. There are two
+holes, and the sentence names which one it is:
+
+| the hole | the sentence |
+|---|---|
+| the daemon did not read some files — a budget ran out, or a file was a cloud placeholder | `the daemon did not read N file(s): the answer is partial` |
+| the list was longer than the limit | `the answer stops at the limit` |
+
+`searchctl --daemon` prints the sentence on stderr, and the window shows
+it under the field. The two layers say the same words about the same answer,
+because an answer that does not say so looks whole.
+
+The reasons travel with the answer as well, in `skips`, and **both** say
+them — the command line and the window: a file that is a cloud placeholder
+and a budget that ran out are different problems, and "the answer is
+partial" on its own does not say which one of them the reader can fix.
+
+The daemon's own warnings travel with the answer, and they are said on every
+path — the scoped search, the pack store's route and the walk's route — so a
+search that could not read everything says so whichever route it took. A
+query rgy cannot make sense of fails closed: an unknown `type:` is a
+`{"op":"warning",…}` frame on the wire, and the daemon keeps serving — the
+warning is part of the answer, not the end of it. On the command line the
+same refusal is a `warning:` line on stderr, no matches, and exit 1. Neither
+of them searches everything.
+
+### The live feed
+
+The daemon follows the tree while it runs, and the line it prints at startup
+says how:
+
+```
+searchd: following the tree with the USN journal
+searchd: following the tree with the tree's directory notifications
+searchd: following the tree with inotify
+searchd: following the tree with FSEvents
+```
+
+and, where the platform has no feed at all:
+
+```
+searchd: no live feed for this tree: the index is a snapshot until the next rebuild
+```
+
+On Windows the two fast paths — the USN journal and the MFT walk — need a
+volume handle, and a volume handle needs the rights an elevated process
+has. A daemon that is not elevated is refused the journal, and the feed
+falls back to the tree's own directory notifications: the line says which
+one it is. The MFT walk falls back to the portable walk the same way.
+
+The daemon also says when it could not bring an index up to date, and names
+the cause rather than the platform:
+
+```
+searchd: reusing index /home/you/.cache/rgy/caf45dc303365b6b.idx (128 entries, built 3m ago) — no change journal: the volume would not open; a volume handle on Windows needs the rights an elevated process has (win32 error 5), so the changes made since the index was built are not in it
+```
+
+The `status` answer's `feed` field says the same thing on the wire:
+`live` while the feed runs, `gone` when it died, `none` when there is none.
 
 It can also listen on a socket instead of stdin:
 
@@ -532,6 +890,54 @@ rgxy                  # the resident launcher; Control twice opens the window
 rgxy --query invoice  # one search, printed, and out
 rgxy --tui            # the terminal interface, for a machine with no desktop
 ```
+
+| flag | what it does |
+|---|---|
+| `--query <text>` | one search: prints the paths and leaves |
+| `--limit <n>` | how many results (default: 50) |
+| `--tui` | the terminal interface, instead of the window |
+| `--endpoint <e>` | where the daemon is: `pipe:<name>`, `uds:<path>` or `stdio` |
+| `--show` | opens the window right away |
+| `--no-hook` | does not install the global shortcut |
+| `--pick` | hands the results to a picker and prints the choice |
+| `--fzf-binary <p>` | the picker to run — `fzf` or `sk` by default |
+| `--fzf-arg <arg>` | one argument for the picker, repeatable |
+| `-h, --help` | what the launcher does — it prints it and stops |
+| `-V, --version` | the version — it prints it and stops |
+
+Without `--endpoint` the launcher asks the daemon this machine has
+registered: the socket on Linux and macOS, the named pipe on Windows.
+
+### The two faces
+
+The launcher has two faces, and the binary is the same on every platform: a
+floating graphical window where there is a desktop (Windows), and the
+terminal interface where there is not (Linux and macOS). Both carry the
+name `rgxy` — the window in its title, the terminal in its header.
+
+The header says how many entries the index holds, and the number is the
+daemon's own: the client does not walk the tree and cannot know the size of
+an index it does not have. When the daemon has not answered, the header
+says **count not known** — it does not say zero, because zero is a fact
+("there is nothing here") and a header that claims an empty index under a
+daemon holding thousands of entries is a wrong fact.
+
+### The icon in the notification area
+
+On Windows the launcher leaves an icon in the notification area — the row of
+icons at the right of the taskbar — so that it can be found when the
+shortcut is not remembered. The icon is a magnifying glass in the
+launcher's own blue, and the launcher draws it itself.
+
+| you do | the launcher does |
+|---|---|
+| click the icon | the window comes up |
+| double-click the icon | the window comes up |
+| right-click the icon | the menu: **Search** and **Quit** |
+
+The icon never closes the window: a double click is two clicks, and a
+window that opens and closes again is a window that is not there. The
+shortcut closes it, and so does `Escape`.
 
 ### The two layers
 
@@ -588,7 +994,8 @@ it is the worker that gives up when they are gone. The client's own window
 is thirty, which is right for a program that waits in the background and
 wrong for a search box — thirty seconds of silence is a window that
 stopped answering the keyboard.
- A content query waits for the scope before it reads a
+
+A content query waits for the scope before it reads a
 byte. A daemon that is slow says so and the launcher carries on — a
 daemon that is slow is not a daemon that is gone, and the line under the
 field still shows what the last answer said.
@@ -788,6 +1195,9 @@ rgx-tv update . --store ~/tv-store           # publish what changed
 rgx-tv inspect --store ~/tv-store            # verify and report
 ```
 
+`rgx-tv` is upstream's tool and it is **not in the release archive**: a
+workspace build puts it in `target/release/` (section 3).
+
 rgy's own binaries reach the store through one flag:
 
 ```sh
@@ -810,7 +1220,7 @@ want them.
 | `-L, --follow` | follow symbolic links |
 | `--no-ignore` | ignore `.gitignore` and `.ignore` |
 | `--compact` | `update` only: reclaim the space of superseded payloads |
-| `--engine <which>` | `auto` (default), `rgx`, `grep` or `both`; `search` only |
+| `--engine <which>` | `auto` (default) or `rgx`; `grep` and `both` are retired names that still parse, resolve to `rgx` and say so on stderr; `search` only |
 | `-j, --threads <N>` | search threads; `search` only |
 | `-c, --count` | print the count per file; `search` only |
 | `-n, --line-number` | show 1-based line numbers (on by default) |
@@ -819,11 +1229,11 @@ want them.
 | `-M, --max-filesize <N>` | skip files bigger than N (`k`, `m`, `g` suffixes); `search` only |
 | `--mmap` | map the packs instead of reading them; `search` only |
 | `--no-mmap` | buffered reads — the default; `search` only |
-| `--serial-buffered` | buffered reads, one pack at a time, by the coordinator |
-| `--packs-per-thread <N>` | packs a worker claims per claim (default 1) |
-| `--pool` | reuse one set of mappings across queries in this process |
-| `--no-pool` | deprecated: the pool is off by default |
-| `--leak-mmap` | skip the explicit unmap and let the exit reclaim it |
+| `--serial-buffered` | buffered reads, one pack at a time, by the coordinator; `search` only |
+| `--packs-per-thread <N>` | packs a worker claims per claim (default 1); `search` only |
+| `--pool` | reuse one set of mappings across queries in this process; `search` only |
+| `--no-pool` | deprecated: the pool is off by default; `search` only |
+| `--leak-mmap` | skip the explicit unmap and let the exit reclaim it; `search` only |
 | `--validate` | check that every file the manifest claims is still there; `search` only |
 | `--stats` | print the stage breakdown to stderr; `search` only |
 
@@ -836,8 +1246,8 @@ build . --store d --stats` exits 1 and says so.
 that does not apply fails closed. Read the warning; it names the token.
 
 **No results, no warning.** The name is not close to what you typed. Drop
-the quotes to go fuzzy, or check the spelling of the filter: `ext:pdf`, not
-`ext:.pdf`.
+the quotes to go fuzzy, or check the spelling of the filter — `ext:pdf` and
+`ext:.pdf` are the same filter, and the leading dot is optional.
 
 **The same query gives different answers later.** The index was rebuilt.
 `--max-age` controls how stale it may get; `--reindex` forces a rebuild
@@ -853,6 +1263,12 @@ reach is the document's own structure — a PDF's page, a spreadsheet's cell
 answers on stdout. `{"op":"status"}` tells you whether it is alive and
 what it has indexed.
 
+**The answer says it is partial.** `the daemon did not read N file(s): the
+answer is partial` and `the answer stops at the limit` are two different
+holes — files the daemon did not read, and a list longer than the limit —
+and the sentence says which one it is. See
+[the daemon](#7-the-daemon).
+
 **A file cannot be read.** Permission, a broken link, a file that is
 being written. rgy skips it and lists it rather than failing the run.
 
@@ -862,5 +1278,12 @@ being written. rgy skips it and lists it rather than failing the run.
 |---|---|
 | [README.md](README.md) | the map: what rgy is, how it compares to rgx |
 | [FORMATS.md](FORMATS.md) | what it reads inside a file, format by format |
+| [docs/release-0.1.2.md](docs/release-0.1.2.md) | the 0.1.2 release page, with the changelog in it |
 | [benchmark/](benchmark/) | the measured numbers |
 | [rgx](https://github.com/danalec/rgx) | the content-search specialist this workspace is built on |
+
+| link | what it is |
+|---|---|
+| [the 0.1.2 release](https://github.com/danalec/rgy/releases/tag/rgy-v0.1.2) | the archives, the `SHA256SUMS`, and the changelog |
+| [crates.io](https://crates.io/crates/rgy-search) | the twenty crates, all at 0.1.2 |
+| [docs.rs](https://docs.rs/rgy-name-core) | the API of each crate |

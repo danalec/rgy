@@ -104,13 +104,6 @@
     Exits 1 on any drift or any unpinned row, 0 otherwise.
 #>
 
-param(
-    [string]$Upstream = "",
-    [switch]$Pin,
-    [string]$For = "",
-    [switch]$Help
-)
-
 $ErrorActionPreference = 'Stop'
 # git is asked questions whose answer is sometimes "no" -- does this pin
 # resolve? -- and a native command that exits non-zero must not throw just
@@ -158,29 +151,36 @@ function Write-Usage {
     Write-Report "unpinned row, 0 otherwise."
 }
 
-if ($Help) {
+# The help, before the options are read: the script's own header, the way
+# the twin prints it.
+. (Join-Path $PSScriptRoot "lib/options.ps1")
+if (Test-RgyHelp -Arguments $args) {
     Write-Usage
     exit 0
 }
 
-# An argument this script does not know is an error, not something to
-# ignore: the bash twin says so too, and a check that quietly ignores half
-# its command line is a check that ran something else.
-if ($args.Count -gt 0) {
-    Write-Complaint "unknown argument: $($args[0])"
+# The options, read by the helper the two twins share: the long spelling
+# and the PowerShell one are the same option, and an option neither of
+# them knows is an error on both platforms -- not a silent "check
+# something else", which in a drift gate is a gate that did not run.
+$Upstream = ""
+$Pin = $false
+$For = ""
+Read-RgyOptions -Switches @{ "pin" = "Pin" } `
+                 -Values   @{ "upstream" = "Upstream"; "for" = "For" } `
+                 -Positionals @{} `
+                 -Arguments $args
+
+if ($Pin -or $For) {
+    Write-Complaint "--pin is gone: the pin column is written by scripts/sync-rgx-upstream.sh,"
+    Write-Complaint "which pins every row to the commit the whole sync was taken from."
+    Write-Complaint "Re-pin by running the sync."
     exit 1
 }
 
 $manifestPath = Join-Path $PSScriptRoot 'vendored-sources.tsv'
 if (-not (Test-Path $manifestPath)) {
     Write-Complaint "no manifest at $manifestPath"
-    exit 1
-}
-
-if ($Pin -or $For) {
-    Write-Complaint "--pin is gone: the pin column is written by scripts/sync-rgx-upstream.sh,"
-    Write-Complaint "which pins every row to the commit the whole sync was taken from."
-    Write-Complaint "Re-pin by running the sync."
     exit 1
 }
 
@@ -194,7 +194,18 @@ if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     Write-Complaint "git not found; this check asks git about the upstream"
     exit 1
 }
-$upstreamDir = (Resolve-Path -LiteralPath $Upstream).Path
+# The path is resolved by hand and not by Resolve-Path, because
+# Resolve-Path throws when the path is not there, and a script that
+# crashes with a PowerShell stack trace says nothing about what the
+# caller got wrong. The bash twin says "no such directory" and exits 1,
+# so this says the same words and exits the same code.
+$upstreamDir = ""
+try {
+    $upstreamDir = (Resolve-Path -LiteralPath $Upstream -ErrorAction Stop).Path
+} catch {
+    Write-Complaint "no such directory: $Upstream"
+    exit 1
+}
 if (-not (Test-Path (Join-Path $upstreamDir '.git'))) {
     Write-Complaint "$upstreamDir is not a git checkout"
     exit 1

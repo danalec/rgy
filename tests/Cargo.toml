@@ -40,6 +40,11 @@ name = "autostart"
 path = "autostart.rs"
 
 [dev-dependencies]
+# The protocol, for the rule that says where a unix socket is when the path
+# the caller asked for does not fit the platform's `sun_path`: the fake
+# daemon in `cli.rs` has to bind the socket the client will look for, and
+# that is the product's rule and not the test's.
+rgy-proto = { path = "../crates/proto", version = "0.1.2" }
 # The pack store, for the test that proves the third backend of the
 # content layer: the daemon started with `--tv-dir` answers from a packed
 # corpus instead of reading the files. The builder is upstream's, and it

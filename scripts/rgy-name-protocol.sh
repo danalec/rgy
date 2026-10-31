@@ -27,8 +27,8 @@
 #
 # The .ps1's parameter names are accepted as they stand (case-insensitively,
 # PowerShell style: -Scales, -Rounds, -Threads, -Out, -Repo, -Queries), so
-# the invocation it documents transfers. An argument the .ps1 does not know
-# lands in its $args and is ignored, and the twin ignores it too.
+# the invocation it documents transfers. An option neither script knows is
+# an error on both platforms, with the same words and the same exit code.
 #
 # --queries is repeatable and takes one query per occurrence, which is the
 # -Queries array of the .ps1 in -Command mode. In -File mode pwsh hands
@@ -47,6 +47,16 @@
 
 set -uo pipefail
 
+script_path=$0
+case "$script_path" in
+    /*|[A-Za-z]:[/\\]*) ;;
+    *) script_path=$PWD/$script_path ;;
+esac
+script_path=$(printf '%s' "$script_path" | tr '\\' '/')
+script_dir=${script_path%/*}
+[ "$script_dir" = "$script_path" ] && script_dir=.
+here=$(cd "$script_dir" && pwd)
+
 REPO=""
 SCALES='200000,5000000'
 ROUNDS=7
@@ -54,63 +64,14 @@ THREADS=16
 OUT='benchmark/rgy-name-transcript.md'
 query_args=()
 
-# PowerShell binds parameter names case-insensitively; the case statement
-# that reads them does the same.
-shopt -s nocasematch
-
-while [ $# -gt 0 ]; do
-    # PowerShell's -Name:value form, and the two-word form, are the same
-    # parameter; the colon form carries its value with it.
-    name="$1"
-    value=''
-    have_value=0
-    case "$1" in
-        -*:*) name="${1%%:*}"; value="${1#*:}"; have_value=1 ;;
-    esac
-    case "$name" in
-        -scales|--scales)
-            if [ "$have_value" -eq 0 ]; then
-                [ $# -ge 2 ] || { echo "missing value for $name" >&2; exit 1; }
-                value="$2"; shift
-            fi
-            SCALES="$value" ;;
-        -rounds|--rounds)
-            if [ "$have_value" -eq 0 ]; then
-                [ $# -ge 2 ] || { echo "missing value for $name" >&2; exit 1; }
-                value="$2"; shift
-            fi
-            ROUNDS="$value" ;;
-        -threads|--threads)
-            if [ "$have_value" -eq 0 ]; then
-                [ $# -ge 2 ] || { echo "missing value for $name" >&2; exit 1; }
-                value="$2"; shift
-            fi
-            THREADS="$value" ;;
-        -out|--out)
-            if [ "$have_value" -eq 0 ]; then
-                [ $# -ge 2 ] || { echo "missing value for $name" >&2; exit 1; }
-                value="$2"; shift
-            fi
-            OUT="$value" ;;
-        -repo|--repo)
-            if [ "$have_value" -eq 0 ]; then
-                [ $# -ge 2 ] || { echo "missing value for $name" >&2; exit 1; }
-                value="$2"; shift
-            fi
-            REPO="$value" ;;
-        -queries|--queries)
-            if [ "$have_value" -eq 0 ]; then
-                [ $# -ge 2 ] || { echo "missing value for $name" >&2; exit 1; }
-                value="$2"; shift
-            fi
-            query_args+=("$value") ;;
-        *)
-            # An argument the .ps1 does not know lands in its $args and is
-            # ignored; so is this one.
-            ;;
-    esac
-    shift
-done
+# The options, read by the helper the two twins share: the long spelling
+# and the PowerShell one are the same option, and an option neither of
+# them knows is an error on both platforms -- the same words, the same
+# exit code. The helper takes the value with the colon (-Scales:200000)
+# or in the next word, and a name that may be given more than once
+# collects every occurrence.
+. "$here/lib/options.sh"
+rgy_read_options "" "repo=REPO scales=SCALES rounds=ROUNDS threads=THREADS out=OUT queries=query_args[]" "" "$@"
 
 # [int]'abc' throws in PowerShell; a scale that is not an integer aborts the
 # run here too, rather than becoming a corpus of no files.
@@ -130,9 +91,18 @@ to_int() {
 
 # [int] binds before the body runs: a round count or a thread count that is
 # not an integer is an argument error, and it is one before the scale list
-# is even looked at.
-ROUNDS="$(to_int "$ROUNDS")" || { echo "not an integer round count: '$ROUNDS'" >&2; exit 1; }
-THREADS="$(to_int "$THREADS")" || { echo "not an integer thread count: '$THREADS'" >&2; exit 1; }
+# is even looked at. The value is reported as it was written, and not as
+# the empty string the failed substitution would leave behind.
+if ! rounds_int="$(to_int "$ROUNDS")"; then
+    echo "not an integer round count: '$ROUNDS'" >&2
+    exit 1
+fi
+ROUNDS="$rounds_int"
+if ! threads_int="$(to_int "$THREADS")"; then
+    echo "not an integer thread count: '$THREADS'" >&2
+    exit 1
+fi
+THREADS="$threads_int"
 
 # RGY_NAME_SCALES overrides the parameter: environment variables survive
 # the argument marshalling of nested shells, which has been observed to

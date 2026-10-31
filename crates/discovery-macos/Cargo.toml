@@ -1,6 +1,6 @@
 [package]
 name = "rgy-discovery-macos"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
 description = "macOS discovery backend: getattrlistbulk walk + FSEvents watch (from fsearch)"
@@ -21,12 +21,12 @@ default = ["std"]
 std = ["rgy-par/std"]
 
 [dependencies]
-rgy-discovery = { path = "../discovery", version = "0.1.1", default-features = false }
-rgy-par = { path = "../par", version = "0.1.1", default-features = false }
+rgy-discovery = { path = "../discovery", version = "0.1.2", default-features = false }
+rgy-par = { path = "../par", version = "0.1.2", default-features = false }
 
 [dev-dependencies]
 # The tests build a name index and apply the feed's records to it: the
 # live overlay is the thing under test.
-rgy-name-core = { path = "../name-core", version = "0.1.1" }
+rgy-name-core = { path = "../name-core", version = "0.1.2" }
 # The portable walk, which the tests use to index a fixture tree.
-rgy-discovery = { path = "../discovery", version = "0.1.1", features = ["std"] }
+rgy-discovery = { path = "../discovery", version = "0.1.2", features = ["std"] }

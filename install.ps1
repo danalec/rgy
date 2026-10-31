@@ -17,29 +17,122 @@
 .EXAMPLE
     .\install.ps1 -NoAutostart
 #>
-[CmdletBinding()]
-param(
-    # install destination; default %LOCALAPPDATA%\Programs\rgy
-    [string]$InstallDir = "$env:LOCALAPPDATA\Programs\rgy",
 
-    # override the download base (mirror/self-hosted Forgejo)
-    [string]$BaseUrl = 'https://github.com/danalec/rgy/releases/download',
-
-    # pin the version instead of asking the server for the latest rgy-*
-    [string]$Version = 'rgy-v0.1.1',
-
-    # skip SHA256 verification (not recommended)
-    [switch]$SkipChecksum,
-
-    # do not register the daemon to start at login
-    [switch]$NoAutostart,
-
-    # do not register the launcher (rgxy) to start at login
-    [switch]$NoLauncher
-)
+# The options, the digest and the refusal are the tree's own
+# (scripts/lib/options.ps1 and scripts/lib/digest.ps1), so that this
+# script and its .sh twin answer the same question the same way. The
+# helpers live in the tree, and this script is also run from a URL -- piped
+# straight into the shell, where there is no tree to read them from -- so
+# they are used when they are there, and the same behaviour is spelled out
+# here when they are not.
+#
+# The options are read from $args and not from a `param` block. A param
+# block hands an argument the script does not know to PowerShell's own
+# binder, which prints the whole parameter declaration and exits 1; the
+# tree's refusal is one sentence and exit 2, and it is the sentence the
+# .sh twin prints.
+#
+# The refusals -- the sentences on stderr -- are written with the newline
+# the shell writes and not with the one the host would, the way
+# scripts/lib/options.ps1 writes its own: the two scripts are compared
+# byte for byte, and a CRLF here is a byte the bash twin does not write.
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+
+# The tree this installer was run from, when it was run from a checkout.
+# The path is only a hint: piped into the shell there is no checkout.
+$here = $PSScriptRoot
+
+if ($here -and (Test-Path -LiteralPath (Join-Path $here 'scripts/lib/options.ps1'))) {
+    . (Join-Path $here 'scripts/lib/options.ps1')
+} else {
+    # The helper's own loop with the table lookup spelled out, for the run
+    # that has no tree to read the helper from. The refusal is the same
+    # sentence and the same exit code.
+    function Read-RgyOptions {
+        param(
+            [hashtable]$Switches = @{},
+            [hashtable]$Values = @{},
+            [System.Collections.IDictionary]$Positionals = @{},
+            [object[]]$Arguments = @()
+        )
+
+        # The refusal is written with the newline the shell writes, and not
+        # with the one the host would: the two scripts are compared byte
+        # for byte, and a CRLF here is a byte the bash twin does not write.
+        function Write-RgyRefusal([string]$text) {
+            [Console]::Error.Write("$text`n")
+        }
+
+        $at = 0
+        while ($at -lt $Arguments.Count) {
+            $written = [string]$Arguments[$at]
+            $name = $written
+            $value = ""
+            $haveValue = $false
+            # -Name:value carries the value with it.
+            if ($written -match '^(?<head>[^:]+):(?<tail>.*)$') {
+                $name = $Matches["head"]
+                $value = $Matches["tail"]
+                $haveValue = $true
+            }
+            # The name with the dashes and the case off.
+            $key = ($name -replace '^-{1,2}', '' -replace '[-_]', '').ToLowerInvariant()
+            if ($Switches.ContainsKey($key)) {
+                if ($haveValue) {
+                    Write-RgyRefusal "unknown option: $written"
+                    exit 2
+                }
+                Set-Variable -Name $Switches[$key] -Value $true -Scope 1
+                $at++
+            } elseif ($Values.ContainsKey($key)) {
+                if (-not $haveValue) {
+                    if ($at + 1 -ge $Arguments.Count) {
+                        Write-RgyRefusal "option $written needs a value"
+                        exit 2
+                    }
+                    $value = [string]$Arguments[$at + 1]
+                    $at++
+                }
+                Set-Variable -Name $Values[$key] -Value $value -Scope 1
+                $at++
+            } else {
+                # Not an option, and not a name this script knows. The
+                # installers take no positional argument, so every one of
+                # them is a name the script does not know.
+                Write-RgyRefusal "unknown option: $written"
+                exit 2
+            }
+        }
+    }
+}
+
+if ($here -and (Test-Path -LiteralPath (Join-Path $here 'scripts/lib/digest.ps1'))) {
+    . (Join-Path $here 'scripts/lib/digest.ps1')
+} else {
+    # The same answer the helper gives, for the run that has no tree to
+    # read the helper from: the lowercase hex of the digest.
+    function Get-RgySha256([string]$path) {
+        (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLower()
+    }
+}
+
+# The options, and their defaults. The names are the tree's: the long
+# spelling and the PowerShell one are the same option, and an option
+# neither of them knows is refused with the tree's words and the tree's
+# exit code.
+$InstallDir = "$env:LOCALAPPDATA\Programs\rgy"
+$BaseUrl = 'https://github.com/danalec/rgy/releases/download'
+$Version = 'rgy-v0.1.2'
+$SkipChecksum = $false
+$NoAutostart = $false
+$NoLauncher = $false
+
+Read-RgyOptions -Switches @{ "skipchecksum" = "SkipChecksum"; "noautostart" = "NoAutostart"; "nolauncher" = "NoLauncher" } `
+                -Values   @{ "installdir" = "InstallDir"; "baseurl" = "BaseUrl"; "version" = "Version" } `
+                -Positionals @{ } `
+                -Arguments $args
 
 # The digests of the archives this installer is allowed to install.
 #
@@ -52,7 +145,7 @@ Set-StrictMode -Version Latest
 # an emulator, and an installer that hands it one installs something that
 # will not start.
 $expected = @{
-    'x86_64-windows.zip' = '42707293DC24616F2EDE162328391CFF4775845E91B697FD72CC1A9B71F9EA89'
+    'x86_64-windows.zip' = 'E0E250AF04330A23F0580FBD1CF9A467CF348B3821E05916FF985FB235B0DD40'
     'aarch64-windows.zip' = '0000000000000000000000000000000000000000000000000000000000000000'
 }
 
@@ -77,20 +170,31 @@ switch ($arch) {
     'AMD64' { $assetName = 'x86_64-windows.zip'; $archName = 'x86_64' }
     'ARM64' { $assetName = 'aarch64-windows.zip'; $archName = 'aarch64' }
     default {
-        [Console]::Error.WriteLine("there is no rgy release for this architecture: $arch")
+        [Console]::Error.Write("there is no rgy release for this architecture: $arch`n")
         exit 1
     }
 }
 $asset = "$Version-$assetName"
 $digest = $expected[$assetName]
 
-# The pin is still a placeholder: no release has been published for this
-# architecture yet. The installer says so in words, instead of downloading
-# something it cannot vouch for. A caller that asked for no digest check
-# is asking for exactly that, and the flag is theirs to use.
+# The pin is the digest of the archive this release carries, and the check
+# below refuses a download that does not match it: an installer that hands
+# out an archive it cannot vouch for is worse than one that says there is
+# none.
+#
+# The platforms this release does not carry still hold the placeholder
+# digest, and those are refused by name, before anything is downloaded. The
+# sentence names the platform and the architecture, the way the unix twin
+# does: the architecture alone is a lie on some of them -- there is no
+# published rgy release for x86_64 macOS, and there is a published one for
+# x86_64 Linux, and a sentence that said only "x86_64" would be wrong on
+# one of the two.
+#
+# A caller that asked for no digest check is asking for exactly that, and
+# the flag is theirs to use.
 if (-not $SkipChecksum -and $digest -eq $placeholder) {
-    [Console]::Error.WriteLine("there is no published rgy release for $archName yet")
-    [Console]::Error.WriteLine(" expected $asset")
+    [Console]::Error.Write("there is no published rgy release for Windows $archName yet`n")
+    [Console]::Error.Write(" expected $asset`n")
     exit 1
 }
 
@@ -98,13 +202,29 @@ $url = "$BaseUrl/$Version/$asset"
 $tmp = Join-Path $env:TEMP "rgy-install-$asset"
 
 Write-Host "Downloading $url ..." -ForegroundColor Cyan
-Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
+try {
+    Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
+} catch {
+    # The same line and the same exit code the .sh twin prints: the
+    # archive is not there, and nothing was installed.
+    Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+    [Console]::Error.Write("the download failed`n")
+    exit 1
+}
 
 if (-not $SkipChecksum) {
-    $actual = (Get-FileHash -Path $tmp -Algorithm SHA256).Hash
+    # The digest is asked of the tree's helper, the way the unix twin asks
+    # it: the machine that runs the installer is not the machine the
+    # release was built on, and the helper answers with the tool the
+    # machine has. The pin is uppercase hex and the helper answers in
+    # lowercase.
+    $actual = (Get-RgySha256 $tmp).ToUpperInvariant()
     if ($actual -ne $digest) {
         Remove-Item $tmp -Force
-        throw "SHA256 mismatch for $asset`n expected $digest`n got      $actual"
+        [Console]::Error.Write("SHA256 mismatch for $asset`n")
+        [Console]::Error.Write(" expected $digest`n")
+        [Console]::Error.Write(" got      $actual`n")
+        exit 1
     }
     Write-Host "SHA256 verified." -ForegroundColor Green
 } else {
@@ -137,14 +257,15 @@ foreach ($exe in @('searchctl.exe', 'searchd.exe', 'rgy-autostart.exe', 'rgxy.ex
             # archive that does not carry a binary is a failed install, and
             # a pair of twins that answer that in two different words is a
             # pair nobody can compare.
-            [Console]::Error.WriteLine("no $exe in $asset")
+            [Console]::Error.Write("no $exe in $asset`n")
             exit 1
         }
         $src = $found.FullName
     }
     Copy-Item -Path $src -Destination $InstallDir -Force
 }
-foreach ($doc in @('README.md', 'MANUAL.md', 'FORMATS.md', 'COPYING', 'NOTICE')) {
+foreach ($doc in @('README.md', 'MANUAL.md', 'FORMATS.md', 'COPYING', 'NOTICE',
+                   'LICENSE-APACHE', 'LICENSE-MIT', 'LICENSE-MIT-FSEARCH')) {
     $src = Join-Path $staging $doc
     if (-not (Test-Path $src)) {
         $found = Find-InStaging $doc
@@ -153,11 +274,31 @@ foreach ($doc in @('README.md', 'MANUAL.md', 'FORMATS.md', 'COPYING', 'NOTICE'))
     if (Test-Path $src) { Copy-Item -Path $src -Destination $InstallDir -Force }
 }
 
+# The picture the README shows travels with it.
+#
+# The README points at it by a relative path, so an install that leaves it
+# behind has a README with a hole in it -- and a README that shows nothing
+# is a README that says less than the window does. The path inside the
+# install is the one the README uses, so the link works where the README
+# is.
+$docs = Join-Path $staging 'docs'
+if (Test-Path $docs) {
+    $target = Join-Path $InstallDir 'docs'
+    New-Item -ItemType Directory -Force -Path $target | Out-Null
+    Copy-Item -Path (Join-Path $docs '*') -Destination $target -Recurse -Force
+}
+
 # user PATH (idempotent prepend)
+#
+# The entry goes into the PATH of the user, and not into the PATH of the
+# machine: the shell the user opens reads the first one. The message says
+# which of the two it wrote, the way the .sh twin names the profile file
+# it wrote -- a pair of twins that answer the same question in two
+# different words is a pair nobody can compare.
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 if (($userPath -split ';') -notcontains $InstallDir) {
     [Environment]::SetEnvironmentVariable('Path', "$InstallDir;$userPath", 'User')
-    Write-Host "Added $InstallDir to the PATH (open a new terminal to pick it up)." -ForegroundColor Yellow
+    Write-Host "Added $InstallDir to the user PATH (open a new terminal to pick it up)." -ForegroundColor Yellow
 } else {
     Write-Host "$InstallDir is already on the PATH."
 }
@@ -183,7 +324,7 @@ if ($aliasSrc) {
     Copy-Item -Path $aliasSrc -Destination $InstallDir -Force
     Write-Host "Added the rgy command: it runs searchctl."
 } else {
-    [Console]::Error.WriteLine("the archive carries no rgy command: the install continues without it.")
+    [Console]::Error.Write("the archive carries no rgy command: the install continues without it.`n")
 }
 
 # The staging directory goes last: the alias above is still in it.
@@ -200,24 +341,49 @@ Remove-Item $staging -Recurse -Force
 # The launcher is registered with it, under its own name: the window is
 # there in a few milliseconds because the *daemon* has the index warm, not
 # because the launcher built one.
+#
+# This step is a convenience, and a failure here is not a reason to tell
+# the user the install failed: by the time it runs, the daemon, the
+# launcher, the alias and the PATH entry are all in place. So the step
+# warns and the install finishes -- the .sh twin does the same, and an
+# installer that aborted here would leave a half-installed tool behind
+# and a non-zero exit on top of it.
 if (-not $NoAutostart) {
     # The launcher is registered with the daemon, under its own name, and
     # only when it is actually on the machine: an entry that points at a
     # binary that is not there is an entry that fails at every login.
     $launcher = Join-Path $InstallDir 'rgxy.exe'
-    $args = @('install')
-    if ((-not $NoLauncher) -and (Test-Path $launcher)) { $args += '--launcher' }
-    & (Join-Path $InstallDir 'rgy-autostart.exe') @args
-    $code = $LASTEXITCODE
+    $autostartArgs = @('install')
+    if ((-not $NoLauncher) -and (Test-Path $launcher)) { $autostartArgs += '--launcher' }
+
+    # The call is made with the error preference that does not turn a
+    # failing native command into a terminating error, and the answer is
+    # read from $LASTEXITCODE -- the way the .sh twin reads it. The
+    # error record PowerShell writes for the failure is silenced too: the
+    # tool's own sentence and the line below say what happened, and the
+    # .sh twin prints no third line.
+    $code = 1
+    $before = $ErrorActionPreference
+    $ErrorActionPreference = 'SilentlyContinue'
+    try {
+        & (Join-Path $InstallDir 'rgy-autostart.exe') @autostartArgs
+        $code = $LASTEXITCODE
+    } catch {
+        # The tool is not there, or the platform refused to start it.
+        $code = 1
+    } finally {
+        $ErrorActionPreference = $before
+    }
+
     if ($code -eq 0) {
         Write-Host "The daemon starts at login. To take it out: rgy-autostart uninstall"
-        if ($args -contains '--launcher') {
+        if ($autostartArgs -contains '--launcher') {
             Write-Host "The launcher starts at login too: Control twice opens the window."
         }
     } elseif ($code -eq 2) {
-        [Console]::Error.WriteLine("The entries were written but the platform could not arm them (see above).")
+        [Console]::Error.Write("The entries were written but the platform could not arm them (see above).`n")
     } else {
-        [Console]::Error.WriteLine("The daemon was not registered. To register it: rgy-autostart install")
+        [Console]::Error.Write("The daemon was not registered. To register it: rgy-autostart install`n")
     }
 }
 

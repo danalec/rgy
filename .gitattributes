@@ -69,6 +69,15 @@ LICENSE* text eol=lf
 **/fixtures/** -text
 *.expected -text
 *.pdf -text
+# The README's screenshot is a PNG. Git would sniff it as binary on its own
+# -- the signature carries a NUL -- but a rule that is not written is a rule
+# that depends on the guess, and the guess is not what keeps a picture a
+# picture.
+*.png -text
+# The clips are MP4, and the README links them: the same rule, for the same
+# reason. A checkout that rewrote a clip would put a different movie in the
+# release.
+*.mp4 -text
 # The local patches, byte for byte. `git apply` matches the context lines of
 # a patch against the file it is applied to, and a checkout that rewrote the
 # line endings would leave every context line ending in a CR that the file
