@@ -1179,6 +1179,21 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Action {
     action
 }
 
+/// Whether the drain goes on after this event.
+///
+/// The drain reads the keys already queued behind the one it has, so that
+/// a burst of typing costs one search and not one per letter. Windows
+/// hands over a release for every press, and a drain that stopped at the
+/// first release would stop at the first key — a drain that never fires,
+/// and a burst of typing that is a burst of whole-index searches, each
+/// one paid for in full and then thrown away.
+///
+/// A release carries no news for the query, so the drain goes on; a
+/// resize does, because what is on screen no longer matches the terminal.
+fn drain_goes_on(event: &term::Event) -> bool {
+    matches!(event, term::Event::Key(_))
+}
+
 /// Run the interactive search. Enter prints the selected path to stdout after
 /// the screen is restored, so the result can be piped onward.
 pub fn run(live: Live, root: String, indexed: usize) -> Result<(), String> {
@@ -1257,7 +1272,17 @@ fn run_app(mut app: App) -> Result<(), String> {
                 break;
             }
             block = false;
-            match term::read().map_err(|e| format!("cannot read the keyboard: {e}"))? {
+            let event = term::read().map_err(|e| format!("cannot read the keyboard: {e}"))?;
+            // A key coming up is not a reason to stop the drain: the
+            // console hands over a release for every press, and a drain
+            // that stops at the first release stops at the first key --
+            // a burst of typing would then be a burst of whole-index
+            // searches, one per letter, each one paid for in full and
+            // then thrown away.
+            if !drain_goes_on(&event) {
+                break;
+            }
+            match event {
                 // Windows can report releases as well as presses; ignore
                 // anything that is not a key going down.
                 term::Event::Key(key) if key.kind == KeyEventKind::Press => {
@@ -1281,6 +1306,10 @@ fn run_app(mut app: App) -> Result<(), String> {
                         Action::None | Action::Moved => {}
                     }
                 }
+                // A key coming up carries no news for the query: the
+                // console sends one for every press, and the drain goes
+                // on.
+                term::Event::Key(_) => {}
                 // A resize and anything else want the next frame, not more
                 // keys: what is on screen no longer matches the terminal.
                 _ => break,
@@ -1386,9 +1415,93 @@ fn style_run(run: &[char], matched: bool) -> String {
     }
 }
 
-/// Pad `s` to exactly `width` chars, trimming from the left when it is longer.
+/// How many cells a character takes on the screen.
+///
+/// The East Asian Wide and Fullwidth characters take two cells: a CJK
+/// ideograph, a kana, a Hangul syllable, an emoji. The non-spacing marks
+/// take none: a decomposed name is one character on the screen, not two.
+/// Everything else takes one.
+///
+/// The Ambiguous characters are counted as one cell. The tree draws its rule
+/// and its sparkline with them (`─`, `▁`..`█`), and a terminal that gave
+/// them two would draw the rule twice as wide as the window it belongs to.
+/// The Western width is the one the tree's own layout assumes.
+fn cell_width(c: char) -> usize {
+    let cp = c as u32;
+    if is_combining(cp) {
+        0
+    } else if is_wide(cp) {
+        2
+    } else {
+        1
+    }
+}
+
+/// The cells a piece of text takes on the screen.
+fn cells(s: &str) -> usize {
+    s.chars().map(cell_width).sum()
+}
+
+/// Whether the character takes two cells: the East Asian Wide and Fullwidth
+/// blocks.
+fn is_wide(cp: u32) -> bool {
+    matches!(
+        cp,
+        0x1100..=0x115F   // Hangul Jamo
+        | 0x2E80..=0x303E // CJK radicals, Kangxi, CJK symbols
+        | 0x3041..=0x33FF // kana, Hangul compatibility jamo, CJK compatibility
+        | 0x3400..=0x4DBF // CJK unified ideographs extension A
+        | 0x4E00..=0x9FFF // CJK unified ideographs
+        | 0xA000..=0xA4CF // Yi
+        | 0xAC00..=0xD7A3 // Hangul syllables
+        | 0xF900..=0xFAFF // CJK compatibility ideographs
+        | 0xFE10..=0xFE19 // vertical forms
+        | 0xFE30..=0xFE6F // CJK compatibility forms, small form variants
+        | 0xFF00..=0xFF60 // fullwidth forms
+        | 0xFFE0..=0xFFE6 // fullwidth signs
+        | 0x1F300..=0x1F64F // emoji
+        | 0x1F900..=0x1F9FF // supplemental symbols and pictographs
+        | 0x20000..=0x3FFFD // CJK unified ideographs extension B and beyond
+    )
+}
+
+/// Whether the character is a non-spacing mark: it takes no cell of its own.
+///
+/// The marks of the scripts a file name is likely to carry. A mark of a
+/// rarer script is counted as one cell, which makes the line one cell too
+/// wide rather than one too narrow.
+fn is_combining(cp: u32) -> bool {
+    matches!(
+        cp,
+        0x0300..=0x036F // combining diacritical marks: the decomposed Latin a macOS name carries
+        | 0x0483..=0x0489 // combining Cyrillic
+        | 0x0591..=0x05BD // Hebrew points
+        | 0x05BF
+        | 0x05C1..=0x05C2
+        | 0x05C4..=0x05C5
+        | 0x05C7
+        | 0x0610..=0x061A // Arabic signs
+        | 0x064B..=0x065F // Arabic marks
+        | 0x0670
+        | 0x06D6..=0x06DC
+        | 0x0900..=0x0902 // Devanagari
+        | 0x093A..=0x093C
+        | 0x093E..=0x094F
+        | 0x0951..=0x0957
+        | 0x0962..=0x0963
+        | 0x0E31 // Thai
+        | 0x0E34..=0x0E3A
+        | 0x0E47..=0x0E4E
+        | 0x20D0..=0x20F0 // combining marks for symbols
+        | 0x3099..=0x309A // combining katakana marks
+        | 0xFE00..=0xFE0F // variation selectors
+        | 0xFE20..=0xFE2F // combining half marks
+    )
+}
+
+/// Pad `s` to exactly `width` cells, trimming from the left when it is longer.
 fn fit(s: &str, width: usize) -> String {
-    let len = s.chars().count();
+    let len = cells(s);
     if len == width {
         s.to_string()
     } else if len < width {
@@ -1405,26 +1518,35 @@ fn fit(s: &str, width: usize) -> String {
 /// A path is longer than a terminal often, and a path cut in half is a
 /// path the user cannot use: a word that does not fit on a line of its
 /// own is broken, and the rest of the line is broken on its spaces.
+///
+/// The width is in cells, so a wide word is broken sooner than a narrow
+/// one, and the break is on a character boundary: half a character is not a
+/// character.
 fn wrap(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     let mut out: Vec<String> = Vec::new();
     let mut line = String::new();
+    let mut line_cells = 0usize;
     for word in text.split(' ') {
-        let fits = line.chars().count() + 1 + word.chars().count() <= width;
+        let word_cells = cells(word);
+        let fits = line_cells + 1 + word_cells <= width;
         if !line.is_empty() && fits {
             line.push(' ');
             line.push_str(word);
+            line_cells += 1 + word_cells;
             continue;
         }
         if !line.is_empty() {
             out.push(std::mem::take(&mut line));
         }
-        let mut chars: Vec<char> = word.chars().collect();
-        while chars.len() > width {
-            out.push(chars[..width].iter().collect());
-            chars.drain(..width);
+        let mut rest = word;
+        while cells(rest) > width {
+            let cut = cut_at_cells(rest, width);
+            out.push(rest[..cut].to_string());
+            rest = &rest[cut..];
         }
-        line = chars.into_iter().collect();
+        line = rest.to_string();
+        line_cells = cells(rest);
     }
     if !line.is_empty() {
         out.push(line);
@@ -1435,11 +1557,45 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     out
 }
 
-/// Shorten to `width` chars keeping the tail. Paths are read from the end, so
+/// Where `s` stops filling `width` cells, as a byte offset.
+///
+/// The cut is on a character boundary: a wide character that would need two
+/// cells and has one left goes whole to the next piece, because half a
+/// character is not a character.
+fn cut_at_cells(s: &str, width: usize) -> usize {
+    let mut used = 0usize;
+    for (i, c) in s.char_indices() {
+        let w = cell_width(c);
+        if used + w > width {
+            // A character too wide for the whole line is still taken, so
+            // the cut always makes progress.
+            return if i == 0 { c.len_utf8() } else { i };
+        }
+        used += w;
+    }
+    s.len()
+}
+
+/// The tail of `s` that fills at most `width` cells, cut on a character
+/// boundary.
+fn tail_at_cells(s: &str, width: usize) -> &str {
+    let mut used = 0usize;
+    let mut start = s.len();
+    for (i, c) in s.char_indices().rev() {
+        let w = cell_width(c);
+        if used + w > width {
+            break;
+        }
+        used += w;
+        start = i;
+    }
+    &s[start..]
+}
+
+/// Shorten to `width` cells keeping the tail. Paths are read from the end, so
 /// the directory that gave a file its meaning must survive the cut.
 fn elide_tail(s: &str, width: usize) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= width {
+    if cells(s) <= width {
         return s.to_string();
     }
     if width == 0 {
@@ -1448,8 +1604,8 @@ fn elide_tail(s: &str, width: usize) -> String {
     if width == 1 {
         return "…".to_string();
     }
-    let tail: String = chars[chars.len() - (width - 1)..].iter().collect();
-    format!("…{tail}")
+    // The ellipsis takes a cell of its own, and the tail is what is left.
+    format!("…{}", tail_at_cells(s, width - 1))
 }
 
 /// Drop ANSI escape sequences, leaving the text a user actually sees.
@@ -1471,16 +1627,24 @@ fn strip_ansi(s: &str) -> String {
 }
 
 /// Display width of a styled string, ignoring ANSI escape sequences.
+///
+/// The width is in cells, not characters: a CJK ideograph is two cells
+/// wide, so a line measured in characters is a line twice as wide as the
+/// terminal it was drawn for.
 fn display_width(s: &str) -> usize {
-    strip_ansi(s).chars().count()
+    cells(&strip_ansi(s))
 }
 
-/// Clip a styled string to `width` visible characters, keeping its escape
+/// Clip a styled string to `width` visible cells, keeping its escape
 /// sequences so styling survives the cut.
 ///
 /// Width is counted on the text, not the escapes: measuring the raw character
 /// count would make every coloured cell look far too long and clip the content
 /// the caller had just laid out.
+///
+/// A wide character that would need two cells and has one left is dropped
+/// whole: half a character is not a character, and a character drawn across
+/// the edge of the terminal is a character the terminal cannot show.
 fn truncate_visible(s: &str, width: usize) -> String {
     let mut out = String::new();
     let mut visible = 0usize;
@@ -1496,12 +1660,13 @@ fn truncate_visible(s: &str, width: usize) -> String {
             }
             continue;
         }
-        if visible == width {
+        let w = cell_width(c);
+        if visible + w > width {
             out.push_str(term::RESET);
             return out;
         }
         out.push(c);
-        visible += 1;
+        visible += w;
     }
     out
 }
@@ -1700,6 +1865,82 @@ mod tests {
             "the results must not move until the caller searches; otherwise \
              every key in a burst pays for a whole search"
         );
+    }
+
+    /// A key coming up does not end the drain.
+    ///
+    /// The console hands over a release for every press, and the drain
+    /// reads the queue until it is empty, so that a burst of typing costs
+    /// one search. A drain that stopped at the first release would stop at
+    /// the first key — so the burst would be a search per letter, each one
+    /// paid for in full and then thrown away, which is the whole thing the
+    /// drain is there to avoid.
+    #[test]
+    fn a_key_coming_up_does_not_end_the_drain() {
+        let press = term::Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        let mut release = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+        release.kind = KeyEventKind::Release;
+        assert!(drain_goes_on(&press), "a press keeps the drain going");
+        assert!(
+            drain_goes_on(&term::Event::Key(release)),
+            "and a release does too: the console sends one for every press"
+        );
+        assert!(
+            !drain_goes_on(&term::Event::Resize(80, 24)),
+            "a resize ends it: the frame on screen is the old one"
+        );
+    }
+
+    /// The width is in cells, and not in characters.
+    ///
+    /// A CJK ideograph takes two cells and a combining mark takes none, so
+    /// a row measured in characters is a row twice as wide as the terminal
+    /// it was drawn for: the terminal wraps it, and the frame that was one
+    /// line becomes two. A name with an accent in it is the other way
+    /// round — one cell for two characters — and a row measured in
+    /// characters is then a row too narrow.
+    #[test]
+    fn the_width_is_in_cells_and_not_in_characters() {
+        // Two ideographs: two characters, four cells.
+        let wide = "\u{4e00}\u{4e00}";
+        assert_eq!(wide.chars().count(), 2, "the fixture is two characters");
+        assert_eq!(cells(wide), 4, "and four cells");
+
+        // A decomposed name: two characters, one cell.
+        let decomposed = "e\u{0301}";
+        assert_eq!(
+            decomposed.chars().count(),
+            2,
+            "the fixture is two characters"
+        );
+        assert_eq!(cells(decomposed), 1, "and one cell");
+
+        // The row is the width, in cells.
+        assert_eq!(
+            cells(&fit(wide, 4)),
+            4,
+            "a wide name fills the row in cells"
+        );
+        assert_eq!(
+            cells(&fit(wide, 3)),
+            3,
+            "and a name that does not fit is cut to it"
+        );
+        assert_eq!(
+            cells(&fit(decomposed, 3)),
+            3,
+            "a decomposed name fills it too"
+        );
+
+        // The cut is on a character boundary: half a character is not a
+        // character, and a character drawn across the edge of the
+        // terminal is a character the terminal cannot show.
+        let cut = fit(wide, 3);
+        assert!(
+            !cut.contains('\u{4e00}') || cut.chars().all(|c| c == '\u{4e00}' || c == '…'),
+            "the cut is whole characters: {cut:?}"
+        );
+        assert_eq!(cells(&cut), 3, "and the row is still the width");
     }
 
     /// A resize shares no rows with the frame before it -- the columns of

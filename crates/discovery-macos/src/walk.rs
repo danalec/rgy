@@ -297,6 +297,16 @@ pub fn list_one(path: &[u8]) -> Option<Listing> {
 
 const OPEN_DIR: c_int = O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC;
 
+/// The ROOT is opened without `O_NOFOLLOW`.
+///
+/// The root is the folder the caller named, and a root that reaches the tree
+/// through a symbolic link is resolved: the portable walk resolves it, the
+/// two are the same answer, and a root that answers "nothing" on one
+/// platform and "everything" on another is not an answer at all. Every other
+/// folder is opened with `O_NOFOLLOW`: the walk does not descend into a
+/// link, and a link that points back up the tree is a loop.
+const OPEN_ROOT: c_int = O_RDONLY | O_DIRECTORY | O_CLOEXEC;
+
 /// The path of the root, when paths are tracked: they are only tracked
 /// when there is something to skip.
 fn tracked_path(root: &[u8]) -> Option<Vec<u8>> {
@@ -332,7 +342,7 @@ fn list_dir_inner(work: Work, ctx: &Ctx, buf: &mut [u8]) {
                 OPEN_DIR,
             )
         },
-        None => unsafe { open(rgy_discovery::path::as_c_ptr(&work.name), OPEN_DIR) },
+        None => unsafe { open(rgy_discovery::path::as_c_ptr(&work.name), OPEN_ROOT) },
     };
     if fd < 0 {
         // (With paths tracked, opening is how refusals get recorded.)

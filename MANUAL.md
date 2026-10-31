@@ -48,18 +48,18 @@ everything with it.
 
 ## 2. Install it
 
-The release is **0.1.2**. It is on
-[GitHub](https://github.com/danalec/rgy/releases/tag/rgy-v0.1.2), and the
+The release is **0.1.3**. It is on
+[GitHub](https://github.com/danalec/rgy/releases/tag/rgy-v0.1.3), and the
 crates are on crates.io.
 
 ### From crates.io
 
 ```sh
-cargo install rgy-search --version 0.1.2         # gives you `searchctl`
+cargo install rgy-search --version 0.1.3         # gives you `searchctl`
 ```
 
 That is the whole install for the tool you actually type. It needs **Rust
-1.85 or newer** and a **C compiler** (the allocator is C), and it drops the
+1.89 or newer** and a **C compiler** (the allocator is C), and it drops the
 binary into `~/.cargo/bin` — already on your PATH if Rust was installed the
 usual way.
 
@@ -67,10 +67,10 @@ The other binaries are separate crates, because most people only want the
 first one:
 
 ```sh
-cargo install rgy-searchd --version 0.1.2       # the daemon: searchd
-cargo install rgy-autostart --version 0.1.2     # the login item: rgy-autostart
-cargo install rgy-rgxy --version 0.1.2          # the window: rgxy
-cargo install rgy-zen --version 0.1.2           # the zen CLI: zen-rs (Windows)
+cargo install rgy-searchd --version 0.1.3       # the daemon: searchd
+cargo install rgy-autostart --version 0.1.3     # the login item: rgy-autostart
+cargo install rgxy --version 0.1.3            # the window: rgxy
+cargo install rgy-zen --version 0.1.3           # the zen CLI: zen-rs (Windows)
 ```
 
 ### From the release
@@ -82,8 +82,8 @@ administrator — and a symlink on Linux and macOS:
 
 | platform | archive |
 |---|---|
-| Windows x86_64 | `rgy-v0.1.2-x86_64-windows.zip` |
-| Linux x86_64 | `rgy-v0.1.2-x86_64-linux.tar.gz` |
+| Windows x86_64 | `rgy-v0.1.3-x86_64-windows.zip` |
+| Linux x86_64 | `rgy-v0.1.3-x86_64-linux.tar.gz` |
 
 The release page carries a `SHA256SUMS` beside the archives. The archive
 that matches the machine is the one that gets installed: the operating
@@ -142,7 +142,7 @@ they have everywhere else, and the project itself is still rgy.
 
 ### The library
 
-The crates are on crates.io too, all twenty at 0.1.2, and fifteen of them are
+The crates are on crates.io too, all twenty at 0.1.3, and fifteen of them are
 the library:
 
 | crate | what it gives you |
@@ -237,7 +237,9 @@ that repairs it.
 
 ## 3. Build it
 
-Rust **1.85** or newer.
+Rust **1.89** or newer — the tree's SIMD kernels use the AVX-512 target
+features, and those landed in 1.89. The manifests declare the floor, so cargo
+refuses an older rustc with a sentence instead of a wall of errors.
 
 ```sh
 cargo build --release            # the whole workspace
@@ -423,8 +425,10 @@ name in `Documents`, however well it matches.
 There is no file, and the defaults are the rules: `node_modules`,
 `target`, `Caches`, the dot-directories and the macOS bundles are low,
 `Applications` is above normal, and a folder nobody wrote a rule about is
-normal. A line that does not parse is an error — rgy warns and uses the
-defaults rather than dropping the rule you wrote.
+normal. A line that does not parse is reported and skipped: the rules that
+parsed are the rules, and the broken line is said out loud with its line
+number — a file with one bad line is a file with one rule missing, not a
+file that says nothing.
 
 The rules are read when the index is built, so a change to them needs a
 new index (`--reindex`).
@@ -469,6 +473,11 @@ and `(?<!...)`) and the **Unicode property classes** (`\p{L}`). A pattern
 with either is refused, and the refusal says which pattern it was and why
 it would not be taken -- a refused pattern is an error, not a search that
 found nothing.
+
+The refusal is a `warning:` line on stderr and the exit code is 1, and the
+two routes say the same thing: the local search and the daemon's answer
+about the same refused pattern are the same refusal, and the answer that
+comes with it is empty because the pattern was never read.
 
 A pattern of more than one word has to be **quoted**. Without the quotes
 the second word is not part of the pattern: it is part of the file's
@@ -546,7 +555,7 @@ the other:
 | code | what it means |
 |---|---|
 | 0 | the query matched something |
-| 1 | the query matched nothing, the daemon reported an error, or the picker failed |
+| 1 | the query matched nothing, the daemon reported an error, the picker failed, or a pattern was refused |
 | 2 | the command could not run: an unknown option, `--daemon` with no daemon to ask, `--count --daemon` |
 
 `rgxy` answers the same way, with two differences: a command line it cannot
@@ -922,6 +931,16 @@ says **count not known** — it does not say zero, because zero is a fact
 ("there is nothing here") and a header that claims an empty index under a
 daemon holding thousands of entries is a wrong fact.
 
+### The language
+
+The launcher reads the environment once, at start-up, and speaks the language
+the environment asks for: `RGY_LANG` first — the program's own name for the
+question — then `LC_ALL`, then `LANG`. Anything that starts with `pt` is
+Portuguese; everything else is English, and a machine that says nothing gets
+English. A launcher that changed its language in the middle of a sentence
+would be a launcher that says two things at once, so the answer is read once
+and handed down.
+
 ### The icon in the notification area
 
 On Windows the launcher leaves an icon in the notification area — the row of
@@ -1278,12 +1297,12 @@ being written. rgy skips it and lists it rather than failing the run.
 |---|---|
 | [README.md](README.md) | the map: what rgy is, how it compares to rgx |
 | [FORMATS.md](FORMATS.md) | what it reads inside a file, format by format |
-| [docs/release-0.1.2.md](docs/release-0.1.2.md) | the 0.1.2 release page, with the changelog in it |
+| [docs/release-0.1.3.md](docs/release-0.1.3.md) | the 0.1.3 release page, with the changelog in it |
 | [benchmark/](benchmark/) | the measured numbers |
 | [rgx](https://github.com/danalec/rgx) | the content-search specialist this workspace is built on |
 
 | link | what it is |
 |---|---|
-| [the 0.1.2 release](https://github.com/danalec/rgy/releases/tag/rgy-v0.1.2) | the archives, the `SHA256SUMS`, and the changelog |
-| [crates.io](https://crates.io/crates/rgy-search) | the twenty crates, all at 0.1.2 |
+| [the 0.1.3 release](https://github.com/danalec/rgy/releases/tag/rgy-v0.1.3) | the archives, the `SHA256SUMS`, and the changelog |
+| [crates.io](https://crates.io/crates/rgy-search) | the twenty crates, all at 0.1.3 |
 | [docs.rs](https://docs.rs/rgy-name-core) | the API of each crate |

@@ -227,8 +227,40 @@ pub fn stderr() -> Console<std::io::Stderr> {
 }
 
 /// How many paths could not be spelled.
+///
+/// The counter counts paths, and not spellings: the daemon spells the
+/// search root once per hit, and a path spelled a thousand times is one
+/// path. The paths already counted are kept (see [`count_once`]), so the
+/// number the user reads is the number of paths.
 #[cfg(feature = "std")]
 static UNSPELLABLE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The unspellable paths already counted.
+///
+/// The set holds the paths, not the names, and a path that is not UTF-8
+/// is rare: the set is small.
+#[cfg(feature = "std")]
+static COUNTED: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<alloc::vec::Vec<u8>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
+/// Has this path been counted already?
+///
+/// The count is of paths and not of spellings, and a path is spelled more
+/// than once — the daemon spells the search root once per hit, and the
+/// root is one path — so the paths that were counted are kept and a path
+/// that is already in them is not counted again.
+///
+/// A lock that cannot be taken (a poisoned one) counts the path anyway:
+/// the count is then the old one, which is wrong by the number of the
+/// repetitions and right about the number of the paths.
+#[cfg(feature = "std")]
+fn count_once(path: &[u8]) -> bool {
+    match COUNTED.lock() {
+        Ok(mut seen) => seen.insert(path.to_vec()),
+        Err(_) => true,
+    }
+}
 
 /// The path as text.
 ///
@@ -245,14 +277,19 @@ pub fn spell(path: &[u8]) -> alloc::string::String {
     match std::str::from_utf8(path) {
         Ok(text) => alloc::string::String::from(text),
         Err(_) => {
-            let count = UNSPELLABLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-            if count == 1 || count.is_multiple_of(1000) {
-                let _ = std::io::Write::write_fmt(
-                    &mut stderr(),
-                    format_args!(
-                        "rgy: {count} path(s) are not valid UTF-8 and are written with a replacement character\n"
-                    ),
-                );
+            // The count is of paths, so a path that was counted already is
+            // not counted again — the daemon spells the search root once
+            // per hit, and one root is one path.
+            if count_once(path) {
+                let count = UNSPELLABLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                if count == 1 || count.is_multiple_of(1000) {
+                    let _ = std::io::Write::write_fmt(
+                        &mut stderr(),
+                        format_args!(
+                            "rgy: {count} path(s) are not valid UTF-8 and are written with a replacement character\n"
+                        ),
+                    );
+                }
             }
             alloc::string::String::from_utf8_lossy(path).into_owned()
         }
@@ -452,6 +489,25 @@ mod tests {
         assert!(
             spelled.contains('\u{FFFD}'),
             "the replacement character is there: {spelled}"
+        );
+    }
+
+    /// A path spelled twice is one path.
+    ///
+    /// The count is of paths and not of spellings, and the daemon spells
+    /// the search root once per hit: a root spelled a hundred times is
+    /// one path, and the number the user reads has to say one.
+    #[cfg(feature = "std")]
+    #[test]
+    fn a_path_spelled_twice_is_counted_once() {
+        let path = b"counted-once-probe-\xff";
+        assert!(count_once(path), "the first time counts the path");
+        assert!(!count_once(path), "the second time does not");
+        assert!(!count_once(path), "and the third does not");
+        // Another path is another path.
+        assert!(
+            count_once(b"counted-once-probe-\xfe"),
+            "a different path is counted too"
         );
     }
 

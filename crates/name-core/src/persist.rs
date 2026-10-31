@@ -10,7 +10,16 @@
 //! So every saved index gets a `<index>.meta` sidecar naming the root it was
 //! built from. A load whose sidecar is missing, unreadable, or names another
 //! root is reported as a plain miss and the caller rebuilds; it is never
-//! trusted. The index file is also never silently promoted past its age
+//! trusted.
+//!
+//! The sidecar is not the only word: the blob carries the root's digest in
+//! its header, and a load checks the blob against the tree it is asked
+//! about. Two files can disagree — they are written one after the other,
+//! and a crash between the two writes leaves the sidecar naming the tree
+//! the blob was built for *before* — and a loader that trusted the sidecar
+//! alone would serve the wrong tree's paths for the right tree.
+//!
+//! The index file is also never silently promoted past its age
 //! limit, because the portable walk has no change feed to tell a fresh tree
 //! from a stale one: the limit defaults to [`DEFAULT_MAX_AGE`], and a caller
 //! that passes its own limit overrides it.
@@ -103,13 +112,28 @@ pub struct Saved {
 /// (`Index::save` is tmp+rename). A sidecar without its blob would be worse
 /// than nothing, so a failure between the two writes leaves the previous
 /// sidecar in place, whose root check then rejects the new blob.
-pub fn save(idx: &Index, root: &Path, index: &Path) -> std::io::Result<Saved> {
+///
+/// The blob says which tree it is for as well, and that is not belt and
+/// braces: the sidecar and the blob are two files, and a crash between
+/// the two writes leaves them disagreeing -- the sidecar naming the tree
+/// the blob was built for *before*, the blob holding the tree built
+/// *after*. A loader that trusted the sidecar alone would then serve the
+/// wrong tree's paths for the right tree, which is the one failure a
+/// cache must not have. The digest in the blob's header is what closes
+/// it: the blob is checked against the tree it is asked about, and not
+/// only against a sidecar a crash may have left behind.
+pub fn save(idx: &mut Index, root: &Path, index: &Path) -> std::io::Result<Saved> {
     if let Some(dir) = index.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir)?;
     }
+    // The root's bytes are read once: the digest in the blob and the root
+    // in the sidecar are two words about the same tree, and two reads
+    // could be two trees if the path changed under the first one.
+    let bytes = root_bytes(root);
+    idx.set_root_digest(fnv1a(&bytes));
     idx.save(index)?;
     let meta = stamp_path(index);
-    std::fs::write(&meta, stamp(root, idx.n, now_unix()))?;
+    std::fs::write(&meta, stamp(&bytes, idx.n, now_unix()))?;
     Ok(Saved { index: index.to_path_buf(), meta })
 }
 
@@ -126,8 +150,8 @@ pub fn save(idx: &Index, root: &Path, index: &Path) -> std::io::Result<Saved> {
 /// line break, and it carries the bytes exactly.
 const STAMP_VERSION: u32 = 2;
 
-fn stamp(root: &Path, entries: usize, built: u64) -> String {
-    format!("rgy-index-meta {STAMP_VERSION}\nroot-hex {}\nentries {entries}\nbuilt {built}\n", hex(&root_bytes(root)))
+fn stamp(root: &[u8], entries: usize, built: u64) -> String {
+    format!("rgy-index-meta {STAMP_VERSION}\nroot-hex {}\nentries {entries}\nbuilt {built}\n", hex(root))
 }
 
 /// The root's bytes, exactly as the filesystem spells them.
@@ -226,6 +250,13 @@ pub enum Miss {
     /// The two roots are as one line each: a root that carries a line
     /// break cannot be one, and the message is one line.
     WrongRoot { saved: String, want: String },
+    /// The blob and the sidecar are about different trees.
+    ///
+    /// The sidecar checked out and the blob did not: the blob was built
+    /// for another tree. This is what a crash between the two writes
+    /// leaves behind -- the sidecar naming the tree built before, the blob
+    /// holding the tree built after -- and the tree is walked again.
+    WrongBlob,
     /// Older than the caller's `max_age`.
     TooOld { built: u64 },
     /// The sidecar checked out but the blob is missing or will not load.
@@ -243,6 +274,7 @@ impl std::fmt::Display for Miss {
             Miss::WrongRoot { saved, want } => {
                 write!(f, "index was built for {saved}, not {want}")
             }
+            Miss::WrongBlob => write!(f, "the index file is about another tree"),
             Miss::TooOld { built } => {
                 let age = now_unix().saturating_sub(*built);
                 write!(f, "index is {} old", age_text(age))
@@ -290,6 +322,14 @@ pub fn load_for(root: &Path, index: &Path, max_age: Option<Duration>) -> Result<
     // The sidecar checked out, so a blob that will not map is corruption,
     // not an absence — say so instead of looking like "never saved".
     let idx = Index::load(index).ok_or(Miss::BadIndex)?;
+    // The blob says which tree it was built for, and the sidecar says
+    // which tree it is for. The two have to be the same tree: they are
+    // two files, and a crash between the two writes leaves them
+    // disagreeing. The sidecar alone is not enough -- it is the file that
+    // was not written -- so the blob's own word is what is checked.
+    if idx.root_digest != fnv1a(&want) {
+        return Err(Miss::WrongBlob);
+    }
     // A blob whose parent chain is not a forest would answer with paths
     // that do not exist. It is corruption too, and it is caught here
     // rather than in the middle of a search.
@@ -313,6 +353,12 @@ pub fn load_saved(index: &Path) -> Result<(Index, String), Miss> {
         return Err(Miss::NoStamp);
     };
     let idx = Index::load(index).ok_or(Miss::BadIndex)?;
+    // The blob has to be the tree the sidecar names: the caller pointed
+    // at a file and the stamp is what says what is in it, and the blob
+    // says so too. Two files that disagree are not read.
+    if idx.root_digest != fnv1a(&saved) {
+        return Err(Miss::WrongBlob);
+    }
     // The root is text here because the caller prints it: the paths it
     // serves are the root's bytes joined to the names, and the root comes
     // back whole.
@@ -481,8 +527,8 @@ mod tests {
     fn round_trips_and_survives_a_reload() {
         let dir = tree("rt");
         let idx_path = dir.join("cache.idx");
-        let built = build(&dir);
-        save(&built, &dir, &idx_path).expect("save");
+        let mut built = build(&dir);
+        save(&mut built, &dir, &idx_path).expect("save");
 
         assert_eq!(outcome(&dir, &idx_path, None).expect("no miss"), built.n);
 
@@ -497,7 +543,7 @@ mod tests {
         let a = tree("root-a");
         let b = tree("root-b");
         let idx_path = a.join("cache.idx");
-        save(&build(&a), &a, &idx_path).expect("save");
+        save(&mut build(&a), &a, &idx_path).expect("save");
 
         // Point B's query at A's index: must be a refusal, not a wrong answer.
         let err = outcome(&b, &idx_path, None).unwrap_err();
@@ -509,11 +555,43 @@ mod tests {
         let _ = std::fs::remove_dir_all(&b);
     }
 
+    /// The blob and the sidecar have to be about the same tree.
+    ///
+    /// They are two files, and they are written one after the other. A
+    /// crash between the two writes leaves the sidecar naming the tree the
+    /// blob was built for *before* and the blob holding the tree built
+    /// *after* — and a loader that trusted the sidecar alone would serve
+    /// the wrong tree's paths for the right tree. The blob says which tree
+    /// it is for, and that is what is checked.
+    #[test]
+    fn a_blob_of_another_tree_is_never_served() {
+        let a = tree("blob-a");
+        let b = tree("blob-b");
+        let idx_path = a.join("cache.idx");
+        let mut built_a = build(&a);
+        save(&mut built_a, &a, &idx_path).expect("save");
+
+        // The crash: the blob is written for B and the sidecar is not, so
+        // what is left on the disk is A's sidecar beside B's blob.
+        let mut built_b = build(&b);
+        built_b.set_root_digest(fnv1a(&root_bytes(&b)));
+        built_b.save(&idx_path).expect("the blob alone");
+
+        // A's query must be refused, not answered with B's tree.
+        let err = outcome(&a, &idx_path, None).unwrap_err();
+        assert!(matches!(err, Miss::WrongBlob), "got {err}");
+        // And B's query is refused by the sidecar, which is A's.
+        assert!(matches!(outcome(&b, &idx_path, None), Err(Miss::WrongRoot { .. })), "B was served A's sidecar");
+
+        let _ = std::fs::remove_dir_all(&a);
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
     #[test]
     fn max_age_expires_the_index() {
         let dir = tree("age");
         let idx_path = dir.join("cache.idx");
-        save(&build(&dir), &dir, &idx_path).expect("save");
+        save(&mut build(&dir), &dir, &idx_path).expect("save");
 
         assert!(outcome(&dir, &idx_path, Some(Duration::from_secs(3600))).is_ok());
         // Zero tolerance means "never reuse", even for a same-second stamp.
@@ -560,7 +638,7 @@ mod tests {
     fn an_index_older_than_the_default_limit_is_not_reused() {
         let dir = tree("default-age");
         let idx_path = dir.join("cache.idx");
-        save(&build(&dir), &dir, &idx_path).expect("save");
+        save(&mut build(&dir), &dir, &idx_path).expect("save");
 
         // Age the stamp past the default limit.
         let mut meta_name = idx_path.as_os_str().to_os_string();
@@ -606,8 +684,8 @@ mod tests {
     fn a_saved_index_returns_its_stamped_root() {
         let dir = tree("saved-root");
         let idx_path = dir.join("cache.idx");
-        let built = build(&dir);
-        save(&built, &dir, &idx_path).expect("save");
+        let mut built = build(&dir);
+        save(&mut built, &dir, &idx_path).expect("save");
 
         let (loaded, root) = load_saved(&idx_path).expect("load");
         assert_eq!(loaded.n, built.n);
@@ -627,12 +705,12 @@ mod tests {
     fn a_root_with_a_line_break_comes_back_whole() {
         let dir = tree("linebreak");
         let idx_path = dir.join("cache.idx");
-        let built = build(&dir);
+        let mut built = build(&dir);
         // The root's own name carries a line break. The directory need
         // not exist: the canonical form of a path that is not there is
         // the path itself, and the stamp is what carries the root.
         let root = dir.join("ro\not");
-        save(&built, &root, &idx_path).expect("save");
+        save(&mut built, &root, &idx_path).expect("save");
 
         // The stamp is one line per field, and the root's line break is
         // not one of them.
@@ -657,9 +735,9 @@ mod tests {
     fn a_root_cannot_name_another_tree() {
         let dir = tree("spoof");
         let idx_path = dir.join("cache.idx");
-        let built = build(&dir);
+        let mut built = build(&dir);
         let root = dir.join("x\nroot /etc");
-        save(&built, &root, &idx_path).expect("save");
+        save(&mut built, &root, &idx_path).expect("save");
 
         let (_, saved) = load_saved(&idx_path).expect("load");
         assert_eq!(saved, canon(&root).to_string_lossy().into_owned());
@@ -678,8 +756,8 @@ mod tests {
     fn a_stamp_from_the_previous_program_is_still_read() {
         let dir = tree("v1");
         let idx_path = dir.join("cache.idx");
-        let built = build(&dir);
-        save(&built, &dir, &idx_path).expect("save");
+        let mut built = build(&dir);
+        save(&mut built, &dir, &idx_path).expect("save");
 
         // The stamp as version 1 wrote it: the root in plain text.
         let v1 = format!("rgy-index-meta 1\nroot {}\nentries {}\nbuilt {}\n", canon(&dir).to_string_lossy(), built.n, now_unix());
@@ -720,7 +798,7 @@ mod tests {
     fn a_stamp_without_a_blob_is_refused() {
         let dir = tree("noblob");
         let idx_path = dir.join("cache.idx");
-        save(&build(&dir), &dir, &idx_path).expect("save");
+        save(&mut build(&dir), &dir, &idx_path).expect("save");
         std::fs::remove_file(&idx_path).expect("drop the blob");
 
         assert_eq!(outcome(&dir, &idx_path, None).unwrap_err(), Miss::BadIndex);

@@ -5,13 +5,14 @@
  //! produce comparable numbers.
  //!
 -//! ## Where the upstream crate's search still runs
-+//! ## The portable path
- //!
+-//!
 -//! On a CPU without AVX2, and on every architecture where the upstream
 -//! crate's vector width is decided at compile time -- aarch64's NEON, for
 -//! instance -- the upstream search is used unchanged. There is nothing to
 -//! fix there: those paths never needed `std` to be chosen, so they are the
 -//! same in both builds already.
++//! ## The portable path
++//!
 +//! **Where the pair scanner has no vector to work with -- a CPU without
 +//! AVX2, and every architecture that is not x86_64 -- the search is
 +//! Boyer--Moore--Horspool**, written out in this module: the needle's own
@@ -168,7 +169,7 @@
  /// Returns the index of the first occurrence of `needle` in `haystack`.
  ///
  /// If `needle` is empty, this returns `Some(0)`.
-@@ -78,7 +219,7 @@ pub fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+@@ -78,7 +219,7 @@
              return crate::scan::pair_find(needle, haystack);
          }
      }
@@ -177,7 +178,7 @@
  }
  
  /// Returns the index of the last occurrence to `needle` in `haystack`.
-@@ -107,7 +248,7 @@ pub fn rfind(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+@@ -107,7 +248,7 @@
              return crate::scan::pair_rfind(needle, haystack);
          }
      }
@@ -186,13 +187,20 @@
  }
  
  /// Returns an iterator over all non-overlapping occurrences of a substring
-@@ -459,66 +600,157 @@ impl fmt::Debug for FinderBuilder {
+@@ -459,66 +600,157 @@
  mod tests {
      use alloc::vec::Vec;
  
 -    /// The answers must be the upstream crate's answers.
 +    /// The oracle: the first occurrence, byte at a time.
-+    ///
+     ///
+-    /// The upstream crate's substring search is the oracle: it is the
+-    /// implementation this module replaces, and a difference in the offsets
+-    /// it reports is a difference in what rgx finds. The corpus is the
+-    /// shapes that break a scanner -- the empty haystack, a haystack
+-    /// shorter than the needle, a needle at the very end, a needle that
+-    /// repeats itself, a needle whose two rarest bytes are at neither end,
+-    /// and a needle long enough to leave the first block.
 +    /// It is a loop and it is obviously right, and that is the whole point
 +    /// of an oracle -- it must not share a single line with the code it
 +    /// judges. The upstream crate cannot be the oracle any more: it is the
@@ -241,14 +249,7 @@
 +
 +    /// The oracle for the reverse iterator: the non-overlapping matches,
 +    /// from the back.
-     ///
--    /// The upstream crate's substring search is the oracle: it is the
--    /// implementation this module replaces, and a difference in the offsets
--    /// it reports is a difference in what rgx finds. The corpus is the
--    /// shapes that break a scanner -- the empty haystack, a haystack
--    /// shorter than the needle, a needle at the very end, a needle that
--    /// repeats itself, a needle whose two rarest bytes are at neither end,
--    /// and a needle long enough to leave the first block.
++    ///
 +    /// The backwards walk is not the forward walk reversed: the forward walk
 +    /// takes the first match and steps over it, and the backwards walk takes
 +    /// the last match and bounds itself by it, so the two can land on
@@ -389,7 +390,7 @@
                      "rfind_iter({needle:?}) over {} bytes",
                      hay.len()
                  );
-@@ -526,8 +758,73 @@ mod tests {
+@@ -526,8 +758,73 @@
          }
      }
  
@@ -465,7 +466,7 @@
      ///
      /// The scanner's blocks are 32 bytes wide (64 with AVX-512) and the
      /// pair is the needle's two rarest bytes, which may sit at any two
-@@ -535,7 +832,7 @@ mod tests {
+@@ -535,7 +832,7 @@
      /// occurs at many offsets exercises the block walk, the tail, and the
      /// confirmation at both ends.
      #[test]
@@ -474,7 +475,7 @@
          let mut hay = Vec::new();
          let mut x: u64 = 0x243f_6a88_85a3_08d3;
          for _ in 0..300 {
-@@ -558,14 +855,79 @@ mod tests {
+@@ -558,14 +855,79 @@
              h[at..at + needle.len()].copy_from_slice(needle);
              assert_eq!(
                  super::find(&h, needle),
@@ -490,6 +491,7 @@
              );
          }
      }
+-}
 +
 +    /// The search and the naive one must agree on haystacks nobody wrote.
 +    ///
@@ -555,4 +557,4 @@
 +            );
 +        }
 +    }
- }
++}

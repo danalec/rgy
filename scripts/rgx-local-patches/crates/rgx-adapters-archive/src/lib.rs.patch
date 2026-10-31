@@ -1,6 +1,6 @@
 --- a/crates/rgx-adapters-archive/src/lib.rs
 +++ b/crates/rgx-adapters-archive/src/lib.rs
-@@ -536,35 +536,30 @@ impl Adapter for Decompress {
+@@ -536,35 +536,30 @@
              "zst" | "zstd" | "tzst" => {
                  // The in-house decoder refuses a bomb from the frame header
                  // before it expands one and enforces the cap while it runs.
@@ -52,7 +52,7 @@
              }
              "lz4" => {
                  // In-house decoder covering both the modern frame and the
-@@ -681,28 +676,6 @@ fn truncated(inner: String, bytes: Vec<u8>, declared: Option<u64>, limit: u64) -
+@@ -681,28 +676,6 @@
      Outcome::Members(vec![note, (inner, bytes)])
  }
  
@@ -81,7 +81,7 @@
  #[cfg(all(
      test,
      any(
-@@ -900,99 +873,6 @@ mod tests {
+@@ -900,99 +873,6 @@
                      .unwrap_or_else(|e| panic!("{label}: {e:?}"));
                  assert!(!b.capped, "{label}");
                  assert_eq!(b.bytes, *want, "{label}");
@@ -181,7 +181,7 @@
              }
          });
      }
-@@ -1015,7 +895,6 @@ mod tests {
+@@ -1015,7 +895,6 @@
                  .decode(&both)
                  .expect("two frames");
              assert_eq!(got, want);
@@ -189,7 +189,7 @@
  
              // Skippable frame: magic 0x184D2A5x, then a 4-byte length.
              let mut skipped = vec![0x5f, 0x2a, 0x4d, 0x18, 0x04, 0x00, 0x00, 0x00, 1, 2, 3, 4];
-@@ -1029,19 +908,14 @@ mod tests {
+@@ -1029,19 +908,14 @@
      }
  
      /// A frame carrying a Dictionary_ID is the one shape the in-house
@@ -215,7 +215,7 @@
          use crate::budget::testing::locked;
          let frame = [
              0x28u8, 0xb5, 0x2f, 0xfd, 0xa3, 0x44, 0x33, 0x22, 0x11, 0x00, 0x00, 0x00,
-@@ -1055,24 +929,21 @@ mod tests {
+@@ -1055,24 +929,21 @@
          locked(|| match Decompress.extract(&frame, "d.zst") {
              Err(e) => {
                  let text = format!("{e}");
@@ -246,7 +246,7 @@
          use crate::budget::testing::locked;
          const N: usize = 31;
          let mut frame = vec![0x28, 0xb5, 0x2f, 0xfd, 0xa0];
-@@ -1084,12 +955,10 @@ mod tests {
+@@ -1084,12 +955,10 @@
          frame.extend_from_slice(&header.to_le_bytes()[..3]);
          frame.extend_from_slice(&block);
          locked(|| {
@@ -260,7 +260,7 @@
          });
      }
  
-@@ -1098,12 +967,20 @@ mod tests {
+@@ -1098,12 +967,20 @@
      #[cfg(feature = "decompress")]
      #[test]
      fn a_declared_bomb_stops_at_the_byte_budget() {
@@ -285,7 +285,7 @@
          crate::budget::testing::under_budget(64, LIMIT, || {
              let Outcome::Members(m) = Decompress.extract(&bomb, "bomb.zst").expect("bomb") else {
                  panic!("members")
-@@ -1122,10 +999,11 @@ mod tests {
+@@ -1122,10 +999,11 @@
      }
  
      /// Eight megabytes of one byte in about twenty bytes of RLE blocks.
@@ -301,7 +301,7 @@
      #[cfg(feature = "decompress")]
      fn bzst_of_runs(total: u32) -> Vec<u8> {
          let mut frame = vec![0x28, 0xb5, 0x2f, 0xfd, 0xa0];
-@@ -1440,7 +1318,7 @@ mod tests {
+@@ -1440,7 +1318,7 @@
              assert!(got, "the corpus does not exercise {what}");
          }
          // RLE_Literals_Block is the one shape no encoder in reach produces;
@@ -310,7 +310,7 @@
          assert!(
              !seen.rle_literals,
              "an encoder did produce RLE literals: add them here"
-@@ -1976,11 +1854,6 @@ mod tests {
+@@ -1976,11 +1854,6 @@
              rgx_core::compress::zlib::ZlibEncoder::new().encode(data)
          }
  
@@ -322,7 +322,7 @@
          fn members(out: Outcome) -> Vec<(String, Vec<u8>)> {
              let Outcome::Members(m) = out else {
                  panic!("expected members")
-@@ -2056,7 +1929,6 @@ mod tests {
+@@ -2056,7 +1929,6 @@
          fn every_decompressed_format_stops_at_the_byte_budget() {
              const LIMIT: u64 = 1000;
              let zlib = zlib_of(&b"needle ".repeat(500));
@@ -330,7 +330,7 @@
              let cases: [(&[u8], &str, &str); 9] = [
                  (
                      include_bytes!("../testdata/bzip2_cli_l9_rep.bz2"),
-@@ -2094,7 +1966,11 @@ mod tests {
+@@ -2094,7 +1966,11 @@
                      "brotli, brotli 1.2.0",
                  ),
                  (&zlib, "fixture.z", "zlib framing, in-house encoder"),
@@ -343,7 +343,7 @@
              ];
              for (data, path, label) in cases {
                  let out = under_budget(64, LIMIT, || {
-@@ -2122,7 +1998,6 @@ mod tests {
+@@ -2122,7 +1998,6 @@
          fn legitimate_streams_are_not_truncated() {
              let payload = b"needle ".repeat(500);
              let zlib = zlib_of(&payload);
@@ -351,7 +351,7 @@
              let cases: [(&[u8], &[u8], &str, &str); 8] = [
                  (
                      include_bytes!("../testdata/bzip2_cli_l9_rep.bz2"),
-@@ -2161,7 +2036,12 @@ mod tests {
+@@ -2161,7 +2036,12 @@
                      "fixture",
                  ),
                  (&zlib, &payload, "fixture.z", "fixture"),

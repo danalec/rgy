@@ -1,6 +1,6 @@
 --- a/crates/rgx-adapters-archive/README.md
 +++ b/crates/rgx-adapters-archive/README.md
-@@ -103,7 +103,8 @@ decode does not rescan its central directory once per entry.
+@@ -103,7 +103,8 @@
  ## Feature flags
  
  - `std` (default) — pulls in `rar-codec/std`; the `decompress` feature is

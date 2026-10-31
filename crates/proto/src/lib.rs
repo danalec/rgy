@@ -515,9 +515,19 @@ impl Request {
         // The cap is the tree's own: the daemon holds the whole index,
         // and a request that asks for the whole index is a request to
         // make the daemon materialise it.
+        //
+        // A limit that is not a whole number is a limit that cannot be
+        // true: the answer carries whole hits, and a request for 1.9
+        // hits is a request for a number of hits that does not exist.
+        // The rule for every other number on this wire is to refuse it
+        // (`count_of`, `session_id`, `span_offset`), and the limit was
+        // the only one that cast it into a *different* number instead:
+        // 1.9 became 1, and the caller was told the answer was complete
+        // for a limit it never asked for.
         let limit = match obj.get("limit").and_then(|l| l.as_num()) {
             Some(n) if n < 0.0 => 0,
             Some(n) if n >= MAX_LIMIT as f64 => MAX_LIMIT,
+            Some(n) if !whole_number(n) => return None,
             Some(n) => n as usize,
             // No limit at all: the default.
             None => 50,
@@ -2835,6 +2845,38 @@ mod tests {
         // And no limit at all is the default.
         let none = Request::from_json(r#"{"op":"search","q":"x"}"#).expect("the request is read");
         assert_eq!(none.limit(), 50, "no limit is the default");
+    }
+
+    /// A limit that is not a whole number is a request that cannot be true.
+    ///
+    /// The answer carries whole hits, and a request for 1.9 of them is a
+    /// request for a number of hits that does not exist. The reader used
+    /// to cast it, and a cast truncates: 1.9 became 1, 0.5 became 0, and
+    /// the caller was told the answer was complete for a limit it never
+    /// asked for. Every other number on this wire is refused when it
+    /// cannot be true — the count, the session, the span — and the limit
+    /// is now the same.
+    #[test]
+    fn a_limit_that_is_not_a_whole_number_is_refused() {
+        assert_eq!(
+            Request::from_json(r#"{"op":"search","q":"x","limit":1.9}"#),
+            None,
+            "a limit of 1.9 hits is not a limit"
+        );
+        assert_eq!(
+            Request::from_json(r#"{"op":"search","q":"x","limit":0.5}"#),
+            None,
+            "a limit of half a hit is not a limit"
+        );
+        assert_eq!(
+            Request::from_json(r#"{"op":"grep","q":"x","limit":99.999}"#),
+            None,
+            "and the same on the grep route"
+        );
+        // A whole number written as a decimal is still a whole number.
+        let whole = Request::from_json(r#"{"op":"search","q":"x","limit":20.0}"#)
+            .expect("the request is read");
+        assert_eq!(whole.limit(), 20, "20.0 is 20");
     }
 
     /// A request that names a session and a request that names none.

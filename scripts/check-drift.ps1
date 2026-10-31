@@ -378,8 +378,8 @@ function Test-PatchCreatesFile([string]$patchFile) {
     return $false
 }
 
-# Returns 'ok', 'no-upstream-file', 'no-copy', 'does-not-apply' or
-# 'mismatch'.
+# Returns 'ok', 'no-upstream-file', 'no-copy', 'not-in-index',
+# 'does-not-apply' or 'mismatch'.
 #
 # The question is the one the sync asks: is the file this repository holds
 # the upstream blob at the pin with the local patch applied on top?
@@ -397,8 +397,14 @@ function Test-PatchRow([string]$patchRel, [string]$upstreamRel, [string]$pin) {
         # gate cannot see it and says the patch does not apply. That is
         # not a broken patch: it is a patch that has not been added to
         # the repository yet. Stage it, and the gate sees it.
+        #
+        # The verdict says so, because a gate that fails with the wrong
+        # reason is worse than no gate: "the patch no longer applies"
+        # sends the reader to re-derive a patch that never stopped
+        # applying, and the re-derivation is an edit to a file the reader
+        # was not asked to touch.
         $patchCopy = Join-Path $work 'rgy.patch'
-        if (-not (Get-RepoBlob $patchRel $patchCopy)) { return 'does-not-apply' }
+        if (-not (Get-RepoBlob $patchRel $patchCopy)) { return 'not-in-index' }
         $creates = Test-PatchCreatesFile $patchCopy
         $target = Join-Path $work $upstreamRel
         [void](New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force)
@@ -627,7 +633,8 @@ foreach ($r in $rows) {
                 $drifted++
                 switch ($verdict) {
                     'no-upstream-file' { Write-Report "  FAIL: $($r.Rgx): upstream has no $($r.Upstream)" 'Red' }
-                    'no-copy'         { Write-Report "  FAIL: $($r.Rgx): the patched file $($r.Upstream) is not in the tree" 'Red' }
+                    'no-copy'         { Write-Report "  FAIL: $($r.Rgx): the patched file $($r.Upstream) is not in the index (the gate reads the index, not the working tree)" 'Red' }
+                    'not-in-index'    { Write-Report "  FAIL: $($r.Rgx): the patch is not in the index (the gate reads the index, not the working tree)" 'Red' }
                     'does-not-apply'  { Write-Report "  FAIL: $($r.Rgx): the patch no longer applies to upstream's current content of $($r.Upstream)" 'Red' }
                     'mismatch'        { Write-Report "  FAIL: $($r.Rgx): the copy does not match upstream's current content plus the patch" 'Red' }
                 }

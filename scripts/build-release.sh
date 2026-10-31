@@ -488,10 +488,106 @@ for media_file in $media; do
     cp "$repo/$media_file" "$stage/$media_file"
 done
 
+# The page of the release the README calls the changelog.
+#
+# The README points at it by a relative path, and the name of that page
+# carries the version -- so the page that travels with the archive is the
+# page of the release being built, and not the page of an older one. A tree
+# without it has a README with a hole in it.
+release_page="docs/release-$version.md"
+if [ ! -f "$repo/$release_page" ]; then
+    echo "the release carries $release_page and this tree does not have it: the archive would not" >&2
+    echo "  the README points at it, and an archive without it is a README with a hole in it" >&2
+    exit 1
+fi
+mkdir -p "$stage/docs"
+cp "$repo/$release_page" "$stage/$release_page"
+
+# The benchmark folder the README points at.
+#
+# The README links the folder itself and not one file of it, so the folder
+# has to be inside the archive -- and the rows the README quotes live in it.
+benchmark_dir="benchmark"
+if [ ! -d "$repo/$benchmark_dir" ]; then
+    echo "the release carries $benchmark_dir/ and this tree does not have it: the archive would not" >&2
+    echo "  the README points at it, and an archive without it is a README with a hole in it" >&2
+    exit 1
+fi
+cp -R "$repo/$benchmark_dir" "$stage/"
+
+# Every relative link in every document that travels resolves inside the stage.
+#
+# The README and the manual are what the reader has, and they point at their
+# neighbours by relative paths: the picture, the manual, the benchmark
+# folder, the page of the release. A link that does not resolve inside the
+# archive is a link that works on the forge and nowhere else -- and the
+# reader of the archive is the one who cannot follow it.
+#
+# Every document in the stage is checked, and not only the README and the
+# manual: the benchmark folder travels too, and its own documents point at
+# each other. The order is the ordinal one, so the two twins read the same
+# document first and say the same thing about it.
+#
+# The links are read the way the reader reads them: the text between the
+# parentheses. The absolute ones (http:, https:, mailto:) are the reader's
+# own business, and the pure anchors (#...) stay inside the document.
+for doc_path in $(cd "$stage" && find . -type f -name '*.md' | sed 's|^\./||' | LC_ALL=C sort); do
+    # A relative link is resolved against the folder of the document that
+    # carries it, and not against the root of the archive: a link in
+    # benchmark/README.md to baseline-names.md is the file beside it.
+    doc_dir=$(dirname "$doc_path")
+    [ "$doc_dir" = "." ] && doc_dir=""
+    links=$(grep -o ']([^)]*)' "$stage/$doc_path" | sed -e 's/^](//' -e 's/)$//')
+    while IFS= read -r link; do
+        [ -n "$link" ] || continue
+        case "$link" in
+            \#*) continue ;;
+            //*) continue ;;
+        esac
+        # A scheme means a URL and not a path: http:, https:, mailto:.
+        if printf '%s' "$link" | grep -q '^[A-Za-z][A-Za-z0-9+.-]*:'; then
+            continue
+        fi
+        # The path: what is before the anchor, and what is before the title.
+        path=${link%%#*}
+        if [ "${path#<}" != "$path" ]; then
+            path=${path#<}
+            path=${path%%>*}
+        else
+            path=${path%% *}
+        fi
+        # The trailing slash is how the README spells the folder, and not part
+        # of the folder's name: the folder is looked up by its name.
+        check=$(printf '%s' "$path" | sed 's:/*$::')
+        [ -n "$check" ] || continue
+        if [ -n "$doc_dir" ]; then
+            target="$doc_dir/$check"
+        else
+            target="$check"
+        fi
+        if [ ! -e "$stage/$target" ]; then
+            echo "the $doc_path points at $link and the archive does not carry it: the link is broken exactly where the reader is offline" >&2
+            exit 1
+        fi
+    done <<< "$links"
+done
+
 archive_name="rgy-v$version-$asset.tar.gz"
 archive="$out/$archive_name"
 files="searchctl searchd rgy-autostart rgxy rgy README.md MANUAL.md FORMATS.md COPYING NOTICE LICENSE-APACHE LICENSE-MIT LICENSE-MIT-FSEARCH"
 files="$files $media"
+files="$files benchmark $release_page"
+
+# Every member of the list is in the stage, or the archive is packed
+# without it -- and tar's complaint is not a sentence the reader can act on.
+for member in $files; do
+    if [ ! -e "$stage/$member" ]; then
+        echo "the archive carries $member and the stage does not have it: the archive would not" >&2
+        echo "  carry what this build promised" >&2
+        exit 1
+    fi
+done
+
 if ! tar -czf "$archive" -C "$stage" $files; then
     echo "the archive was not packed: tar failed, and a release without its archive is no release" >&2
     exit 1
@@ -522,6 +618,15 @@ for doc in $documents; do
 done
 for media_file in $media; do
     printf '%s  %s\n' "$(rgy_sha256 "$repo/$media_file")" "$media_file" >> "$docs_tmp"
+done
+# The page of the release and the benchmark folder travel with the archive,
+# so the record names them too: a record that lists only the documents is a
+# record of a part of the archive, and the publish step compares the record
+# with the tree -- so a stale page, or a benchmark row of an older run,
+# would pass a check that is about the whole.
+printf '%s  %s\n' "$(rgy_sha256 "$repo/$release_page")" "$release_page" >> "$docs_tmp"
+for bench_file in $(cd "$repo/$benchmark_dir" && find . -type f | sed 's|^\./||'); do
+    printf '%s  %s\n' "$(rgy_sha256 "$repo/$benchmark_dir/$bench_file")" "$benchmark_dir/$bench_file" >> "$docs_tmp"
 done
 # The ordinal order, so the two machines write the same bytes.
 LC_ALL=C sort -k2 "$docs_tmp" > "$docs_file"

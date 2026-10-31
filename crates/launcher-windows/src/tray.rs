@@ -164,10 +164,16 @@ fn on_the_mark(
 /// The square root of two, in a crate with no `std` to ask.
 const SQRT_2: f32 = core::f32::consts::SQRT_2;
 
-/// The mask's rows are padded to four bytes, the way the platform reads
-/// them.
+/// The mask's rows are padded to a word, the way the platform reads them.
+///
+/// The mask is given to `CreateBitmap`, which makes a device-dependent
+/// bitmap: a one-bit device-dependent picture pads its rows to a word — two
+/// bytes — and not to the four bytes a device-independent one uses. The tree
+/// wrote four-byte rows and the platform read the tree's row *n* as its own
+/// row *2n*, so the icon's mask was garbage at every size where the two
+/// paddings disagree: sixteen pixels, and thirty-six, forty and forty-eight.
 fn mask_stride(size: usize) -> usize {
-    size.div_ceil(32) * 4
+    size.div_ceil(16) * 2
 }
 
 /// Set one bit of the mask: a transparent pixel.
@@ -436,8 +442,20 @@ fn colour_info(size: i32) -> BitmapInfo {
 }
 
 /// Write the tip the shell shows when the pointer rests on the icon.
+///
+/// The buffer is cleared first: the tip is written over the one that was
+/// there before — the tree writes the English tip when the icon is made and
+/// the language's own over it — and a shorter tip would otherwise keep the
+/// tail of the longer one, and the shell would show the user two sentences
+/// at once.
+///
+/// The last slot is the terminator's: the shell reads the tip as a string,
+/// and a tip that filled the whole field would have no terminator of its
+/// own.
 fn write_tip(tip: &mut [u16; 128], text: &str) {
-    for (slot, ch) in tip.iter_mut().zip(text.encode_utf16()) {
+    tip.fill(0);
+    let last = tip.len() - 1;
+    for (slot, ch) in tip[..last].iter_mut().zip(text.encode_utf16()) {
         *slot = ch;
     }
 }
@@ -626,22 +644,72 @@ mod tests {
 
     /// The mask says where the shell draws nothing.
     ///
-    /// A mask that is empty makes the icon a rectangle of the taskbar's
-    /// own colour, and a mask that is full makes it invisible.
+    /// A mask that is empty makes the icon a rectangle of the taskbar's own
+    /// colour, and a mask that is full makes it invisible. The bits are what
+    /// the platform reads, so the bits are what is counted: the padding of a
+    /// row is not a pixel of the mask, and a count of bytes would have
+    /// called a mask that hides everything a mask that hides most of it.
     #[test]
     fn the_mask_covers_what_the_picture_does_not() {
         let pixels = magnifier(16);
-        let set = pixels.mask.iter().filter(|b| **b != 0).count();
+        let set: usize = pixels.mask.iter().map(|b| b.count_ones() as usize).sum();
+        let whole = (pixels.size * pixels.size) as usize;
         assert!(set > 0, "the mask says nothing");
-        assert!(set < pixels.mask.len(), "the mask hides everything");
+        assert!(set < whole, "the mask hides everything");
     }
 
     /// The rows of the mask are padded the way the platform reads them.
+    ///
+    /// The mask is a device-dependent bitmap, and a one-bit device-dependent
+    /// picture pads its rows to a word — two bytes — and not to the four
+    /// bytes a device-independent one uses. These are the platform's
+    /// numbers: sixteen pixels is two bytes a row, twenty is four, and
+    /// thirty-two is four.
     #[test]
-    fn the_mask_rows_are_padded() {
-        assert_eq!(mask_stride(16), 4);
+    fn the_mask_rows_are_padded_to_a_word() {
+        assert_eq!(mask_stride(16), 2);
+        assert_eq!(mask_stride(20), 4);
         assert_eq!(mask_stride(32), 4);
-        assert_eq!(mask_stride(33), 8);
+    }
+
+    /// A shorter tip leaves no tail of the longer one.
+    ///
+    /// The tip is written over the one that was there before, and the buffer
+    /// is the shell's: the tree writes the English tip when the icon is made
+    /// and the language's own over it, and a tip that kept the tail of the
+    /// last one would show the user two sentences at once.
+    #[test]
+    fn a_shorter_tip_leaves_no_tail() {
+        let mut tip = [0u16; 128];
+        write_tip(&mut tip, "rgxy — search files, apps or commands");
+        write_tip(&mut tip, "rgxy — buscar arquivos");
+
+        let said: alloc::vec::Vec<u16> = "rgxy — buscar arquivos".encode_utf16().collect();
+        for (slot, ch) in tip.iter().zip(said.iter()) {
+            assert_eq!(*slot, *ch, "the tip does not say what it should");
+        }
+        // Everything past the text is the terminator's: the shell reads the
+        // tip as a string, and a tail of the last one would be part of it.
+        for slot in tip.iter().skip(said.len()) {
+            assert_eq!(*slot, 0, "the tip keeps the tail of the last one");
+        }
+    }
+
+    /// A tip that fills the buffer still ends where the buffer ends.
+    ///
+    /// The field is a hundred and twenty-eight units and the shell reads the
+    /// tip as a string: a tip that filled the whole field would have no
+    /// terminator of its own, and the shell would read past the field for
+    /// the rest of it.
+    #[test]
+    fn a_tip_that_fills_the_buffer_is_terminated() {
+        let mut tip = [0u16; 128];
+        write_tip(&mut tip, &"x".repeat(200));
+
+        assert_eq!(tip[127], 0, "the tip has no terminator of its own");
+        for slot in tip.iter().take(127) {
+            assert_eq!(*slot, u16::from(b'x'), "the tip is not what was written");
+        }
     }
 
     /// The icon is drawn at the size the shell asked for.

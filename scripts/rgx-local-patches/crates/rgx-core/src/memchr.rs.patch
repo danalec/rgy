@@ -1,6 +1,6 @@
 --- a/crates/rgx-core/src/memchr.rs
 +++ b/crates/rgx-core/src/memchr.rs
-@@ -24,28 +24,28 @@
+@@ -24,27 +24,27 @@
  //! The two configurations now take the *same* path. There is no
  //! `feature = "std"` anywhere in the dispatch: a build with `std` and a
  //! build without it ask the same probe and reach the same kernel, so the
@@ -37,9 +37,8 @@
  //! `memmem::find_iter` yields the *start* of each match, and the matches
  //! do not overlap. A caller that wants the overlapping ones has to step
  //! one byte on, which is what `crate::regex`'s `sub_offsets` does.
- 
--pub use ::memchr::*;
 -
+-pub use ::memchr::*;
+ 
  pub mod memmem;
  
- mod dispatch;

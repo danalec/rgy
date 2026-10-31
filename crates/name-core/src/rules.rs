@@ -27,6 +27,11 @@
 //! who the rule is for: `d` is the folder whose name matched, `f` is the
 //! files under it. A rule with neither flag applies to both.
 //!
+//! A line that does not parse is skipped and reported, not fatal: a file
+//! with one broken line is a file with one rule missing, not a file that
+//! says nothing. The rules that parsed are the rules, and the broken
+//! lines are said to the user (see [`Rules::warnings`]).
+//!
 //! The level of a record is the level of the **closest** rule that matches
 //! a name in its chain and applies to it: its own name first, then its
 //! parent's, and so on. A record no rule reaches is `Normal`.
@@ -73,23 +78,43 @@ impl Rule {
 #[derive(Default)]
 pub struct Rules {
     rules: Vec<Rule>,
+    /// The lines that did not parse, and why.
+    ///
+    /// A rule the user wrote and rgy silently dropped is a rule that does
+    /// not work, so a line that does not parse is reported and the lines
+    /// that do are the rules.
+    warnings: Vec<String>,
 }
 
 impl Rules {
     /// The rules in a file's text.
     ///
-    /// A line that does not parse is an error, not a warning: a rule the
-    /// user wrote and rgy silently dropped is a rule that does not work.
-    pub fn parse(text: &str) -> Result<Rules, String> {
+    /// A line that does not parse is skipped and reported, not fatal: a
+    /// file with one broken line is a file with one rule missing, not a
+    /// file that says nothing. The rules that parsed are the rules, and
+    /// the broken lines are said to the user (see [`Rules::warnings`]).
+    pub fn parse(text: &str) -> Rules {
         let mut rules = Vec::new();
+        let mut warnings = Vec::new();
         for (n, line) in text.lines().enumerate() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
-            rules.push(parse_rule(line).map_err(|e| format!("line {}: {e}", n + 1))?);
+            match parse_rule(line) {
+                Ok(rule) => rules.push(rule),
+                Err(e) => warnings.push(format!("line {}: {e}", n + 1)),
+            }
         }
-        Ok(Rules { rules })
+        Rules { rules, warnings }
+    }
+
+    /// The lines of the file that did not parse, and why.
+    ///
+    /// The caller says them to the user: a rule that does not work is the
+    /// user's to fix, and only they can.
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
     }
 
     /// The rules in a file, read from the disk.
@@ -98,26 +123,36 @@ impl Rules {
     #[cfg(feature = "std")]
     pub fn read(path: &std::path::Path) -> Result<Rules, String> {
         let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        Rules::parse(&text)
+        Ok(Rules::parse(&text))
     }
 
     /// The rules beside an index: `<index>.rules`.
     ///
     /// No file is not an error -- the defaults are the rules, and a daemon
-    /// that never wrote a file still has them. A file that does not parse is
-    /// an error: the user wrote it, and rgy would otherwise ignore it
+    /// that never wrote a file still has them. A file that cannot be read
+    /// is an error: the user wrote it, and rgy would otherwise ignore it
     /// without saying so. The defaults stand in for it, and the reason
     /// comes back with them.
     ///
-    /// The `std` path: reading the disk is what this is for.
+    /// A file that reads but has a line that does not parse is not an
+    /// error: the rules that parsed are the rules, and the broken line
+    /// comes back as the reason to say.
     #[cfg(feature = "std")]
     pub fn beside(index_path: &std::path::Path) -> (Rules, Option<String>) {
         let path = index_path.with_extension("rules");
         match Rules::read(&path) {
-            Ok(rules) => (rules, None),
+            Ok(rules) => {
+                let said = rules.warnings.join("; ");
+                let why = (!said.is_empty()).then(|| format!("a rules file line does not parse: {said}; the parsed rules are in use"));
+                (rules, why)
+            }
             Err(why) => {
                 let missing = !path.exists();
-                (Rules::defaults(), (!missing).then_some(why))
+                // The message says what is in use, because the caller
+                // cannot tell the two cases apart: a file that could not
+                // be read leaves the defaults in place, and a file that
+                // read with a broken line leaves the parsed rules.
+                (Rules::defaults(), (!missing).then(|| format!("{why} -- the default rules are in use")))
             }
         }
     }
@@ -177,6 +212,7 @@ impl Rules {
                 rule(Tier::Low, r"(?i)\.(framework|bundle|plugin|appex|kext|xpc|lproj|xcassets|photoslibrary|musiclibrary|tvlibrary|imovielibrary|dSYM|xcarchive|sdk|platform)$").folders(true).files(true),
                 rule(Tier::Low, r"(?i)\.app$").folders(true).files(true),
             ],
+            warnings: Vec::new(),
         }
     }
 }
@@ -260,7 +296,7 @@ mod tests {
     use super::*;
 
     fn level(text: &str, name: &str, for_files: bool) -> Option<Tier> {
-        Rules::parse(text).expect("the rules parse").level_of(name.as_bytes(), for_files)
+        Rules::parse(text).level_of(name.as_bytes(), for_files)
     }
 
     #[test]
@@ -290,12 +326,27 @@ mod tests {
         assert_eq!(level(text, "build", false), Some(Tier::High), "the last rule written wins");
     }
 
+    /// A line that does not parse is reported, and the other lines stay.
+    ///
+    /// The file is a list of rules, and one broken line is one rule
+    /// missing — not a file that says nothing. Dropping the whole file
+    /// turned every rule the user wrote off, and the search answered a
+    /// different question than the one in the file.
     #[test]
-    fn a_line_that_does_not_parse_is_an_error() {
-        assert!(Rules::parse("bogus ^x$").is_err(), "an unknown level");
-        assert!(Rules::parse("low [unclosed").is_err(), "an uncompilable pattern");
-        assert!(Rules::parse("low ^x$ q").is_err(), "an unknown flag");
-        assert!(Rules::parse("low").is_err(), "no pattern");
+    fn a_line_that_does_not_parse_is_reported_and_the_rest_stay() {
+        let rules = Rules::parse("low ^node_modules$\nbogus ^x$\nlow [unclosed\nlow ^x$ q\nlow");
+        // The rule that parsed is the rule.
+        assert_eq!(rules.level_of(b"node_modules", false), Some(Tier::Low), "the good rule stands");
+        // And each broken line is said, with the line it is on.
+        let said = rules.warnings();
+        assert_eq!(said.len(), 4, "every broken line is said: {said:?}");
+        assert!(said[0].starts_with("line 2:"), "the line is named: {}", said[0]);
+        assert!(said[0].contains("unknown level"), "and why: {}", said[0]);
+        assert!(said[1].contains("line 3:"), "the line is named: {}", said[1]);
+        assert!(said[2].contains("line 4:"), "the line is named: {}", said[2]);
+        assert!(said[3].contains("line 5:"), "the line is named: {}", said[3]);
+        // A file that parses says nothing.
+        assert!(Rules::parse("low ^node_modules$").warnings().is_empty(), "a good file is quiet");
     }
 
     /// The shape never rejects a name the engine accepts.

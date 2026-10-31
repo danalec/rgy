@@ -1969,22 +1969,32 @@ impl Content {
     }
 
     pub fn search(&self, g: &Grep, filt: &Query) -> GrepResult {
+        self.search_covered(g, filt, None)
+    }
+
+    fn search_covered(&self, g: &Grep, filt: &Query, covered: Option<&std::collections::HashSet<Vec<u8>>>) -> GrepResult {
         let Found { mut per, total, dense } = self.candidates(&g.plan(), filt);
         // A candidate whose content's bloom filter lacks one of the pattern's
-        // grams can't match: skip it without opening the file.
+        // grams can't match: skip it without opening the file. When `plan`
+        // already split the scan into `covered` and `bare`, a doc outside
+        // `covered` belongs to `bare` and is skipped here too.
         let probes = g.probes();
         let path = |&(_, si, d): &Ranked| {
             let s = &self.segs[si as usize];
+            let p = s.path(d);
+            if covered.is_some_and(|cov| !cov.contains(p)) {
+                return None;
+            }
             let (a, c) = self.content_of(s.doc_gid()[d as usize])?;
-            self.segs[a].may_contain(c, &probes).then(|| s.path(d))
+            self.segs[a].may_contain(c, &probes).then_some(p)
         };
         // Most searches are done within the best few hundred candidates:
         // rank those first, and the rest only if reading gets that far.
         let t = std::time::Instant::now();
         let best = take_best(&mut per);
-        let (mut r, done) =
+        let (mut r, mut checked) =
             verify_from(g, best.len(), filt.limit, READERS, t, |i| path(&best[i]), |p| match_file(g, p, &placeholder::attributes, None));
-        if r.files.len() < filt.limit && done == best.len() && best.len() < total {
+        if r.files.len() < filt.limit && checked == best.len() && best.len() < total {
             // Then the next best few thousand, and the others only if
             // reading gets past those too.
             let mut rest: Vec<Ranked> = par_claim(&per, per.len().min(8), |c| c.rest(&self.segs, &dense)).concat();
@@ -2010,17 +2020,26 @@ impl Content {
                     |i| path(&rest[at + i]),
                     |p| match_file(g, p, &placeholder::attributes, None),
                 );
+                checked += done;
                 r.files.extend(more.files);
                 r.read += more.read;
                 r.skipped.extend(more.skipped);
                 r.complete = more.complete;
+                if r.error.is_none() {
+                    r.error = more.error;
+                }
                 if r.files.len() >= filt.limit || done < end - at {
                     break;
                 }
                 at = end;
             }
         }
-        r.candidates = total;
+        r.complete = checked == total || r.files.len() >= filt.limit;
+        // `checked - r.read` candidates were ruled out in memory without
+        // opening a file; subtracting them leaves `r.candidates - r.read`
+        // equal to `total - checked`, the candidates a spent budget never
+        // reached.
+        r.candidates = total.saturating_sub(checked.saturating_sub(r.read));
         r
     }
 
@@ -3820,7 +3839,9 @@ pub struct Scope<'a> {
 /// a file has already said what the file says.
 pub fn answer_with(g: &Grep, q: &Query, scope: Scope<'_>, limit: usize) -> GrepResult {
     let Scope { root, live, home, index, adapter } = scope;
-    let (covered, bare, mut r) = plan(g, q, root, live, home, index);
+    let mut q = q.clone();
+    q.limit = limit;
+    let (covered, bare, mut r) = plan(g, &q, root, live, home, index);
     // `search`'s files are the covered ones that matched (its grams ruled
     // out the others); keep only those this scan's universe named, so an
     // index doc outside it never leaks in. Then read the rest.
@@ -3831,8 +3852,11 @@ pub fn answer_with(g: &Grep, q: &Query, scope: Scope<'_>, limit: usize) -> GrepR
     r.files.extend(rest.files);
     r.read += rest.read;
     r.skipped.extend(rest.skipped);
+    if r.error.is_none() {
+        r.error = rest.error;
+    }
     r.candidates = covered.len() + bare.len();
-    r.complete = r.files.len() < limit && rest.complete;
+    r.complete = r.files.len() < limit && r.complete && rest.complete && r.skipped.is_empty();
     // What was not read, and why: the CLI does not carry the list itself,
     // so the note is where the user sees it.
     note_skipped(&r.skipped);
@@ -3856,7 +3880,7 @@ pub fn plan(
 ) -> (std::collections::HashSet<Vec<u8>>, Vec<Vec<u8>>, GrepResult) {
     let paths = scan_paths(root, live, q.clone_for_scan());
     let Some(index) = index else {
-        let r = GrepResult { candidates: paths.len(), ..Default::default() };
+        let r = GrepResult { candidates: paths.len(), complete: true, ..Default::default() };
         return (Default::default(), paths, r);
     };
     let mut covered = Vec::new();
@@ -3869,7 +3893,9 @@ pub fn plan(
         }
     }
     let covered: std::collections::HashSet<Vec<u8>> = covered.into_iter().collect();
-    let r = index.search(g, q);
+    let mut r = index.search_covered(g, q, Some(&covered));
+    r.files.retain(|f| covered.contains(&f.path));
+    r.skipped.retain(|s| covered.contains(&s.path));
     (covered, bare, r)
 }
 

@@ -1,5 +1,22 @@
 --- a/crates/rgx-core/Cargo.toml
 +++ b/crates/rgx-core/Cargo.toml
+@@ -1,6 +1,6 @@
+ [package]
+ name = "rgx-core"
+-version = "0.1.1"
++version = "0.1.2"
+ edition = "2021"
+ authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
+ description = "rgx's engine: the adapter contract, the byte-search kernels, the JSON arena and the pack store -- no_std + alloc, with an opt-in std feature"
+@@ -11,7 +11,7 @@
+ readme = "README.md"
+ keywords = ["search", "regex", "engine", "ripgrep"]
+ categories = ["text-processing", "command-line-utilities"]
+-repository = "https://github.com/danalec/rgx"
++repository = "https://github.com/danalec/rgy"
+ # What the published crate carries. The test corpus is the repository's:
+ # the fixtures under `testdata/` are what this crate's own tests read, and
+ # a user of the crate has no use for them. The examples are one-off
 @@ -45,7 +45,7 @@
  # flag, a core atomic, stays; and the JSON float parser becomes this crate's
  # own, since `f64::from_str` is std-only.

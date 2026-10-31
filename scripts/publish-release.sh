@@ -300,10 +300,16 @@ if [ "$manifests_only" -eq 0 ] && git rev-parse --verify --quiet refs/heads/main
 fi
 
 # --- 2c. the release body ----------------------------------------------------
-# The body of the release is a file in the tree: docs/release-0.1.2.md. It is
-# the page the README and the manual promise, and both publishers read it, so
-# the release says what the tree says and the page that is published is the
+# The body of the release is a file in the tree: docs/release-<version>.md. It
+# is the page the README and the manual promise, and both publishers read it,
+# so the release says what the tree says and the page that is published is the
 # page the repository carries.
+#
+# The name is the version's, not a constant: a page named for one release and
+# read for another is a page that says one thing and is published as another,
+# and the drift is silent -- the publish reads what is there and does not
+# complain. The version is the one the tree carries (the manifests), so the
+# page that names the version is the page of the release being cut.
 #
 # Two markers in the page are for the scripts, and they are the only part of
 # it that is not the page:
@@ -324,7 +330,7 @@ fi
 # The page is read as UTF-8 and normalized: the carriage returns go and the
 # trailing newline goes with them. A checkout that rewrote the line endings
 # must not change what the release says, and a carriage return is not JSON.
-page="docs/release-0.1.2.md"
+page="docs/release-$version.md"
 if [ ! -f "$page" ]; then
     echo "the release page is not there: $page" >&2
     exit 1

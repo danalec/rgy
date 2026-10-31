@@ -8,7 +8,7 @@
  use std::io;
  use std::os::unix::io::RawFd;
  use std::ptr;
-@@ -28,7 +29,7 @@ impl Drop for MmapInner {
+@@ -28,7 +29,7 @@
      fn drop(&mut self) {
          let (aligned_ptr, aligned_len) = self.unaligned_to_aligned();
          unsafe {
@@ -17,7 +17,7 @@
          }
      }
  }
-@@ -46,8 +47,8 @@ impl MmapInner {
+@@ -46,8 +47,8 @@
  
      fn new_inner(
          len: usize,
@@ -28,7 +28,7 @@
          fd: RawFd,
          offset: u64,
      ) -> io::Result<MmapInner> {
-@@ -62,16 +63,16 @@ impl MmapInner {
+@@ -62,16 +63,16 @@
              .ok_or_else(|| to_io_error(Error::LengthOverflow))?;
          let map_len = map_len.max(1);
          let raw = unsafe {
@@ -41,15 +41,17 @@
                  flags,
                  fd,
 -                aligned_offset as libc::off_t,
-+                aligned_offset as i64,
-             )
-         };
+-            )
+-        };
 -        if raw == libc::MAP_FAILED {
++                aligned_offset as i64,
++            )
++        };
 +        if raw == super::unix::MAP_FAILED {
              return Err(io::Error::last_os_error());
          }
          let ptr = unsafe { (raw as *mut u8).add(alignment as usize) };
-@@ -79,14 +80,20 @@ impl MmapInner {
+@@ -79,14 +80,20 @@
      }
  
      pub fn map(len: usize, fd: RawFd, offset: u64, _populate: bool) -> io::Result<MmapInner> {
@@ -73,7 +75,7 @@
              fd,
              offset,
          )
-@@ -95,8 +102,8 @@ impl MmapInner {
+@@ -95,8 +102,8 @@
      pub fn map_mut(len: usize, fd: RawFd, offset: u64, _populate: bool) -> io::Result<MmapInner> {
          MmapInner::new_inner(
              len,
@@ -84,7 +86,7 @@
              fd,
              offset,
          )
-@@ -105,8 +112,8 @@ impl MmapInner {
+@@ -105,8 +112,8 @@
      pub fn map_copy(len: usize, fd: RawFd, offset: u64, _populate: bool) -> io::Result<MmapInner> {
          MmapInner::new_inner(
              len,
@@ -95,7 +97,7 @@
              fd,
              offset,
          )
-@@ -118,7 +125,13 @@ impl MmapInner {
+@@ -118,7 +125,13 @@
          offset: u64,
          _populate: bool,
      ) -> io::Result<MmapInner> {
@@ -110,7 +112,7 @@
      }
  
      pub fn map_anon(len: usize, _stack: bool, _populate: bool) -> io::Result<MmapInner> {
-@@ -127,16 +140,16 @@ impl MmapInner {
+@@ -127,16 +140,16 @@
          }
          let map_len = len.max(1);
          let raw = unsafe {
@@ -132,7 +134,7 @@
              return Err(io::Error::last_os_error());
          }
          Ok(MmapInner {
-@@ -147,10 +160,10 @@ impl MmapInner {
+@@ -147,10 +160,10 @@
  
      pub fn flush(&self, offset: usize, len: usize) -> io::Result<()> {
          let r = unsafe {
@@ -147,7 +149,7 @@
              )
          };
          if r == 0 {
-@@ -162,10 +175,10 @@ impl MmapInner {
+@@ -162,10 +175,10 @@
  
      pub fn flush_async(&self, offset: usize, len: usize) -> io::Result<()> {
          let r = unsafe {
@@ -162,7 +164,7 @@
              )
          };
          if r == 0 {
-@@ -178,10 +191,10 @@ impl MmapInner {
+@@ -178,10 +191,10 @@
      pub fn make_read_only(&mut self) -> io::Result<()> {
          let (ptr, len) = self.unaligned_to_aligned();
          let r = unsafe {
@@ -177,7 +179,7 @@
              )
          };
          if r == 0 {
-@@ -194,10 +207,10 @@ impl MmapInner {
+@@ -194,10 +207,10 @@
      pub fn make_exec(&mut self) -> io::Result<()> {
          let (ptr, len) = self.unaligned_to_aligned();
          let r = unsafe {
@@ -192,7 +194,7 @@
              )
          };
          if r == 0 {
-@@ -210,10 +223,10 @@ impl MmapInner {
+@@ -210,25 +223,25 @@
      pub fn make_mut(&mut self) -> io::Result<()> {
          let (ptr, len) = self.unaligned_to_aligned();
          let r = unsafe {
@@ -200,18 +202,29 @@
 -                ptr as *mut libc::c_void,
 -                len as libc::size_t,
 -                libc::PROT_READ | libc::PROT_WRITE,
+-            )
+-        };
+-        if r == 0 {
+-            Ok(())
+-        } else {
+-            Err(io::Error::last_os_error())
+-        }
+-    }
+-
+-    pub fn advise(&self, advice: libc::c_int, offset: usize, len: usize) -> io::Result<()> {
 +            super::unix::mprotect(
 +                ptr as *mut core::ffi::c_void,
 +                len as usize,
 +                super::unix::PROT_READ | super::unix::PROT_WRITE,
-             )
-         };
-         if r == 0 {
-@@ -223,12 +236,12 @@ impl MmapInner {
-         }
-     }
- 
--    pub fn advise(&self, advice: libc::c_int, offset: usize, len: usize) -> io::Result<()> {
++            )
++        };
++        if r == 0 {
++            Ok(())
++        } else {
++            Err(io::Error::last_os_error())
++        }
++    }
++
 +    pub fn advise(&self, advice: c_int, offset: usize, len: usize) -> io::Result<()> {
          super::refuse_unavailable(advice)?;
          let r = unsafe {
@@ -224,7 +237,7 @@
                  advice,
              )
          };
-@@ -241,7 +254,7 @@ impl MmapInner {
+@@ -241,7 +254,7 @@
  
      pub fn lock(&self) -> io::Result<()> {
          let (_ptr, len) = self.unaligned_to_aligned();
@@ -233,7 +246,7 @@
          if r == 0 {
              Ok(())
          } else {
-@@ -251,7 +264,7 @@ impl MmapInner {
+@@ -251,7 +264,7 @@
  
      pub fn unlock(&self) -> io::Result<()> {
          let (_ptr, len) = self.unaligned_to_aligned();

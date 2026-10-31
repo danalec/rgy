@@ -1,6 +1,6 @@
 --- a/crates/rgx-core/src/tv/plan.rs
 +++ b/crates/rgx-core/src/tv/plan.rs
-@@ -347,8 +347,25 @@ mod tests {
+@@ -347,8 +347,25 @@
          f
      }
  
@@ -26,7 +26,7 @@
          let at = u64::from(MAX_EXTENT_GAP);
          let under = u64::from(MAX_EXTENT_GAP - 1);
  
-@@ -374,6 +391,7 @@ mod tests {
+@@ -374,6 +391,7 @@
  
      #[test]
      fn a_chain_of_small_gaps_collapses_into_one_unit() {
@@ -34,7 +34,7 @@
          // f0 [0,100), f1 [110,210), f2 [220,320): two 10-byte holes.
          let locs = vec![loc(0, 0, 100), loc(1, 110, 100), loc(2, 220, 100)];
          let units = cut_units(&[0, 1, 2], &[0, 3], &locs);
-@@ -383,6 +401,7 @@ mod tests {
+@@ -383,6 +401,7 @@
  
      #[test]
      fn every_file_sits_whole_inside_exactly_one_unit() {
@@ -42,7 +42,7 @@
          let locs = vec![
              loc(0, 0, 100),
              loc(1, 200, 50),
-@@ -418,6 +437,7 @@ mod tests {
+@@ -418,6 +437,7 @@
  
      #[test]
      fn the_pre_plan_filter_leaves_holes_the_cut_never_reads() {
@@ -50,7 +50,7 @@
          let q = query_sig512("needle", false).expect("a literal query has a signature");
          let a = with_sig(loc(0, 0, 100), b"needle at the start");
          let b = with_sig(loc(1, 100, 70_000), b"nothing to see here at all");
-@@ -446,6 +466,7 @@ mod tests {
+@@ -446,6 +466,7 @@
  
      #[test]
      fn a_small_hole_is_read_rather_than_issued_around() {
@@ -58,7 +58,7 @@
          let q = query_sig512("needle", false).expect("a literal query has a signature");
          let a = with_sig(loc(0, 0, 100), b"needle at the start");
          let b = with_sig(loc(1, 100, 1_000), b"nothing to see here at all");
-@@ -465,6 +486,7 @@ mod tests {
+@@ -465,6 +486,7 @@
  
      #[test]
      fn a_rollup_under_a_foreign_fingerprint_is_never_rejected() {
@@ -66,7 +66,7 @@
          let q = query_sig512("needle", false).expect("a literal query has a signature");
          let plain = with_sig(loc(0, 0, 100), b"nothing to see here at all");
          let rollup = with_sig(
-@@ -490,7 +512,7 @@ mod tests {
+@@ -490,7 +512,7 @@
  
      #[test]
      fn the_ablation_rejects_nothing() {

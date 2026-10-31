@@ -22,7 +22,7 @@
  
  use core::fmt;
  use core::iter::Rev;
-@@ -29,7 +36,7 @@ pub fn memchr(needle: u8, haystack: &[u8]) -> Option<usize> {
+@@ -29,7 +36,7 @@
              return unsafe { x86_64::one_find(needle, haystack) };
          }
      }
@@ -31,7 +31,7 @@
  }
  
  /// Search for the last occurrence of `needle` in `haystack`.
-@@ -44,7 +51,7 @@ pub fn memrchr(needle: u8, haystack: &[u8]) -> Option<usize> {
+@@ -44,7 +51,7 @@
              return unsafe { x86_64::one_rfind(needle, haystack) };
          }
      }
@@ -40,7 +40,7 @@
  }
  
  /// Search for the first occurrence of either `needle1` or `needle2`.
-@@ -59,7 +66,7 @@ pub fn memchr2(needle1: u8, needle2: u8, haystack: &[u8]) -> Option<usize> {
+@@ -59,7 +66,7 @@
              return unsafe { x86_64::two_find(needle1, needle2, haystack) };
          }
      }
@@ -49,7 +49,7 @@
  }
  
  /// Search for the last occurrence of either `needle1` or `needle2`.
-@@ -74,7 +81,7 @@ pub fn memrchr2(needle1: u8, needle2: u8, haystack: &[u8]) -> Option<usize> {
+@@ -74,7 +81,7 @@
              return unsafe { x86_64::two_rfind(needle1, needle2, haystack) };
          }
      }
@@ -58,7 +58,7 @@
  }
  
  /// Search for the first occurrence of any of the three needles.
-@@ -89,7 +96,7 @@ pub fn memchr3(needle1: u8, needle2: u8, needle3: u8, haystack: &[u8]) -> Option
+@@ -89,7 +96,7 @@
              return unsafe { x86_64::three_find(needle1, needle2, needle3, haystack) };
          }
      }
@@ -67,7 +67,7 @@
  }
  
  /// Search for the last occurrence of any of the three needles.
-@@ -104,7 +111,7 @@ pub fn memrchr3(needle1: u8, needle2: u8, needle3: u8, haystack: &[u8]) -> Optio
+@@ -104,7 +111,7 @@
              return unsafe { x86_64::three_rfind(needle1, needle2, needle3, haystack) };
          }
      }
@@ -76,7 +76,7 @@
  }
  
  /// Count the occurrences of `needle` in `haystack`.
-@@ -124,7 +131,7 @@ fn count_one(needle: u8, haystack: &[u8]) -> usize {
+@@ -124,7 +131,7 @@
              return unsafe { x86_64::one_count(needle, haystack) };
          }
      }
@@ -85,7 +85,7 @@
  }
  
  /// Returns an iterator over all occurrences of the needle in a haystack.
-@@ -171,115 +178,300 @@ pub fn memrchr3_iter<'h>(
+@@ -171,115 +178,300 @@
      Memchr3::new(needle1, needle2, needle3, haystack).rev()
  }
  
@@ -96,14 +96,6 @@
 -/// The upstream crate publishes these behind an `unsafe` constructor whose
 -/// contract is exactly the question [`crate::detect`] answers. The
 -/// `#[target_feature]` on each function is what lets the upstream searcher
--/// inline into it: without it, the AVX2 code would be a separate call per
--/// search, and the whole point of the exercise is that it is not.
--#[cfg(target_arch = "x86_64")]
--mod x86_64 {
--    // The leading `::` names the upstream crate, not this crate's own
--    // `memchr` module -- the two are both called `memchr`, and a `use`
--    // path that starts with the bare name would be ambiguous.
--    use ::memchr::arch::x86_64::avx2::memchr::{One, Three, Two};
 +/// **The word is read little-endian whatever the host's byte order is**, so
 +/// the offset the mask reports is an offset in the haystack and not an
 +/// offset in the machine's own representation of it. A scan that read the
@@ -113,17 +105,7 @@
 +mod portable {
 +    /// The number of bytes one word of the scan covers.
 +    const WORD: usize = core::mem::size_of::<usize>();
- 
--    /// # Safety
--    ///
--    /// The caller must have established that this CPU can run the AVX2
--    /// instructions.
--    #[target_feature(enable = "sse2", enable = "avx2")]
--    pub(super) unsafe fn one_find(needle: u8, haystack: &[u8]) -> Option<usize> {
--        // SAFETY: the caller established AVX2, which is the whole of the
--        // unchecked constructor's contract; the searcher does not outlive
--        // this call.
--        One::new_unchecked(needle).find(haystack)
++
 +    /// `0x0101..01`: one in every byte.
 +    const LO: usize = usize::MAX / 255;
 +    /// `0x8080..80`: the high bit of every byte.
@@ -135,19 +117,10 @@
 +    #[inline]
 +    fn splat(b: u8) -> usize {
 +        LO * (b as usize)
-     }
- 
--    /// # Safety
++    }
++
 +    /// The high bit of every byte of `word` that holds `needle`.
-     ///
--    /// The caller must have established that this CPU can run the AVX2
--    /// instructions.
--    #[target_feature(enable = "sse2", enable = "avx2")]
--    pub(super) unsafe fn one_rfind(needle: u8, haystack: &[u8]) -> Option<usize> {
--        // SAFETY: the caller established AVX2, which is the whole of the
--        // unchecked constructor's contract; the searcher does not outlive
--        // this call.
--        One::new_unchecked(needle).rfind(haystack)
++    ///
 +    /// **The test is `(x & 0x7f) + 0x7f`, and not the usual `x - 0x01..01`.**
 +    /// The usual one borrows from the byte above, and a borrow shows up as a
 +    /// false positive in the byte *above* the one that matched: harmless when
@@ -161,39 +134,18 @@
 +        let x = word ^ splat(needle);
 +        let low = (x & LOW7).wrapping_add(LOW7);
 +        !(low | x) & HI
-     }
- 
--    /// # Safety
--    ///
--    /// The caller must have established that this CPU can run the AVX2
--    /// instructions.
--    #[target_feature(enable = "sse2", enable = "avx2")]
--    pub(super) unsafe fn one_count(needle: u8, haystack: &[u8]) -> usize {
--        let one = One::new_unchecked(needle);
--        let start = haystack.as_ptr();
--        // SAFETY: both pointers are derived from the haystack slice, and
--        // their distance is the slice's length, which cannot overflow an
--        // `isize` because a slice's length cannot.
--        one.count_raw(start, start.wrapping_add(haystack.len()))
++    }
++
 +    /// The word at the start of `chunk`, read little-endian.
 +    #[inline]
 +    fn word_le(chunk: &[u8]) -> usize {
 +        let mut buf = [0u8; WORD];
 +        buf.copy_from_slice(chunk);
 +        usize::from_le_bytes(buf)
-     }
- 
--    /// # Safety
++    }
++
 +    /// The scans, one per needle count.
-     ///
--    /// The caller must have established that this CPU can run the AVX2
--    /// instructions.
--    #[target_feature(enable = "sse2", enable = "avx2")]
--    pub(super) unsafe fn two_find(needle1: u8, needle2: u8, haystack: &[u8]) -> Option<usize> {
--        // SAFETY: the caller established AVX2, which is the whole of the
--        // unchecked constructor's contract; the searcher does not outlive
--        // this call.
--        Two::new_unchecked(needle1, needle2).find(haystack)
++    ///
 +    /// The body is the same for all three; only the number of needles
 +    /// differs, and the mask is the union of the needles' masks, so a byte
 +    /// that matches either of two needles is a candidate for both.
@@ -247,25 +199,14 @@
 +                }
 +            )+
 +        };
-     }
- 
--    /// # Safety
--    ///
--    /// The caller must have established that this CPU can run the AVX2
--    /// instructions.
--    #[target_feature(enable = "sse2", enable = "avx2")]
--    pub(super) unsafe fn two_rfind(needle1: u8, needle2: u8, haystack: &[u8]) -> Option<usize> {
--        // SAFETY: the caller established AVX2, which is the whole of the
--        // unchecked constructor's contract; the searcher does not outlive
--        // this call.
--        Two::new_unchecked(needle1, needle2).rfind(haystack)
++    }
++
 +    scans! {
 +        one_find  one_rfind  [needle];
 +        two_find  two_rfind  [needle1, needle2];
 +        three_find three_rfind [needle1, needle2, needle3];
-     }
- 
--    /// # Safety
++    }
++
 +    /// How many bytes of `haystack` hold `needle`.
 +    pub(super) fn count(needle: u8, haystack: &[u8]) -> usize {
 +        let len = haystack.len();
@@ -295,10 +236,39 @@
 +/// match.
 +///
 +/// The `#[target_feature]` on each function is what lets the vector code
-+/// inline into it: without it, the AVX2 code would be a separate call per
-+/// search, and the whole point of the exercise is that it is not.
-+#[cfg(target_arch = "x86_64")]
-+mod x86_64 {
+ /// inline into it: without it, the AVX2 code would be a separate call per
+ /// search, and the whole point of the exercise is that it is not.
+ #[cfg(target_arch = "x86_64")]
+ mod x86_64 {
+-    // The leading `::` names the upstream crate, not this crate's own
+-    // `memchr` module -- the two are both called `memchr`, and a `use`
+-    // path that starts with the bare name would be ambiguous.
+-    use ::memchr::arch::x86_64::avx2::memchr::{One, Three, Two};
+-
+-    /// # Safety
+-    ///
+-    /// The caller must have established that this CPU can run the AVX2
+-    /// instructions.
+-    #[target_feature(enable = "sse2", enable = "avx2")]
+-    pub(super) unsafe fn one_find(needle: u8, haystack: &[u8]) -> Option<usize> {
+-        // SAFETY: the caller established AVX2, which is the whole of the
+-        // unchecked constructor's contract; the searcher does not outlive
+-        // this call.
+-        One::new_unchecked(needle).find(haystack)
+-    }
+-
+-    /// # Safety
+-    ///
+-    /// The caller must have established that this CPU can run the AVX2
+-    /// instructions.
+-    #[target_feature(enable = "sse2", enable = "avx2")]
+-    pub(super) unsafe fn one_rfind(needle: u8, haystack: &[u8]) -> Option<usize> {
+-        // SAFETY: the caller established AVX2, which is the whole of the
+-        // unchecked constructor's contract; the searcher does not outlive
+-        // this call.
+-        One::new_unchecked(needle).rfind(haystack)
+-    }
+-
 +    use core::arch::x86_64::{
 +        __m256i, _mm256_cmpeq_epi8, _mm256_loadu_si256, _mm256_movemask_epi8, _mm256_or_si256,
 +        _mm256_set1_epi8, _mm256_setzero_si256,
@@ -308,20 +278,7 @@
 +    const BLOCK: usize = 32;
 +
 +    /// The vector kernels, one per needle count.
-     ///
--    /// The caller must have established that this CPU can run the AVX2
--    /// instructions.
--    #[target_feature(enable = "sse2", enable = "avx2")]
--    pub(super) unsafe fn three_find(
--        needle1: u8,
--        needle2: u8,
--        needle3: u8,
--        haystack: &[u8],
--    ) -> Option<usize> {
--        // SAFETY: the caller established AVX2, which is the whole of the
--        // unchecked constructor's contract; the searcher does not outlive
--        // this call.
--        Three::new_unchecked(needle1, needle2, needle3).find(haystack)
++    ///
 +    /// The haystack is walked in blocks from the front (or from the back),
 +    /// and the last block is the same 32 bytes loaded at the end of the
 +    /// haystack with the lanes the blocks already covered masked off. That
@@ -416,8 +373,8 @@
 +                }
 +            )+
 +        };
-     }
- 
++    }
++
 +    kernels! {
 +        one_find one_rfind [needle => vneedle];
 +        two_find two_rfind [needle1 => vneedle1, needle2 => vneedle2];
@@ -435,6 +392,61 @@
      /// The caller must have established that this CPU can run the AVX2
      /// instructions.
      #[target_feature(enable = "sse2", enable = "avx2")]
+     pub(super) unsafe fn one_count(needle: u8, haystack: &[u8]) -> usize {
+-        let one = One::new_unchecked(needle);
+-        let start = haystack.as_ptr();
+-        // SAFETY: both pointers are derived from the haystack slice, and
+-        // their distance is the slice's length, which cannot overflow an
+-        // `isize` because a slice's length cannot.
+-        one.count_raw(start, start.wrapping_add(haystack.len()))
+-    }
+-
+-    /// # Safety
+-    ///
+-    /// The caller must have established that this CPU can run the AVX2
+-    /// instructions.
+-    #[target_feature(enable = "sse2", enable = "avx2")]
+-    pub(super) unsafe fn two_find(needle1: u8, needle2: u8, haystack: &[u8]) -> Option<usize> {
+-        // SAFETY: the caller established AVX2, which is the whole of the
+-        // unchecked constructor's contract; the searcher does not outlive
+-        // this call.
+-        Two::new_unchecked(needle1, needle2).find(haystack)
+-    }
+-
+-    /// # Safety
+-    ///
+-    /// The caller must have established that this CPU can run the AVX2
+-    /// instructions.
+-    #[target_feature(enable = "sse2", enable = "avx2")]
+-    pub(super) unsafe fn two_rfind(needle1: u8, needle2: u8, haystack: &[u8]) -> Option<usize> {
+-        // SAFETY: the caller established AVX2, which is the whole of the
+-        // unchecked constructor's contract; the searcher does not outlive
+-        // this call.
+-        Two::new_unchecked(needle1, needle2).rfind(haystack)
+-    }
+-
+-    /// # Safety
+-    ///
+-    /// The caller must have established that this CPU can run the AVX2
+-    /// instructions.
+-    #[target_feature(enable = "sse2", enable = "avx2")]
+-    pub(super) unsafe fn three_find(
+-        needle1: u8,
+-        needle2: u8,
+-        needle3: u8,
+-        haystack: &[u8],
+-    ) -> Option<usize> {
+-        // SAFETY: the caller established AVX2, which is the whole of the
+-        // unchecked constructor's contract; the searcher does not outlive
+-        // this call.
+-        Three::new_unchecked(needle1, needle2, needle3).find(haystack)
+-    }
+-
+-    /// # Safety
+-    ///
+-    /// The caller must have established that this CPU can run the AVX2
+-    /// instructions.
+-    #[target_feature(enable = "sse2", enable = "avx2")]
 -    pub(super) unsafe fn three_rfind(
 -        needle1: u8,
 -        needle2: u8,
@@ -445,7 +457,6 @@
 -        // unchecked constructor's contract; the searcher does not outlive
 -        // this call.
 -        Three::new_unchecked(needle1, needle2, needle3).rfind(haystack)
-+    pub(super) unsafe fn one_count(needle: u8, haystack: &[u8]) -> usize {
 +        let len = haystack.len();
 +        if len < BLOCK {
 +            return super::portable::count(needle, haystack);
@@ -473,7 +484,7 @@
      }
  }
  
-@@ -396,9 +588,10 @@ fn count_many(needles: &[u8], haystack: &[u8]) -> usize {
+@@ -396,9 +588,10 @@
      let mut n = 0usize;
      let mut front = 0usize;
      while front < haystack.len() {
@@ -487,16 +498,12 @@
          };
          match at {
              Some(at) => {
-@@ -462,107 +655,378 @@ byte_iterator! {
+@@ -462,105 +655,376 @@
  mod tests {
      use alloc::vec::Vec;
  
 -    /// The dispatch and the upstream crate must agree, byte for byte.
-+    /// The number of bytes one word of the portable scan covers.
-+    const WORD: usize = core::mem::size_of::<usize>();
-+
-+    /// The oracle: a byte at a time.
-     ///
+-    ///
 -    /// The upstream crate's own dispatch is the answer this crate is
 -    /// measured against: the two are asked the same question about the same
 -    /// bytes, and a build that takes the AVX2 path where the other does not
@@ -504,6 +511,11 @@
 -    /// differential against the upstream functions over a corpus that
 -    /// includes the empty haystack, the single byte, the vector boundary and
 -    /// a haystack long enough to exercise the wide kernels.
++    /// The number of bytes one word of the portable scan covers.
++    const WORD: usize = core::mem::size_of::<usize>();
++
++    /// The oracle: a byte at a time.
++    ///
 +    /// It is three lines and it is obviously right, and that is the whole
 +    /// point of an oracle -- it must not share a single line with the code
 +    /// it judges. The upstream crate cannot be the oracle any more: it is
@@ -637,11 +649,27 @@
 +    /// The portable scan is the one every CPU without AVX2 runs, and it is
 +    /// the one the vector path is checked against, so it is the one that has
 +    /// to be right on its own.
-+    #[test]
+     #[test]
+-    fn the_dispatch_agrees_with_the_upstream_crate() {
+-        let haystacks: &[&[u8]] = &[
+-            b"",
+-            b"a",
+-            b"aa",
+-            b"aaaaaaaaaaaaaaaa",
+-            b"abcdefghijklmnopqrstuvwxyz",
+-            &[b'x'; 31],
+-            &[b'x'; 32],
+-            &[b'x'; 33],
+-            &[b'x'; 64],
+-            &[b'x'; 65],
+-        ];
+-        for hay in haystacks {
 +    fn the_portable_scan_agrees_with_the_naive_one() {
 +        for hay in corpus() {
-+            for &needle in &[b'a', b'x', b'z', 0] {
-+                assert_eq!(
+             for &needle in &[b'a', b'x', b'z', 0] {
+                 assert_eq!(
+-                    super::memchr(needle, hay),
+-                    ::memchr::memchr(needle, hay),
 +                    super::portable::one_find(needle, &hay),
 +                    naive_find(needle, &hay),
 +                    "find({needle:?}) over {} bytes",
@@ -698,21 +726,7 @@
 +    /// only there: on a machine without it the portable path is the whole
 +    /// answer, and the oracle holds it to that alone.
 +    #[cfg(target_arch = "x86_64")]
-     #[test]
--    fn the_dispatch_agrees_with_the_upstream_crate() {
--        let haystacks: &[&[u8]] = &[
--            b"",
--            b"a",
--            b"aa",
--            b"aaaaaaaaaaaaaaaa",
--            b"abcdefghijklmnopqrstuvwxyz",
--            &[b'x'; 31],
--            &[b'x'; 32],
--            &[b'x'; 33],
--            &[b'x'; 64],
--            &[b'x'; 65],
--        ];
--        for hay in haystacks {
++    #[test]
 +    fn the_vector_scan_agrees_with_the_naive_one() {
 +        if !crate::detect::avx2() {
 +            return;
@@ -790,10 +804,8 @@
 +    #[test]
 +    fn the_dispatch_agrees_with_the_naive_one() {
 +        for hay in corpus() {
-             for &needle in &[b'a', b'x', b'z', 0] {
-                 assert_eq!(
--                    super::memchr(needle, hay),
--                    ::memchr::memchr(needle, hay),
++            for &needle in &[b'a', b'x', b'z', 0] {
++                assert_eq!(
 +                    super::memchr(needle, &hay),
 +                    naive_find(needle, &hay),
                      "memchr({needle:?}) over {} bytes",
@@ -873,10 +885,11 @@
                  );
              }
 -            for &(n1, n2, n3) in &[(b'a', b'x', b'z'), (b'a', b'a', b'a')] {
-+            for &(n1, n2, n3) in &[(b'a', b'x', b'z'), (b'a', b'a', b'a'), (b'a', b'x', b'a')] {
-                 assert_eq!(
+-                assert_eq!(
 -                    super::memchr3(n1, n2, n3, hay),
 -                    ::memchr::memchr3(n1, n2, n3, hay),
++            for &(n1, n2, n3) in &[(b'a', b'x', b'z'), (b'a', b'a', b'a'), (b'a', b'x', b'a')] {
++                assert_eq!(
 +                    super::memchr3(n1, n2, n3, &hay),
 +                    naive_find3(n1, n2, n3, &hay),
                      "memchr3({n1:?}, {n2:?}, {n3:?}) over {} bytes",
@@ -896,8 +909,8 @@
 +                    super::memchr3_iter(n1, n2, n3, &hay).collect::<Vec<_>>(),
 +                    naive_iter3(n1, n2, n3, &hay),
                      "memchr3_iter({n1:?}, {n2:?}, {n3:?}) over {} bytes",
-                     hay.len()
-                 );
++                    hay.len()
++                );
 +                assert_eq!(
 +                    super::memchr3_iter(n1, n2, n3, &hay).count(),
 +                    naive_iter3(n1, n2, n3, &hay).len(),
@@ -908,8 +921,6 @@
 +                    super::memrchr3_iter(n1, n2, n3, &hay).collect::<Vec<_>>(),
 +                    naive_riter3(n1, n2, n3, &hay),
 +                    "memrchr3_iter({n1:?}, {n2:?}, {n3:?}) over {} bytes",
-+                    hay.len()
-+                );
+                     hay.len()
+                 );
              }
-         }
-     }

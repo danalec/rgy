@@ -1,7 +1,8 @@
 [package]
 name = "rgy-engine"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
+rust-version = "1.89"
 authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
 description = "Orchestration: keep-warm, TV pack store glue"
 license = "Apache-2.0"
@@ -26,14 +27,14 @@ std = ["rgx-core/std", "rgx-core/tv-runtime"]
 # the `std` feature) the pack store the daemon greps in. Without the
 # default features it is `no_std` + `alloc`, which is what the engine's
 # own `no_std` configuration needs.
-rgx-core = { path = "../rgx-core", version = "0.1.0", default-features = false }
+rgx-core = { path = "../rgx-core", version = "0.1.2", default-features = false }
 
 [dev-dependencies]
 # The examples measure the name engine against the discovery seam's
 # blocks. They are not the library's own dependencies: the library does
 # not walk anything.
-rgy-discovery = { path = "../discovery", version = "0.1.2" }
-rgy-name-core = { path = "../name-core", version = "0.1.2" }
+rgy-discovery = { path = "../discovery", version = "0.1.3" }
+rgy-name-core = { path = "../name-core", version = "0.1.3" }
 
 [[example]]
 name = "name_bench"

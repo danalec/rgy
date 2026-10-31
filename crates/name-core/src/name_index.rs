@@ -166,7 +166,17 @@ impl BlobMut {
 /// so it is not loaded: a stale index would reject a name whose folded
 /// form holds a class its raw form does not, and the answer would depend
 /// on whether the index had been rebuilt.
-const MAGIC: &[u8; 8] = b"FSIDX014";
+/// `FSIDX015` is `FSIDX014` with the root's digest in the header: the blob
+/// says which tree it was built for, and not only the sidecar beside it
+/// does. The sidecar and the blob are two files, and a crash between the
+/// two writes leaves them disagreeing — the sidecar naming the tree the
+/// blob was built for before, the blob holding the tree built after. A
+/// loader that trusted the sidecar would serve the wrong tree's paths for
+/// the right tree. An index built before this says nothing about its
+/// root, so it is not loaded: a stale index cannot be checked against the
+/// tree it is asked about, and the answer would depend on whether the
+/// index had been rebuilt.
+const MAGIC: &[u8; 8] = b"FSIDX015";
 
 #[derive(Clone, Copy)]
 enum Sec {
@@ -214,6 +224,17 @@ pub struct Index {
     /// If FSEvents history from `event_id` is gone, folders changed since
     /// then are what needs relisting.
     pub synced_at: u32,
+    /// The digest of the root's bytes, or 0 when the index does not say.
+    ///
+    /// The index is built for a tree, and the tree it was built for is what
+    /// makes its paths mean anything. The digest is the tree's, and it is
+    /// in the header so that the bytes on disk carry it: a loader can then
+    /// check the blob against the tree it is asked about, and not only
+    /// against a sidecar that a crash may have left behind.
+    ///
+    /// Zero means the index does not say, and an index that does not say is
+    /// not served for a tree.
+    pub root_digest: u64,
     off: [usize; NSEC],
     plan: crate::sync::OnceCell<MemoPlan>,
     counts: crate::sync::OnceCell<[[u32; CLASSES]; 2]>,
@@ -801,7 +822,8 @@ impl Index {
 
         // Write the blob, freeing each array once its last reader is done:
         // the build's peak is here, the blob beside the arrays it copies.
-        let (off, total) = layout(&section_lens(n, d, u, unames.len()));
+        let lens = section_lens(n, d, u, unames.len()).expect("the sizes fit in a usize");
+        let (off, total) = layout_checked(&lens).expect("the built index's offsets fit in a usize");
         let mut m = BlobMut::anon(total);
         let mut put = |s: Sec, v: &[u8]| m[off[s as usize]..][..v.len()].copy_from_slice(v);
         put(Sec::NameBits, as_bytes(&ubits));
@@ -845,14 +867,30 @@ impl Index {
         let (table, slots) = ext_slots(&unames, &uoff);
         put(Sec::NameExt, &slots);
         put(Sec::Exts, as_bytes(&table));
-        m[..HDR].copy_from_slice(&header(MAGIC, &[n as u64, d as u64, u as u64, unames.len() as u64, event_id, synced_at as u64]));
+        // The root's digest is zero here: the build does not know which
+        // tree it is building for -- that is the caller's word, and the
+        // caller says it when the index is saved (see `root_digest`).
+        m[..HDR].copy_from_slice(&header(MAGIC, &[n as u64, d as u64, u as u64, unames.len() as u64, event_id, synced_at as u64, 0]));
         Index::from_blob(m.freeze()).unwrap()
     }
 
     fn from_blob(map: Blob) -> Option<Index> {
-        let [n, d, u, names_len, event_id, synced_at] = fields(&map, MAGIC)?.map(|v| v as usize);
-        let (off, total) = layout(&section_lens(n, d, u, names_len));
+        let [n, d, u, names_len, event_id, synced_at, root_digest] = fields(&map, MAGIC)?;
+        // The header is bytes that may be corrupt — a truncated file, a
+        // file another version wrote, a file on a failing disk — and every
+        // number in it becomes a size. The arithmetic is checked here, so
+        // a count that does not make sense is refused instead of wrapping
+        // into a small one: a wrapped count is a section read out of the
+        // map, and past its end.
+        let n = usize::try_from(n).ok()?;
+        let d = usize::try_from(d).ok()?;
+        let u = usize::try_from(u).ok()?;
+        let names_len = usize::try_from(names_len).ok()?;
+        let synced_at = u32::try_from(synced_at).ok()?;
+        let u1 = u.checked_add(1)?;
         let words = u.div_ceil(64);
+        let bits_len = words.checked_mul(NBITMAPS)?;
+        let (off, total) = layout_checked(&section_lens(n, d, u, names_len)?)?;
         if map.len() < total {
             return None;
         }
@@ -860,14 +898,15 @@ impl Index {
             n,
             d,
             u,
-            u1: u + 1,
+            u1,
             names_len,
             words,
-            bits_len: words * NBITMAPS,
+            bits_len,
             zones_len: n.div_ceil(ZONE),
             ext_slots: 256,
-            event_id: event_id as u64,
-            synced_at: synced_at as u32,
+            event_id,
+            synced_at,
+            root_digest,
             off,
             map,
             plan: crate::sync::OnceCell::new(),
@@ -888,7 +927,7 @@ impl Index {
         let mut out = Vec::with_capacity(self.map.len());
         out.extend_from_slice(&header(
             MAGIC,
-            &[self.n as u64, self.d as u64, self.u as u64, self.names_len as u64, self.event_id, self.synced_at as u64],
+            &[self.n as u64, self.d as u64, self.u as u64, self.names_len as u64, self.event_id, self.synced_at as u64, self.root_digest],
         ));
         out.extend_from_slice(&self.map[HDR..]);
         out
@@ -905,10 +944,34 @@ impl Index {
 
     /// The event id an index is current as of, from the header alone.
     ///
-    /// The header is 56 bytes of the file's first 4 KiB, so this answers
+    /// The header is 64 bytes of the file's first 4 KiB, so this answers
     /// "is the saved index current?" without reading the payload.
     pub fn header_event_id(bytes: &[u8]) -> Option<u64> {
-        fields::<6>(bytes, MAGIC).map(|f| f[4])
+        fields::<7>(bytes, MAGIC).map(|f| f[4])
+    }
+
+    /// The digest of the root this index was built for, from the header
+    /// alone.
+    ///
+    /// The header is 64 bytes of the file's first 4 KiB, so this answers
+    /// "is this blob the tree I am asking about?" without reading the
+    /// payload -- and the payload is the part that costs.
+    pub fn header_root_digest(bytes: &[u8]) -> Option<u64> {
+        fields::<7>(bytes, MAGIC).map(|f| f[6])
+    }
+
+    /// Say which tree this index is for.
+    ///
+    /// The digest is the tree's, and the tree's bytes are the caller's:
+    /// the caller is the one that knows the root, and the index is built
+    /// for a tree, not for a file. A digest of zero means the index does
+    /// not say, and an index that does not say is not served for a tree.
+    ///
+    /// The stamp happens when the index is saved, because the root is
+    /// known then and not before: the build walks the tree and knows
+    /// nothing about which one it walked.
+    pub fn set_root_digest(&mut self, digest: u64) {
+        self.root_digest = digest;
     }
 
     /// Write atomically (tmp + rename), stamping the current event id.
@@ -929,7 +992,7 @@ impl Index {
     #[cfg(feature = "std")]
     pub fn saved_event_id(path: &Path) -> Option<u64> {
         use std::io::Read;
-        let mut h = [0u8; 56];
+        let mut h = [0u8; 64];
         std::fs::File::open(path).ok()?.read_exact(&mut h).ok()?;
         Index::header_event_id(&h)
     }
@@ -1085,6 +1148,12 @@ pub(crate) fn fields<const N: usize>(b: &[u8], magic: &[u8; 8]) -> Option<[u64; 
 }
 
 /// Section offsets for these lengths, and the file size.
+///
+/// The content segments read the same layout, and they are the `std`
+/// half of it: the name index's own layout is the checked one (see
+/// `layout_checked`), because the name index is the half that reads
+/// bytes that may be corrupt.
+#[cfg(feature = "std")]
 pub(crate) fn layout<const N: usize>(lens: &[usize; N]) -> ([usize; N], usize) {
     let mut off = [0usize; N];
     let mut at = HDR;
@@ -1093,6 +1162,21 @@ pub(crate) fn layout<const N: usize>(lens: &[usize; N]) -> ([usize; N], usize) {
         at = (at + l + 63) & !63;
     }
     (off, at)
+}
+
+/// `layout`, with the arithmetic checked.
+///
+/// The offsets are what every section is read at, and a header that does
+/// not make sense must not wrap into an offset that points somewhere
+/// else: `None` is the header refusing to make sense.
+pub(crate) fn layout_checked<const N: usize>(lens: &[usize; N]) -> Option<([usize; N], usize)> {
+    let mut off = [0usize; N];
+    let mut at = HDR;
+    for (k, &l) in lens.iter().enumerate() {
+        off[k] = at;
+        at = (at.checked_add(l)?.checked_add(63)?) & !63;
+    }
+    Some((off, at))
 }
 
 pub(crate) fn as_bytes<T: Copy>(v: &[T]) -> &[u8] {
@@ -1182,10 +1266,21 @@ impl NameInfo {
     }
 }
 
-fn section_lens(n: usize, d: usize, u: usize, names_len: usize) -> [usize; NSEC] {
-    let (n4, d4, u4) = (n * 4, d * 4, (u + 1) * 4);
-    let z = n.div_ceil(ZONE) * core::mem::size_of::<Zone>();
-    [u.div_ceil(64) * NBITMAPS * 8, u4, names_len, n4, n, n, n4, n4, n4, d4, d4, d4, d4, d, d4, u4, n4, u, u * 4, u, 256 * 16, z]
+/// The sizes of the sections, checked.
+///
+/// The header is read from bytes that may be corrupt, and every number in
+/// it becomes a size: the arithmetic has to be checked, or a count of
+/// `u64::MAX` wraps into a small one and the reader goes on to read a
+/// slice of the wrong size — out of the map, and past its end. `None` is
+/// the header refusing to make sense.
+fn section_lens(n: usize, d: usize, u: usize, names_len: usize) -> Option<[usize; NSEC]> {
+    let n4 = n.checked_mul(4)?;
+    let d4 = d.checked_mul(4)?;
+    let u4 = u.checked_add(1)?.checked_mul(4)?;
+    let u4b = u.checked_mul(4)?;
+    let z = n.div_ceil(ZONE).checked_mul(core::mem::size_of::<Zone>())?;
+    let bits = u.div_ceil(64).checked_mul(NBITMAPS)?.checked_mul(8)?;
+    Some([bits, u4, names_len, n4, n, n, n4, n4, n4, d4, d4, d4, d4, d, d4, u4, n4, u, u4b, u, 256 * 16, z])
 }
 
 /// Entries per `Zone`.
@@ -1475,6 +1570,50 @@ mod blob_tests {
         let ls = vec![Listing { id: 0, names, ents: vec![a, d] }, Listing { id: 1, names: inner, ents: vec![b, c] }];
         let idx = Index::build(ls, 0, 1, b"/");
         assert_eq!(idx.validate_forest(), Ok(()), "a built index is a forest: {:?}", idx.validate_forest());
+    }
+
+    /// A header that does not make sense is refused, not read.
+    ///
+    /// The index is read back from bytes that may be corrupt: a truncated
+    /// file, a file another version wrote, a file on a failing disk. The
+    /// counts in the header become sizes, and the arithmetic has to be
+    /// checked — a count of `u64::MAX` wraps into a small one in a
+    /// release build, and the reader goes on to read a slice of the wrong
+    /// size: out of the map, and past its end.
+    #[test]
+    fn a_header_that_does_not_make_sense_is_refused() {
+        use rgy_discovery::walk::{KIND_FILE, Listing, NONE, RawEnt};
+        let mut names = b"hi.txt".to_vec();
+        let ents = vec![RawEnt { name_off: 0, name_len: 6, kind: KIND_FILE, size: 3, mtime: 7, child: NONE }];
+        let ls = vec![Listing { id: 0, names: core::mem::take(&mut names), ents }];
+        let bytes = Index::build(ls, 42, 1, b"/").to_bytes();
+        assert!(Index::from_bytes(&bytes).is_some(), "the good bytes are an index");
+
+        // The header's counts: n, d, u, names_len, event_id, synced_at.
+        let forge = |n: u64, d: u64, u: u64| {
+            let mut b = bytes.clone();
+            b[8..16].copy_from_slice(&n.to_le_bytes());
+            b[16..24].copy_from_slice(&d.to_le_bytes());
+            b[24..32].copy_from_slice(&u.to_le_bytes());
+            b
+        };
+        // The counts that do not make sense: they ask for more than the
+        // arithmetic, or more than the file, holds.
+        assert!(Index::from_bytes(&forge(u64::MAX, 0, 0)).is_none(), "a count of u64::MAX is refused");
+        assert!(Index::from_bytes(&forge(0, u64::MAX, 0)).is_none(), "so is a count of folders");
+        assert!(Index::from_bytes(&forge(0, 0, u64::MAX)).is_none(), "so is a count of names");
+        let huge = forge(1_000_000_000, 0, 0);
+        assert!(Index::from_bytes(&huge).is_none(), "a count past the file is refused");
+        let folders = forge(0, 1_000_000_000, 0);
+        assert!(Index::from_bytes(&folders).is_none(), "a count of folders past the file");
+        // And the header's own width: a second that does not fit the u32
+        // the index keeps is refused too.
+        let mut synced = bytes.clone();
+        synced[48..56].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert!(Index::from_bytes(&synced).is_none(), "a second past the u32 is refused");
+        // The refusal is the reader's own: nothing is read out of bounds.
+        let half = bytes[..bytes.len() / 2].to_vec();
+        assert!(Index::from_bytes(&half).is_none(), "a truncated payload is refused");
     }
 
     /// Each of the four faults is caught.

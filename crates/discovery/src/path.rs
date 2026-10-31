@@ -179,6 +179,14 @@ pub fn win_has_dot(text: &str) -> bool {
 /// `\\?\` followed by a UNC path is not a UNC path any more.
 #[cfg(any(windows, test))]
 pub fn win_verbatim_text(text: &str) -> String {
+    // A path that ALREADY carries the long-path prefix is already in the
+    // form the object manager wants: the prefix is not something to be
+    // added twice. And a second one is not a longer path — `\\?\` followed
+    // by a UNC path is not a UNC path any more, so the drive would become
+    // the name of a share called "?" and every call on it would fail.
+    if text.starts_with(r"\\?\") {
+        return text.into();
+    }
     if !win_qualified(text) || win_has_dot(text) {
         return text.into();
     }
@@ -277,6 +285,14 @@ mod win_tests {
         assert_eq!(win_verbatim_text(r"foo\bar"), r"foo\bar");
         // Nor one with a `.` in it: there, `.` is a name, not a movement.
         assert_eq!(win_verbatim_text(r"C:\foo\..\bar"), r"C:\foo\..\bar");
+        // And a path that is ALREADY in the long form keeps it: the prefix
+        // is not something to be added twice, and a second one turns the
+        // drive into the name of a share called "?".
+        assert_eq!(win_verbatim_text(r"\\?\C:\foo"), r"\\?\C:\foo");
+        assert_eq!(
+            win_verbatim_text(r"\\?\UNC\server\share"),
+            r"\\?\UNC\server\share"
+        );
     }
 
     #[test]

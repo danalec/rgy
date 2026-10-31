@@ -298,7 +298,7 @@ patch_creates_file() {
     grep -q -E '^(--- /dev/null|new file mode)' "$1"
 }
 
-# Prints: ok | no-upstream-file | no-copy | does-not-apply | mismatch
+# Prints: ok | no-upstream-file | no-copy | not-in-index | does-not-apply | mismatch
 #
 # The question is the one the sync asks: is the file this repository holds
 # the upstream blob at the pin with the local patch applied on top?
@@ -313,12 +313,17 @@ patch_verdict() {
     # this repository's own bytes.
     #
     # A patch that has not been staged is not in the index, so the gate
-    # cannot see it and says the patch does not apply. That is not a
-    # broken patch: it is a patch that has not been added to the
+    # cannot see it and says the patch does not apply. That is
+    # not a broken patch: it is a patch that has not been added to the
     # repository yet. Stage it, and the gate sees it.
+    #
+    # The verdict says so, because a gate that fails with the wrong reason
+    # is worse than no gate: "the patch no longer applies" sends the reader
+    # to re-derive a patch that never stopped applying, and the re-derivation
+    # is an edit to a file the reader was not asked to touch.
     if ! repo_blob "$patch_rel" > "$work/rgy.patch" 2>/dev/null; then
         rm -rf "$work"
-        printf 'does-not-apply'
+        printf 'not-in-index'
         return 0
     fi
     if patch_creates_file "$work/rgy.patch"; then
@@ -573,7 +578,11 @@ while IFS=$'\001' read -r rgx up pin kind note; do
                 drifted=$((drifted + 1))
                 ;;
             no-copy)
-                report red "  FAIL: $rgx: the patched file $up is not in the tree"
+                report red "  FAIL: $rgx: the patched file $up is not in the index (the gate reads the index, not the working tree)"
+                drifted=$((drifted + 1))
+                ;;
+            not-in-index)
+                report red "  FAIL: $rgx: the patch is not in the index (the gate reads the index, not the working tree)"
                 drifted=$((drifted + 1))
                 ;;
             does-not-apply)

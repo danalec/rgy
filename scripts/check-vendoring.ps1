@@ -346,12 +346,14 @@ if ($remainingOracle.Count -gt 0) {
 }
 
 # --- 5. the vendored crates come from the tree --------------------------------
-# The vendored crates carry the package names upstream publishes on
-# crates.io, at the same version: rgx-core, the rgx-adapters-* family and
-# rar-codec. A dependency that names one of them without a `path` resolves
-# to the registry copy instead of the tree -- silently, and at the same
-# version, so cargo has nothing to say. The tree would stop being upstream's
-# bytes and the drift check would have nothing to compare.
+# The vendored crates are the upstream's crates and they go out under the
+# upstream's names -- rgx-core, the rgx-adapters-* family and rar-codec --
+# carrying this tree's patches inside them, at the upstream's next version
+# (0.1.2; 0.1.1 is published and yanked). A dependency that names one of
+# them without a `path` resolves to the registry's copy instead of the
+# tree's -- silently, and that copy is the upstream's, without one of the
+# patches that live here. The tree would stop being upstream's bytes and the
+# drift check would have nothing to compare.
 #
 # So the rule is: every dependency on a vendored name carries a path, and no
 # lock file resolves one of them from a registry. The scan covers every

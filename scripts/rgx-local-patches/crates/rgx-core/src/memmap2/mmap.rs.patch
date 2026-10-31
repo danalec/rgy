@@ -1,6 +1,6 @@
 --- a/crates/rgx-core/src/memmap2/mmap.rs
 +++ b/crates/rgx-core/src/memmap2/mmap.rs
-@@ -13,6 +13,8 @@ use crate::memmap2::platform::MmapInner;
+@@ -13,6 +13,8 @@
  use crate::memmap2::advice::Advice;
  #[cfg(unix)]
  use crate::memmap2::advice::UncheckedAdvice;
@@ -9,7 +9,7 @@
  
  pub struct Mmap {
      inner: MmapInner,
-@@ -38,19 +40,17 @@ impl Mmap {
+@@ -38,19 +40,17 @@
  
      #[cfg(unix)]
      pub fn advise(&self, advice: Advice) -> io::Result<()> {
@@ -32,7 +32,7 @@
      }
  
      #[cfg(unix)]
-@@ -60,7 +60,7 @@ impl Mmap {
+@@ -60,7 +60,7 @@
          offset: usize,
          len: usize,
      ) -> io::Result<()> {

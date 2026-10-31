@@ -1,0 +1,25 @@
+--- a/crates/rgx-adapters-mail/Cargo.toml
++++ b/crates/rgx-adapters-mail/Cargo.toml
+@@ -1,6 +1,6 @@
+ [package]
+ name = "rgx-adapters-mail"
+-version = "0.1.1"
++version = "0.1.2"
+ edition = "2021"
+ authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
+ description = "rgx adapters for e-mail archives (mbox, eml) with MIME attachment recursion"
+@@ -8,7 +8,7 @@
+ readme = "README.md"
+ keywords = ["email", "mbox", "eml", "pst"]
+ categories = ["parser-implementations", "encoding"]
+-repository = "https://github.com/danalec/rgx"
++repository = "https://github.com/danalec/rgy"
+ # What the published crate carries. The test corpus is the repository's:
+ # the fixtures under `testdata/` are what this crate's own tests read, and
+ # a user of the crate has no use for them. The examples are one-off
+@@ -53,4 +53,4 @@
+ apple-mailbox = []
+ 
+ [dependencies]
+-rgx-core = { path = "../rgx-core", version = "0.1.1", default-features = false, features = ["std", "sha256-hw"] }
++rgx-core = { path = "../rgx-core", version = "0.1.2", default-features = false, features = ["std", "sha256-hw"] }

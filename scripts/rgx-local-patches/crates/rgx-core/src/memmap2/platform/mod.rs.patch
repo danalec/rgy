@@ -9,7 +9,7 @@
  use std::ops::{Deref, DerefMut};
  use std::slice;
  
-@@ -44,10 +42,178 @@ mod fallback;
+@@ -44,10 +42,178 @@
  )))]
  pub(crate) use self::fallback::MmapInner;
  
@@ -189,7 +189,7 @@
          if p > 0 {
              p as usize
          } else {
-@@ -109,7 +275,7 @@ pub(crate) fn file_len(file: &File) -> io::Result<u64> {
+@@ -109,7 +275,7 @@
  /// and refuses nothing, and the two BSDs have the five that every unix
  /// kernel has and refuse the other seven.
  #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
@@ -198,7 +198,7 @@
      if crate::memmap2::advice::is_available(advice) {
          return Ok(());
      }
-@@ -122,13 +288,27 @@ pub(crate) fn refuse_unavailable(advice: libc::c_int) -> io::Result<()> {
+@@ -122,13 +288,27 @@
  pub(crate) fn file_len_for_desc(desc: &MmapRawDescriptor) -> io::Result<u64> {
      #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
      {
@@ -222,11 +222,11 @@
 +        let here = unsafe { unix::lseek(desc.0, 0, unix::SEEK_CUR) };
 +        if here < 0 {
 +            return Err(io::Error::last_os_error());
-+        }
+         }
 +        let end = unsafe { unix::lseek(desc.0, 0, unix::SEEK_END) };
 +        if end < 0 {
 +            return Err(io::Error::last_os_error());
-         }
++        }
 +        unsafe { unix::lseek(desc.0, here, unix::SEEK_SET) };
 +        Ok(end as u64)
      }

@@ -72,8 +72,16 @@ pub fn expand_home_with(path: &str, home: &str) -> String {
     }
     let trimmed = home.trim_end_matches(['/', '\\']);
     // The home that is the separator itself -- the root user's `/` -- has
-    // nothing to trim and everything to keep.
-    let base = if trimmed.is_empty() { home } else { trimmed };
+    // nothing to trim and everything to keep. A drive root is the same
+    // thing: `C:\` trimmed of its separator is `C:`, and on Windows `C:`
+    // is not the root of the drive -- it is *the current directory* on
+    // drive C:, which is a scope the caller never asked for. The
+    // separator is what says which one it is, so it is kept.
+    let base = if trimmed.is_empty() || trimmed.ends_with(':') {
+        home
+    } else {
+        trimmed
+    };
     if base.is_empty() {
         return path.to_string();
     }
@@ -155,6 +163,18 @@ mod tests {
         // to join the rest of the path to.
         assert_eq!(expand_home_with("~", "/"), "/");
         assert_eq!(expand_home_with("~/Documents", "/"), "/Documents");
+    }
+
+    #[test]
+    fn a_home_that_is_a_drive_root_keeps_its_separator() {
+        // `C:\` trimmed of its separator is `C:`, and on Windows `C:` is
+        // not the root of the drive: it is the current directory on drive
+        // C:. A scope that quietly becomes "wherever the daemon was
+        // started" is the opposite of what the caller asked for.
+        assert_eq!(expand_home_with("~", "C:\\"), "C:\\");
+        assert_eq!(expand_home_with("~/Documents", "C:\\"), "C:\\Documents");
+        // And the unix root still is what it was.
+        assert_eq!(expand_home_with("~", "/"), "/");
     }
 
     #[test]

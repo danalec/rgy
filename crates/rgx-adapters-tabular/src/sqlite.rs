@@ -598,8 +598,20 @@ fn text_of(values: &[Value], index: usize) -> Result<String, Error> {
 /// case-insensitive and treats `_` as any one character: the name is one
 /// of SQLite's own when it starts with `sqlite` and has at least one more
 /// character after it.
+///
+/// The first six BYTES are what the name is compared on, and a name whose
+/// sixth byte falls inside a character has no six bytes to compare. The
+/// slice is taken with `get`, which says "there is no such slice" — and a
+/// name that came out of the file is not the tree's own doing, so it does
+/// not get to stop the answer.
 fn is_internal_name(name: &str) -> bool {
-    name.len() > 6 && name[..6].eq_ignore_ascii_case("sqlite")
+    // The six bytes are taken with `get`: a name whose sixth byte is
+    // inside a character has no six bytes to compare, and `get` says so
+    // where a plain slice would panic.
+    let Some(head) = name.get(..6) else {
+        return false;
+    };
+    name.len() > 6 && head.eq_ignore_ascii_case("sqlite")
 }
 
 fn be_i8(bytes: &[u8]) -> Result<i8, Error> {
@@ -1490,4 +1502,30 @@ fn split_items(body: &[u8]) -> Vec<&[u8]> {
     }
     items.push(&body[start..]);
     items
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_internal_name;
+
+    /// A table name whose sixth byte is inside a character.
+    ///
+    /// The name comes out of the file, and a name is not the tree's own
+    /// doing. The slice of the first six bytes is taken with `get`, which
+    /// says "there is no such slice" where a plain slice would panic — and
+    /// a name that has no six bytes to compare is not one of SQLite's own
+    /// tables: it is a table, and the answer says so.
+    #[test]
+    fn a_table_name_that_is_not_on_a_character_boundary_is_not_internal() {
+        // The emoji is four bytes, so byte six is inside it.
+        assert!(!is_internal_name("sql\u{1F600}"));
+        // And a two-byte character in the same place.
+        assert!(!is_internal_name("sql\u{e9}"));
+        // The names that ARE SQLite's own still are.
+        assert!(is_internal_name("sqlite_sequence"));
+        assert!(is_internal_name("SQLITE_stat1"));
+        // And the ones that are not still are not.
+        assert!(!is_internal_name("sqlite"));
+        assert!(!is_internal_name("mytable"));
+    }
 }

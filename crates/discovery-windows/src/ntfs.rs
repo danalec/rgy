@@ -608,6 +608,14 @@ impl UsnJournalData {
     }
 }
 
+/// The documented "first available record" sentinel.
+///
+/// It is not a position: it is the kernel's way of saying "the first record
+/// you can read". The feed starts there when there is no saved position, and
+/// a resume point that equals it has lost nothing — the journal may well
+/// have recycled records below it.
+pub const FIRST_AVAILABLE_USN: i64 = 0x7FFF_FFFF;
+
 /// `NTFS_FILE_RECORD_INPUT` for `FSCTL_GET_NTFS_FILE_RECORD`.
 ///
 /// Despite the conventional `VolumeSerialNumber` + `FileReferenceNumber` layout,

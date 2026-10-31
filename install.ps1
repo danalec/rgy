@@ -124,7 +124,7 @@ if ($here -and (Test-Path -LiteralPath (Join-Path $here 'scripts/lib/digest.ps1'
 # exit code.
 $InstallDir = "$env:LOCALAPPDATA\Programs\rgy"
 $BaseUrl = 'https://github.com/danalec/rgy/releases/download'
-$Version = 'rgy-v0.1.2'
+$Version = 'rgy-v0.1.3'
 $SkipChecksum = $false
 $NoAutostart = $false
 $NoLauncher = $false
@@ -145,7 +145,7 @@ Read-RgyOptions -Switches @{ "skipchecksum" = "SkipChecksum"; "noautostart" = "N
 # an emulator, and an installer that hands it one installs something that
 # will not start.
 $expected = @{
-    'x86_64-windows.zip' = 'E0E250AF04330A23F0580FBD1CF9A467CF348B3821E05916FF985FB235B0DD40'
+    'x86_64-windows.zip' = 'FC612EE79DA92A34E7B68DC8B134875812A5CE994EAD58746C9ED82CA3174509'
     'aarch64-windows.zip' = '0000000000000000000000000000000000000000000000000000000000000000'
 }
 

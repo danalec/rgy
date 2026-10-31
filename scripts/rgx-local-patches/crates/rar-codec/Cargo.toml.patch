@@ -1,0 +1,19 @@
+--- a/crates/rar-codec/Cargo.toml
++++ b/crates/rar-codec/Cargo.toml
+@@ -1,6 +1,6 @@
+ [package]
+ name = "rar-codec"
+-version = "0.1.1"
++version = "0.1.2"
+ edition = "2021"
+ authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
+ description = "Pure-Rust, no_std RAR codec: RAR4/RAR5 parsing, LZ+Huffman and PPMd decode (solid, multivolume, VM filters), RAR5 store encode. Zero dependencies."
+@@ -11,7 +11,7 @@
+ readme = "README.md"
+ keywords = ["rar", "codec", "archive", "compression"]
+ categories = ["encoding", "compression"]
+-repository = "https://github.com/danalec/rgx"
++repository = "https://github.com/danalec/rgy"
+ 
+ # What the published crate carries. The test corpus is the repository's:
+ # the fixtures under `testdata/` are what this crate's own tests read, and

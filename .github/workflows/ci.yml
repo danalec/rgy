@@ -130,6 +130,35 @@ jobs:
         shell: pwsh
         run: ./scripts/check-vendoring.ps1
 
+  twins:
+    name: "the twins say the same thing"
+    # The same gate as the first job: the owner and the collaborators,
+    # and nobody else.
+    if: github.event_name != 'pull_request' || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
+    # The tree's rule is that every .ps1 has a .sh beside it and the two are
+    # twins: the same text, on the same input, with the same exit code. The
+    # test for that is to run BOTH and diff the result.
+    #
+    # The CI runs each twin on its own runner, which exercises both of them
+    # and compares neither. One pair is compared -- the publish twins, whose
+    # escaped release body is asserted to be the same bytes on the two
+    # runners, in scripts/test-publish-release.sh -- and the other ten are
+    # not. A drift between those ten is invisible until somebody publishes a
+    # release with it, and a release is published by one of the twins.
+    #
+    # So this job is the comparison, and it runs where both interpreters live:
+    # bash natively on the ubuntu runner, and pwsh beside it -- the GitHub
+    # images ship PowerShell 7. The input is an option no script knows, so
+    # every script must refuse it with exit 2, and the refusal must be the
+    # SAME refusal.
+    timeout-minutes: 20
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: bash scripts/check-twins.sh
+
   tv-runtime:
     name: the pack-store builder compiles
     # The same gate as the first job: the owner and the collaborators,
@@ -292,6 +321,16 @@ jobs:
       # -- so the half of the pack store that can be linked into an
       # embedded search box was in no build in the tree. With it, that
       # half is compiled on a target that has no filesystem to reach for.
+      #
+      # The flag says `rgx-core` and the crate is `rgx-core`: the vendored
+      # tree carries the upstream's name, so the key in `[dependencies]` and
+      # the package name are one word. Cargo resolves `package/feature` on
+      # the command line by the name the dependency is REFERRED TO -- the
+      # key -- and the two used to differ here, when the vendored crates
+      # went out under the house's names and the key stayed. A flag that
+      # names the package where the key is spelled differently fails with
+      # "none of the selected packages contains this feature" -- a failure
+      # that reads like a missing feature and is a misspelled name.
       - run: cargo build --release --locked --no-default-features -p rgy-par -p rgy-discovery -p rgy-name-core -p rgy-proto -p rgy-engine -p rgy-discovery-dispatch -p rgy-autostart -p rgy-discovery-linux -p rgy-discovery-freebsd -p rgy-discovery-windows -p rgy-discovery-macos -p rgy-launcher -p rgy-pick -p rgy-launcher-windows --features rgx-core/tv --target x86_64-unknown-none
       # The lint of the same tree. A build that prints a warning is a
       # warning somebody has to read, and the code that only exists
@@ -324,6 +363,34 @@ jobs:
       # list that drifts.
       - name: the tests compile without std too
         run: cargo clippy --locked --no-default-features -p rgy-par -p rgy-discovery -p rgy-name-core -p rgy-proto -p rgy-engine -p rgy-discovery-dispatch -p rgy-autostart -p rgy-discovery-linux -p rgy-discovery-freebsd -p rgy-discovery-windows -p rgy-discovery-macos -p rgy-launcher -p rgy-pick -p rgy-launcher-windows --features rgx-core/tv --all-targets -- -D warnings
+
+  msrv:
+    name: "the oldest rustc the tree promises still builds it"
+    # The same gate as the first job: the owner and the collaborators,
+    # and nobody else.
+    if: github.event_name != 'pull_request' || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
+    # One whole-workspace compile with the exact rustc the README names.
+    # The promise is a sentence in a document, and a document does not
+    # fail when the code moves under it -- this job is what makes the
+    # sentence true, and it is why the sentence can be trusted.
+    #
+    # It is also the gate that would have caught the promise this one
+    # replaced: the README said 1.85, the tree needed 1.89, and a reader
+    # on 1.85 got seventy-four errors out of a crate they had never
+    # heard of.
+    timeout-minutes: 60
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # Pinned, and not `stable`: a job on `stable` proves the tree builds
+      # today and says nothing about the floor the README promises. The
+      # floor is 1.89 -- the release in which the AVX-512 target features
+      # stabilised, and the tree's SIMD kernels use them.
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: swatinem/rust-cache@v2
+      - run: cargo check --workspace --all-targets --locked
 
   freebsd-suite:
     name: "bar: full suite on a FreeBSD kernel"
@@ -563,7 +630,11 @@ jobs:
           # printed two lines above.
           listing=$(mktemp)
           tar -tf "$archive" | tee "$listing"
-          for f in searchctl searchd rgy-autostart rgxy README.md MANUAL.md FORMATS.md COPYING NOTICE LICENSE-APACHE; do
+          # The page of the release and the benchmark folder travel with the
+          # archive: the README points at them by a relative path, and a link
+          # that resolves on the forge and not in the archive is a link
+          # broken exactly where the reader is offline.
+          for f in searchctl searchd rgy-autostart rgxy README.md MANUAL.md FORMATS.md COPYING NOTICE LICENSE-APACHE docs/release- benchmark/; do
             if ! grep -q "$f" "$listing"; then
               echo "the archive does not carry $f"
               exit 1
@@ -603,7 +674,11 @@ jobs:
             $zip.Dispose()
           }
           $names | ForEach-Object { Write-Host $_ }
-          foreach ($f in @('searchctl', 'searchd', 'rgy-autostart', 'rgxy.exe', 'rgy.exe', 'README.md', 'MANUAL.md', 'FORMATS.md', 'COPYING', 'NOTICE', 'LICENSE-APACHE')) {
+          # The page of the release and the benchmark folder travel with the
+          # archive: the README points at them by a relative path, and a link
+          # that resolves on the forge and not in the archive is a link
+          # broken exactly where the reader is offline.
+          foreach ($f in @('searchctl', 'searchd', 'rgy-autostart', 'rgxy.exe', 'rgy.exe', 'README.md', 'MANUAL.md', 'FORMATS.md', 'COPYING', 'NOTICE', 'LICENSE-APACHE', 'docs/release-', 'benchmark/')) {
             if (-not ($names | Where-Object { $_ -like "*$f*" })) {
               Write-Host "the archive does not carry $f"
               exit 1
@@ -714,7 +789,17 @@ jobs:
           RGY_IN_RELEASE: ${{ matrix.in_release }}
         run: |
           set -eu
-          page=docs/release-0.1.2.md
+          # The page of the release being cut: its name is the version's,
+          # because a page named for one release and read for another is a
+          # page published saying one thing and written saying another. The
+          # version is the one the tree carries -- the manifest, the same
+          # source the publish scripts read.
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' bins/searchctl/Cargo.toml | head -1)
+          if [ -z "$version" ]; then
+            echo "no version in bins/searchctl/Cargo.toml"
+            exit 1
+          fi
+          page="docs/release-$version.md"
           archive=$(ls .dist/rgy-v*.tar.gz 2>/dev/null | head -1 || true)
           if [ -z "$archive" ]; then
             echo "no archive in .dist/"
@@ -751,7 +836,18 @@ jobs:
           RGY_IN_RELEASE: ${{ matrix.in_release }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $page = "docs/release-0.1.2.md"
+          # The page of the release being cut: its name is the version's,
+          # because a page named for one release and read for another is a
+          # page published saying one thing and written saying another. The
+          # version is the one the tree carries -- the manifest, the same
+          # source the publish scripts read.
+          $m = Select-String -Path 'bins/searchctl/Cargo.toml' -Pattern '^version = "([^"]+)"' | Select-Object -First 1
+          if (-not $m) {
+            Write-Host 'no version in bins/searchctl/Cargo.toml'
+            exit 1
+          }
+          $version = $m.Matches.Groups[1].Value
+          $page = "docs/release-$version.md"
           $archive = Get-ChildItem .dist/rgy-v*.zip | Select-Object -First 1
           if (-not $archive) {
             Write-Host "no archive in .dist/"

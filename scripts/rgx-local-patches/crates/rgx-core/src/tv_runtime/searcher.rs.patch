@@ -1,6 +1,6 @@
 --- a/crates/rgx-core/src/tv_runtime/searcher.rs
 +++ b/crates/rgx-core/src/tv_runtime/searcher.rs
-@@ -1959,7 +1959,13 @@ mod sparse_tests {
+@@ -1959,7 +1959,13 @@
              s1.total_files_pruned
          );
  

@@ -134,8 +134,8 @@ fn main() {
             let root = Path::new(dir);
             let t0 = Instant::now();
             let listings = walk::scan(dir.as_bytes(), threads);
-            let idx = Index::build(listings, 0, 1_700_000_000, b"/");
-            persist::save(&idx, root, Path::new(index)).expect("build: persist");
+            let mut idx = Index::build(listings, 0, 1_700_000_000, b"/");
+            persist::save(&mut idx, root, Path::new(index)).expect("build: persist");
             eprintln!("name_proto: built in {:.3} s", t0.elapsed().as_secs_f64());
         }
         "q-index" => {

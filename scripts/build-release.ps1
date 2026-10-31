@@ -498,11 +498,15 @@ foreach ($doc in $documents) {
 # ONE list, and three parts of the build read it: the copy below, the
 # archive's member list, and the digests the publish step compares with the
 # tree. A list that lives in three places is a list that drifts.
+#
+# The paths are spelled the way the unix twin spells them, with the forward
+# slash: a message that names a media file has to name it the same way on
+# both platforms, or the two twins answer the same question two ways.
 $media = @(
-    "docs\screenshots\rgxy.png",
-    "docs\screenshots\gui-filters.png",
-    "docs\videos\gui-filters.mp4",
-    "docs\videos\term-tui.mp4"
+    "docs/screenshots/rgxy.png",
+    "docs/screenshots/gui-filters.png",
+    "docs/videos/gui-filters.mp4",
+    "docs/videos/term-tui.mp4"
 )
 foreach ($mediaFile in $media) {
     $mediaPath = Join-Path $root $mediaFile
@@ -516,8 +520,130 @@ foreach ($mediaFile in $media) {
     Copy-Item $mediaPath $inStage
 }
 
+# The page of the release the README calls the changelog.
+#
+# The README points at it by a relative path, and the name of that page
+# carries the version -- so the page that travels with the archive is the
+# page of the release being built, and not the page of an older one. A tree
+# without it has a README with a hole in it.
+$releasePage = "docs/release-$Version.md"
+$releasePagePath = Join-Path $root $releasePage
+if (-not (Test-Path $releasePagePath -PathType Leaf)) {
+    [Console]::Error.WriteLine("the release carries $releasePage and this tree does not have it: the archive would not")
+    [Console]::Error.WriteLine("  the README points at it, and an archive without it is a README with a hole in it")
+    exit 1
+}
+$releasePageInStage = Join-Path $stage $releasePage
+New-Item -ItemType Directory -Force -Path (Split-Path $releasePageInStage -Parent) | Out-Null
+Copy-Item $releasePagePath $releasePageInStage
+
+# The benchmark folder the README points at.
+#
+# The README links the folder itself and not one file of it, so the folder
+# has to be inside the archive -- and the rows the README quotes live in it.
+$benchmarkDir = "benchmark"
+$benchmarkPath = Join-Path $root $benchmarkDir
+if (-not (Test-Path $benchmarkPath -PathType Container)) {
+    [Console]::Error.WriteLine("the release carries $benchmarkDir/ and this tree does not have it: the archive would not")
+    [Console]::Error.WriteLine("  the README points at it, and an archive without it is a README with a hole in it")
+    exit 1
+}
+$benchmarkInStage = Join-Path $stage $benchmarkDir
+New-Item -ItemType Directory -Force -Path $benchmarkInStage | Out-Null
+Copy-Item -Path (Join-Path $benchmarkPath "*") -Destination $benchmarkInStage -Recurse -Force
+
+# Every relative link in every document that travels resolves inside the stage.
+#
+# The README and the manual are what the reader has, and they point at their
+# neighbours by relative paths: the picture, the manual, the benchmark
+# folder, the page of the release. A link that does not resolve inside the
+# archive is a link that works on the forge and nowhere else -- and the
+# reader of the archive is the one who cannot follow it.
+#
+# Every document in the stage is checked, and not only the README and the
+# manual: the benchmark folder travels too, and its own documents point at
+# each other. The order is the ordinal one, so the two twins read the same
+# document first and say the same thing about it.
+#
+# The links are read the way the reader reads them: the text between the
+# parentheses. The absolute ones (http:, https:, mailto:) are the reader's
+# own business, and the pure anchors (#...) stay inside the document.
+$mdFiles = [System.Collections.Generic.List[string]]::new()
+foreach ($mdFile in (Get-ChildItem -Path $stage -Recurse -File -Filter '*.md')) {
+    $mdRelative = $mdFile.FullName.Substring($stage.Length + 1) -replace '\\', '/'
+    $at = 0
+    while ($at -lt $mdFiles.Count -and
+           [System.StringComparer]::Ordinal.Compare($mdFiles[$at], $mdRelative) -le 0) {
+        $at++
+    }
+    $mdFiles.Insert($at, $mdRelative)
+}
+foreach ($docPath in $mdFiles) {
+    # A relative link is resolved against the folder of the document that
+    # carries it, and not against the root of the archive: a link in
+    # benchmark/README.md to baseline-names.md is the file beside it.
+    $docDir = $docPath.Substring(0, [Math]::Max(0, $docPath.LastIndexOf('/')))
+    $docFull = Join-Path $stage ($docPath -replace '/', '\')
+    foreach ($line in [System.IO.File]::ReadAllLines($docFull)) {
+        foreach ($hit in [regex]::Matches($line, '\]\(([^)]*)\)')) {
+            $link = $hit.Groups[1].Value
+            if (-not $link) { continue }
+            if ($link.StartsWith("#")) { continue }
+            if ($link.StartsWith("//")) { continue }
+            # A scheme means a URL and not a path: http:, https:, mailto:.
+            if ($link -cmatch '^[A-Za-z][A-Za-z0-9+.-]*:') { continue }
+            # The path: what is before the anchor, and what is before the title.
+            $path = $link
+            $at = $path.IndexOf("#")
+            if ($at -ge 0) { $path = $path.Substring(0, $at) }
+            if ($path.StartsWith("<")) {
+                $path = $path.Substring(1)
+                $at = $path.IndexOf(">")
+                if ($at -ge 0) { $path = $path.Substring(0, $at) }
+            } else {
+                $at = $path.IndexOf(" ")
+                if ($at -ge 0) { $path = $path.Substring(0, $at) }
+            }
+            # The trailing slash is how the README spells the folder, and not
+            # part of the folder's name: the folder is looked up by its name.
+            $check = $path -replace '/+$', ''
+            if (-not $check) { continue }
+            if ($docDir) { $target = "$docDir/$check" } else { $target = $check }
+            $inStage = Join-Path $stage ($target -replace '/', '\')
+            if (-not (Test-Path $inStage)) {
+                [Console]::Error.WriteLine("the $docPath points at $link and the archive does not carry it: the link is broken exactly where the reader is offline")
+                exit 1
+            }
+        }
+    }
+}
+
 $archiveName = "rgy-v$Version-$asset.zip"
 $archive = Join-Path $out $archiveName
+
+# The archive's member list: the paths the archive carries.
+#
+# The unix twin hands this list to tar, which packs exactly these paths.
+# The Windows twin packs the whole stage -- so the list is checked here
+# instead: a member the stage does not have is a member the archive does
+# not have, and the archive would say it carries it.
+#
+# The names are the unix twin's, with the two the platform spells
+# differently: the .exe suffix, and the rgy link that Windows cannot make
+# without an administrator, so the archive carries the binary itself.
+$files = @("searchctl.exe", "searchd.exe", "rgy-autostart.exe", "rgxy.exe", "rgy.exe")
+$files += $documents
+$files += $media
+$files += @("benchmark", $releasePage)
+foreach ($member in $files) {
+    $inStage = Join-Path $stage ($member -replace '/', '\')
+    if (-not (Test-Path $inStage)) {
+        [Console]::Error.WriteLine("the archive carries $member and the stage does not have it: the archive would not")
+        [Console]::Error.WriteLine("  carry what this build promised")
+        exit 1
+    }
+}
+
 try {
     Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $archive -Force -ErrorAction Stop
 } catch {
@@ -550,7 +676,17 @@ foreach ($doc in $documents) {
 }
 foreach ($mediaFile in $media) {
     $mediaPath = Join-Path $root $mediaFile
-    $docsRows += "$(Get-RgySha256 $mediaPath)  $($mediaFile -replace '\\', '/')"
+    $docsRows += "$(Get-RgySha256 $mediaPath)  $mediaFile"
+}
+# The page of the release and the benchmark folder travel with the archive,
+# so the record names them too: a record that lists only the documents is a
+# record of a part of the archive, and the publish step compares the record
+# with the tree -- so a stale page, or a benchmark row of an older run,
+# would pass a check that is about the whole.
+$docsRows += "$(Get-RgySha256 $releasePagePath)  $releasePage"
+foreach ($benchFile in (Get-ChildItem -Path $benchmarkPath -Recurse -File)) {
+    $benchRelative = $benchFile.FullName.Substring($root.Length + 1) -replace '\\', '/'
+    $docsRows += "$(Get-RgySha256 $benchFile.FullName)  $benchRelative"
 }
 # The ordinal order, so the two machines write the same bytes.
 $docsOrdered = [System.Collections.Generic.List[string]]::new()

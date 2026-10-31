@@ -121,14 +121,21 @@ impl rgy_discovery::Source for LinuxSource {
 /// which reads the metadata without following a link. Where the metadata
 /// says nothing about the kind (a socket, a fifo, a filesystem that does
 /// not fill the mode in), the row's own kind is what there is.
-fn list_dir(dir: &[u8]) -> Option<Listing> {
+fn list_dir(dir: &[u8], follow: bool) -> Option<Listing> {
     let c = path::cstring(dir)?;
-    let fd = unsafe {
-        sys::open(
-            path::as_c_ptr(&c),
-            sys::O_RDONLY | sys::O_DIRECTORY | sys::O_NOFOLLOW,
-        )
+    // The ROOT is the folder the caller named, and a root that reaches the
+    // tree through a symbolic link is resolved: the portable walk resolves
+    // it, the two are the same answer, and a root that answers "nothing"
+    // on one platform and "everything" on another is not an answer at all.
+    //
+    // A CHILD is opened without following a link: the walk does not descend
+    // into a link, and a link that points back up the tree is a loop.
+    let flags = if follow {
+        sys::O_RDONLY | sys::O_DIRECTORY
+    } else {
+        sys::O_RDONLY | sys::O_DIRECTORY | sys::O_NOFOLLOW
     };
+    let fd = unsafe { sys::open(path::as_c_ptr(&c), flags) };
     if fd < 0 {
         return None;
     }
@@ -226,7 +233,9 @@ pub fn scan(root: &[u8]) -> Vec<Listing> {
         if blocked(&dir) {
             continue;
         }
-        let Some(mut listing) = list_dir(&dir) else {
+        // The first frame is the root: it has no parent slot, and it is
+        // the one folder that is resolved rather than refused.
+        let Some(mut listing) = list_dir(&dir, fix.is_none()) else {
             continue;
         };
         let id = if fix.is_none() { 0 } else { next_id };

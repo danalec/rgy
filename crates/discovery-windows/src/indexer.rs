@@ -617,6 +617,21 @@ impl<'a> Indexer<'a> {
         }
         *known_journal_id = journal.usn_journal_id;
         if !journal.covers(*start_usn) {
+            if *start_usn < journal.lowest_valid_usn && *start_usn != ntfs::FIRST_AVAILABLE_USN {
+                // The journal recycled the records between the resume point
+                // and the oldest one it still holds: that history is gone,
+                // and the feed has to say so — the index has to be rebuilt,
+                // because what happened in the gap is not known, and an
+                // index that claims to be whole is not.
+                //
+                // The sentinel is the exception: it is not a position, it
+                // is the kernel's way of saying "the first record you can
+                // read", and nothing was lost.
+                wrapped = true;
+            }
+            // Either way the read starts at the oldest record the journal
+            // still holds: a resume point above the head is ahead of it,
+            // and one below the window is in a hole the journal recycled.
             *start_usn = journal.lowest_valid_usn;
         }
         if journal_id_changed {

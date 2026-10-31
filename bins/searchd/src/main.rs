@@ -229,7 +229,21 @@ impl Ctx {
         // it that the hash filled. The id is under the wire's limit, so it
         // survives the round trip as the very number that was sent.
         let width = Self::SESSION_LIMIT - Self::DAEMON_SESSIONS;
-        Some(Self::DAEMON_SESSIONS | (raw & (width - 1)))
+        let id = Self::DAEMON_SESSIONS | (raw & (width - 1));
+        // The id enters the map here: the daemon issues it, and an id the
+        // daemon issues is one the daemon takes back.
+        //
+        // The id used to enter the map only inside the search that used it,
+        // and a query with alternatives (`|`) never got that far -- the
+        // search returns before the session is looked up. So the daemon
+        // handed out an id, put it on the wire, and then refused it: the
+        // client's next keystroke named an id the daemon said was not
+        // its own, and the answer came back with a different session. The
+        // session is empty here, and that is right: it is the receipt for
+        // the id, not the results.
+        let session = std::sync::Arc::new(rgy_name_core::session::Session::new(id));
+        self.sessions.lock().unwrap().insert(id, session);
+        Some(id)
     }
 
     /// Whether the daemon has issued this session and still keeps it.
@@ -1076,13 +1090,15 @@ fn open_index(
     // honest.
     let watermark = journal.head;
     // The user's priority rules, beside the index: `<index>.rules`. No file
-    // is not an error -- the defaults are the rules.
+    // is not an error -- the defaults are the rules. The message the rules
+    // file comes back with says what is in use: the defaults when the file
+    // could not be read, the parsed rules when a line of it did not parse.
     let (rules, why) = rgy_name_core::rules::Rules::beside(&index_path);
     if let Some(why) = why {
-        rgy_engine::errln!("searchd: {why} -- using the default rules");
+        rgy_engine::errln!("searchd: {why}");
     }
-    let idx = Index::build_with_rules(listings, watermark, now_secs(), root.as_bytes(), &rules);
-    match persist::save(&idx, &root_path, &index_path) {
+    let mut idx = Index::build_with_rules(listings, watermark, now_secs(), root.as_bytes(), &rules);
+    match persist::save(&mut idx, &root_path, &index_path) {
         Ok(saved) => rgy_engine::errln!(
             "searchd: indexed {} entries → {}",
             idx.n,
@@ -1231,6 +1247,12 @@ fn handle(req: Request, ctx: &Ctx) -> Vec<Answer> {
                     [one] => Some(&one.tokens),
                     _ => None,
                 };
+                // The root is spelled once for the whole answer and not once
+                // per hit: it is the same path every time, and spelling it
+                // again is spelling it again — the console counts the paths
+                // it could not spell, and a root spelled a hundred times is
+                // one path.
+                let root_text = rgy_engine::console::spell(&ctx.root);
                 let wire: Vec<WireHit> = hits
                     .iter()
                     .map(|h| {
@@ -1257,7 +1279,7 @@ fn handle(req: Request, ctx: &Ctx) -> Vec<Answer> {
                                 buf.clear();
                                 let name =
                                     rel.rsplit(['/', '\\']).next().unwrap_or(&rel).to_string();
-                                let mut full = rgy_engine::console::spell(&ctx.root);
+                                let mut full = root_text.clone();
                                 let rel = rel.trim_start_matches(['/', '\\']);
                                 if !rel.is_empty() {
                                     full.push(std::path::MAIN_SEPARATOR);
@@ -1514,7 +1536,26 @@ fn scoped_content(q: &str, paths: &[String], limit: usize, ctx: &Ctx) -> Vec<Ans
 
     let g = match Grep::new(&pattern, mode) {
         Ok(g) => g,
-        Err(e) => return vec![Answer::Frame(Response::Error { message: e })],
+        Err(e) => {
+            // A pattern the engine refuses is a warning and not the end of
+            // the answer: the whole-tree route says it that way, and the
+            // manual says the warning is part of the answer, not the end
+            // of it. This route used to answer `{"op":"error"}` and
+            // nothing else — the one path that stopped instead of
+            // answering with nothing and saying why.
+            out.push(Answer::Frame(Response::Warning { message: e }));
+            out.push(Answer::Frame(Response::GrepFiles {
+                files: Vec::new(),
+                took_us: t0.elapsed().as_micros() as u64,
+                // Nothing was read, and nothing was left out: the answer is
+                // whole because it is empty.
+                complete: true,
+                skipped: 0,
+                skips: Vec::new(),
+            }));
+            out.push(Answer::Frame(Response::Done { count: 0 }));
+            return out;
+        }
     };
 
     // 2. The files: the ones the adapters claim are read through them, and
@@ -1886,6 +1927,10 @@ fn grep(q: &str, limit: usize, ctx: &Ctx) -> Vec<Answer> {
                     // found, and it says so rather than pretending.
                     return vec![Answer::Frame(Response::Error { message: why })];
                 }
+                let index_candidates = if r.complete { 0 } else { r.candidates };
+                let index_read = if r.complete { 0 } else { r.read };
+                let bare_candidates = if rest.complete { 0 } else { bare.len() };
+                let bare_read = if rest.complete { 0 } else { rest.read };
                 r.files.extend(rest.files);
                 r.read += rest.read;
                 // The placeholders the index's own scan refused, and the
@@ -1897,13 +1942,19 @@ fn grep(q: &str, limit: usize, ctx: &Ctx) -> Vec<Answer> {
                 not_read.extend(rest.skipped);
                 r.candidates = covered.len() + bare.len();
                 // The scan read everything it was given: that is this
-                // alternative's own fact. Whether the *answer* is whole is
-                // the total's fact -- the alternatives make one answer
+                // alternative's own fact, across both the index's scan and
+                // the bare scan. Whether the *answer* is whole is the
+                // total's fact -- the alternatives make one answer
                 // together, and one alternative's own count says nothing
                 // about it -- so the limit is settled at the end.
-                r.complete = rest.complete;
+                r.complete = r.complete && rest.complete;
                 complete = complete && r.complete;
-                let (n, groups) = unread_files(bare.len(), rest.read, rest.complete, &not_read);
+                let (n, groups) = unread_files(
+                    index_candidates + bare_candidates,
+                    index_read + bare_read,
+                    r.complete,
+                    &not_read,
+                );
                 skipped += n;
                 skips.extend(groups);
                 for f in r.files {
@@ -3483,6 +3534,71 @@ mod tests {
         assert_eq!(session_of(Some(7)), Some(7));
     }
 
+    /// The daemon takes back the session it issued, alternatives or not.
+    ///
+    /// A query with a `|` is searched on its own: the session holds one
+    /// result set, and a query with alternatives is not one query. So the
+    /// search returns before the session is looked up — and the id the
+    /// daemon issued used to enter the map only there. The daemon put an
+    /// id on the wire and then refused it: the client's next keystroke
+    /// named an id the daemon said was not its own, and the answer came
+    /// back with a different session. The answers were right, so nothing
+    /// looked broken; the session was simply never the same one twice.
+    #[test]
+    fn the_daemon_takes_back_the_session_it_issued_for_a_query_with_alternatives() {
+        let dir = TempTree::new("rgy-searchd-session-alts");
+        std::fs::write(dir.join("hello.txt"), b"hello\n").unwrap();
+        let root = dir.as_os_str().as_encoded_bytes().to_vec();
+
+        let source = PortableSource::new(root.clone(), 2);
+        let live = Live::with_root(
+            Index::build(source.enumerate().expect("the walk"), 0, 1, b"/"),
+            &root,
+        );
+        let ctx = std::sync::Arc::new(Ctx {
+            root: root.clone(),
+            home: String::new(),
+            tv_dir: None,
+            live: std::sync::RwLock::new(live),
+            catch_up: std::sync::atomic::AtomicU8::new(CATCH_UP_RELISTED),
+            feed: std::sync::atomic::AtomicU8::new(FEED_NONE),
+            changed: Changed::new(),
+            content: std::sync::Mutex::new(None),
+            wants_content: std::sync::atomic::AtomicBool::new(false),
+            sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
+            sessions_next: std::sync::atomic::AtomicU64::new(0),
+        });
+
+        let session_of = |session: Option<u64>| {
+            handle(
+                Request::Search {
+                    q: "hello | world".to_string(),
+                    limit: 10,
+                    session,
+                },
+                &ctx,
+            )
+            .iter()
+            .find_map(|r| match r {
+                Answer::Frame(Response::Hits { session, .. }) => Some(*session),
+                _ => None,
+            })
+            .expect("a hits frame")
+        };
+
+        // The daemon names a session, and the answer carries it.
+        let first = session_of(None);
+        assert!(first.is_some(), "the daemon names the session");
+        // And the next request that names it gets it back: the id the
+        // daemon issued is the daemon's own, and it takes back the ones it
+        // issued and only those.
+        assert_eq!(
+            session_of(Some(first.unwrap())),
+            Some(first.unwrap()),
+            "the daemon takes back the id it issued, alternatives or not"
+        );
+    }
+
     /// A query the engine refuses answers nothing, on every route.
     ///
     /// The unknown `type:` fails closed: the engine refuses the whole
@@ -4026,6 +4142,56 @@ mod tests {
         let (files, complete) = answer(10);
         assert_eq!(files, 3, "every file in the scope is in the answer");
         assert!(complete, "an answer under the limit is the whole answer");
+    }
+
+    /// A pattern the engine refuses is a warning, and the answer goes on.
+    ///
+    /// The whole-tree route answers a refusal with a warning frame and an
+    /// empty answer, and the manual says the warning is part of the answer
+    /// and not the end of it. The scoped route used to answer the same
+    /// refusal with an `{"op":"error"}` frame and nothing else — the one
+    /// path that stopped instead of answering with nothing and saying why.
+    #[test]
+    fn a_refused_pattern_is_a_warning_on_the_scoped_route_too() {
+        let tree = TempTree::new("rgy-searchd-refused");
+        let path = tree.join("a.txt");
+        std::fs::write(&path, b"the needle is here\n").unwrap();
+        let scope = vec![path.to_string_lossy().into_owned()];
+
+        let ctx = std::sync::Arc::new(Ctx {
+            root: tree.as_os_str().as_encoded_bytes().to_vec(),
+            home: String::new(),
+            tv_dir: None,
+            live: std::sync::RwLock::new(Live::new(Index::build(Vec::new(), 0, 0, b"/"))),
+            catch_up: std::sync::atomic::AtomicU8::new(CATCH_UP_RELISTED),
+            feed: std::sync::atomic::AtomicU8::new(FEED_NONE),
+            changed: Changed::new(),
+            content: std::sync::Mutex::new(None),
+            wants_content: std::sync::atomic::AtomicBool::new(false),
+            sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
+            sessions_next: std::sync::atomic::AtomicU64::new(0),
+        });
+
+        // The pattern the engine refuses: an unclosed character class.
+        let answers = scoped_content("regex:[", &scope, 10, &ctx);
+        assert!(
+            answers
+                .iter()
+                .any(|a| matches!(a, Answer::Frame(Response::Warning { .. }))),
+            "the refusal is said out loud: {answers:?}"
+        );
+        assert!(
+            !answers
+                .iter()
+                .any(|a| matches!(a, Answer::Frame(Response::Error { .. }))),
+            "and it is not the end of the answer: {answers:?}"
+        );
+        assert!(
+            answers
+                .iter()
+                .any(|a| matches!(a, Answer::Frame(Response::GrepFiles { .. }))),
+            "the answer is still there, and it is empty: {answers:?}"
+        );
     }
 
     /// The scope names the file however the path is spelled.

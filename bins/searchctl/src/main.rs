@@ -362,16 +362,19 @@ fn obtain_index(opts: &Opts) -> Result<Index, String> {
             }
         })
         .map_err(|_| "scan cancelled — no index written".to_string())?;
-    let idx = {
+    let mut idx = {
         // The user's priority rules, beside the index: `<index>.rules`. No
-        // file is not an error -- the defaults are the rules.
+        // file is not an error -- the defaults are the rules. The message
+        // the rules file comes back with says what is in use: the defaults
+        // when the file could not be read, the parsed rules when a line of
+        // it did not parse.
         let (rules, why) = rgy_name_core::rules::Rules::beside(&index_path);
         if let Some(why) = why {
-            rgy_engine::errln!("searchctl: {why} -- using the default rules");
+            rgy_engine::errln!("searchctl: {why}");
         }
         Index::build_with_rules(listings, 0, now_secs(), opts.root.as_bytes(), &rules)
     };
-    match persist::save(&idx, &root_path, &index_path) {
+    match persist::save(&mut idx, &root_path, &index_path) {
         Ok(saved) => rgy_engine::errln!(
             "searchctl: indexed {} entries → {}",
             idx.n,
@@ -515,6 +518,26 @@ fn local_name_note(hits: usize, limit: usize) -> Option<&'static str> {
 fn run_pick(opts: &Opts, query: &str) -> Result<i32, String> {
     use std::io::Write;
 
+    // The query is parsed once, here: the layer the query belongs to decides
+    // which question is asked, and a query with a content operator is a
+    // content question.
+    //
+    // The picker used to ask the *name* layer whatever the query said: the
+    // content operator was parsed away, the query was left with no name
+    // token at all, and the name layer matched *everything*. So
+    // `--pick 'grep:needle'` offered the whole tree, and the user opened a
+    // file that does not contain the text they searched for — while the
+    // same query without `--pick` answered correctly. Two forms of the
+    // same tool, two answers to the same question.
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_default();
+    let alts = Alternatives::parse(query, &home)?;
+    for w in &alts.warnings {
+        rgy_engine::errln!("warning: {w}");
+    }
+    let content = alts.alts.iter().any(|a| a.grep.is_some());
+
     let req = rgy_pick::Request {
         args: &opts.fzf_arg,
         binary: opts.fzf_binary.as_deref(),
@@ -562,6 +585,20 @@ fn run_pick(opts: &Opts, query: &str) -> Result<i32, String> {
         rgy_engine::errln!("searchctl: asking the running daemon (its own tree, not --root)");
         let search = Box::new(
             move |out: &mut (dyn Write + Send + 'static)| -> Result<bool, String> {
+                if content {
+                    // The content route: the files that hold the text, and
+                    // not the files whose name matches nothing.
+                    let outcome = c.grep(&q, limit).map_err(|e| e.to_string())?;
+                    let mut any = false;
+                    for file in &outcome.files {
+                        out.write_all(file.path.as_bytes())
+                            .map_err(|e| format!("the results could not reach the picker: {e}"))?;
+                        out.write_all(&[0])
+                            .map_err(|e| format!("the results could not reach the picker: {e}"))?;
+                        any = true;
+                    }
+                    return Ok(any);
+                }
                 let outcome = c.search(&q, limit).map_err(|e| e.to_string())?;
                 // The list the picker is given may be a page of a longer
                 // one, and the picker cannot say so: the user chooses from
@@ -581,7 +618,20 @@ fn run_pick(opts: &Opts, query: &str) -> Result<i32, String> {
                 Ok(any)
             },
         );
-        let (code, records) = rgy_pick::pick_records(search, &req)?;
+        let (code, records) = match rgy_pick::pick_records(search, &req) {
+            Ok(picked) => picked,
+            Err(e) => {
+                // A picker that cannot run is a failure of the picker, and
+                // the exit table gives it 1 — "the picker failed". The error
+                // used to travel as an Err and the command answered 2, which
+                // the table reserves for a command that could not run at
+                // all; and `rgxy`, which has the same picker, answers 2 for
+                // it on purpose, so the two tools were saying different
+                // things about the same failure.
+                rgy_engine::errln!("searchctl: {e}");
+                return Ok(1);
+            }
+        };
         print_selection(&records);
         if let Some(why) = *note.lock().unwrap() {
             eprintln!("searchctl: {why}");
@@ -592,18 +642,72 @@ fn run_pick(opts: &Opts, query: &str) -> Result<i32, String> {
     // The local index: the same walk and the same ranking, paid for here.
     let idx = obtain_index(opts)?;
     let live = Live::with_root(idx, opts.root.as_bytes());
-    let home = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .unwrap_or_default();
-    let alts = Alternatives::parse(query, &home)?;
-    for w in &alts.warnings {
-        rgy_engine::errln!("warning: {w}");
-    }
     let root_disp = opts.root.trim_end_matches(['/', '\\']).to_string();
     let limit = opts.limit;
     let carried = note.clone();
+    // The content index, when one is already built alongside this root's
+    // name index (the daemon keeps it fresh). The same rule the plain route
+    // follows: with one the search skips the reads the grams rule out, and
+    // without one it reads the files.
+    let content_index = {
+        let root_path = std::path::PathBuf::from(&opts.root);
+        let base = opts
+            .index
+            .as_ref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| persist::default_index_path(&root_path));
+        let dir = base.with_extension("content");
+        dir.is_dir()
+            .then(|| content::Content::open_shared(dir))
+            .filter(|c| !c.segs.is_empty())
+    };
+    let root = opts.root.clone();
+    let home = home.clone();
     let search = Box::new(
         move |out: &mut (dyn Write + Send + 'static)| -> Result<bool, String> {
+            if content {
+                // The content route: the files that hold the text, and not
+                // the files whose name matches nothing.
+                let mut any = false;
+                let mut shown = 0usize;
+                for alt in &alts.alts {
+                    let Some(pat) = &alt.grep else { continue };
+                    let g = match Grep::new(pat, alt.grep_mode) {
+                        Ok(g) => g,
+                        Err(e) => {
+                            rgy_engine::errln!("warning: {e}");
+                            continue;
+                        }
+                    };
+                    let res = content::answer_with(
+                        &g,
+                        alt,
+                        content::Scope {
+                            root: root.as_bytes(),
+                            live: &live,
+                            home: home.as_bytes(),
+                            index: content_index.as_ref(),
+                            // The formats the adapters claim are read through
+                            // them, so a PDF's words and an archive member's
+                            // content are searched like any other file's bytes.
+                            adapter: Some(&rgy_adapters::Adapters),
+                        },
+                        limit.saturating_sub(shown),
+                    );
+                    shown += res.files.len();
+                    for f in &res.files {
+                        // The record is the bare path: the picker hands the
+                        // line it chose back, and the CLI opens that. The
+                        // path is spelled the way the tree spells it.
+                        out.write_all(&f.path)
+                            .map_err(|e| format!("the results could not reach the picker: {e}"))?;
+                        out.write_all(&[0])
+                            .map_err(|e| format!("the results could not reach the picker: {e}"))?;
+                        any = true;
+                    }
+                }
+                return Ok(any);
+            }
             let searcher = Searcher { live: &live };
             let hits = searcher.search_alternatives(&alts.alts, limit);
             // The list the picker is given may be a page of a longer one,
@@ -627,7 +731,17 @@ fn run_pick(opts: &Opts, query: &str) -> Result<i32, String> {
             Ok(any)
         },
     );
-    let (code, records) = rgy_pick::pick_records(search, &req)?;
+    let (code, records) = match rgy_pick::pick_records(search, &req) {
+        Ok(picked) => picked,
+        Err(e) => {
+            // A picker that cannot run is a failure of the picker, and the
+            // exit table gives it 1 — "the picker failed". The error used
+            // to travel as an Err and the command answered 2, which the
+            // table reserves for a command that could not run at all.
+            rgy_engine::errln!("searchctl: {e}");
+            return Ok(1);
+        }
+    };
     print_selection(&records);
     if let Some(why) = *note.lock().unwrap() {
         eprintln!("searchctl: {why}");
@@ -703,7 +817,23 @@ fn run_daemon(opts: &Opts, query: &str) -> Result<(), String> {
     let content = alts.alts.iter().any(|a| a.grep.is_some());
 
     if content {
-        let outcome = client.grep(query, opts.limit).map_err(|e| e.to_string())?;
+        let outcome = match client.grep(query, opts.limit) {
+            Ok(o) => o,
+            Err(e) => {
+                // The daemon reported an error, and the exit table gives
+                // that 1 — "the daemon reported an error". The error used
+                // to travel as an Err and the command answered 2, which the
+                // table reserves for a command that could not run at all,
+                // and the one code the table reserves for a daemon-sourced
+                // error was the one the CLI never produced for one. A pipe
+                // that broke is not the daemon's report, and that stays 2.
+                if rgy_proto::client::is_the_daemon_saying_no(&e) {
+                    rgy_engine::errln!("searchctl: {e}");
+                    std::process::exit(1);
+                }
+                return Err(e.to_string());
+            }
+        };
         for w in &outcome.warnings {
             rgy_engine::errln!("warning: {w}");
         }
@@ -742,9 +872,21 @@ fn run_daemon(opts: &Opts, query: &str) -> Result<(), String> {
         return Ok(());
     }
 
-    let outcome = client
-        .search(query, opts.limit)
-        .map_err(|e| e.to_string())?;
+    let outcome = match client.search(query, opts.limit) {
+        Ok(o) => o,
+        Err(e) => {
+            // The daemon reported an error, and the exit table gives that
+            // 1 — "the daemon reported an error". The error used to travel
+            // as an Err and the command answered 2, which the table
+            // reserves for a command that could not run at all. A pipe that
+            // broke is not the daemon's report, and that stays 2.
+            if rgy_proto::client::is_the_daemon_saying_no(&e) {
+                rgy_engine::errln!("searchctl: {e}");
+                std::process::exit(1);
+            }
+            return Err(e.to_string());
+        }
+    };
     for w in &outcome.warnings {
         rgy_engine::errln!("warning: {w}");
     }
@@ -959,7 +1101,19 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
             let mut lost: Option<String> = None;
             for alt in &alts.alts {
                 let Some(pat) = &alt.grep else { continue };
-                let mut g = Grep::new(pat, alt.grep_mode)?;
+                let mut g = match Grep::new(pat, alt.grep_mode) {
+                    Ok(g) => g,
+                    Err(e) => {
+                        // A pattern the engine refuses is said out loud, and
+                        // the count goes on with the alternatives that did
+                        // compile: the daemon route answers the same refusal
+                        // with a warning and an empty answer. The `?` used
+                        // to turn it into an error and the exit code 2, so
+                        // one refusal had two codes depending on the route.
+                        rgy_engine::errln!("warning: {e}");
+                        continue;
+                    }
+                };
                 // No preview caps. `Grep` is built for *showing* results: it
                 // stops at 5 lines a file and gives up after 250 ms, which is
                 // right for a preview and wrong for a number. Counting what
@@ -999,12 +1153,28 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
             return Ok(());
         }
         let mut shown = 0usize;
+        let mut files_shown = 0usize;
         // A lane that panicked is a search that lost part of itself: the
         // rows are what was found, and they are not all of it.
         let mut lost: Option<String> = None;
         for alt in &alts.alts {
             let Some(pat) = &alt.grep else { continue };
-            let g = Grep::new(pat, alt.grep_mode)?;
+            if files_shown >= limit {
+                break;
+            }
+            let g = match Grep::new(pat, alt.grep_mode) {
+                Ok(g) => g,
+                Err(e) => {
+                    // A pattern the engine refuses is said out loud, and the
+                    // search goes on with the alternatives that did compile:
+                    // the daemon route answers the same refusal with a
+                    // warning and an empty answer. The `?` used to turn it
+                    // into an error and the exit code 2, so one refusal had
+                    // two codes depending on the route.
+                    rgy_engine::errln!("warning: {e}");
+                    continue;
+                }
+            };
             let res = content::answer_with(
                 &g,
                 alt,
@@ -1018,8 +1188,9 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
                     // searched like any other file's bytes.
                     adapter: Some(&rgy_adapters::Adapters),
                 },
-                limit,
+                limit.saturating_sub(files_shown),
             );
+            files_shown += res.files.len();
             if let Some(why) = &res.error {
                 lost = Some(why.clone());
             }

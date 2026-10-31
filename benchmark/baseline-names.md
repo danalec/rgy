@@ -445,10 +445,10 @@ Commands:
     # peak_rss_bytes=154652672 peak_rss_mib=147.5 resident_rss_mib=147.5 exit=1
 
 `name_bench --save-index <file> --root <dir>` exists for this recipe: the
-index is persisted through `rgy_name_core::persist` (root sidecar included, so
-`searchd` will trust it) and the run stops before the walk fixture, which
-writes one file per corpus entry. `exit=1` in hold mode is mem-peak killing
-the daemon on schedule.
+index is persisted through `rgy_name_core::persist` — the root sidecar, and
+the root's digest in the index's own header, so `searchd` will trust it — and
+the run stops before the walk fixture, which writes one file per corpus
+entry. `exit=1` in hold mode is mem-peak killing the daemon on schedule.
 
 ### Item 3, measured: the indirection is not the lever
 

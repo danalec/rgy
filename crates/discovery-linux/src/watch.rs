@@ -52,6 +52,12 @@ mod sys {
     pub(super) const EAGAIN: c_int = 11;
     /// `EWOULDBLOCK`: the same number under the other name.
     pub(super) const EWOULDBLOCK: c_int = EAGAIN;
+    /// `EACCES`: the folder cannot be watched.
+    pub(super) const EACCES: c_int = 13;
+    /// `ENOENT`: the folder is gone.
+    pub(super) const ENOENT: c_int = 2;
+    /// `ENOSPC`: the watch limit is reached.
+    pub(super) const ENOSPC: c_int = 28;
 
     unsafe extern "C" {
         pub(super) fn inotify_init1(flags: c_int) -> c_int;
@@ -71,6 +77,22 @@ const REASON_CREATE: u32 = rgy_discovery::USN_REASON_FILE_CREATE;
 const REASON_DELETE: u32 = rgy_discovery::USN_REASON_FILE_DELETE;
 const REASON_RENAME_OLD: u32 = rgy_discovery::USN_REASON_RENAME_OLD_NAME;
 const REASON_RENAME_NEW: u32 = rgy_discovery::USN_REASON_RENAME_NEW_NAME;
+
+/// The name of an errno the watch can be refused with.
+///
+/// The crate has no `libc` to ask, and the three that matter are the three
+/// a user can do something about: the watch limit
+/// (`/proc/sys/fs/inotify/max_user_watches`), the permission, and the
+/// folder that is gone. An errno with no name is still the number, and the
+/// number is the fact.
+fn errno_name(errno: i32) -> &'static str {
+    match errno {
+        sys::EACCES => "EACCES: the folder cannot be watched",
+        sys::ENOENT => "ENOENT: the folder is gone",
+        sys::ENOSPC => "ENOSPC: the watch limit is reached",
+        _ => "the kernel refused the watch",
+    }
+}
 
 pub struct InotifyWatch {
     fd: i32,
@@ -94,12 +116,11 @@ impl InotifyWatch {
             watches: BTreeMap::new(),
             pending_old: None,
         };
-        w.add_tree(root)
-            .map_err(|e| alloc::format!("inotify_add_watch failed: {e}"))?;
+        w.add_tree(root)?;
         Ok(w)
     }
 
-    fn add_tree(&mut self, dir: &[u8]) -> Result<(), i32> {
+    fn add_tree(&mut self, dir: &[u8]) -> Result<(), String> {
         self.add_one(dir)?;
         // The seam reads the folder and the metadata of every entry in
         // it, so the names and the kinds come out of one pass. A folder
@@ -121,8 +142,10 @@ impl InotifyWatch {
         Ok(())
     }
 
-    fn add_one(&mut self, dir: &[u8]) -> Result<(), i32> {
-        let c = path::cstring(dir).ok_or(-1)?;
+    fn add_one(&mut self, dir: &[u8]) -> Result<(), String> {
+        let Some(c) = path::cstring(dir) else {
+            return Err("inotify_add_watch: the path has a NUL in it".into());
+        };
         let wd = unsafe {
             sys::inotify_add_watch(
                 self.fd,
@@ -135,7 +158,18 @@ impl InotifyWatch {
             )
         };
         if wd < 0 {
-            return Err(wd);
+            // The errno is read HERE, where the call is: the number that
+            // says why the watch was refused is the number the call set,
+            // and a later read of it would be a later fact. The number is
+            // the answer the user needs -- the watch limit and the
+            // permission are the two reasons a live feed does not start,
+            // and both of them have something the user can do about them.
+            let errno = unsafe { *sys::__errno_location() };
+            return Err(alloc::format!(
+                "inotify_add_watch: errno {errno} ({}) on {}",
+                errno_name(errno),
+                String::from_utf8_lossy(dir),
+            ));
         }
         self.watches.insert(wd, dir.to_vec());
         Ok(())

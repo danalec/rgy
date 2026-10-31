@@ -1,6 +1,23 @@
 --- a/crates/rgx-adapters-archive/Cargo.toml
 +++ b/crates/rgx-adapters-archive/Cargo.toml
-@@ -84,10 +84,10 @@ git-pack = ["std", "rgx-core/zlib"]
+@@ -1,6 +1,6 @@
+ [package]
+ name = "rgx-adapters-archive"
+-version = "0.1.1"
++version = "0.1.2"
+ edition = "2021"
+ authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
+ description = "rgx adapters: zip, tar, cpio, 7z, single-file decompressors"
+@@ -13,7 +13,7 @@
+ readme = "README.md"
+ keywords = ["archive", "zip", "tar", "7z", "rar"]
+ categories = ["encoding", "filesystem"]
+-repository = "https://github.com/danalec/rgx"
++repository = "https://github.com/danalec/rgy"
+ # What the published crate carries. The test corpus is the repository's:
+ # the fixtures under `testdata/` are what this crate's own tests read, and
+ # a user of the crate has no use for them. The examples are one-off
+@@ -84,10 +84,10 @@
  # A git bundle and a Subversion dump are read through the git-pack reader.
  git-bundle = ["std", "git-pack", "rgx-core/zlib"]
  svn-dump = ["std", "git-pack", "rgx-core/zlib"]
@@ -15,11 +32,15 @@
  # The RAR codec is the only user of `rar-codec`.
  rar = ["std", "dep:rar-codec"]
  pgdump = ["std"]
-@@ -108,14 +108,8 @@ squashfs = ["std", "rgx-core/lzma", "rgx-core/deflate", "rgx-core/xz", "rgx-core
+@@ -106,16 +106,10 @@
+ erofs = ["std"]
+ squashfs = ["std", "rgx-core/lzma", "rgx-core/deflate", "rgx-core/xz", "rgx-core/zstd"]
  [dependencies]
- rgx-core = { path = "../rgx-core", version = "0.1.1", default-features = false, features = ["std", "sha256-hw"] }
- rar-codec = { path = "../rar-codec", version = "0.1.1", optional = true }
+-rgx-core = { path = "../rgx-core", version = "0.1.1", default-features = false, features = ["std", "sha256-hw"] }
+-rar-codec = { path = "../rar-codec", version = "0.1.1", optional = true }
 -zstd = { version = "0.14", optional = true }
++rgx-core = { path = "../rgx-core", version = "0.1.2", default-features = false, features = ["std", "sha256-hw"] }
++rar-codec = { path = "../rar-codec", version = "0.1.2", optional = true }
  
 -# The benches reach into the codecs the adapter registry does not expose, so
 -# they are named with the features that carry them.

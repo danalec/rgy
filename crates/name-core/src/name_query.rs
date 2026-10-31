@@ -189,6 +189,17 @@ impl Token {
 const TYPO_MIN_LEN: usize = 5;
 /// What a typo costs, so clean matches of the same quality rank first.
 const TYPO_COST: i32 = 60;
+/// The most positive words a query carries.
+///
+/// The axes' mask is 32 bits wide, but the machinery around it is not:
+/// the folder memo keeps one score per token in a fixed array
+/// (`DirMatch::best`, eight of them) and the scan keeps four
+/// (`DirMemo::best`), and a token's place among the positive words is
+/// what says which slot is its own. A ninth word has no slot to be
+/// scored in, so it is not carried — and the query says so, because a
+/// word dropped in silence is a query that is not the one the user
+/// asked.
+const MAX_WORDS: usize = 8;
 
 fn takes_typos(text: &[u8], mode: Mode) -> bool {
     mode == Mode::Fuzzy && text.len() >= TYPO_MIN_LEN
@@ -316,7 +327,16 @@ impl Query {
         for (word, quoted) in split_words(s) {
             // A wildcard term is one whole-path glob — never split on `/`
             // (zen-rs: `*/src/*.rs` covers the whole path).
-            if word.contains('*') || word.contains('?') {
+            //
+            // A word whose prefix names a pattern filter is not a glob,
+            // whatever its value holds: `regex:need.*` is a regex, and the
+            // `*` belongs to the engine that runs it. The wildcard test
+            // used to come first, and the whole word — the prefix
+            // included — became a glob for a file called `regex:need.*`:
+            // the content search was voided, and the tool said "nothing
+            // found" for a search it never ran.
+            let pattern_filter = word.split_once(':').is_some_and(|(k, _)| q.pattern_filter_is(k));
+            if (word.contains('*') || word.contains('?')) && !pattern_filter {
                 q.push_token(&word);
                 continue;
             }
@@ -448,8 +468,17 @@ impl Query {
             self.globs.push((negate, pattern.iter().map(|&b| b.to_ascii_lowercase()).collect()));
             return;
         }
-        // Positive tokens are tracked in a u8 bitset.
-        if t.is_empty() || (!negate && self.tokens.iter().filter(|t| !t.negate).count() >= 8) {
+        // Positive tokens are tracked in a u32 bitset (the axes' mask), and
+        // the memo's per-token slots are eight wide: a query carries eight
+        // words. The ninth is not dropped in silence — the query says which
+        // word it did not use, because a query that ran with fewer words
+        // than it was given answers a narrower question than the one asked.
+        if t.is_empty() {
+            return;
+        }
+        if !negate && self.tokens.iter().filter(|t| !t.negate).count() >= MAX_WORDS {
+            let note = format!("too many words: '{w}' was ignored (at most {MAX_WORDS} words)");
+            self.warnings.push(note);
             return;
         }
         // The token is folded before it is compared: a query typed in NFC
@@ -488,6 +517,16 @@ impl Query {
                 | "sym"
                 | "symbol"
         )
+    }
+
+    /// Whether the prefix names a filter whose value is a pattern.
+    ///
+    /// A pattern filter is one whose value the engine reads as a pattern:
+    /// a regex, a path glob, a literal to look for in the file's bytes.
+    /// Such a value may hold a `*` or a `?`, and those belong to the
+    /// engine that runs them — not to the name matcher.
+    fn pattern_filter_is(&self, k: &str) -> bool {
+        matches!(k, "re" | "path" | "grep" | "content" | "regex" | "sym" | "symbol")
     }
 
     /// Apply filter `k:v`; false if `k` is not a filter name.
@@ -790,11 +829,14 @@ impl Query {
 
 /// The extension of a name: the tail after the last dot, without the dot.
 ///
-/// A name with no dot has no extension, and neither has one whose dot is
-/// the first byte (a dotfile's name is the whole thing).
+/// A name with no dot has no extension, and a dotfile's extension is its own
+/// name without the dot — `.bashrc` is a `bashrc`. The rule is the tail
+/// after the last dot and nothing else: the extension filter and the
+/// extension axis read the extension through this one function, so the two
+/// forms of `ext:` cannot disagree about a name.
 fn ext_of(name: &[u8]) -> Option<&[u8]> {
     let dot = name.iter().rposition(|&b| b == b'.')?;
-    if dot == 0 || dot + 1 >= name.len() {
+    if dot + 1 >= name.len() {
         return None;
     }
     Some(&name[dot + 1..])
@@ -963,12 +1005,27 @@ fn parse_age(s: &str) -> Option<u64> {
 /// day is 86 400 seconds -- the constant The reference's parser carries.
 const DAY: u64 = 86_400;
 
+/// The last year the `mtime:` filter can name.
+///
+/// The filter's answer is a pair of unix seconds in a `u32` — the width
+/// the index keeps a file's modification time in — and the u32 epoch ends
+/// on 2106-02-07. A year past it is refused: the alternative is a
+/// timestamp that wrapped into the past, and a filter that answers with
+/// the wrong decade is worse than one that says it cannot answer.
+const MAX_YEAR: i64 = 2106;
+
 /// The unix second a calendar date starts at, in UTC.
 ///
 /// The accepted forms are `YYYY-MM-DD` and `YYYY/MM/DD`. The day counts
 /// from the epoch with the civil-from-days algorithm, so there is no
 /// timezone and no leap-year table to get wrong: the days since 1970 are
 /// what the calendar says.
+///
+/// A date the filter cannot hold is refused. The bound is checked before
+/// the arithmetic below, because the arithmetic is what overflows on a
+/// year nobody can hold: the days are counted in an `i64` and turned
+/// into seconds and then into a `u32`, and a year of 999 999 999 999
+/// needs more seconds than a `u64` has.
 fn parse_date(s: &str) -> Option<u32> {
     let s = s.trim();
     let (y, rest) = s.split_once(['-', '/'])?;
@@ -977,6 +1034,11 @@ fn parse_date(s: &str) -> Option<u32> {
     let m: u32 = m.parse().ok()?;
     let d: u32 = d.parse().ok()?;
     if !(1..=12).contains(&m) || !(1..=31).contains(&d) || y < 0 {
+        return None;
+    }
+    // The year the u32 epoch holds, and the bound the arithmetic below
+    // needs: past it the day count leaves the `i64` it is counted in.
+    if y > MAX_YEAR {
         return None;
     }
     // The day of the month has to exist in that month.
@@ -999,7 +1061,14 @@ fn parse_date(s: &str) -> Option<u32> {
     let doy = (153 * mp + 2) / 5 + d as i64 - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     let days = era * 146_097 + doe - 719_468;
-    (days >= 0).then_some((days as u64 * DAY) as u32)
+    if days < 0 {
+        return None;
+    }
+    // The timestamp is the `u32` the filter carries, and a date the u32
+    // epoch does not reach is refused rather than truncated into the
+    // past: the last day of the epoch is 2106-02-07, and the days after
+    // it are not a date the filter can hold.
+    u32::try_from((days as u64).checked_mul(DAY)?).ok()
 }
 
 /// The operator a date value carries.
@@ -1020,7 +1089,8 @@ enum DateOp {
 /// The value is one of three things, and the operator suffix is what tells
 /// them apart:
 ///
-/// * a **calendar date** -- `2024-01-01`, or a range of two
+/// * a **calendar date** -- `2024-01-01` or `2024/01/01` (the separator
+///   is a dash or a slash, as it is in the date parser), or a range of two
 ///   (`2024-01-01..2024-02-01`). A date names a whole day: it starts at
 ///   midnight and ends at the next midnight, so `mtime:2024-01-01` is the
 ///   files changed that day;
@@ -1052,8 +1122,12 @@ fn date_range(v: &str, now: u32) -> Result<(u32, u32), String> {
         Some(b'c') | Some(b'C') => (DateOp::Created, &v[1..]),
         _ => (DateOp::None, v),
     };
-    // A calendar date, or a range of two.
-    if rest.contains('-') && rest.split('-').count() >= 3 {
+    // A calendar date, or a range of two. The shape is the parser's: a
+    // date is a year, a separator, a month, a separator and a day, and
+    // the separator is a dash or a slash. `parse_date` takes both, so
+    // the filter takes both — a date the parser reads is a date the
+    // filter reads.
+    if rest.matches(['-', '/']).count() >= 2 {
         let (lo, hi) = match rest.split_once("..") {
             Some((a, b)) => (parse_date(a).ok_or_else(bad)?, parse_date(b).ok_or_else(bad)?),
             None => {
@@ -1912,11 +1986,12 @@ fn token_matches(name: &[u8], t: &Token) -> bool {
     token_score(name, None, !0, t).is_some()
 }
 
-/// Top k by (score, then lower entry index): a total order, so the result
 /// Does the name end in one of `exts` (ASCII-case-insensitive)?
+///
+/// The extension is the one `ext_of` names, so the filter and the axis
+/// read it the same way and cannot disagree about a dotfile.
 fn ext_ok(name: &[u8], exts: &[Vec<u8>]) -> bool {
-    let Some(dot) = name.iter().rposition(|&b| b == b'.') else { return false };
-    let e = &name[dot + 1..];
+    let Some(e) = ext_of(name) else { return false };
     exts.iter().any(|x| x.len() == e.len() && x.iter().zip(e).all(|(&a, &b)| a == fold(b)))
 }
 
@@ -2077,6 +2152,35 @@ mod tests {
         Query::parse(s, "").expect("parses")
     }
 
+    /// A pattern filter keeps its pattern.
+    ///
+    /// `regex:need.*` is a regex, and the `*` belongs to the engine that
+    /// runs it. The wildcard test used to come first, and the whole word
+    /// — the prefix included — became a glob for a file called
+    /// `regex:need.*`: the content search was voided, and the tool said
+    /// "nothing found" for a search it never ran. The same for `grep:`
+    /// and `sym:`.
+    #[test]
+    fn a_pattern_filter_keeps_its_pattern() {
+        let regex = q("regex:need.*");
+        assert_eq!(regex.grep.as_deref(), Some("need.*"), "the pattern reaches the engine whole");
+        assert_eq!(regex.grep_mode, GrepMode::Regex, "and it is a regex");
+        assert!(regex.globs.is_empty(), "and it is not a glob for a file's name");
+
+        let literal = q("grep:needle");
+        assert_eq!(literal.grep.as_deref(), Some("needle"), "a literal grep keeps its text");
+        assert_eq!(literal.grep_mode, GrepMode::Literal, "and it is a literal");
+
+        let symbol = q("sym:need*");
+        assert_eq!(symbol.grep.as_deref(), Some("need*"), "a symbol pattern keeps its text too");
+        assert_eq!(symbol.grep_mode, GrepMode::Symbol, "and it is a symbol");
+
+        // A bare word with a wildcard is still a glob for the name.
+        let glob = q("*.rs");
+        assert!(glob.grep.is_none(), "a bare wildcard is not a content search");
+        assert_eq!(glob.globs.len(), 1, "and it is a whole-path glob");
+    }
+
     fn hit(query: &str, path: &str, kind: u8, size: u64) -> bool {
         Alternatives::parse(query, "").unwrap().match_path(path.as_bytes(), kind, size, 0).is_some()
     }
@@ -2125,6 +2229,28 @@ mod tests {
         // includes the extension.
         assert!(hit("pdf", "/a/pdf-report.txt", KIND_FILE, 10));
         assert!(hit("pdf", "/a/report.pdf", KIND_FILE, 10));
+    }
+
+    /// The two forms of `ext:` agree about a dotfile.
+    ///
+    /// `ext:pdf` is the filter ("the extension is pdf") and `ext:^pdf` is
+    /// the axis ("the extension, starting with pdf"), and they are the
+    /// same extension read the same way: the tail after the last dot. A
+    /// dotfile's extension is its own name without the dot, so `.bashrc`
+    /// is a `bashrc` under both.
+    #[test]
+    fn the_two_forms_of_ext_agree_about_a_dotfile() {
+        // The filter form takes the dotfile.
+        assert!(hit("ext:bashrc", "/x/.bashrc", KIND_FILE, 10), "the filter takes it");
+        // And the axis form does too: it used to say no, and the two forms
+        // of the same filter gave two different answers.
+        assert!(hit("ext:^bashrc", "/x/.bashrc", KIND_FILE, 10), "the axis form takes it as well");
+        // A name with an extension is the same under both.
+        assert!(hit("ext:pdf", "/x/report.pdf", KIND_FILE, 10));
+        assert!(hit("ext:^pdf", "/x/report.pdf", KIND_FILE, 10));
+        // And a name with no dot has no extension, under either form.
+        assert!(!hit("ext:bashrc", "/x/README", KIND_FILE, 10), "no dot, no extension");
+        assert!(!hit("ext:^bashrc", "/x/README", KIND_FILE, 10), "no dot, no extension");
     }
 
     /// The folder axis matches a folder of the path.
@@ -2714,6 +2840,78 @@ mod tests {
         assert!(Query::parse("mtime:notadate", "").is_err(), "a date that is not one is refused");
     }
 
+    /// A date the filter cannot hold is refused, not wrapped.
+    ///
+    /// The filter's answer is a pair of unix seconds in a `u32` — the
+    /// width the index keeps a file's modification time in — and the u32
+    /// epoch ends on 2106-02-07. A year past that end is more seconds
+    /// than the u32 holds, and a timestamp that wrapped is a date in the
+    /// past: the filter would answer with files from the wrong decade.
+    #[test]
+    fn a_date_the_filter_cannot_hold_is_refused() {
+        // A year past the u32 epoch: the seconds it needs do not fit the u32
+        // the filter carries, so the old arithmetic answered with a date
+        // in the past.
+        let why = match Query::parse("mtime:99999999-01-01", "") {
+            Ok(_) => panic!("a year of 99 999 999 is refused"),
+            Err(e) => e,
+        };
+        assert!(why.contains("bad date"), "and it says why: {why}");
+        // A year whose seconds do not fit the u64 they are counted in.
+        let huge = Query::parse("mtime:999999999999-01-01", "");
+        assert!(huge.is_err(), "a year of 999 999 999 999 is refused");
+        // A year past the u32 epoch, and the day past its end.
+        assert!(Query::parse("mtime:2107-01-01", "").is_err(), "a year past the epoch is refused");
+        assert!(Query::parse("mtime:2106-02-08", "").is_err(), "a day past the epoch is refused");
+        // And the last day the epoch holds is accepted: the timestamp is
+        // the second that day starts at.
+        let last = q("mtime:2106-02-07");
+        assert_eq!(last.mtime.0, 4_294_944_000, "the last day of the u32 epoch");
+        assert_eq!(last.mtime.1, u32::MAX - 1, "and the last second the epoch holds");
+    }
+
+    /// The date filter takes what the date parser takes.
+    ///
+    /// The parser takes `YYYY/MM/DD` as well as `YYYY-MM-DD`, and the
+    /// filter that reads the parser's dates has to read them both: a
+    /// user who writes the documented form was told the date is not a
+    /// date.
+    #[test]
+    fn the_date_filter_takes_the_slash_form_too() {
+        let dash = q("mtime:2024-01-01");
+        let slash = q("mtime:2024/01/01");
+        assert_eq!(slash.mtime, dash.mtime, "the slash form is the same day");
+        assert_eq!(dash.mtime.0, 1_704_067_200, "and it is the day the manual names");
+        // The range takes it as well.
+        let range = q("mtime:2024/01/01..2024/01/31");
+        assert_eq!(range.mtime, q("mtime:2024-01-01..2024-01-31").mtime, "the range takes it too");
+    }
+
+    /// The ninth word is said, not dropped in silence.
+    ///
+    /// The query is a list of words and every word narrows the answer,
+    /// so a word the query does not carry is a word the user has to be
+    /// told about: the answer to a narrower question looks like the
+    /// answer to the one that was asked.
+    #[test]
+    fn the_ninth_word_is_reported() {
+        let eight = "one two three four five six seven eight";
+        let carried = q(eight);
+        let words = |query: &Query| query.tokens.iter().filter(|t| !t.negate).count();
+        assert_eq!(words(&carried), 8, "eight words are carried");
+        assert!(carried.warnings.is_empty(), "and eight words are quiet: {:?}", carried.warnings);
+        // The ninth does not fit, and the query says which word it did
+        // not use.
+        let nine = q(&format!("{eight} nine"));
+        assert_eq!(words(&nine), 8, "the query carries eight words");
+        assert_eq!(nine.warnings.len(), 1, "and says so: {:?}", nine.warnings);
+        assert!(nine.warnings[0].contains("nine"), "the word it dropped is named: {:?}", nine.warnings);
+        // The warning travels with the answer, as the other query
+        // warnings do.
+        let alts = Alternatives::parse(&format!("{eight} nine"), "").expect("the query parses");
+        assert_eq!(alts.warnings.len(), 1, "the warning is the alternative's: {:?}", alts.warnings);
+    }
+
     /// The signed size bounds the manual spells have to work.
     ///
     /// The manual says `size:+10m` is "bigger than 10 MB" and `size:-1k`
@@ -2846,7 +3044,12 @@ mod tests {
     /// scored name table behind. They are worth keeping only while the
     /// user is typing, so a quiet spell gives them back -- and the daemon
     /// has no idle moment of its own, so a thread of its own does it.
+    ///
+    /// The `std` build only: "idle" is the wall clock's word, and without
+    /// a clock there is no idle moment to decide. The test stands down
+    /// with the thing it measures.
     #[test]
+    #[cfg(feature = "std")]
     fn the_query_cache_is_dropped_after_a_quiet_spell() {
         let live = many_live(100);
         let searcher = Searcher { live: &live };
@@ -3101,7 +3304,12 @@ mod tests {
 
     /// `--explain` is only worth anything if every arm is reachable. If a plan
     /// could never be taken, reporting it would be decoration.
+    ///
+    /// The `std` build only: the plan lives in thread-local storage, and
+    /// without it there is no plan to report. The test stands down with the
+    /// thing it reads.
     #[test]
+    #[cfg(feature = "std")]
     fn the_reported_plan_is_the_path_that_actually_ran() {
         let live = many_live(300);
         let s = Searcher { live: &live };

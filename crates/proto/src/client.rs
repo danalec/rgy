@@ -214,19 +214,38 @@ impl Client {
         let mut out = Vec::new();
         loop {
             let Some(raw) = self.read_line(deadline)? else {
-                // The daemon closed the connection between two answers: it
-                // hung up, and it is not there. The kind says so, because
-                // the kind is what the caller reads: a caller that says
+                // The daemon closed the connection. WHICH close is the
+                // difference between two facts, and the kind is what the
+                // caller reads.
+                //
+                // A close before anything was said is a daemon that is not
+                // there: the pipe that was closed, and the user has to
+                // start one. The kind says so, because a caller that says
                 // "the daemon answered badly" about a daemon that is gone
                 // hides the daemon the user has to start.
+                //
+                // A close after the daemon spoke is a daemon that IS there
+                // and answered badly: it spoke, and then it stopped. The
+                // answer that arrived is not an answer, and the caller
+                // that says "no connection to the daemon" about it says
+                // something that is not true -- and it is the launcher's
+                // own rule, which says that only a daemon that could not
+                // be REACHED is gone.
                 //
                 // A half answer is a different thing, and it is a different
                 // kind: a caller that showed it would show "no results" for
                 // a daemon that died mid-sentence.
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::ConnectionAborted,
-                    "the daemon closed the connection before the answer",
-                ));
+                return Err(if out.is_empty() {
+                    std::io::Error::new(
+                        std::io::ErrorKind::ConnectionAborted,
+                        "the daemon closed the connection before the answer",
+                    )
+                } else {
+                    std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "the daemon closed the connection in the middle of the answer",
+                    )
+                });
             };
             let line = raw.trim_end_matches(['\r']);
             if line.trim().is_empty() {
@@ -239,6 +258,10 @@ impl Client {
                 break;
             }
         }
+        // The count the terminator carries is checked here, where the wire
+        // was read: every reader of the wire gets the check, and a reader
+        // that used the raw frames gets it too.
+        the_count_agrees(&out)?;
         Ok(out)
     }
 
@@ -363,6 +386,10 @@ impl Client {
         };
         let responses = self.request_within(&req, window)?;
         let mut out = SearchOutcome::default();
+        // Whether a result frame has been read yet. The flag of the answer
+        // is the AND of the flags of the frames: a frame that says "this
+        // part is whole" cannot make the whole answer whole on its own.
+        let mut whole = true;
         for r in responses {
             match r {
                 Response::Hits {
@@ -371,9 +398,15 @@ impl Client {
                     complete,
                     session,
                 } => {
-                    out.hits = hits;
+                    // The entries ACCUMULATE. One result frame per answer is
+                    // the rule, and a peer that sends two does not lose the
+                    // first one on the way in: the count that ends the
+                    // answer says how big the answer is, and the reader
+                    // compares it with what arrived.
+                    out.hits.extend(hits);
                     out.took_us = took_us;
-                    out.complete = complete;
+                    whole &= complete;
+                    out.complete = whole;
                     // The session the answer was computed for. The client
                     // keeps it and sends it back with the next question,
                     // and the daemon re-ranks this answer instead of
@@ -557,6 +590,10 @@ impl Client {
     /// two ways would have two places to keep in step.
     fn grep_outcome(responses: Vec<Response>) -> std::io::Result<GrepOutcome> {
         let mut out = GrepOutcome::default();
+        // Whether a result frame has been read yet. The flag of the answer
+        // is the AND of the flags of the frames: a frame that says "this
+        // part is whole" cannot make the whole answer whole on its own.
+        let mut whole = true;
         for r in responses {
             match r {
                 Response::GrepFiles {
@@ -566,11 +603,16 @@ impl Client {
                     skipped,
                     skips,
                 } => {
-                    out.files = files;
+                    // The entries ACCUMULATE, for the same reason the name
+                    // answer's do: a peer that sends two result frames does
+                    // not lose the first one on the way in, and the count
+                    // that ends the answer says how big the answer is.
+                    out.files.extend(files);
                     out.took_us = took_us;
-                    out.complete = complete;
-                    out.skipped = skipped;
-                    out.skips = skips;
+                    whole &= complete;
+                    out.complete = whole;
+                    out.skipped += skipped;
+                    out.skips.extend(skips);
                 }
                 Response::Warning { message } => out.warnings.push(message),
                 Response::Error { message } => return Err(std::io::Error::other(message)),
@@ -781,6 +823,22 @@ pub struct DaemonStatus {
     pub feed: Feed,
 }
 
+/// Whether this error is the daemon's own answer.
+///
+/// The daemon reports a failure with an `{"op":"error"}` frame, and the
+/// client carries that message as an `io::Error` of the kind `Other`: a
+/// message that came from the peer, and not from the pipe. A caller that
+/// has to tell "the daemon said no" from "the daemon went away" asks
+/// here — the exit code of a CLI is one of those two things, and the two
+/// are not the same.
+///
+/// The kind is the distinction because it is the only one there is: the
+/// frame and the transport are both failures of the request, and only the
+/// frame carries the daemon's own words.
+pub fn is_the_daemon_saying_no(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::Other
+}
+
 /// The response that ends the answer to `req`.
 ///
 /// The daemon answers a search with the hits and a `done`, and a status
@@ -796,6 +854,45 @@ fn ends_the_answer(req: &Request, resp: &Response) -> bool {
         Response::Resolved { .. } => matches!(req, Request::Resolve { .. }),
         Response::Hits { .. } | Response::GrepFiles { .. } | Response::Warning { .. } => false,
     }
+}
+
+/// The count that ends the answer, against the entries that arrived.
+///
+/// The terminator says how many entries the answer carried, and the reader
+/// counts what it got: the two are the same number, and the reader compares
+/// them. The frame whose whole job is to say how big the answer was was
+/// otherwise decoded and thrown away, and an answer that lost a frame in
+/// the middle looks exactly like one that never lost anything.
+///
+/// The kind of the error is the data's: the daemon is there and said
+/// something that is not true, and a caller that reads the kind reads the
+/// same thing on every platform.
+///
+/// An answer that ends without a terminator is not this check's business:
+/// the status route ends at its own frame, and the reader that asked for it
+/// is reading a different thing.
+fn the_count_agrees(responses: &[Response]) -> std::io::Result<()> {
+    let Some(said) = responses.iter().find_map(|r| match r {
+        Response::Done { count } => Some(*count),
+        _ => None,
+    }) else {
+        return Ok(());
+    };
+    let arrived: usize = responses
+        .iter()
+        .map(|r| match r {
+            Response::Hits { hits, .. } => hits.len(),
+            Response::GrepFiles { files, .. } => files.len(),
+            _ => 0,
+        })
+        .sum();
+    if said == arrived {
+        return Ok(());
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("the answer says it carries {said} entries and {arrived} arrived"),
+    ))
 }
 
 /// The sentence a line the client cannot read gets.
@@ -2106,6 +2203,40 @@ mod tests {
         server.join();
     }
 
+    /// The daemon's own refusal is told apart from a broken pipe.
+    ///
+    /// The daemon reports a failure with an `{"op":"error"}` frame, and the
+    /// client carries the message as an error. A pipe that broke is a
+    /// failure too, and the two are not the same: the exit code of a CLI
+    /// is one of them or the other, and the code that says "the daemon
+    /// reported an error" must not be given for a pipe that died.
+    #[test]
+    fn the_daemons_own_refusal_is_told_apart_from_a_broken_pipe() {
+        let server = serve(|mut peer: Peer| {
+            let _ = peer.read_request();
+            let _ =
+                peer.send(b"{\"op\":\"error\",\"message\":\"the pattern `[` does not compile\"}\n");
+        });
+        let mut client = Client::connect(&server.endpoint).expect("the client connects");
+        let err = client.grep("hello", 10).expect_err("the daemon said no");
+        assert!(
+            is_the_daemon_saying_no(&err),
+            "the daemon's own words are the daemon's: {err}"
+        );
+        assert!(
+            err.to_string().contains("does not compile"),
+            "and the message is the daemon's: {err}"
+        );
+        server.join();
+
+        // A pipe that broke is not the daemon saying no.
+        let broken = std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "the pipe closed");
+        assert!(
+            !is_the_daemon_saying_no(&broken),
+            "a broken pipe is not a report: {broken}"
+        );
+    }
+
     /// The resolve op has a branch now.
     ///
     /// The daemon answered the question and the protocol read the answer
@@ -2151,6 +2282,37 @@ mod tests {
         let _ = peer.send(br#"{"op":"hits","hits":[{"path":"a""#);
         // The peer is dropped here: the connection closes with the line
         // unfinished.
+    }
+
+    /// A daemon that says a whole frame and then hangs up.
+    ///
+    /// The frame is whole -- it ends with a newline -- and the daemon stops
+    /// after it. The answer started and it did not finish, and that is a
+    /// different thing from a daemon that hung up between two answers: this
+    /// one was there.
+    fn says_a_frame_and_hangs_up(peer: Peer) {
+        let mut peer = peer;
+        let _ = peer.read_request();
+        let _ = peer.send(
+            br#"{"op":"hits","hits":[{"path":"a","score":1}],"took_us":1,"complete":true}
+"#,
+        );
+        // The peer is dropped here: the connection closes at the frame's
+        // boundary, with the answer unfinished.
+    }
+
+    /// A daemon whose count does not match what it sent.
+    ///
+    /// One hit on the wire and a count of five: the answer says it carries
+    /// five entries and one arrived.
+    fn counts_wrong(peer: Peer) {
+        let mut peer = peer;
+        let _ = peer.read_request();
+        let _ = peer.send(
+            br#"{"op":"hits","hits":[{"path":"a","score":1}],"took_us":1,"complete":true}
+{"op":"done","count":5}
+"#,
+        );
     }
 
     /// A daemon that sends a line that never ends.
@@ -2379,6 +2541,75 @@ mod tests {
         assert!(
             err.to_string().contains("in the middle of the answer"),
             "the reason says what happened: {err}"
+        );
+        server.join();
+    }
+
+    /// A daemon that says a frame and then hangs up is a daemon that is
+    /// there.
+    ///
+    /// The frame was whole, and the daemon stopped after it. The answer
+    /// started and it did not finish, and that is not the same thing as a
+    /// daemon that hung up between two answers: this one spoke, and the
+    /// launcher reads the kind to know whether to say "no daemon" or "the
+    /// daemon answered badly". A daemon that answered badly is a daemon the
+    /// user has to look at; a daemon that is gone is a daemon the user has
+    /// to start.
+    #[test]
+    fn a_daemon_that_stops_after_a_frame_is_not_a_daemon_that_is_gone() {
+        let server = serve(says_a_frame_and_hangs_up);
+        let mut client = Client::connect(&server.endpoint).expect("the client connects");
+        let err = client
+            .request_within(
+                &Request::Search {
+                    q: "a".into(),
+                    limit: 10,
+                    session: None,
+                },
+                SHORT,
+            )
+            .expect_err("half an answer is not an answer");
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::UnexpectedEof,
+            "the answer was cut: {err}"
+        );
+        assert!(
+            err.to_string().contains("in the middle of the answer"),
+            "the reason says what happened: {err}"
+        );
+        server.join();
+    }
+
+    /// A count that does not match the entries is not an answer.
+    ///
+    /// The count is how big the answer said it was, and the reader counts
+    /// what arrived. The two are the same number, and the reader compares
+    /// them: a frame whose whole job is to say how big the answer was was
+    /// decoded and thrown away, and an answer that lost a frame in the
+    /// middle looked exactly like one that never lost anything.
+    #[test]
+    fn a_count_that_does_not_match_the_entries_fails_the_answer() {
+        let server = serve(counts_wrong);
+        let mut client = Client::connect(&server.endpoint).expect("the client connects");
+        let err = client
+            .request_within(
+                &Request::Search {
+                    q: "a".into(),
+                    limit: 10,
+                    session: None,
+                },
+                SHORT,
+            )
+            .expect_err("a count that does not match is not an answer");
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::InvalidData,
+            "the answer lied about its size: {err}"
+        );
+        assert!(
+            err.to_string().contains("carries 5 entries"),
+            "the reason says what did not agree: {err}"
         );
         server.join();
     }

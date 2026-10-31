@@ -202,11 +202,24 @@ echo "syncing vendored rgx crates from $UPSTREAM" >&2
 # `ls-files` answers.
 upstream_list="$(mktemp)"
 patched_paths="$(mktemp)"
-trap 'rm -f "$upstream_list" "$patched_paths"' EXIT
+upstream_tree_paths="$(mktemp)"
+trap 'rm -f "$upstream_list" "$patched_paths" "$upstream_tree_paths"' EXIT
 for crate in $CRATES; do
     git -C "$UPSTREAM" ls-files "crates/$crate" >> "$upstream_list"
 done
 sort -o "$upstream_list" "$upstream_list"
+
+# Every path the pinned commit holds, and the question the manifest asks
+# about a patch: does upstream have this path at all? A patch that changes
+# a file upstream has is applied on top of the copy; a patch that creates a
+# file upstream has no path for is the file's whole content. The two are
+# both "a divergence from upstream" and the manifest has to tell them
+# apart, or the row says the patch goes on top of a copy that does not
+# exist.
+#
+# The list is the commit's and not the checkout's: the copy is taken from
+# the commit, so the question is asked of the commit.
+git -C "$UPSTREAM" ls-tree -r --name-only "$upstream_commit" > "$upstream_tree_paths"
 
 # The paths that have a local patch, repository-relative. One list for the
 # whole run, because the copy list asks it for every crate: a file with a
@@ -468,11 +481,20 @@ for crate in $CRATES; do
     # it is the upstream working tree against the commit being copied, so
     # every name in it is a change upstream has not committed yet. A
     # committed change upstream would have been copied, not reported.
+    #
+    # The comparison ignores the carriage return at the end of a line,
+    # because the checkout's line endings are not a change. A checkout
+    # made by a git configured to write CRLF holds CRLF on disk where the
+    # blob has LF, and without this the report said 325 files had
+    # uncommitted changes on a checkout that had none -- the answer came
+    # from the git that ran the question and not from the checkout. The
+    # copy takes the commit's bytes, so the endings on the upstream disk
+    # are not what this repository ends up with either.
     while IFS= read -r rel; do
         [ -n "$rel" ] || continue
         echo "  ahead  $rel: uncommitted upstream change; the copy takes the commit, so this is not in the tree yet" >&2
         ahead=$((ahead + 1))
-    done < <(git -C "$UPSTREAM" diff --name-only "$upstream_commit" -- "crates/$crate" 2>/dev/null)
+    done < <(git -C "$UPSTREAM" diff --name-only --ignore-cr-at-eol "$upstream_commit" -- "crates/$crate" 2>/dev/null)
 
     rm -f "$upstream_paths" "$upstream_pairs" "$local_paths" "$local_pairs" "$to_copy"
 done
@@ -590,8 +612,10 @@ if [ "$DRY_RUN" = 0 ]; then
         echo "#"
         echo "# A patch row is a file of this repository that upstream does not"
         echo "# have, or has differently: a divergence from upstream is a patch"
-        echo "# applied on top of the copy, and the patch is what says what the"
-        echo "# divergence is. A tree that carries patches is not upstream's"
+        echo "# applied on top of the copy -- or, when upstream has no such path"
+        echo "# at all, a patch that creates the file -- and the patch is what"
+        echo "# says what the divergence is. The note on the row says which of"
+        echo "# the two it is. A tree that carries patches is not upstream's"
         echo "# verbatim, and the patch rows below it are the ones that say so."
         echo "#"
         echo "# A row whose note says the copy excludes paths is a tree that is"
@@ -633,9 +657,20 @@ if [ "$DRY_RUN" = 0 ]; then
         while IFS= read -r patch; do
             rel="${patch#"$PATCH_DIR"/}"
             rel="${rel%.patch}"
+            # Two kinds of divergence, and the row says which one this is.
+            # A patch that changes a file upstream has is applied on top of
+            # the copy. A patch for a path upstream does not have creates
+            # the file, and there is no copy for it to go on top of: the
+            # patch is the file's whole content. The note said "on top of
+            # the copy" for both, and the reader had no way to tell the
+            # four creation patches from the twenty-six edits.
+            if grep -Fxq "$rel" "$upstream_tree_paths"; then
+                note="a divergence from upstream: the patch is applied on top of the copy"
+            else
+                note="a divergence from upstream: the patch creates the file, upstream has no such path"
+            fi
             printf '%s\t%s\t%s\tpatch\t%s\n' \
-                "$PATCH_DIR/$rel.patch" "$rel" "$upstream_commit" \
-                "a divergence from upstream: the patch is applied on top of the copy" \
+                "$PATCH_DIR/$rel.patch" "$rel" "$upstream_commit" "$note" \
                 >> "$tmp_manifest"
         # The rows are sorted ordinally, and not by the locale's habit: a
         # locale-aware sort puts `sqlite_oracle.rs.patch` before

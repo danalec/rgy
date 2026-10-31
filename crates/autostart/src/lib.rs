@@ -81,6 +81,13 @@ pub const DAEMON_NAME: &str = if cfg!(windows) {
 ///
 /// The launchd label is a reverse-DNS name, because that is what launchd
 /// expects; the other two are plain names.
+///
+/// The entry keeps the `rgy-rgxy` name even though the crate is `rgxy` and
+/// the program the user types is `rgxy`: the entry is an identity on the
+/// user's machine -- the file in Startup, the launchd label -- and the
+/// uninstall finds it by that name. Renaming it would leave an installed
+/// entry behind, starting the launcher at every login, with nothing left
+/// to take it out.
 pub fn launcher_default_name(platform: Platform) -> &'static str {
     match platform {
         Platform::MacOs => "com.rgy.rgxy",

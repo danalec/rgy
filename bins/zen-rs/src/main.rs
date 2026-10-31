@@ -306,9 +306,9 @@ fn cmd_record(volume_path: &str, frn: u64) -> Result<(), String> {
 #[cfg(windows)]
 fn cmd_save(volume_path: &str, file: &str) -> Result<(), String> {
     let volume = Volume::open(volume_path).map_err(|e| e.to_string())?;
-    let (idx, _stats) = build_index(&volume)?;
+    let (mut idx, _stats) = build_index(&volume)?;
     let saved = persist::save(
-        &idx,
+        &mut idx,
         std::path::Path::new(&volume.root),
         std::path::Path::new(file),
     )
@@ -601,8 +601,8 @@ mod tests {
         let root = std::fs::canonicalize(&dir).expect("canonical root");
 
         let path = temp_path("roundtrip");
-        let idx = sample_index();
-        persist::save(&idx, &root, std::path::Path::new(&path)).expect("save");
+        let mut idx = sample_index();
+        persist::save(&mut idx, &root, std::path::Path::new(&path)).expect("save");
 
         assert!(std::path::Path::new(&path).exists(), "target must exist");
         assert!(
@@ -626,9 +626,9 @@ mod tests {
         // blob must be rejected outright rather than decoded into a partial
         // index that looks plausible.
         let path = temp_path("truncated");
-        let idx = sample_index();
+        let mut idx = sample_index();
         persist::save(
-            &idx,
+            &mut idx,
             std::env::temp_dir().as_path(),
             std::path::Path::new(&path),
         )
@@ -660,7 +660,8 @@ mod tests {
         std::fs::write(&dir, b"file, not a directory").expect("make the blocker");
         let path = dir.join("out.idx");
 
-        let err = persist::save(&sample_index(), std::path::Path::new("C:\\"), &path)
+        let mut idx = sample_index();
+        let err = persist::save(&mut idx, std::path::Path::new("C:\\"), &path)
             .expect_err("saving under a plain file must fail");
         assert!(!path.exists(), "no target may appear on failure");
         assert!(!err.to_string().is_empty());

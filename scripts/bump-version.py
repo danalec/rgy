@@ -25,6 +25,18 @@ upstream's crate is called.
 keeps its `0.0.0`: it is not a published crate, and a number that
 looks published is a number somebody will try to publish.
 
+The installers are touched too, and they are touched for the same reason:
+an installer names the release it installs, and a release whose installer
+still names the previous one downloads the previous release's archive and
+refuses it -- the digest is the new archive's and the file is the old
+one.
+
+**What it does not walk.** The tree's own build outputs, and the nested
+checkouts: the release tree the chain cuts the archives from, and the
+packaged crates the publish step already built. They are not this tree,
+and rewriting their manifests would change bytes that belong to another
+tree.
+
 **Usage:**
     python3 scripts/bump-version.py 0.1.2
     python3 scripts/bump-version.py --check 0.1.2   # what would change
@@ -34,6 +46,7 @@ from __future__ import annotations
 
 import argparse
 import io
+import os
 import re
 import subprocess
 import sys
@@ -58,6 +71,20 @@ OUR_DEPENDENCY = re.compile(
     re.MULTILINE,
 )
 
+# The installers name the release they install, and the release's name is
+# the tag: "rgy-v<version>". The tag is rewritten wherever it is written,
+# and it is written in two files, one for each platform -- and in the unix
+# one twice, once in the setting and once in the usage the file prints.
+INSTALLER_TAG = {
+    "install.sh": [
+        re.compile(r'(?m)^(version=")rgy-v[0-9]+\.[0-9]+\.[0-9]+(")$'),
+        re.compile(r'(?m)^(#   bash install\.sh --version )rgy-v[0-9]+\.[0-9]+\.[0-9]+$'),
+    ],
+    "install.ps1": [
+        re.compile(r"(?m)^(\$Version = ')rgy-v[0-9]+\.[0-9]+\.[0-9]+('$)", re.IGNORECASE),
+    ],
+}
+
 
 def repo_root() -> Path:
     return Path(__file__).resolve().parent.parent
@@ -81,24 +108,89 @@ def is_published(manifest: Path) -> bool:
 
 
 def manifests(root: Path) -> list[Path]:
-    """Every manifest in the tree, the vendored ones included."""
-    out = []
-    for path in sorted(root.rglob("Cargo.toml")):
-        rel = path.relative_to(root).as_posix()
-        if rel.startswith("target/") or rel.startswith(".git/"):
+    """Every manifest in the tree, the vendored ones included.
+
+    The tree's own build outputs and the nested checkouts are skipped. A
+    nested checkout is not this tree: the release tree the chain cuts the
+    archives from is the commit's own checkout, and the packaged crates
+    under its target/ are what the publish step already built. Rewriting
+    their manifests would change bytes that belong to another tree -- and
+    silently, because a bump that says it changed thirty manifests and
+    changed fifty-two is a bump nobody reads.
+    """
+    out: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        here = Path(dirpath)
+        rel = here.relative_to(root).as_posix()
+        if rel == ".":
+            rel = ""
+        if rel and (here / ".git").exists():
+            # A checkout of its own: the tree is not this one.
+            dirnames[:] = []
             continue
-        out.append(path)
-    return out
+        dirnames[:] = [d for d in dirnames if d not in ("target", ".git")]
+        if "Cargo.toml" in filenames:
+            out.append(here / "Cargo.toml")
+    return sorted(out)
 
 
-def rewrite(text: str, version: str) -> tuple[str, int, int]:
-    """The manifest with the new version, and how much changed."""
-    packages = 0
+def rewrite_installer(path: Path, version: str, write: bool) -> bool:
+    """The installer naming the release it installs, and whether it moved.
+
+    The tag is the tree's version: an installer that names another
+    release downloads that release's archive and refuses it, because the
+    digest pinned inside it is the digest of the archive this release
+    carries.
+    """
+    if not path.is_file():
+        return False
+    patterns = INSTALLER_TAG.get(path.name)
+    if not patterns:
+        return False
+    with io.open(path, "r", encoding="utf-8", newline="") as handle:
+        text = handle.read()
+    out = text
+    count = 0
+
+    def with_tag(m: re.Match[str]) -> str:
+        # The second group is the tail of the line, when the pattern names
+        # one: the setting keeps the quote it had, the usage ends with the
+        # tag itself.
+        tail = m.group(2) if m.lastindex and m.lastindex >= 2 else ""
+        return m.group(1) + "rgy-v" + version + tail
+
+    for pattern in patterns:
+        out, hits = pattern.subn(with_tag, out)
+        count += hits
+    # The text, and not the number of matches: a pattern that matches the
+    # tag it is replacing is not a change, and a bump that says it changed
+    # a file it did not change is a bump nobody believes.
+    if count == 0 or out == text:
+        return False
+    if write:
+        with io.open(path, "w", encoding="utf-8", newline="") as handle:
+            handle.write(out)
+        print(f"  changed {path.name} (installer tag -> rgy-v{version})")
+    else:
+        print(f"  would change {path.name} (installer tag -> rgy-v{version})")
+    return True
+
+
+def rewrite(text: str, version: str, packages: bool = True) -> tuple[str, int, int]:
+    """The manifest with the new version, and how much changed.
+
+    The package version is only rewritten when the package is published:
+    the e2e harness keeps its 0.0.0, because a number that looks published
+    is a number somebody will try to publish. Its requirements on our own
+    crates are ours, and they follow the tree like every other requirement
+    does.
+    """
+    packages_changed = 0
     dependencies = 0
 
     def package(m: re.Match[str]) -> str:
-        nonlocal packages
-        packages += 1
+        nonlocal packages_changed
+        packages_changed += 1
         return f'{m.group(1)}"{version}"'
 
     def dependency(m: re.Match[str]) -> str:
@@ -106,9 +198,11 @@ def rewrite(text: str, version: str) -> tuple[str, int, int]:
         dependencies += 1
         return f'{m.group("head")}"{version}"'
 
-    out = PACKAGE_VERSION.sub(package, text, count=1)
+    out = text
+    if packages:
+        out = PACKAGE_VERSION.sub(package, out, count=1)
     out = OUR_DEPENDENCY.sub(dependency, out)
-    return out, packages, dependencies
+    return out, packages_changed, dependencies
 
 
 def main() -> int:
@@ -131,21 +225,19 @@ def main() -> int:
 
     root = repo_root()
     changed: list[str] = []
+    manifests_changed = 0
     for manifest in manifests(root):
         if not is_ours(manifest, root):
             continue
-        if not is_published(manifest):
-            # The e2e harness is not a published crate: its number is
-            # not one anybody can install, and a number that looks
-            # published is a number somebody will try to publish.
-            continue
+        published = is_published(manifest)
         with io.open(manifest, "r", encoding="utf-8", newline="") as handle:
             text = handle.read()
-        out, packages, dependencies = rewrite(text, version)
+        out, packages, dependencies = rewrite(text, version, packages=published)
         if out == text:
             continue
         rel = manifest.relative_to(root).as_posix()
         changed.append(rel)
+        manifests_changed += 1
         if args.check:
             print(f"  would change {rel} ({packages} package, {dependencies} requirement)")
             continue
@@ -153,27 +245,35 @@ def main() -> int:
             handle.write(out)
         print(f"  changed {rel} ({packages} package, {dependencies} requirement)")
 
+    # The installers name the release they install, and that name is the
+    # tree's version -- the same one the manifests carry.
+    for name in sorted(INSTALLER_TAG):
+        installer = root / name
+        if rewrite_installer(installer, version, write=not args.check):
+            changed.append(name)
+
     if not changed:
         print("bump-version: nothing to change")
         return 0
     if args.check:
-        print(f"bump-version: {len(changed)} manifest(s) would change")
+        print(f"bump-version: {len(changed)} file(s) would change")
         return 0
 
-    # The lockfile is cargo's own record of the tree, and the tree just
-    # changed: `cargo update --workspace` rewrites the members' entries
-    # and leaves every other dependency alone.
-    lock = subprocess.run(
-        ["cargo", "update", "--workspace", "--offline"],
-        cwd=str(root),
-        capture_output=True,
-        text=True,
-    )
-    if lock.returncode != 0:
-        print("bump-version: the lockfile could not be refreshed", file=sys.stderr)
-        print(lock.stderr.strip()[:800], file=sys.stderr)
-        return 1
-    print(f"bump-version: {len(changed)} manifest(s) at {version}")
+    if manifests_changed:
+        # The lockfile is cargo's own record of the tree, and the tree just
+        # changed: `cargo update --workspace` rewrites the members' entries
+        # and leaves every other dependency alone.
+        lock = subprocess.run(
+            ["cargo", "update", "--workspace", "--offline"],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+        )
+        if lock.returncode != 0:
+            print("bump-version: the lockfile could not be refreshed", file=sys.stderr)
+            print(lock.stderr.strip()[:800], file=sys.stderr)
+            return 1
+    print(f"bump-version: {len(changed)} file(s) at {version}")
     return 0
 
 

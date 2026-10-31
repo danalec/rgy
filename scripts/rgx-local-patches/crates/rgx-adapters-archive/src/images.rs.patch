@@ -1,6 +1,6 @@
 --- a/crates/rgx-adapters-archive/src/images.rs
 +++ b/crates/rgx-adapters-archive/src/images.rs
-@@ -672,7 +672,11 @@
+@@ -680,7 +680,11 @@
          let _ = writeln!(out, "attributes: case-folding");
      }
      for (i, &bit) in [64u32, 63, 62, 61].iter().enumerate() {

@@ -398,27 +398,48 @@ fn the_compat_front_says_a_path_one_way() {
     );
     assert_eq!(code, 0, "stderr={err}");
 
+    // The whole tree answers with more than one file -- the fixture holds
+    // two that carry the needle -- and the order it answers in is the
+    // files' own: the candidates are the newest first, and the two files
+    // are written a moment apart, so which one comes first is the clock's
+    // business and not the tree's. The test compares ONE file's spelling
+    // in the two answers, so it names the file it compares instead of
+    // taking whichever came first: comparing the first of one answer with
+    // the first of the other compares two files when the order moves, and
+    // a test that fails when the order moves is a test about the order.
+    //
+    // The file is the one the caller named: the scoped answer holds it
+    // alone, so its spelling is the caller's, and the whole-tree answer
+    // has to say that same file the same way.
+    let named = paths_in(&narrow);
     assert_eq!(
-        path_in(&wide),
-        path_in(&narrow),
-        "one file, one spelling: {wide}"
+        named.len(),
+        1,
+        "the scoped answer holds the file the caller named; got {narrow:?}"
+    );
+    assert!(
+        paths_in(&wide).contains(&named[0]),
+        "one file, one spelling: the caller says {:?} and the tree says {:?}",
+        named[0],
+        paths_in(&wide)
     );
 }
 
-/// The path in the compat front's answer.
+/// The paths in the compat front's answer.
 ///
 /// The wire escapes the separator, so the bytes here are the escaped
 /// ones -- and that is enough: a `/` is not escaped and a `\\` is, so
 /// two spellings of one file are two different answers here.
-fn path_in(out: &str) -> String {
-    let line = out
-        .lines()
-        .find(|l| l.contains("\"type\":\"begin\""))
-        .unwrap_or_else(|| panic!("the answer names a file; got {out}"));
-    let start = line.find("\"text\":\"").expect("the line carries a path") + 8;
-    let rest = &line[start..];
-    let end = rest.find('"').expect("the path ends");
-    rest[..end].to_string()
+fn paths_in(out: &str) -> Vec<String> {
+    out.lines()
+        .filter(|l| l.contains("\"type\":\"begin\""))
+        .map(|line| {
+            let start = line.find("\"text\":\"").expect("the line carries a path") + 8;
+            let rest = &line[start..];
+            let end = rest.find('"').expect("the path ends");
+            rest[..end].to_string()
+        })
+        .collect()
 }
 
 #[test]

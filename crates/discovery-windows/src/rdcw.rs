@@ -235,15 +235,9 @@ impl Drop for RdcwWatch {
 /// The long form (`\\?\`) is what lets a path be longer than `MAX_PATH`,
 /// and the root of a deep tree is. A root that already carries the prefix
 /// keeps it: the prefix is not something to be added twice, and the seam's
-/// own spelling would read a prefixed root as a UNC share and turn it into
-/// `\\?\UNC\?\C:\...`.
+/// own spelling knows that now — it hands a prefixed root back as it is.
 fn handle_path(root: &str) -> Vec<u16> {
-    let text = if root.starts_with(r"\\?\") {
-        root.to_string()
-    } else {
-        rgy_discovery::path::win_verbatim_text(root)
-    };
-    rgy_discovery::path::win_wide(&text)
+    rgy_discovery::path::win_wide(&rgy_discovery::path::win_verbatim_text(root))
 }
 
 /// The records in the filled part of the buffer.

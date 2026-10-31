@@ -239,6 +239,48 @@ fn grep_no_match_exits_one() {
     assert_eq!(code, 1, "grep miss must exit 1; stdout={out}");
 }
 
+/// A pattern the engine refuses is said out loud, and it is exit 1.
+///
+/// The refusal is not a search that found nothing — it is a pattern the
+/// engine would not take, and the user has to be told which one and why.
+/// The exit code is 1, because that is the code the daemon's route gives
+/// the same refusal, and the two routes used to answer the same question
+/// with two different codes: 2 here and 1 there. And 2 is reserved for a
+/// command that could not run at all.
+#[test]
+fn a_refused_pattern_is_a_warning_and_not_an_error() {
+    let dir = fixture_dir("refused");
+    text_tree(&dir);
+    let root = dir.to_str().unwrap();
+
+    let (code, out, err) = run(&searchctl(), &["--root", root, "regex:["]);
+    assert_eq!(code, 1, "a refused pattern is exit 1; stdout={out}");
+    assert!(out.is_empty(), "a refused pattern matches nothing: {out}");
+    assert!(
+        err.contains("warning:") && err.contains('['),
+        "the refusal says which pattern it was: {err}"
+    );
+}
+
+/// The same refusal through `--count`.
+///
+/// The count route compiles the pattern too, and it used to answer the
+/// refusal with the error code while the route beside it answered it with
+/// the warning.
+#[test]
+fn a_refused_pattern_counts_as_a_warning_too() {
+    let dir = fixture_dir("refusedcount");
+    text_tree(&dir);
+    let root = dir.to_str().unwrap();
+
+    let (code, out, err) = run(&searchctl(), &["--root", root, "--count", "regex:["]);
+    assert_eq!(code, 1, "a refused pattern is exit 1; stdout={out}");
+    assert!(
+        err.contains("warning:"),
+        "the refusal is said out loud: {err}"
+    );
+}
+
 // --- genuinely bad invocations → exit 2 ------------------------------------
 
 #[test]
@@ -625,6 +667,108 @@ fn a_redirected_stdout_keeps_the_utf8_bytes_in_json() {
         out.contains(name),
         "the JSON must carry the name as UTF-8: {out}"
     );
+}
+
+// --- the picker --------------------------------------------------------------
+
+/// A picker that hands the list back.
+///
+/// The picker is a program the user names; this one is a program the test
+/// names, and it does the only thing the test needs: it echoes the list it
+/// was given, so the test can see what the picker was offered. The records
+/// arrive one per line, because a picker whose name the crate does not know
+/// is given the line separator.
+fn fake_picker(dir: &std::path::Path) -> std::path::PathBuf {
+    #[cfg(windows)]
+    {
+        let path = dir.join("fake-picker.cmd");
+        std::fs::write(
+            &path,
+            "@powershell -NoProfile -Command \"[Console]::OpenStandardInput().CopyTo([Console]::OpenStandardOutput())\"\r\n",
+        )
+        .unwrap();
+        path
+    }
+    #[cfg(unix)]
+    {
+        let path = dir.join("fake-picker.sh");
+        std::fs::write(&path, "#!/bin/sh\nexec cat\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+}
+
+/// The picker is given the files that hold the text, not the whole tree.
+///
+/// `grep:needle` is a content search: two of the fixture's files hold the
+/// text and the other five do not. The picker used to be given the *name*
+/// layer's answer, and the name layer had no name token to match — so it
+/// matched everything, and the user was offered the whole tree and opened a
+/// file that does not contain what they searched for. The same query
+/// without `--pick` answered correctly, so the two forms of the same tool
+/// gave two answers to the same question.
+#[test]
+fn pick_with_a_content_operator_is_given_the_matching_files() {
+    let dir = fixture_dir("pickcontent");
+    text_tree(&dir);
+    let root = dir.to_str().unwrap();
+    let picker_dir = fixture_dir("pickcontent-picker");
+    let picker = fake_picker(&picker_dir);
+    let picker = picker.to_str().unwrap();
+
+    let (code, out, err) = run_with(
+        &[
+            "--root",
+            root,
+            "--pick",
+            "--fzf-binary",
+            picker,
+            "grep:needle",
+        ],
+        &harness::absent(),
+    );
+    assert_eq!(
+        code, 0,
+        "the picker's status is the command's; stderr={err}"
+    );
+    assert!(
+        out.contains("hello.txt"),
+        "the file that holds the text is offered: {out}"
+    );
+    assert!(out.contains("main.rs"), "and the other one: {out}");
+    assert!(
+        !out.contains("notes.md"),
+        "and the file that does not hold the text is not offered: {out}"
+    );
+}
+
+/// A picker that cannot run is exit 1.
+///
+/// The exit table gives the picker 1 — "the picker failed" — and 2 to a
+/// command that could not run at all. The failure used to travel as an Err
+/// and the command answered 2, so a script that reads 2 as "the command
+/// could not run" was told that about a picker that simply is not there.
+#[test]
+fn a_picker_that_cannot_run_is_exit_one() {
+    let dir = fixture_dir("pickbroken");
+    text_tree(&dir);
+    let root = dir.to_str().unwrap();
+    let missing = dir.join("no-such-picker");
+
+    let (code, out, err) = run_with(
+        &[
+            "--root",
+            root,
+            "--pick",
+            "--fzf-binary",
+            missing.to_str().unwrap(),
+            "hello",
+        ],
+        &harness::absent(),
+    );
+    assert_eq!(code, 1, "a picker that cannot run is exit 1; stdout={out}");
+    assert!(err.contains("picker"), "the error names the picker: {err}");
 }
 
 // --- the daemon, instead of the local index --------------------------------

@@ -40,11 +40,20 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-# The vendored trees are upstream's crates: they carry upstream's names and
-# upstream's versions, and upstream publishes them. A plan that offered to
-# publish them would be offering to publish somebody else's crate under a
-# version upstream never released.
-VENDORED = ("rgx-", "rar-codec")
+# The vendored trees are the upstream's crates and they go out under the
+# upstream's names -- `rgx-core`, the `rgx-adapters-*` family and
+# `rar-codec`. That is not a fork of somebody else's crate: the upstream is
+# the same owner's project, and what the house publishes under the upstream's
+# name is the upstream's engine with this tree's patches inside it.
+#
+# Their version is the upstream's next one: 0.1.1 is published (and yanked),
+# and a version that exists cannot be published again. The bump is a patch
+# like any other divergence -- the sync copies the upstream's manifests, and
+# the patch says what the house changed.
+#
+# So nothing is withheld from the plan: the vendored trees are ours to
+# publish, and the plan says so.
+VENDORED: tuple[str, ...] = ()
 
 # The faces of the product: the launcher is the window the user sees, and it
 # is a **client of the running daemon** -- it talks to `searchd` over the wire
@@ -56,7 +65,7 @@ VENDORED = ("rgx-", "rar-codec")
 # `searchd`, it speaks to it -- so the rule is here, and it is the only
 # place where the order of a release is decided by anything but a
 # dependency.
-FACES = ("rgy-rgxy",)
+FACES = ("rgxy",)
 
 USER_AGENT = "rgy-publish-plan (crates.io publish order)"
 
@@ -108,7 +117,7 @@ def workspace_packages(root: Path) -> list[dict]:
             }
         )
         p["_publishable"] = p.get("publish") != []
-        p["_vendored"] = p["name"] in VENDORED or p["name"].startswith("rgx-")
+        p["_vendored"] = p["name"] in VENDORED
     return packages
 
 

@@ -2,6 +2,7 @@
 name = "rgy-e2e-tests"
 version = "0.0.0"
 edition = "2021"
+rust-version = "1.89"
 authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
 publish = false
 license = "Apache-2.0"
@@ -44,12 +45,12 @@ path = "autostart.rs"
 # the caller asked for does not fit the platform's `sun_path`: the fake
 # daemon in `cli.rs` has to bind the socket the client will look for, and
 # that is the product's rule and not the test's.
-rgy-proto = { path = "../crates/proto", version = "0.1.2" }
+rgy-proto = { path = "../crates/proto", version = "0.1.3" }
 # The pack store, for the test that proves the third backend of the
 # content layer: the daemon started with `--tv-dir` answers from a packed
 # corpus instead of reading the files. The builder is upstream's, and it
 # is behind the `tv-runtime` feature because it is the only consumer.
-rgx-core = { path = "../crates/rgx-core", version = "0.1.1", default-features = false, features = [
+rgx-core = { path = "../crates/rgx-core", version = "0.1.2", default-features = false, features = [
     "std",
     "tv-runtime",
 ] }

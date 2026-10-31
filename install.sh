@@ -5,7 +5,7 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/danalec/rgy/main/install.sh | bash
 #   bash install.sh --install-dir /usr/local/bin
-#   bash install.sh --version rgy-v0.1.2
+#   bash install.sh --version rgy-v0.1.3
 #
 # Downloads the rgy release tarball, verifies its SHA256, unpacks the four
 # binaries into the install directory, prepends it to the user's PATH and
@@ -42,7 +42,7 @@
 # here when they are not.
 set -u
 
-version="rgy-v0.1.2"
+version="rgy-v0.1.3"
 install_dir="$HOME/.local/bin"
 base_url="https://github.com/danalec/rgy/releases/download"
 skip_checksum=0
@@ -54,7 +54,7 @@ no_launcher=0
 # The digest is uppercase hex, and it is rewritten in place by
 # scripts/publish-release.sh -- so the shape of these lines is part of the
 # contract, not a formatting choice.
-expected_linux_x86_64="6A1B6C13C623689B4BCE9659D56005C024343403517CC6F5F26360D08D15A54E"
+expected_linux_x86_64="F745B2593136545B6D471F0233121B7A866EBC19831CE11D345A20B4B4031B91"
 expected_linux_aarch64="0000000000000000000000000000000000000000000000000000000000000000"
 expected_macos_x86_64="0000000000000000000000000000000000000000000000000000000000000000"
 expected_macos_aarch64="0000000000000000000000000000000000000000000000000000000000000000"

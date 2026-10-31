@@ -200,14 +200,14 @@ fn main() {
     // --- build ---
     let listings = synthetic_listings(n, dirs);
     let t0 = Instant::now();
-    let idx = Index::build(listings, 0, 1_700_000_000, b"/");
+    let mut idx = Index::build(listings, 0, 1_700_000_000, b"/");
     let build_ms = t0.elapsed().as_secs_f64() * 1e3;
     if let Some(path) = &save_index {
         // Persist before `Live::new(idx)` below consumes the index: `save`
         // borrows it, `Live::new` takes it by value. The borrow ends this
         // branch either way -- generator mode stops here, because the rest of
         // the run would write the walk fixture's n files (see the header).
-        match persist::save(&idx, &root, path) {
+        match persist::save(&mut idx, &root, path) {
             Ok(saved) => eprintln!(
                 "name_bench: saved {} ({} entries) for root {}",
                 saved.index.display(),

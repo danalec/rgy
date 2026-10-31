@@ -303,12 +303,18 @@ mod imp {
         };
         let mut off = 0;
         while off < bytes.len() {
+            // The length of a write is the platform's own (a `DWORD`), so a
+            // payload bigger than 4 GiB is written in pieces. The remaining
+            // length is CAPPED, never cast: a cast would make the second
+            // piece zero bytes long, and the file would be left half
+            // written with the function saying that it failed.
+            let want = (bytes.len() - off).min(u32::MAX as usize) as u32;
             let mut put: u32 = 0;
             let ok = unsafe {
                 WriteFile(
                     h,
                     bytes.as_ptr().add(off),
-                    (bytes.len() - off) as u32,
+                    want,
                     &mut put,
                     core::ptr::null(),
                 )

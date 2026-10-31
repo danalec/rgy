@@ -66,7 +66,7 @@ impl<'a> UsnWatch<'a> {
         UsnWatch {
             indexer,
             // The documented "first available record" sentinel.
-            start_usn: 0x7FFF_FFFF,
+            start_usn: crate::ntfs::FIRST_AVAILABLE_USN,
             journal_id: 0,
             max_records: 4096,
             paths,
