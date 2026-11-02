@@ -143,6 +143,7 @@ struct Style {
     foreground: Option<Color>,
     background: Option<Color>,
     bold: bool,
+    dim: bool,
     reverse: bool,
 }
 
@@ -170,11 +171,14 @@ impl std::fmt::Display for Styled {
             f.write_str(&colour_escape(true, foreground))?;
             reset_foreground = true;
         }
-        // The attributes come in the order they are named, and the bold
-        // one comes before the reversed one.
-        let attributes = self.style.bold || self.style.reverse;
+        // The attributes come in the SGR's own order — bold is 1, dim is 2,
+        // reversed is 7 — and each is its own escape.
+        let attributes = self.style.bold || self.style.dim || self.style.reverse;
         if self.style.bold {
             f.write_str("\x1b[1m")?;
+        }
+        if self.style.dim {
+            f.write_str("\x1b[2m")?;
         }
         if self.style.reverse {
             f.write_str("\x1b[7m")?;
@@ -205,6 +209,8 @@ pub trait Paint {
     fn with(self, colour: Color) -> Styled;
     /// The text in bold.
     fn bold(self) -> Styled;
+    /// The text, dimmed: the words around the answer, not the answer.
+    fn dim(self) -> Styled;
     /// The text with the colours swapped.
     fn reverse(self) -> Styled;
 }
@@ -224,6 +230,16 @@ impl Paint for &str {
         Styled {
             style: Style {
                 bold: true,
+                ..Style::default()
+            },
+            content: self.to_string(),
+        }
+    }
+
+    fn dim(self) -> Styled {
+        Styled {
+            style: Style {
+                dim: true,
                 ..Style::default()
             },
             content: self.to_string(),
@@ -262,6 +278,16 @@ impl Paint for String {
         }
     }
 
+    fn dim(self) -> Styled {
+        Styled {
+            style: Style {
+                dim: true,
+                ..Style::default()
+            },
+            content: self,
+        }
+    }
+
     fn reverse(self) -> Styled {
         Styled {
             style: Style {
@@ -282,6 +308,10 @@ impl Paint for char {
         self.to_string().bold()
     }
 
+    fn dim(self) -> Styled {
+        self.to_string().dim()
+    }
+
     fn reverse(self) -> Styled {
         self.to_string().reverse()
     }
@@ -295,6 +325,11 @@ impl Paint for Styled {
 
     fn bold(mut self) -> Styled {
         self.style.bold = true;
+        self
+    }
+
+    fn dim(mut self) -> Styled {
+        self.style.dim = true;
         self
     }
 

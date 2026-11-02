@@ -738,6 +738,24 @@ fn locate() -> Option<String> {
     None
 }
 
+/// Whether the picker that would run takes `fzf`'s colour flags.
+///
+/// `--color` is `fzf`'s own vocabulary: `sk` spells its colours another
+/// way and `peco` has none, and a flag a picker does not understand is
+/// a picker that refuses to run. The question is asked about the picker
+/// the request would run — the one the caller named, or the first one
+/// the `PATH` has — because the answer decides whether the caller's
+/// colour flags are handed over at all.
+#[cfg(feature = "std")]
+pub fn takes_colour_flags(binary: Option<&str>) -> bool {
+    match binary {
+        Some(named) => stem(named).eq_ignore_ascii_case("fzf"),
+        None => locate()
+            .map(|found| stem(&found).eq_ignore_ascii_case("fzf"))
+            .unwrap_or(false),
+    }
+}
+
 /// Look for one picker on `PATH`.
 #[cfg(feature = "std")]
 fn scan(binary: &str) -> Option<String> {
@@ -863,6 +881,22 @@ mod tests {
         assert_eq!(order_args(Order::Keep, "C:/bin/sk.exe"), &["--no-sort"]);
         assert!(order_args(Order::Keep, "/usr/bin/peco").is_empty());
         assert!(order_args(Order::Sort, "/usr/bin/fzf").is_empty());
+    }
+
+    /// Only `fzf` is asked about the colours.
+    ///
+    /// `--color` is fzf's own vocabulary: sk spells its colours another
+    /// way and peco has none, and a flag a picker does not understand
+    /// is a picker that refuses to run. The question is about the
+    /// picker the caller named, whatever its directory and extension.
+    #[cfg(feature = "std")]
+    #[test]
+    fn only_fzf_is_asked_about_the_colours() {
+        assert!(takes_colour_flags(Some("/usr/bin/fzf")));
+        assert!(takes_colour_flags(Some("C:/bin/fzf.exe")));
+        assert!(!takes_colour_flags(Some("/usr/bin/sk")));
+        assert!(!takes_colour_flags(Some("C:/bin/peco.exe")));
+        assert!(!takes_colour_flags(Some("fzf-like")));
     }
 
     #[cfg(feature = "std")]

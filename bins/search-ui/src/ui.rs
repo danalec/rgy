@@ -21,33 +21,21 @@
 //! the `>copy` command.
 
 use crate::preview;
-use crate::term::{self, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, Paint};
+use crate::term::{self, Color, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, Paint};
 use rgy_launcher::Action as LauncherAction;
 use rgy_launcher::latency::{LatencyMeter, duration};
 use rgy_launcher::text::{Brand, Lang, Text};
+use rgy_launcher::theme::{Rgb, Theme};
 use rgy_name_core::live::Live;
 use rgy_name_core::name_query::{Alternatives, Hit, Searcher};
 use std::io::Write;
 use std::time::Instant;
 
-/// Ink colours sampled off the reference recording (`watch.mp4`) so the UI
-/// reproduces that design rather than whatever theme the host terminal
-/// happens to carry.
-///
-/// 24-bit SGR is not universal, and a terminal that cannot honour it shows
-/// what it can — which is how the "colours look old and the background is
-/// pure black" symptom happens. So each role has both an exact RGB and the
-/// nearest ANSI-16 colour, and [`truecolor`] picks. The ANSI fallback keeps
-/// the video's hues (blue prompt, green timings) on a terminal that cannot
-/// honour the exact values; the RGB is used only where it will actually
-/// render.
+/// Whether the host advertises 24-bit colour. `COLORTERM` is the standard
+/// signal; `WT_SESSION` is Windows Terminal and `TERM_PROGRAM` covers
+/// iTerm2/WezTerm/VS Code. A console that advertises none of them must not
+/// be sent RGB.
 mod palette {
-    use crate::term::Color;
-
-    /// Whether the host advertises 24-bit colour. `COLORTERM` is the standard
-    /// signal; `WT_SESSION` is Windows Terminal and `TERM_PROGRAM` covers
-    /// iTerm2/WezTerm/VS Code. A console that advertises none of them must not
-    /// be sent RGB.
     pub fn truecolor() -> bool {
         use std::sync::OnceLock;
         static OK: OnceLock<bool> = OnceLock::new();
@@ -68,86 +56,66 @@ mod palette {
             )
         })
     }
+}
 
-    /// Background: the recording's charcoal-purple, falling back to the
-    /// terminal's own black — the only near-black ANSI offers.
-    pub fn bg() -> Color {
-        if truecolor() {
-            Color::Rgb {
-                r: 19,
-                g: 18,
-                b: 21,
-            }
-        } else {
-            Color::Black
-        }
-    }
-
-    /// Filenames and the query — the brightest ink on screen.
-    pub fn ink() -> Color {
-        if truecolor() {
-            Color::Rgb {
-                r: 255,
-                g: 255,
-                b: 255,
-            }
-        } else {
-            Color::White
-        }
-    }
-
+/// The colours one frame is drawn in.
+///
+/// The theme is the launcher's vocabulary of roles and this is six of them,
+/// resolved once when the app is built: a frame has no business asking the
+/// environment per row. 24-bit SGR is not universal, and a terminal that
+/// cannot honour it shows what it can — which is how the "colours look old
+/// and the background is pure black" symptom happens — so each role carries
+/// both the theme's RGB and the nearest ANSI-16 colour, and
+/// [`palette::truecolor`] picks. The fallback keeps the theme's hues (blue
+/// prompt, green timings) at the 16-colour palette's saturation; the RGB is
+/// used only where it will actually render.
+struct Palette {
+    /// What the screen is cleared with.
+    bg: Color,
+    /// Names, the query — what the user is reading.
+    ink: Color,
     /// Header subtitle, parent directories, footer prose, `p50/p90`.
-    pub fn dim() -> Color {
-        if truecolor() {
-            Color::Rgb {
-                r: 115,
-                g: 114,
-                b: 119,
-            }
-        } else {
-            Color::DarkGrey
-        }
-    }
-
-    /// The `❯` prompt and the caret. The video's periwinkle; ANSI bright blue
-    /// is the same hue at the 16-colour palette's saturation.
-    pub fn blue() -> Color {
-        if truecolor() {
-            Color::Rgb {
-                r: 114,
-                g: 170,
-                b: 255,
-            }
-        } else {
-            Color::Blue
-        }
-    }
-
-    /// The characters of a name the query matched: the span that earned the
-    /// score. The video's amber; ANSI bright yellow is the same hue at the
-    /// 16-colour palette's saturation.
-    pub fn highlight() -> Color {
-        if truecolor() {
-            Color::Rgb {
-                r: 233,
-                g: 184,
-                b: 92,
-            }
-        } else {
-            Color::Yellow
-        }
-    }
-
+    dim: Color,
+    /// The `❯` prompt and the caret — the machine's own mark.
+    accent: Color,
+    /// The characters of a name the query matched: the span that earned
+    /// the score.
+    matched: Color,
     /// Latency figures, the sparkline, first/p50/p90.
-    pub fn green() -> Color {
-        if truecolor() {
-            Color::Rgb {
-                r: 119,
-                g: 217,
-                b: 139,
+    good: Color,
+}
+
+impl Palette {
+    /// The palette a theme resolves to on this terminal.
+    fn of(theme: Theme) -> Palette {
+        Palette::resolved(theme, palette::truecolor())
+    }
+
+    /// The palette a theme resolves to, given whether the terminal takes
+    /// 24-bit colour.
+    ///
+    /// Split out of [`Palette::of`] so the resolution is a fact the tests
+    /// can pin on both branches: the environment decides which one the app
+    /// runs in, and it decides it once.
+    fn resolved(theme: Theme, truecolor: bool) -> Palette {
+        let role = |rgb: Rgb, ansi: Color| {
+            if truecolor {
+                Color::Rgb {
+                    r: rgb.r,
+                    g: rgb.g,
+                    b: rgb.b,
+                }
+            } else {
+                ansi
             }
-        } else {
-            Color::Green
+        };
+        Palette {
+            bg: role(theme.background, Color::Black),
+            ink: role(theme.text, Color::White),
+            dim: role(theme.dim, Color::DarkGrey),
+            accent: role(theme.accent, Color::Blue),
+            matched: role(theme.matched, Color::Yellow),
+            good: role(theme.good, Color::Green),
         }
     }
 }
@@ -167,16 +135,21 @@ const MIN_HEIGHT: usize = 8;
 struct TerminalGuard;
 
 impl TerminalGuard {
-    fn enter(out: &mut impl Write) -> Result<Self, String> {
+    /// Enter the raw mode and the alternate screen, painted with the
+    /// background the frames are drawn on.
+    ///
+    /// The guard has no app to ask, so the background comes in the way the
+    /// code already threads values: the caller hands over the palette's
+    /// `bg`, and the whole alternate screen is painted with it so the ink
+    /// colours read the way they do in the theme, whatever the host
+    /// terminal's own is.
+    fn enter(out: &mut impl Write, bg: Color) -> Result<Self, String> {
         term::enable_raw_mode().map_err(|e| format!("cannot enter raw mode: {e}"))?;
-        // Paint the whole alternate screen with the reference palette's
-        // background so the ink colours read the way they do in the video,
-        // whatever the host terminal's own theme is.
         let mut screen = term::Screen::new(&mut *out);
         screen
             .enter_alternate_screen()
             .and_then(|()| screen.hide())
-            .and_then(|()| screen.background(palette::bg()))
+            .and_then(|()| screen.background(bg))
             .and_then(|()| screen.clear_all())
             .and_then(|()| screen.flush())
             .map_err(|e| format!("cannot set up the screen: {e}"))?;
@@ -213,6 +186,14 @@ struct App {
     /// The tool that keeps an index in its own process is a different
     /// program, and it says its own name.
     brand: Brand,
+    /// The colours the frame is drawn in.
+    ///
+    /// The theme is the caller's the way the language is: the terminal is
+    /// one face of the launcher and the theme is an answer every face
+    /// gives. An entry point that names no theme stays with MIDNIGHT, the
+    /// palette this interface was drawn in, so the default is today's
+    /// colours byte for byte.
+    palette: Palette,
     /// The fsearch name index + overlay, the same searcher `searchctl` uses.
     /// Volume root, shown in the header.
     root: String,
@@ -388,11 +369,15 @@ impl Notice {
     }
 
     /// The panel's rows, wrapped to the width.
-    fn rows(&self, width: usize) -> Vec<String> {
-        let mut out = vec![self.title.clone().with(palette::ink()).bold().to_string()];
+    ///
+    /// The notice is not the app's, so the palette comes in the way the
+    /// code already threads values: the caller hands over the colours the
+    /// frame is drawn in.
+    fn rows(&self, width: usize, palette: &Palette) -> Vec<String> {
+        let mut out = vec![self.title.clone().with(palette.ink).bold().to_string()];
         for line in &self.lines {
             for piece in wrap(line, width) {
-                out.push(piece.with(palette::ink()).to_string());
+                out.push(piece.with(palette.ink).to_string());
             }
         }
         out
@@ -410,6 +395,7 @@ fn describe(action: LauncherAction, text: &Text) -> &'static str {
         LauncherAction::CopyPath => text.terminal_copy_path,
         LauncherAction::Preview => text.terminal_preview,
         LauncherAction::Menu => text.terminal_menu,
+        LauncherAction::Settings => text.terminal_settings,
     }
 }
 
@@ -426,6 +412,7 @@ fn shortcut(action: LauncherAction) -> &'static str {
         LauncherAction::CopyPath => ">copy",
         LauncherAction::Preview => "Ctrl+P",
         LauncherAction::Menu => "Ctrl+K",
+        LauncherAction::Settings => ">settings",
     }
 }
 
@@ -436,6 +423,9 @@ impl App {
             // The index is this process's own, so the header says the name
             // of the program that owns it.
             brand: Brand::Index,
+            // The entry points that name no theme keep the palette this
+            // interface was drawn in.
+            palette: Palette::of(Theme::MIDNIGHT),
             live: Some(live),
             root,
             indexed: Some(indexed),
@@ -472,6 +462,9 @@ impl App {
             // terminal face: the header says the launcher's name, which
             // is the name the floating window's title carries too.
             brand: Brand::Launcher,
+            // The palette is overwritten by the entry point that names a
+            // theme; this one is the default the others keep.
+            palette: Palette::of(Theme::MIDNIGHT),
             live: None,
             root,
             indexed,
@@ -701,6 +694,23 @@ impl App {
     /// ends it, because the terminal has no window to open a file in and
     /// prints the path instead — which is what `Enter` does too.
     fn run_action(&mut self, action: LauncherAction) -> bool {
+        // The settings are nobody's row here either: the terminal has no
+        // panel, and the file is where they are. The notice says the
+        // true path, so the user can go and open it.
+        if action == LauncherAction::Settings {
+            let text = Text::for_lang(self.lang);
+            let where_ = rgy_proto::endpoint::cache_dir()
+                .map(|cache| {
+                    let path = cache.join("rgy").join("settings.tsv");
+                    path.to_string_lossy().into_owned()
+                })
+                .unwrap_or_else(|| "?".to_string());
+            self.notice = Some(Notice {
+                title: text.terminal_settings.to_string(),
+                lines: vec![text.terminal_settings_file.replace("{}", &where_)],
+            });
+            return false;
+        }
         let Some(path) = self.selected_path() else {
             // Nothing to act on is something to say: a command that does
             // nothing and says nothing is a launcher the user cannot
@@ -726,6 +736,11 @@ impl App {
                 self.notice = Some(Notice::menu(self.lang));
                 false
             }
+            // Taken above, before the row is asked for: the settings are
+            // nobody's row. The arm is here because the match is on the
+            // whole action, and a setting that somehow reached it answers
+            // the way the rowless path above does.
+            LauncherAction::Settings => false,
         }
     }
 
@@ -766,7 +781,7 @@ impl App {
                 0,
                 MIN_WIDTH,
                 &format!("terminal {width}x{height} is too small — need {MIN_WIDTH}x{MIN_HEIGHT}")
-                    .with(palette::dim())
+                    .with(self.palette.dim)
                     .to_string(),
             );
         }
@@ -796,12 +811,12 @@ impl App {
         };
         let subtitle = format!(
             "{} · {}",
-            self.root.as_str().with(palette::dim()),
-            count.as_str().with(palette::dim())
+            self.root.as_str().with(self.palette.dim),
+            count.as_str().with(self.palette.dim)
         );
         rows.push(format!(
             "{}  {}",
-            self.brand.word(text).with(palette::ink()).bold(),
+            self.brand.word(text).with(self.palette.ink).bold(),
             subtitle
         ));
 
@@ -809,15 +824,15 @@ impl App {
         // video puts a green "8.1 ms" flush right of the prompt, with no word
         // before it.
         let latency = match self.meter.last() {
-            Some(us) => duration(us).with(palette::green()).to_string(),
+            Some(us) => duration(us).with(self.palette.good).to_string(),
             None => String::new(),
         };
         rows.push(self.prompt_line(width, &latency));
-        rows.push("─".repeat(width).with(palette::dim()).to_string());
+        rows.push("─".repeat(width).with(self.palette.dim).to_string());
 
         // The notice, when there is one, is a panel over the results:
         // the same place the window puts the preview and the menu.
-        let notice = self.notice.as_ref().map(|n| n.rows(width));
+        let notice = self.notice.as_ref().map(|n| n.rows(width, &self.palette));
 
         let first = self.top.min(self.results.len());
         let last = (first + list_height).min(self.results.len());
@@ -832,7 +847,7 @@ impl App {
                 Some(panel) => panel.get(offset).cloned().unwrap_or_default(),
                 None => {
                     if self.results.is_empty() && offset == 0 {
-                        "  no matches".with(palette::dim()).to_string()
+                        "  no matches".with(self.palette.dim).to_string()
                     } else if row < last {
                         self.result_cell(row, width)
                     } else {
@@ -871,7 +886,7 @@ impl App {
             if stale || self.painted.get(row) != Some(cell) {
                 let mut screen = term::Screen::new(&mut *out);
                 screen.move_to(0, row as u16)?;
-                screen.background(palette::bg())?;
+                screen.background(self.palette.bg)?;
                 screen.clear_line()?;
                 screen.print(cell)?;
                 screen.flush()?;
@@ -904,12 +919,14 @@ impl App {
         // caret as a solid blue half-block — `▌` fills the left half of a
         // cell, the 9 px of a 16 px cell the video shows. A bar cursor goes
         // at the insertion point, so the character under the caret stays
-        // readable rather than being overwritten or inverted.
-        let mut line = "❯".with(palette::blue()).to_string();
+        // readable rather than being overwritten or inverted. The roles are
+        // the theme's now: the accent is the recording's blue, the ink its
+        // white.
+        let mut line = "❯".with(self.palette.accent).to_string();
         line.push(' ');
-        line.push_str(&before.with(palette::ink()).bold().to_string());
-        line.push_str(&"▌".with(palette::blue()).to_string());
-        line.push_str(&after.with(palette::ink()).bold().to_string());
+        line.push_str(&before.with(self.palette.ink).bold().to_string());
+        line.push_str(&"▌".with(self.palette.accent).to_string());
+        line.push_str(&after.with(self.palette.ink).bold().to_string());
 
         if !latency.is_empty() {
             let used = display_width(&line);
@@ -935,7 +952,7 @@ impl App {
         let cell = format!(
             "{name}  {dir}",
             name = self.styled_name(row, name, name_visible),
-            dir = elide_tail(&shorten_home(parent_of(path)), dir_width).with(palette::dim())
+            dir = elide_tail(&shorten_home(parent_of(path)), dir_width).with(self.palette.dim)
         );
         if row == self.selected {
             cell.reverse().to_string()
@@ -944,7 +961,7 @@ impl App {
         }
     }
 
-    /// The name, with the characters the query matched in the highlight's
+    /// The name, with the characters the query matched in the matched
     /// colour and the rest in the ink.
     ///
     /// The matched characters come in runs, and a run is one styled piece:
@@ -953,7 +970,7 @@ impl App {
     fn styled_name(&self, row: usize, name: &str, visible: usize) -> String {
         let matched = self.matched.get(row).map(|m| m.as_slice()).unwrap_or(&[]);
         if matched.is_empty() {
-            return fit(name, visible).with(palette::ink()).to_string();
+            return fit(name, visible).with(self.palette.ink).to_string();
         }
         let mut out = String::new();
         let mut run: Vec<char> = Vec::new();
@@ -965,7 +982,7 @@ impl App {
             }
             let is_matched = matched.binary_search(&(chars as u32)).is_ok();
             if is_matched != run_matched && !run.is_empty() {
-                out.push_str(&style_run(&run, run_matched));
+                out.push_str(&style_run(&run, run_matched, &self.palette));
                 run.clear();
             }
             run_matched = is_matched;
@@ -973,7 +990,7 @@ impl App {
             chars += 1;
         }
         if !run.is_empty() {
-            out.push_str(&style_run(&run, run_matched));
+            out.push_str(&style_run(&run, run_matched, &self.palette));
         }
         out.extend(std::iter::repeat_n(' ', visible.saturating_sub(chars)));
         out
@@ -1003,7 +1020,7 @@ impl App {
         // Prose + sparkline + stats. As the budget shrinks the prose goes
         // first, then the chart; the numbers stay.
         if width >= label_width + stats_width + 4 {
-            line.push_str(&prose.with(palette::dim()).to_string());
+            line.push_str(&prose.with(self.palette.dim).to_string());
             spark_width = 24.min(width.saturating_sub(label_width + stats_width + 4));
         } else if width >= stats_width + 4 {
             spark_width = 24.min(width.saturating_sub(stats_width + 4));
@@ -1017,7 +1034,7 @@ impl App {
                 &self
                     .meter
                     .sparkline(spark_width)
-                    .with(palette::green())
+                    .with(self.palette.good)
                     .to_string(),
             );
         }
@@ -1025,7 +1042,7 @@ impl App {
             if !line.is_empty() {
                 line.push_str("  ");
             }
-            line.push_str(&stats.with(palette::green()).to_string());
+            line.push_str(&stats.with(self.palette.good).to_string());
         }
 
         // Pad to the right edge in case the budget is bigger than the content
@@ -1048,7 +1065,7 @@ impl App {
         // currently active background, and a styled span may have reset it.
         let mut screen = term::Screen::new(out);
         screen.move_to(0, row)?;
-        screen.background(palette::bg())?;
+        screen.background(self.palette.bg)?;
         screen.clear_line()?;
         screen.print(&truncate_visible(cell, width))?;
         screen.flush()
@@ -1233,6 +1250,27 @@ pub fn run_with_source_and_lang(
     run_app(app)
 }
 
+/// Run the interactive search over a source, in the language the launcher
+/// speaks and the colours the caller named.
+///
+/// The theme is the caller's the way the language is: the terminal is one
+/// face of the launcher and the theme is an answer every face gives, so
+/// the palette a user chose follows the search from the window to the
+/// terminal. The roles the terminal has no use for (`selected`, `border`)
+/// are the theme's business and not this face's — reverse video stands in
+/// for the selected band, and the terminal draws no border.
+pub fn run_with_source_lang_and_theme(
+    source: Box<dyn rgy_launcher::Source>,
+    root: String,
+    lang: Lang,
+    theme: Theme,
+) -> Result<(), String> {
+    let mut app = App::with_source(source, root);
+    app.lang = lang;
+    app.palette = Palette::of(theme);
+    run_app(app)
+}
+
 /// The runner, over an app that is already built.
 fn run_app(mut app: App) -> Result<(), String> {
     // The console decides how the UTF-8 bytes are decoded, so it is put
@@ -1246,7 +1284,7 @@ fn run_app(mut app: App) -> Result<(), String> {
     rgy_engine::adapter_view::apply();
 
     let mut out = rgy_engine::console::stdout();
-    let _guard = TerminalGuard::enter(&mut out)?;
+    let _guard = TerminalGuard::enter(&mut out, app.palette.bg)?;
 
     let mut chosen = None;
 
@@ -1404,14 +1442,16 @@ fn home_dir() -> Option<String> {
     None
 }
 
-/// A run of characters of a name, in the highlight's colour when the query
-/// matched them and in the ink when it did not.
-fn style_run(run: &[char], matched: bool) -> String {
+/// A run of characters of a name, in the matched colour when the query
+/// matched them and in the ink when it did not. The palette comes in
+/// because the run is not the app's: it is a piece of a row, and the
+/// colours are the frame's.
+fn style_run(run: &[char], matched: bool, palette: &Palette) -> String {
     let text: String = run.iter().collect();
     if matched {
-        text.with(palette::highlight()).to_string()
+        text.with(palette.matched).to_string()
     } else {
-        text.with(palette::ink()).to_string()
+        text.with(palette.ink).to_string()
     }
 }
 
@@ -2020,32 +2060,117 @@ mod tests {
         assert_eq!(app.meter.window_len(), LATENCY_SAMPLES);
     }
 
-    /// Without a truecolor advertisement the ANSI-16 fallback must be used,
-    /// otherwise the Windows console quantizes RGB to something that just looks
-    /// like the old colours on a black background.
+    /// MIDNIGHT is the palette this interface was drawn in, and both of its
+    /// spellings are pinned: the RGB values for a terminal that honours
+    /// 24-bit colour, and the ANSI-16 fallbacks for one that cannot.
+    ///
+    /// The resolution is forced per branch because the environment decides
+    /// which one the app runs in — once, before the first test — so a test
+    /// that only read [`Palette::of`] would pin whichever branch this
+    /// host's environment happens to give.
     #[test]
-    fn the_palette_falls_back_to_ansi_when_truecolor_is_unadvertised() {
-        // Whatever the host advertises, each role must yield a usable colour
-        // and the truecolor decision must be stable across calls.
-        let first = palette::truecolor();
-        assert_eq!(first, palette::truecolor(), "detection must be cached");
-        for c in [
-            palette::bg(),
-            palette::ink(),
-            palette::dim(),
-            palette::blue(),
-            palette::green(),
-        ] {
-            let described = format!("{c:?}");
-            assert!(!described.is_empty());
-            if !first {
-                // No Rgb may leak through when the terminal cannot show it.
-                assert!(
-                    !described.contains("Rgb"),
-                    "RGB used without truecolor: {described}"
-                );
+    fn midnight_is_the_palette_the_interface_was_drawn_in() {
+        // The detection is read once and is stable across calls: the
+        // environment does not change under a program.
+        assert_eq!(palette::truecolor(), palette::truecolor());
+
+        let truecolor = Palette::resolved(Theme::MIDNIGHT, true);
+        assert_eq!(
+            truecolor.bg,
+            Color::Rgb {
+                r: 19,
+                g: 18,
+                b: 21
             }
-        }
+        );
+        assert_eq!(
+            truecolor.ink,
+            Color::Rgb {
+                r: 255,
+                g: 255,
+                b: 255
+            }
+        );
+        assert_eq!(
+            truecolor.dim,
+            Color::Rgb {
+                r: 115,
+                g: 114,
+                b: 119
+            }
+        );
+        assert_eq!(
+            truecolor.accent,
+            Color::Rgb {
+                r: 114,
+                g: 170,
+                b: 255
+            }
+        );
+        assert_eq!(
+            truecolor.matched,
+            Color::Rgb {
+                r: 233,
+                g: 184,
+                b: 92
+            }
+        );
+        assert_eq!(
+            truecolor.good,
+            Color::Rgb {
+                r: 119,
+                g: 217,
+                b: 139
+            }
+        );
+
+        // Without a truecolor advertisement the ANSI-16 fallback must be
+        // used, otherwise the Windows console quantizes RGB to something
+        // that just looks like the old colours on a black background. No
+        // Rgb may leak through when the terminal cannot show it — and the
+        // fallbacks are the hues of the theme at the 16-colour palette's
+        // saturation.
+        let ansi = Palette::resolved(Theme::MIDNIGHT, false);
+        assert_eq!(ansi.bg, Color::Black);
+        assert_eq!(ansi.ink, Color::White);
+        assert_eq!(ansi.dim, Color::DarkGrey);
+        assert_eq!(ansi.accent, Color::Blue);
+        assert_eq!(ansi.matched, Color::Yellow);
+        assert_eq!(ansi.good, Color::Green);
+    }
+
+    /// A different theme changes the bytes a frame writes.
+    ///
+    /// The palette is a value now: the colours come from the theme the
+    /// caller named, and a frame drawn in LIGHT is not a frame drawn in
+    /// MIDNIGHT. The truecolor resolution is forced on because the escape
+    /// parameters are where the difference is visible — without 24-bit
+    /// colour both themes fall back to the same ANSI-16 roles, which is the
+    /// fallback doing its job and not a missing difference.
+    #[test]
+    fn a_different_theme_changes_the_bytes_a_frame_writes() {
+        let mut midnight = app_with("maintenance");
+        midnight.palette = Palette::resolved(Theme::MIDNIGHT, true);
+        let mut midnight_frame = Vec::new();
+        midnight.draw(&mut midnight_frame, FRAME).expect("draws");
+
+        let mut light = app_with("maintenance");
+        light.palette = Palette::resolved(Theme::LIGHT, true);
+        let mut light_frame = Vec::new();
+        light.draw(&mut light_frame, FRAME).expect("draws");
+
+        assert_ne!(
+            midnight_frame, light_frame,
+            "the theme has to reach the bytes the terminal reads"
+        );
+        let said = String::from_utf8_lossy(&light_frame);
+        // LIGHT's ink is a dark grey (40, 40, 42), and MIDNIGHT's white
+        // (255, 255, 255) is not what a light frame says.
+        assert!(said.contains("38;2;40;40;42"), "{said:?}");
+        assert!(
+            !said.contains("38;2;255;255;255"),
+            "the default's ink is in the light frame: {said:?}"
+        );
     }
 
     /// The footer figures are window percentiles, not a sum. The cold `first`
@@ -2221,7 +2346,7 @@ mod tests {
     #[test]
     fn the_prompt_keeps_the_query_and_the_timing_on_one_line() {
         let app = app_with("ext:rs");
-        let line = app.prompt_line(60, &"3.5 ms".with(palette::green()).to_string());
+        let line = app.prompt_line(60, &"3.5 ms".with(app.palette.good).to_string());
         assert_eq!(display_width(&line), 60);
         let visible = strip_ansi(&line);
         assert!(visible.contains("ext:rs"), "{visible:?}");
@@ -2236,7 +2361,7 @@ mod tests {
         for _ in 0..40 {
             app.insert('x');
         }
-        let line = app.prompt_line(30, &"2.0 ms".with(palette::green()).to_string());
+        let line = app.prompt_line(30, &"2.0 ms".with(app.palette.good).to_string());
         assert_eq!(display_width(&line), 30, "never exceeds the terminal width");
     }
 

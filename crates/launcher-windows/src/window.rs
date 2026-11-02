@@ -43,6 +43,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use rgy_launcher::latency::Latency;
 use rgy_launcher::layout::{BASE_DPI, SCALE_PERCENT, device_pixels, model_pixels};
 use rgy_launcher::text::{Lang, Text};
+use rgy_launcher::theme::Theme;
 use rgy_launcher::{Action, Layout, Mode, Preview, Row};
 
 use crate::paint::{self, Fonts, Icons};
@@ -175,6 +176,26 @@ pub struct View {
     pub latency: Latency,
     /// The panel over the results, when there is one.
     pub preview: Option<Preview>,
+    /// The rows of the settings panel, when it has the keyboard.
+    ///
+    /// Each row is a label and the value it holds, both already spelled
+    /// in the language the user reads and in the words the settings
+    /// say: the panel draws what it is given, and the settings are the
+    /// host's.
+    pub settings: Vec<(String, String)>,
+    /// Which row of the settings panel is selected.
+    pub settings_selected: usize,
+    /// The colours this frame is painted in.
+    ///
+    /// The view carries everything the window draws, and the colours are
+    /// drawn things: a panel that changes the theme wears the new one on
+    /// the very next frame, and a view that could not say its colours
+    /// would be a view the window painted in the ones before.
+    pub theme: rgy_launcher::theme::Theme,
+    /// How opaque the panel is.
+    pub alpha: u32,
+    /// Where the window sits on the work area, in thousandths.
+    pub anchor: (u32, u32),
 }
 
 /// What the host says the window should do about the event it was given.
@@ -288,6 +309,28 @@ struct State {
     icons: Icons,
     /// The window's fonts, made once and deleted with the window.
     fonts: Fonts,
+    /// The colours the window paints in.
+    ///
+    /// The colours live in the state and not in the [`Window`] wrapper
+    /// because the painting happens in the window's procedure, which
+    /// reaches the window through this state and through nothing else:
+    /// a colour the procedure could not read would be a colour the
+    /// picture never wore. They start as the window's own palette and
+    /// [`Window::set_colours`] is the one way they change.
+    colours: paint::Colours,
+    /// The panel's own alpha: ninety per cent.
+    ///
+    /// Almost black and slightly transparent: a tenth of the desktop
+    /// shows through, and the panel keeps its colour where the desktop is
+    /// dark. It is the alpha that lets the desktop through where the
+    /// panel draws nothing — the rounded corners are the region's own,
+    /// and the shadow is the system's own, and the alpha is what is left
+    /// of the panel.
+    ///
+    /// It is the state's own number and not a constant because the theme
+    /// carries it: [`Window::set_colours`] takes it with the palette,
+    /// clamped to the range a panel is a panel in.
+    panel_alpha: u8,
     /// The scale of the monitor the window is on, in per cent.
     ///
     /// The picture is drawn in device pixels and the drawing is in the
@@ -356,15 +399,6 @@ struct Layer {
     /// The panel's height.
     height: i32,
 }
-
-/// The panel's own alpha: ninety per cent.
-///
-/// Almost black and slightly transparent: a tenth of the desktop shows
-/// through, and the panel keeps its colour where the desktop is dark.
-/// It is the alpha that lets the desktop through where the panel draws
-/// nothing — the rounded corners are the region's own, and the shadow is
-/// the system's own, and the alpha is what is left of the panel.
-const PANEL_ALPHA: u8 = 230;
 
 /// How far a pixel may be from the panel's own colour and still be the
 /// panel's own colour.
@@ -523,16 +557,19 @@ impl Layer {
         painted: &mut (i32, i32),
         icons: &mut Icons,
         fonts: &Fonts,
+        colours: &paint::Colours,
+        alpha: u8,
         scale: u32,
         lang: Lang,
     ) -> bool {
         unsafe {
-            // The panel's own near-black is what the desktop shows
-            // through.
-            paint::paint(self.dc, view, painted, false, icons, fonts, scale, lang);
+            // The panel's own colour is what the desktop shows through.
+            paint::paint(
+                self.dc, view, painted, false, icons, fonts, colours, scale, lang,
+            );
             // The alpha is worked out after the drawing: GDI writes the
             // colour of a pixel and never its alpha.
-            self.compose();
+            self.compose(colours, alpha);
             let screen = GetDC(core::ptr::null_mut());
             if screen.is_null() {
                 return false;
@@ -564,10 +601,11 @@ impl Layer {
 
     /// The alpha the window's own pixels carry.
     ///
-    /// The panel's own near-black is nearly opaque and the desktop shows
-    /// through the rest of it; what the panel draws on it — the border,
-    /// the query, the rows — is opaque, so the text keeps its edges.
-    fn compose(&self) {
+    /// The panel's own colour — whatever theme painted it — is nearly
+    /// opaque and the desktop shows through the rest of it; what the
+    /// panel draws on it — the border, the query, the rows — is opaque,
+    /// so the text keeps its edges.
+    fn compose(&self, colours: &paint::Colours, alpha: u8) {
         let width = self.width;
         let height = self.height;
         let stride = (width * 4) as usize;
@@ -576,14 +614,14 @@ impl Layer {
                 for x in 0..width {
                     let at = (y as usize) * stride + (x as usize) * 4;
                     let pixel = self.bits.add(at);
-                    if is_the_panel(*pixel, *pixel.add(1), *pixel.add(2)) {
+                    if is_the_panel(*pixel, *pixel.add(1), *pixel.add(2), colours) {
                         // The panel's own colour: nearly opaque, and the
                         // colour it carries is the colour it has with
                         // that alpha in it.
-                        *pixel = premultiplied(paint::colour::BLUE, PANEL_ALPHA);
-                        *pixel.add(1) = premultiplied(paint::colour::GREEN, PANEL_ALPHA);
-                        *pixel.add(2) = premultiplied(paint::colour::RED, PANEL_ALPHA);
-                        *pixel.add(3) = PANEL_ALPHA;
+                        *pixel = premultiplied(colours.background_blue, alpha);
+                        *pixel.add(1) = premultiplied(colours.background_green, alpha);
+                        *pixel.add(2) = premultiplied(colours.background_red, alpha);
+                        *pixel.add(3) = alpha;
                     } else {
                         // What is drawn on the panel is opaque.
                         *pixel.add(3) = 255;
@@ -613,12 +651,16 @@ impl Drop for Layer {
 /// Whether a pixel is the panel's own colour, or one step away from it.
 ///
 /// The text's faintest edges are the panel's colour: they are the
-/// panel, and they keep the panel's alpha.
-fn is_the_panel(blue: u8, green: u8, red: u8) -> bool {
+/// panel, and they keep the panel's alpha. The panel's colour is the
+/// CURRENT theme's background — the comparison follows the colours the
+/// picture was painted in, and a tolerance pinned to one theme's
+/// channels would treat every other theme's panel as drawing, and paint
+/// it opaque.
+fn is_the_panel(blue: u8, green: u8, red: u8, colours: &paint::Colours) -> bool {
     let near = |value: u8, panel: u8| (value as i32 - panel as i32).abs() <= PANEL_TOLERANCE;
-    near(blue, paint::colour::BLUE)
-        && near(green, paint::colour::GREEN)
-        && near(red, paint::colour::RED)
+    near(blue, colours.background_blue)
+        && near(green, colours.background_green)
+        && near(red, colours.background_red)
 }
 
 /// A colour with the alpha it carries already in it.
@@ -654,6 +696,13 @@ pub struct Window {
     model: (i32, i32),
     /// The scale of the monitor the window is on, in per cent.
     scale: u32,
+    /// Where the window sits on its work area, in permille of it: `x`
+    /// across the room the window does not take, `y` down the area.
+    ///
+    /// The host moves it with [`Window::set_anchor`]; the default is the
+    /// middle of the area, eighteen per cent down — the place the window
+    /// was put before the anchor existed.
+    anchor: (u32, u32),
     /// The icon in the notification area, when the shell took it.
     ///
     /// The window is a tool window on purpose — it is not in the taskbar
@@ -716,6 +765,9 @@ impl Window {
             focus_lost: false,
             icons: Icons::new(),
             fonts: Fonts::new(SCALE_PERCENT),
+            colours: paint::Colours::WARM,
+            // Ninety per cent: the field's own doc says why.
+            panel_alpha: 230,
             scale: SCALE_PERCENT,
             pending_char: None,
             tray_error: None,
@@ -769,6 +821,7 @@ impl Window {
                 height: 80,
                 model: (600, 80),
                 scale: SCALE_PERCENT,
+                anchor: DEFAULT_ANCHOR,
                 tray: None,
             };
             // The icon goes into the notification area now that the window
@@ -889,6 +942,8 @@ impl Window {
                 &mut state.painted,
                 &mut state.icons,
                 &state.fonts,
+                &state.colours,
+                state.panel_alpha,
                 state.scale,
                 state.lang,
             ),
@@ -994,6 +1049,24 @@ impl Window {
         self.install(view);
     }
 
+    /// Paint in another theme.
+    ///
+    /// The theme is the whole palette at once, and the alpha goes with
+    /// it: the panel's colour is the theme's background, and the alpha
+    /// is how much of the desktop shows through that colour — the two
+    /// are one fact about the panel and not two. The alpha is clamped,
+    /// to a quarter at the bottom and to full opacity at the top: a
+    /// panel below a quarter is made of nothing, and a number above 255
+    /// is not an alpha a byte can carry.
+    ///
+    /// The window is repainted at once, in the colours it will wear from
+    /// now on: a theme the user cannot see taking effect is a theme the
+    /// user thinks did nothing.
+    pub fn set_colours(&mut self, theme: Theme, alpha: u32) {
+        self.wear(theme, alpha);
+        self.repaint();
+    }
+
     /// The view the window draws, in the language the window speaks.
     ///
     /// The placeholder is the word of that language: the host owns the
@@ -1002,7 +1075,33 @@ impl Window {
     /// languages at once.
     fn install(&mut self, mut view: View) {
         view.placeholder = Text::for_lang(self.state().lang).placeholder.to_string();
+        // The colours ride with the view, and the window wears the ones
+        // it is given: a frame that arrives in a new theme is painted in
+        // it, and a frame in the same one costs nothing — the comparison
+        // is a few words and the repaint it would cause is not.
+        self.wear(view.theme, view.alpha);
+        // The seat moves with the view too: a panel that moved the
+        // window re-places it here, where the size it will be is already
+        // the size the control carries.
+        if view.anchor != self.anchor {
+            self.set_anchor(view.anchor.0, view.anchor.1);
+        }
         self.state_mut().view = view;
+    }
+
+    /// Wear a theme and an opacity, without painting.
+    ///
+    /// The painting is the caller's: [`Window::set_colours`] is this
+    /// wear with a repaint behind it, for the caller that has no frame
+    /// on its way.
+    fn wear(&mut self, theme: rgy_launcher::theme::Theme, alpha: u32) {
+        let colours = paint::Colours::of(&theme);
+        let alpha = alpha.clamp(64, 255) as u8;
+        let state = self.state_mut();
+        if colours != state.colours || alpha != state.panel_alpha {
+            state.colours = colours;
+            state.panel_alpha = alpha;
+        }
     }
 
     /// Show the window, over everything, without raising what is under it.
@@ -1141,10 +1240,15 @@ impl Window {
     /// Put the window where the user is looking.
     ///
     /// The monitor the cursor is on is the monitor the user is looking
-    /// at, and the window is centred on that monitor's work area and
-    /// sits in the upper third of it.
+    /// at, and the window sits on that monitor's work area at the
+    /// anchor's place in it.
     fn place(&mut self) {
-        let spot = spot_on(self.target_work_area(), self.width, self.height);
+        let spot = spot_on(
+            self.target_work_area(),
+            self.width,
+            self.height,
+            self.anchor,
+        );
         // The spot may have cut the window, and the region is the
         // window's shape: it has to follow. The layer is the panel's own
         // bitmap, and a panel of another size is a panel of another
@@ -1171,6 +1275,18 @@ impl Window {
         // moved to the monitor the user is looking at: a monitor has a
         // scale of its own, and the picture has to be drawn at it.
         self.follow_the_monitor();
+    }
+
+    /// Put the window at another place on its work area.
+    ///
+    /// The numbers are permille of the area, `x` across and `y` down,
+    /// and both are clamped to the area: an anchor outside it is an
+    /// anchor the window cannot honour without leaving the screen. The
+    /// window is placed again at once, so the move happens where the
+    /// caller made it and not at the next showing.
+    pub fn set_anchor(&mut self, x: u32, y: u32) {
+        self.anchor = (x.clamp(0, 1000), y.clamp(0, 1000));
+        self.place();
     }
 
     /// Take the scale of the monitor the window is on.
@@ -1226,7 +1342,7 @@ impl Window {
         // The window is never taller than the room the work area has: the
         // model sizes it from the rows, and the rows have to fit between
         // the top of the area and the bottom of the screen.
-        let spot = spot_on(self.target_work_area(), width, height);
+        let spot = spot_on(self.target_work_area(), width, height, self.anchor);
         if spot.width == self.width && spot.height == self.height {
             return;
         }
@@ -1244,15 +1360,44 @@ impl Window {
             // user was looking at, and a window that moved to another
             // screen while the user is typing in it would be a window the
             // user cannot reach.
-            SetWindowPos(
-                self.hwnd,
-                HWND_TOPMOST,
-                0,
-                0,
-                width,
-                height,
-                SWP_NOMOVE | SWP_NOACTIVATE,
-            );
+            //
+            // It does not stay where it is when that would take it off
+            // the work area: the window's own contract is that it never
+            // falls outside it, and a window wider than the room on its
+            // right has to grow to the left — which is what the anchor
+            // at the far end promised. The position is the one the
+            // window is already at, clamped into the area, so the common
+            // case does not move the window at all.
+            let work = self.target_work_area();
+            let mut rect = RECT {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            };
+            let known = GetWindowRect(self.hwnd, &mut rect) != 0;
+            let (x, y, flags) = if known {
+                let x = rect
+                    .left
+                    .clamp(work.left, (work.right - width).max(work.left));
+                let y = rect
+                    .top
+                    .clamp(work.top, (work.bottom - height).max(work.top));
+                if x == rect.left && y == rect.top {
+                    // The window is not moved at all when it is already
+                    // where it has to be: a window that moves under the
+                    // cursor while the user is typing in it is a window
+                    // the user cannot reach.
+                    (0, 0, SWP_NOMOVE | SWP_NOACTIVATE)
+                } else {
+                    (x, y, SWP_NOACTIVATE)
+                }
+            } else {
+                // The platform would not say where the window is: the
+                // anchor says where it goes.
+                (spot.x, spot.y, SWP_NOACTIVATE)
+            };
+            SetWindowPos(self.hwnd, HWND_TOPMOST, x, y, width, height, flags);
         }
     }
 
@@ -1507,12 +1652,8 @@ impl Window {
                 // The user went somewhere else: the window gets out of the
                 // way, and the answer is given here, where the host is not
                 // inside anything.
-                if self.state_mut().focus_lost {
-                    self.state_mut().focus_lost = false;
-                    let control = on_event(Event::Toggle);
-                    if !self.apply(control) {
-                        break;
-                    }
+                if self.state_mut().focus_lost && !self.get_out_of_the_way(&mut on_event) {
+                    break;
                 }
                 // The notification area: the shell sends its clicks to the
                 // window's procedure, and the pump is where the answer is
@@ -1554,6 +1695,28 @@ impl Window {
         }
     }
 
+    /// Answer the focus the user took away: the window gets out of the
+    /// way, and the answer is given here, where the host is not inside a
+    /// platform call.
+    ///
+    /// Only a window that is on the screen has somewhere to go. The
+    /// notification area's own menu puts the window's thread in front of
+    /// the user and then drops it — `SetForegroundWindow` before the menu
+    /// opens, the deactivation after it closes — and the deactivation
+    /// reaches a window that is not on the screen. Answering it would
+    /// bring the launcher back up: the user walked away from a menu, and
+    /// the launcher opened itself.
+    ///
+    /// False when the window is done.
+    fn get_out_of_the_way(&mut self, on_event: &mut dyn FnMut(Event) -> Control) -> bool {
+        self.state_mut().focus_lost = false;
+        if !self.is_visible() {
+            return true;
+        }
+        let control = on_event(Event::Toggle);
+        self.apply(control)
+    }
+
     /// Turn one message into one control.
     ///
     /// A message the window handles itself — the paint, the resize — is
@@ -1564,6 +1727,13 @@ impl Window {
     fn dispatch(&mut self, msg: &MSG, on_event: &mut impl FnMut(Event) -> Control) -> Control {
         unsafe {
             if msg.message == WM_TOGGLE {
+                return on_event(Event::Toggle);
+            }
+            // A registered combo: the platform posts this message when
+            // the keys were pressed anywhere on the machine, and a
+            // posted message comes out of the queue — the pump is where
+            // the answer is given, like the hook's own message above.
+            if msg.message == WM_HOTKEY {
                 return on_event(Event::Toggle);
             }
             // The notification area's clicks are NOT answered here: the
@@ -1677,11 +1847,12 @@ fn backdrop_is_there(kind: i32) -> bool {
     )
 }
 
-/// How far down the work area the window sits, as a fraction of it.
+/// Where the window sits on its work area by default, in permille of it.
 ///
-/// The upper third: the eye is there, and the middle of the screen is
-/// where the user's hands are.
-const VERTICAL_FRACTION: f32 = 0.18;
+/// Halfway across and eighteen per cent down: the eye is in the upper
+/// part of the screen, and the middle of it is where the user's hands
+/// are.
+const DEFAULT_ANCHOR: (u32, u32) = (500, 180);
 
 /// The window's place on a work area.
 struct Spot {
@@ -1698,25 +1869,35 @@ struct Spot {
 
 /// Where the window goes on a work area.
 ///
-/// The window is centred on the area and sits in the upper third of it,
-/// measured from the area's own top: the taskbar is not part of the
-/// area, and neither is whatever is above it.
+/// The anchor says where, in permille of the area: `x` across the room
+/// the window does not take — so five hundred is the middle, the place
+/// the window was centred on before the anchor existed, and a thousand
+/// puts the window's right edge on the area's own — and `y` down the
+/// area itself, measured from its own top: the taskbar is not part of
+/// the area, and neither is whatever is above it.
 ///
-/// The window never falls outside the area. One that is taller than the
-/// area is pinned to the top and cut to the area's height, and one that
-/// is taller than the room below the offset is cut to that room.
-fn spot_on(work: RECT, width: i32, height: i32) -> Spot {
+/// The window never falls outside the area. One that is wider than the
+/// area is cut to the area, one that is taller than the area is pinned
+/// to the top and cut to the area's height, and one that is taller than
+/// the room below the anchor is cut to that room.
+fn spot_on(work: RECT, width: i32, height: i32, anchor: (u32, u32)) -> Spot {
     let area_w = work.right - work.left;
     let area_h = work.bottom - work.top;
-    // A window wider than the area is cut to the area: centred, it would
-    // hang over the edge of the screen, and the window's own contract is
-    // that it never falls outside it. The height is cut the same way
-    // below, and the two cuts are the same cut.
+    // A window wider than the area is cut to the area: at any anchor it
+    // would hang over the edge of the screen, and the window's own
+    // contract is that it never falls outside it. The height is cut the
+    // same way below, and the two cuts are the same cut.
     let width = width.min(area_w);
-    let x = work.left + (area_w - width).max(0) / 2;
+    // The left edge goes as far across the free width as the anchor
+    // says: the permille is of the room the window does not take, so the
+    // far end of that room is the area's own right edge.
+    let x = work.left + (area_w - width).max(0) * anchor.0 as i32 / 1000;
     // The offset is where the window starts, and the room below it is
-    // what the window has to fit in.
-    let offset = (area_h as f32 * VERTICAL_FRACTION) as i32;
+    // what the window has to fit in. The offset is capped so that there
+    // is always a row of room: a window with no height is a window that
+    // is not there, and an anchor is a place and not a way of not being
+    // there.
+    let offset = (area_h * anchor.1 as i32 / 1000).min((area_h - 1).max(0));
     if height >= area_h {
         // Taller than the area: the window starts at the top and is cut.
         return Spot {
@@ -1848,6 +2029,8 @@ unsafe extern "system" fn wnd_proc(
                                 &mut state.painted,
                                 &mut state.icons,
                                 &state.fonts,
+                                &state.colours,
+                                state.panel_alpha,
                                 state.scale,
                                 state.lang,
                             ) {
@@ -1871,6 +2054,7 @@ unsafe extern "system" fn wnd_proc(
                                 state.backdrop,
                                 &mut state.icons,
                                 &state.fonts,
+                                &state.colours,
                                 state.scale,
                                 state.lang,
                             );
@@ -2235,34 +2419,53 @@ mod tests {
 
     #[test]
     fn the_window_is_centred_on_the_work_area() {
-        let spot = spot_on(area(), 640, 484);
+        let spot = spot_on(area(), 640, 484, DEFAULT_ANCHOR);
         assert_eq!(spot.x, 640, "the window is in the middle of the area");
     }
 
     #[test]
     fn the_window_sits_in_the_upper_third_of_the_work_area() {
-        let spot = spot_on(area(), 640, 484);
+        let spot = spot_on(area(), 640, 484, DEFAULT_ANCHOR);
         assert_eq!(spot.y, 187, "eighteen per cent down the area");
         assert_eq!(spot.height, 484, "the window keeps the height it asked for");
+    }
+
+    /// The defaults are the places the window was put before the anchor
+    /// existed, to the pixel: the old centring was half of the free
+    /// width and the old offset was eighteen per cent of the area, and
+    /// five hundred and a thousandth of the area are the same numbers.
+    #[test]
+    fn the_default_anchor_is_where_the_window_was_put_before_it() {
+        let work = area();
+        let spot = spot_on(work, 640, 484, DEFAULT_ANCHOR);
+        assert_eq!(spot.x, work.left + (1920 - 640) / 2, "centred, exactly");
+        assert_eq!(spot.y, work.top + 1040 * 18 / 100, "eighteen per cent down");
     }
 
     #[test]
     fn the_window_never_falls_outside_the_work_area() {
         let work = area();
-        for height in [0, 100, 484, 1000, 1040, 2000] {
-            let spot = spot_on(work, 640, height);
-            assert!(spot.y >= work.top, "the window starts inside the area");
-            assert!(
-                spot.y + spot.height <= work.bottom,
-                "the window ends inside the area"
-            );
+        for anchor in [DEFAULT_ANCHOR, (0, 0), (250, 750), (1000, 1000)] {
+            for height in [0, 100, 484, 1000, 1040, 2000] {
+                let spot = spot_on(work, 640, height, anchor);
+                assert!(spot.y >= work.top, "the window starts inside the area");
+                assert!(
+                    spot.y + spot.height <= work.bottom,
+                    "the window ends inside the area"
+                );
+                assert!(spot.x >= work.left, "the window starts inside the area");
+                assert!(
+                    spot.x + spot.width <= work.right,
+                    "the window ends inside the area"
+                );
+            }
         }
     }
 
     #[test]
     fn a_window_taller_than_the_work_area_is_pinned_to_its_top() {
         let work = area();
-        let spot = spot_on(work, 640, 2000);
+        let spot = spot_on(work, 640, 2000, DEFAULT_ANCHOR);
         assert_eq!(spot.y, work.top, "the window starts at the top of the area");
         assert_eq!(
             spot.height,
@@ -2282,9 +2485,150 @@ mod tests {
             right: 0,
             bottom: 1040,
         };
-        let spot = spot_on(work, 640, 484);
+        let spot = spot_on(work, 640, 484, DEFAULT_ANCHOR);
         assert_eq!(spot.x, -1280, "the window is centred on that monitor");
         assert_eq!(spot.y, 187);
+    }
+
+    /// The anchor's zero is the area's top-left corner.
+    ///
+    /// The permille is of the room the window does not take, so zero
+    /// across is flush with the left edge and zero down is flush with
+    /// the top: a launcher pinned to the corner is a launcher the hand
+    /// that lives there can reach.
+    #[test]
+    fn an_anchor_of_zero_is_the_corner() {
+        let work = area();
+        let spot = spot_on(work, 640, 484, (0, 0));
+        assert_eq!(spot.x, work.left, "flush with the left edge");
+        assert_eq!(spot.y, work.top, "flush with the top edge");
+        assert_eq!(spot.height, 484, "and the window keeps its height");
+    }
+
+    /// The anchor's thousand is the area's right edge.
+    ///
+    /// The permille is of the room the window does not take, so a
+    /// thousand across gives the whole of that room to the left of the
+    /// window and puts its right edge on the area's own — and not one
+    /// pixel past it, which is the contract the cut above keeps.
+    #[test]
+    fn an_anchor_of_a_thousand_is_the_right_edge() {
+        let work = area();
+        let spot = spot_on(work, 640, 484, (1000, 180));
+        assert_eq!(
+            spot.x + spot.width,
+            work.right,
+            "the window's right edge is the area's right edge"
+        );
+        assert_eq!(
+            spot.x, 1280,
+            "and the window is not where the middle puts it"
+        );
+    }
+
+    /// The anchor the host sets is the anchor the window places at.
+    ///
+    /// The numbers are clamped to the area: an anchor outside it is an
+    /// anchor the window cannot honour without leaving the screen, and
+    /// a launcher that honoured it anyway would be half off the desktop.
+    #[test]
+    fn the_anchor_the_host_sets_is_the_anchor_the_window_keeps() {
+        let mut window = Window::new("rgxy-test").expect("the window was made");
+        assert_eq!(
+            window.anchor, DEFAULT_ANCHOR,
+            "the window starts halfway across and eighteen per cent down"
+        );
+        window.set_anchor(0, 0);
+        assert_eq!(window.anchor, (0, 0), "the corner");
+        window.set_anchor(1000, 1000);
+        assert_eq!(window.anchor, (1000, 1000), "the far corner");
+        window.set_anchor(1001, 5000);
+        assert_eq!(
+            window.anchor,
+            (1000, 1000),
+            "an anchor outside the area is clamped to it"
+        );
+    }
+
+    /// The theme the window is given is the theme it paints in.
+    ///
+    /// The colours live in the state the procedure reads, so the theme
+    /// the host sets is the theme the next paint wears — and the alpha
+    /// is clamped to the range a panel is a panel in: below a quarter
+    /// the panel is made of nothing, and above 255 the byte cannot
+    /// carry it.
+    #[test]
+    fn the_theme_the_window_is_given_is_the_theme_it_paints_in() {
+        let mut window = Window::new("rgxy-test").expect("the window was made");
+        assert_eq!(
+            window.state().colours,
+            paint::Colours::WARM,
+            "the window starts in the palette it was drawn in"
+        );
+        assert_eq!(window.state().panel_alpha, 230, "ninety per cent");
+        window.set_colours(Theme::NORD, 200);
+        assert_eq!(window.state().colours, paint::Colours::of(&Theme::NORD));
+        assert_eq!(window.state().panel_alpha, 200);
+        window.set_colours(Theme::WARM, 0);
+        assert_eq!(
+            window.state().panel_alpha,
+            64,
+            "an alpha of nothing is a quarter"
+        );
+        window.set_colours(Theme::WARM, 4000);
+        assert_eq!(
+            window.state().panel_alpha,
+            255,
+            "an alpha above opaque is opaque"
+        );
+    }
+
+    /// The panel's own colour is the theme's own, whatever the theme is.
+    ///
+    /// The composition reads the picture back and decides which pixels
+    /// are the panel: the decision follows the colours the picture was
+    /// painted in, and a tolerance pinned to one theme's channels would
+    /// treat every other theme's panel as drawing — and paint it opaque,
+    /// a window that is a solid rectangle in every theme but one.
+    #[test]
+    fn the_panel_s_own_colour_is_the_theme_s_own() {
+        let warm = paint::Colours::of(&Theme::WARM);
+        let light = paint::Colours::of(&Theme::LIGHT);
+        // The pixel each panel paints of itself is its own...
+        assert!(is_the_panel(
+            warm.background_blue,
+            warm.background_green,
+            warm.background_red,
+            &warm
+        ));
+        assert!(is_the_panel(
+            light.background_blue,
+            light.background_green,
+            light.background_red,
+            &light
+        ));
+        // ...and one theme's panel is the other theme's drawing.
+        assert!(!is_the_panel(
+            warm.background_blue,
+            warm.background_green,
+            warm.background_red,
+            &light
+        ));
+        // The tolerance follows the theme it is given: the tolerance's
+        // own width away from the panel's colour is still the panel, and
+        // one past it is not.
+        assert!(is_the_panel(
+            warm.background_blue + PANEL_TOLERANCE as u8,
+            warm.background_green,
+            warm.background_red,
+            &warm
+        ));
+        assert!(!is_the_panel(
+            warm.background_blue + PANEL_TOLERANCE as u8 + 1,
+            warm.background_green,
+            warm.background_red,
+            &warm
+        ));
     }
 
     /// The window is the model's size at the screen's scale.
@@ -2312,7 +2656,7 @@ mod tests {
     fn a_window_wider_than_the_work_area_starts_at_its_left_edge() {
         // Centred, it would hang over the edge of the screen.
         let work = area();
-        let spot = spot_on(work, 2400, 484);
+        let spot = spot_on(work, 2400, 484, DEFAULT_ANCHOR);
         assert_eq!(spot.x, work.left);
     }
 
@@ -2511,6 +2855,93 @@ mod tests {
             !window.state().focus_lost,
             "the window opened itself again after the user closed it"
         );
+    }
+
+    /// A focus loss under a window that is not on the screen opens
+    /// nothing.
+    ///
+    /// The notification area's own menu puts the window's thread in
+    /// front of the user and then drops it — `SetForegroundWindow`
+    /// before the menu opens, the deactivation after it closes — and
+    /// the deactivation reaches a window that is not on the screen.
+    /// Answering it would bring the launcher back up: the user walked
+    /// away from a menu, and the launcher opened itself.
+    #[test]
+    fn a_focus_loss_under_a_hidden_window_opens_nothing() {
+        let mut window = Window::new("rgxy-test").expect("the window was made");
+        let hwnd = window.hwnd();
+        window.hide();
+        assert!(!window.is_visible(), "the window is not on the screen");
+
+        let mut msg = MSG {
+            hwnd: core::ptr::null_mut(),
+            message: 0,
+            wParam: 0,
+            lParam: 0,
+            time: 0,
+            pt: POINT { x: 0, y: 0 },
+        };
+        // The goodbye of the hide itself is answered first, the way the
+        // window procedure answers it: a LATER deactivation is not the
+        // window's own.
+        unsafe {
+            PostMessageW(hwnd, WM_ACTIVATEAPP, 0, 0);
+        }
+        unsafe {
+            let got = GetMessageW(&mut msg, core::ptr::null_mut(), 0, 0);
+            assert!(got > 0, "the goodbye arrived");
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        assert!(
+            !window.state().focus_lost,
+            "the window's own goodbye is not the user going somewhere"
+        );
+
+        // The deactivation of the hidden window: the tray menu closing.
+        unsafe {
+            PostMessageW(hwnd, WM_ACTIVATEAPP, 0, 0);
+        }
+        unsafe {
+            let got = GetMessageW(&mut msg, core::ptr::null_mut(), 0, 0);
+            assert!(got > 0, "the deactivation arrived");
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        assert!(
+            window.state().focus_lost,
+            "the platform said the activation was lost"
+        );
+
+        // The pump's answer: no event is asked, the window stays where it
+        // is, and the flag does not linger for the next showing.
+        let mut asked = 0;
+        assert!(
+            window.get_out_of_the_way(&mut |_| {
+                asked += 1;
+                Control::Hide
+            }),
+            "the window is not done"
+        );
+        assert_eq!(asked, 0, "a hidden window has nowhere to go: {asked}");
+        assert!(
+            !window.state().focus_lost,
+            "the flag was consumed, not saved for the next showing"
+        );
+
+        // The same focus loss under a window that IS on the screen is the
+        // user going somewhere, and the host is asked.
+        window.show();
+        assert!(window.is_visible(), "the window is on the screen");
+        window.state_mut().focus_lost = true;
+        assert!(
+            window.get_out_of_the_way(&mut |_| {
+                asked += 1;
+                Control::Hide
+            }),
+            "the window is not done"
+        );
+        assert_eq!(asked, 1, "the host was asked once: {asked}");
     }
 
     /// The window speaks English until it is told otherwise.

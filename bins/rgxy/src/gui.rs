@@ -37,11 +37,14 @@
 
 use std::sync::mpsc::{Receiver, Sender, channel};
 
+use rgy_launcher::TapKey;
 use rgy_launcher::latency::LatencyMeter;
+use rgy_launcher::settings::Hotkey;
 use rgy_launcher::text::{Lang, Text};
 use rgy_launcher::usage::History;
 use rgy_launcher::{Action, Answer, App, Layer, Mode, Preview, Row, Source, commands};
 use rgy_launcher_windows::actions;
+use rgy_launcher_windows::combo::Combo;
 use rgy_launcher_windows::hook::Hook;
 use rgy_launcher_windows::window::{Compositor, Control, Event, Key, View, Window};
 
@@ -52,6 +55,37 @@ use crate::preview;
 
 /// How many results the window asks for.
 const LIMIT: usize = 50;
+
+/// The armed hotkey: the shape the settings chose.
+///
+/// The two shapes are two mechanisms — the double tap of a lone
+/// modifier, watched by the low-level hook, and a combo the platform
+/// watches for — and only one is ever armed. The settings choose, and
+/// the panel can change the choice while the launcher runs: the old
+/// one is dropped and the new one armed in its place, and both guards
+/// give their global thing back when they go. The guards are **held**
+/// and not read: the drop is the work.
+#[allow(dead_code)]
+enum Arm {
+    /// A lone modifier, tapped twice inside a window of milliseconds.
+    Tap(Hook),
+    /// Modifiers held with a key, registered with the platform.
+    Combo(Combo),
+}
+
+impl Arm {
+    /// Arm the shape the settings chose for the window's hotkey.
+    fn of(hwnd: *mut core::ffi::c_void, hotkey: &Hotkey) -> Result<Arm, String> {
+        match hotkey {
+            Hotkey::DoubleTap { key, window_ms } => {
+                Ok(Arm::Tap(Hook::install(hwnd, *key, *window_ms)?))
+            }
+            Hotkey::Combo { modifiers, key } => {
+                Ok(Arm::Combo(Combo::install(hwnd, *modifiers, *key)?))
+            }
+        }
+    }
+}
 
 /// The chart's width, in characters.
 ///
@@ -313,6 +347,35 @@ type Opener = Box<dyn Fn(&str) -> Result<(), String>>;
 struct State {
     /// The model.
     app: App,
+    /// The settings, as the file gave them and as the panel holds them.
+    ///
+    /// The panel edits them in place and writes the file on a thread of
+    /// its own; a value the panel changed is a value the launcher is
+    /// already wearing — the colours, the seat, the width — and the
+    /// next start reads the same answer back.
+    settings: rgy_launcher::settings::Settings,
+    /// The armed hotkey, when one is armed.
+    ///
+    /// The panel can change the choice while the launcher runs: the old
+    /// guard is dropped — giving the global thing back — and the new
+    /// one armed in its place. A refusal keeps the old one armed and
+    /// says so on the line under the field: a hotkey that did not arm
+    /// and said nothing is a hotkey the user presses twice.
+    arm: Option<Arm>,
+    /// The window's own handle, for the things the panel re-arms.
+    hwnd: *mut core::ffi::c_void,
+    /// How many rows this screen has room for.
+    ///
+    /// The settings' row count is a wish and the screen is the ceiling:
+    /// the panel adjusts the wish, and the ceiling is read once, where
+    /// the window was made.
+    rows_fit: usize,
+    /// Where the settings file is, when the panel writes it.
+    ///
+    /// The path is a field and not a call for the reason the memory's
+    /// is: a test that adjusted a setting would write the user's own
+    /// file, and `None` is how a test says "there is no file here".
+    settings_path: Option<std::path::PathBuf>,
     /// The daemon.
     ///
     /// The trait object and not the daemon itself: a test needs a
@@ -485,17 +548,42 @@ impl State {
 }
 
 /// Run the launcher, until the window is closed.
-pub fn run(source: DaemonSource, options: &Options) -> Result<(), String> {
+///
+/// The settings are the file's, read once before the window is made:
+/// the panel writes the file and the next start reads it, and there is
+/// no second place the settings live. A file that could not be read is
+/// the defaults plus a note — a launcher that refuses to start over its
+/// own settings is a launcher the user cannot fix from the inside.
+pub fn run(
+    source: DaemonSource,
+    options: &Options,
+    settings: &rgy_launcher::settings::Settings,
+    settings_note: Option<String>,
+) -> Result<(), String> {
     // The language is the source's: the source says the sentences about the
     // daemon, and the window says the ones about itself.
     let lang = source.lang();
     let mut window = Window::new("rgxy")?.with_lang(lang);
-    // The hook is a global thing, and a global thing can be refused: the
-    // launcher still works, it is just opened another way.
+    // The window is the settings': the colours it is painted in, the
+    // seat it sits on and the glass it is made of are the file's, and
+    // they are applied before anything is drawn so the first frame is
+    // already the user's.
+    window.set_colours(
+        settings.overlay.palette.theme(rgy_launcher::Theme::WARM),
+        settings.overlay.alpha,
+    );
+    window.set_anchor(settings.overlay.x, settings.overlay.y);
+    // The hotkey is a global thing, and a global thing can be refused:
+    // the launcher still works, it is just opened another way. Which
+    // shape is armed is the settings' own — the double tap of a lone
+    // modifier, or a combo the platform watches for — and the panel can
+    // change it while the launcher runs, so the armed one is held for
+    // the whole of the run below.
     let mut refused = None;
-    let _hook = if options.hook {
-        match Hook::install(window.hwnd()) {
-            Ok(hook) => Some(hook),
+    let mut arm = None;
+    if options.hook {
+        match Arm::of(window.hwnd(), &settings.overlay.hotkey) {
+            Ok(armed) => arm = Some(armed),
             Err(reason) => {
                 // The reason is for the window as well as for the stderr:
                 // a program started from a shortcut has no stderr, and a
@@ -506,12 +594,9 @@ pub fn run(source: DaemonSource, options: &Options) -> Result<(), String> {
                     .replace("{reason}", &reason.to_string());
                 eprintln!("rgxy: {message}");
                 refused = Some(message);
-                None
             }
         }
-    } else {
-        None
-    };
+    }
 
     // The memory is read once, when the launcher starts: the launcher is
     // resident, and the file is the memory of the last time it ran.
@@ -538,6 +623,9 @@ pub fn run(source: DaemonSource, options: &Options) -> Result<(), String> {
     if let Some(message) = memory_note {
         facts.push(message);
     }
+    if let Some(message) = settings_note {
+        facts.push(message);
+    }
     // The compositor refused the window's own picture: the window is up
     // and it paints itself, without the translucency, and the line says
     // so. A window that is not what it was is a thing the user has to be
@@ -556,6 +644,11 @@ pub fn run(source: DaemonSource, options: &Options) -> Result<(), String> {
     let (preview_tx, previews): (Sender<PreviewReply>, Receiver<PreviewReply>) = channel();
     let mut state = State {
         app: App::new(),
+        settings: settings.clone(),
+        arm,
+        hwnd: window.hwnd(),
+        rows_fit: rgy_launcher::app::rows_that_fit(window.work_area_height()),
+        settings_path: crate::settings_store::store_path(),
         source: Box::new(Daemon::new(source)),
         clipboard: Box::new(actions::paste_text),
         // The seams answer in the user's language: the machine's own
@@ -581,12 +674,14 @@ pub fn run(source: DaemonSource, options: &Options) -> Result<(), String> {
         said: Vec::new(),
     };
 
-    // The rows the screen has room for: the window is sized from them, and
-    // a window whose bottom half is under the bottom of the screen is a
-    // window the user cannot use.
+    // The rows are the user's wish capped by the screen: a user who asks
+    // for twenty rows on a screen that has room for twelve gets twelve,
+    // and a user who asks for five gets five. The width is the user's
+    // own dimension, with no screen to answer to.
+    state.app.set_width(settings.overlay.width);
     state
         .app
-        .set_visible_rows(rgy_launcher::app::rows_that_fit(window.work_area_height()));
+        .set_visible_rows(settings.overlay.rows.min(state.rows_fit as u32) as usize);
 
     // The window goes up when the launcher was asked to show itself, and
     // also when the hotkey was refused: the hotkey is the only thing that
@@ -749,6 +844,11 @@ fn take_preview(state: &mut State) -> bool {
 
 /// A key.
 fn on_key(state: &mut State, key: Key) -> Control {
+    // The settings panel has the keyboard while it is open.
+    if state.app.mode() == Mode::Settings {
+        return settings_key(state, key);
+    }
+
     // The menu has the keyboard while it is open.
     if state.app.mode() == Mode::Menu {
         return menu_key(state, key);
@@ -1026,8 +1126,289 @@ fn command(state: &mut State) -> Control {
     }
 }
 
+/// One row of the settings panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Setting {
+    /// The overlay's template.
+    Theme,
+    /// How wide the window is.
+    Width,
+    /// How many rows the list shows.
+    Rows,
+    /// Where the window sits across the work area.
+    Across,
+    /// Where the window sits down the work area.
+    Down,
+    /// How opaque the panel is.
+    Alpha,
+    /// The key that opens the launcher.
+    Hotkey,
+    /// How long the window between the two taps is.
+    HotkeyWindow,
+    /// The terminal's template.
+    Tui,
+    /// The picker's template.
+    Fzf,
+    /// The picker's free arguments, read from the file.
+    FzfArgs,
+    /// The way back to the faces as they were.
+    Defaults,
+}
+
+/// The rows of the settings panel, in the order the panel lists them.
+///
+/// The order is the code's and the panel's one order: the rows are
+/// navigated by index, and an order that differed between the two would
+/// be a panel that adjusts another row than the one it lit.
+const SETTINGS: &[Setting] = &[
+    Setting::Theme,
+    Setting::Width,
+    Setting::Rows,
+    Setting::Across,
+    Setting::Down,
+    Setting::Alpha,
+    Setting::Hotkey,
+    Setting::HotkeyWindow,
+    Setting::Tui,
+    Setting::Fzf,
+    Setting::FzfArgs,
+    Setting::Defaults,
+];
+
+/// The rows of the settings panel, spelled for the picture.
+///
+/// The labels are the vocabulary's and the values are the settings'
+/// own words — a template's name, a number, a hotkey's spell — so the
+/// panel says exactly what the file says and the file says exactly what
+/// the panel set.
+fn settings_rows(state: &State) -> Vec<(String, String)> {
+    let text = Text::for_lang(state.lang);
+    let overlay = &state.settings.overlay;
+    SETTINGS
+        .iter()
+        .map(|setting| {
+            let (label, value) = match setting {
+                Setting::Theme => (text.settings_theme, overlay.palette.template.clone()),
+                Setting::Width => (text.settings_width, overlay.width.to_string()),
+                Setting::Rows => (text.settings_rows, overlay.rows.to_string()),
+                Setting::Across => (text.settings_position, format!("{}%", overlay.x / 10)),
+                Setting::Down => (text.settings_position, format!("{}%", overlay.y / 10)),
+                Setting::Alpha => (text.settings_alpha, overlay.alpha.to_string()),
+                Setting::Hotkey => (text.settings_hotkey, overlay.hotkey.spell()),
+                Setting::HotkeyWindow => (
+                    text.settings_hotkey_window,
+                    match overlay.hotkey {
+                        Hotkey::DoubleTap { window_ms, .. } => format!("{window_ms} ms"),
+                        Hotkey::Combo { .. } => "—".to_string(),
+                    },
+                ),
+                Setting::Tui => (text.settings_tui, state.settings.tui.template.clone()),
+                Setting::Fzf => (
+                    text.settings_fzf,
+                    state.settings.fzf.palette.template.clone(),
+                ),
+                Setting::FzfArgs => (
+                    text.settings_fzf_args,
+                    if state.settings.fzf.args.is_empty() {
+                        "—".to_string()
+                    } else {
+                        state.settings.fzf.args.join(" ")
+                    },
+                ),
+                Setting::Defaults => (text.settings_defaults, String::new()),
+            };
+            (label.to_string(), value)
+        })
+        .collect()
+}
+
+/// A key, while the settings panel is open.
+///
+/// The rule is the menu's: the panel holds the keyboard only for the
+/// keys that adjust it — the arrows that move and step, `Enter` that
+/// steps forward, `Escape` that closes — and every other key is the
+/// **field's**, handed over with the panel already closed, so there is
+/// one place where a letter means what a letter means.
+fn settings_key(state: &mut State, key: Key) -> Control {
+    match key {
+        Key::Up => state.app.settings_previous(SETTINGS.len()),
+        Key::Down => state.app.settings_next(SETTINGS.len()),
+        Key::Left => adjust_setting(state, -1),
+        Key::Right | Key::Enter => adjust_setting(state, 1),
+        Key::Esc => state.app.settings_closed(),
+        other => {
+            state.app.settings_closed();
+            return on_key(state, other);
+        }
+    }
+    paint(state)
+}
+
+/// Adjust the selected setting, one step in the direction the key said.
+///
+/// The step lands at once: the setting is worn on the next frame — the
+/// theme, the seat, the width — the hotkey is re-armed where it stands,
+/// and the file is written off the window's thread. A row the arrows
+/// cannot step still answers the key: the defaults are restored by any
+/// step on their row.
+fn adjust_setting(state: &mut State, dir: i32) {
+    let index = state.app.settings_index().min(SETTINGS.len() - 1);
+    match SETTINGS[index] {
+        Setting::Theme => step_template(&mut state.settings.overlay.palette.template, dir),
+        Setting::Width => {
+            state.settings.overlay.width = step(state.settings.overlay.width, 20, 400, 1000, dir);
+            state.app.set_width(state.settings.overlay.width);
+        }
+        Setting::Rows => {
+            state.settings.overlay.rows = step(state.settings.overlay.rows, 1, 1, 30, dir);
+            state
+                .app
+                .set_visible_rows(state.settings.overlay.rows.min(state.rows_fit as u32) as usize);
+        }
+        Setting::Across => {
+            state.settings.overlay.x = step(state.settings.overlay.x, 25, 0, 1000, dir)
+        }
+        Setting::Down => {
+            state.settings.overlay.y = step(state.settings.overlay.y, 25, 0, 1000, dir)
+        }
+        Setting::Alpha => {
+            state.settings.overlay.alpha = step(state.settings.overlay.alpha, 10, 64, 255, dir)
+        }
+        Setting::Hotkey => {
+            // Cycling the key takes the double-tap shape: a combo is a
+            // sentence a free-text field would have to write, and the
+            // file is where that sentence is written.
+            let key = match state.settings.overlay.hotkey {
+                Hotkey::DoubleTap { key, .. } => key,
+                Hotkey::Combo { .. } => rgy_launcher::TapKey::Ctrl,
+            };
+            let next = cycle(TapKey::ALL, key, dir);
+            state.settings.overlay.hotkey = Hotkey::DoubleTap {
+                key: next,
+                window_ms: 400,
+            };
+            rearm(state);
+        }
+        Setting::HotkeyWindow => {
+            let (key, window_ms) = match state.settings.overlay.hotkey {
+                Hotkey::DoubleTap { key, window_ms } => (key, window_ms),
+                Hotkey::Combo { .. } => (rgy_launcher::TapKey::Ctrl, 400),
+            };
+            let window_ms = step(window_ms, 50, 100, 1500, dir);
+            state.settings.overlay.hotkey = Hotkey::DoubleTap { key, window_ms };
+            rearm(state);
+        }
+        Setting::Tui => step_template(&mut state.settings.tui.template, dir),
+        Setting::Fzf => step_template(&mut state.settings.fzf.palette.template, dir),
+        Setting::FzfArgs => {}
+        Setting::Defaults => {
+            state.settings = rgy_launcher::settings::Settings::default();
+            state.app.set_width(state.settings.overlay.width);
+            state
+                .app
+                .set_visible_rows(state.settings.overlay.rows.min(state.rows_fit as u32) as usize);
+            rearm(state);
+        }
+    }
+    save_settings(state);
+}
+
+/// A number, one step in the direction the key said, inside the range
+/// the settings hold.
+fn step(value: u32, by: i32, min: u32, max: u32, dir: i32) -> u32 {
+    let moved = value as i64 + by as i64 * dir as i64;
+    moved.clamp(min as i64, max as i64) as u32
+}
+
+/// A template's name, one step in the direction the key said.
+///
+/// A name nobody has is the first one's neighbour: a file that named a
+/// theme from a newer launcher still gets to step somewhere.
+fn step_template(current: &mut String, dir: i32) {
+    let names = rgy_launcher::Theme::names();
+    let at = names
+        .iter()
+        .position(|name| *name == current.as_str())
+        .map(|at| at as i64)
+        .unwrap_or(0);
+    let next = (at + dir as i64).rem_euclid(names.len() as i64) as usize;
+    *current = names[next].to_string();
+}
+
+/// One of a short list, one step in the direction the key said.
+fn cycle<T: Copy + PartialEq>(all: &[T], current: T, dir: i32) -> T {
+    let at = all
+        .iter()
+        .position(|one| *one == current)
+        .map(|at| at as i64)
+        .unwrap_or(0);
+    all[(at + dir as i64).rem_euclid(all.len() as i64) as usize]
+}
+
+/// Arm the hotkey the settings now name.
+///
+/// The old shape is dropped **first** — its guard gives the global thing
+/// back — and a refusal says so on the line under the field: a hotkey
+/// that did not arm and said nothing is a hotkey the user presses twice.
+///
+/// The order is the whole point and not a detail. A combo is registered
+/// with a window and an id, and registering another combo with the same
+/// window and the same id **replaces** the one that was there — so the
+/// guard that drops the old one would take the new one with it, and the
+/// launcher would stop answering to the key the user has just chosen.
+/// The old shape goes first, and the new one is armed in its place.
+///
+/// A refusal now leaves the launcher without a hotkey, and that is the
+/// honest answer: the old shape is gone, and keeping it would be keeping
+/// the choice the user has just changed.
+fn rearm(state: &mut State) {
+    drop(state.arm.take());
+    match Arm::of(state.hwnd, &state.settings.overlay.hotkey) {
+        Ok(armed) => state.arm = Some(armed),
+        Err(reason) => {
+            let message = Text::for_lang(state.lang)
+                .hotkey_not_armed
+                .replace("{reason}", &reason);
+            let _ = state.note_tx.send(message);
+        }
+    }
+}
+
+/// Write the settings to the file, off the window's thread.
+///
+/// The rule is the history's: a write that can block is never on the
+/// thread that draws the window. The settings are small enough that
+/// every change is worth a whole write, and the file is the panel's and
+/// the hand's one store — what the user set is what the next start
+/// reads.
+fn save_settings(state: &State) {
+    let Some(path) = state.settings_path.clone() else {
+        return;
+    };
+    let settings = state.settings.clone();
+    let lang = state.lang;
+    let tx = state.note_tx.clone();
+    std::thread::spawn(move || {
+        if let Err(reason) = crate::settings_store::save(&path, &settings) {
+            let message = Text::for_lang(lang)
+                .settings_not_saved
+                .replace("{reason}", &reason.to_string());
+            eprintln!("rgxy: {message}");
+            let _ = tx.send(message);
+        }
+    });
+}
+
 /// Do what the user asked of the selected result.
 fn run_action(state: &mut State, action: Action) -> Control {
+    // The settings are nobody's row: they are the launcher's own panel,
+    // and asking the selected result for them would be asking a file
+    // what colour the window is. They open with nothing selected, the
+    // way the menu of the commands does.
+    if action == Action::Settings {
+        state.app.open_settings();
+        return paint(state);
+    }
     let Some(row) = state.app.current().cloned() else {
         // There is nothing to act on. Saying nothing is what makes the
         // user think the launcher is broken, so the line under the field
@@ -1119,6 +1500,14 @@ fn run_action(state: &mut State, action: Action) -> Control {
             // it is not, and the menu is the list of this result's
             // actions.
             state.app.open_menu();
+            paint(state)
+        }
+        // Taken above, before the row is asked for: the settings are
+        // nobody's row. The arm is here because the match is on the whole
+        // action, and a setting that somehow reached it opens the panel
+        // the way the rowless path above does.
+        Action::Settings => {
+            state.app.open_settings();
             paint(state)
         }
     }
@@ -1339,6 +1728,18 @@ fn view(state: &State) -> View {
         // and the chart of the ones before it.
         latency: state.meter.view(SPARK_COLUMNS),
         preview: app.preview().cloned(),
+        settings: settings_rows(state),
+        settings_selected: app.settings_index(),
+        // What the window wears: the panel adjusts the settings and the
+        // very next frame carries them, so a theme the user chose is on
+        // the screen the moment the arrow leaves the key.
+        theme: state
+            .settings
+            .overlay
+            .palette
+            .theme(rgy_launcher::Theme::WARM),
+        alpha: state.settings.overlay.alpha,
+        anchor: (state.settings.overlay.x, state.settings.overlay.y),
     }
 }
 
@@ -1531,6 +1932,16 @@ mod tests {
         let (preview_tx, previews): (Sender<PreviewReply>, Receiver<PreviewReply>) = channel();
         let state = State {
             app: App::new(),
+            settings: rgy_launcher::settings::Settings::default(),
+            arm: None,
+            // A test has no window to hand to the re-arm, and none of the
+            // panel's rows is adjusted in a test that does not say so.
+            hwnd: core::ptr::null_mut(),
+            rows_fit: 12,
+            // A test does not write the user's settings file: the panel
+            // adjusts the settings in memory, and the file is the
+            // machine's.
+            settings_path: None,
             source: Box::new(Recording::new(Rc::clone(&asked), Rc::clone(&took))),
             clipboard: Box::new(|| actions::Clipboard::Text(String::new())),
             open: Box::new(|_| Err("a test does not open files".to_string())),
@@ -2427,6 +2838,106 @@ mod tests {
             "the preview did not open from the menu"
         );
         assert_ne!(state.app.mode(), Mode::Menu, "the menu is closed");
+    }
+
+    /// The command bar opens the settings panel.
+    ///
+    /// The settings are nobody's row: `>settings` opens the panel with
+    /// nothing selected, the way the commands are a question nobody's
+    /// result has to answer.
+    #[test]
+    fn the_command_bar_opens_the_settings_panel() {
+        let (mut state, _asked) = recording();
+        for word in [">settings"] {
+            for c in word.chars() {
+                let _ = on_key(&mut state, Key::Char(c));
+            }
+        }
+        let _ = on_key(&mut state, Key::Enter);
+        assert_eq!(state.app.mode(), Mode::Settings, "the panel is open");
+        assert_eq!(state.app.settings_index(), 0, "the first row is selected");
+    }
+
+    /// The settings panel has the keyboard for the keys that adjust it,
+    /// and a letter is not one of them.
+    ///
+    /// The rule is the menu's: the user who opens the panel and starts
+    /// typing is asking a new question, and the panel is in the way of
+    /// it. The panel closes and the letter lands.
+    #[test]
+    fn a_letter_typed_in_the_settings_panel_is_the_field_s() {
+        let (mut state, asked) = recording();
+        state.app.open_settings();
+        let _ = on_key(&mut state, Key::Char('i'));
+        assert_eq!(state.app.query().text(), "i", "the letter landed");
+        assert_ne!(state.app.mode(), Mode::Settings, "the panel is closed");
+        assert_eq!(state.waiting, Waiting::Answer, "the answer is on its way");
+        assert!(asked.borrow().is_empty(), "the daemon is asked later");
+    }
+
+    /// The arrows adjust the setting they are on, and the adjustment is
+    /// the state's own.
+    ///
+    /// The panel's promise is that the arrow lands at once: the width
+    /// the model carries is the width the file will say, and the hotkey
+    /// the settings name is the one that would be armed (a test has no
+    /// window to arm it on, and the settings still carry the answer).
+    #[test]
+    fn the_arrows_adjust_the_setting_they_are_on() {
+        let (mut state, _asked) = recording();
+        state.app.open_settings();
+        // The first row is the theme: a step forward names the next
+        // template, and a step back the one before it.
+        let _ = on_key(&mut state, Key::Right);
+        assert_eq!(
+            state.settings.overlay.palette.template, "midnight",
+            "the step names the next template"
+        );
+        let _ = on_key(&mut state, Key::Left);
+        assert_eq!(
+            state.settings.overlay.palette.template, "warm",
+            "the step back returns the template"
+        );
+        // The width is the second row: the model carries it too, because
+        // the model is what the window is sized from.
+        let _ = on_key(&mut state, Key::Down);
+        let _ = on_key(&mut state, Key::Right);
+        assert_eq!(state.settings.overlay.width, 620, "the width stepped");
+        assert_eq!(state.app.width(), 620, "the model carries the width");
+        // The hotkey is the seventh row: a step takes the double-tap
+        // shape and names the next modifier.
+        state.app.open_settings();
+        for _ in 0..6 {
+            let _ = on_key(&mut state, Key::Down);
+        }
+        let _ = on_key(&mut state, Key::Right);
+        assert_eq!(
+            state.settings.overlay.hotkey,
+            Hotkey::DoubleTap {
+                key: TapKey::Alt,
+                window_ms: 400
+            },
+            "the hotkey stepped to the next modifier"
+        );
+    }
+
+    /// The defaults row restores the faces as they were.
+    #[test]
+    fn the_defaults_row_restores_the_faces_as_they_were() {
+        let (mut state, _asked) = recording();
+        state.settings.overlay.width = 900;
+        state.settings.overlay.palette.template = "light".to_string();
+        state.app.open_settings();
+        // The last row is the defaults: any step on it restores them.
+        for _ in 0..SETTINGS.len() - 1 {
+            let _ = on_key(&mut state, Key::Down);
+        }
+        let _ = on_key(&mut state, Key::Enter);
+        assert_eq!(
+            state.settings,
+            rgy_launcher::settings::Settings::default(),
+            "the settings are the faces as they were"
+        );
     }
 
     /// The launcher says the machine's news once, and not once a tick.

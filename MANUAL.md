@@ -917,6 +917,56 @@ rgxy --tui            # the terminal interface, for a machine with no desktop
 Without `--endpoint` the launcher asks the daemon this machine has
 registered: the socket on Linux and macOS, the named pipe on Windows.
 
+### The settings
+
+Everything the launcher looks like is one file: `settings.tsv`, in the
+same folder as the index (`%LOCALAPPDATA%\rgy` on Windows, `~/.cache/rgy`
+elsewhere). The panel writes it and a hand can too: a file edited by hand
+is read on the next start, and the file the panel writes is the same one.
+
+Type `>settings` in the bar: `↑`/`↓` choose the row, `←`/`→` and `Enter`
+adjust it, `Esc` closes — and every other key is the field's, so typing
+closes the panel and lands. An adjustment is worn at once: the theme, the
+width, the seat, the glass, the key. The last row restores the defaults.
+
+The keys the file knows:
+
+| key | what it holds |
+|---|---|
+| `overlay.theme` | the window's template: `warm`, `midnight`, `dark-cool`, `light`, `high-contrast`, `nord` |
+| `overlay.width` | how wide the window is, in model units (400–1000, default 600) |
+| `overlay.rows` | how many rows the list shows (1–30, capped by the screen; default 12) |
+| `overlay.x`, `overlay.y` | where the window sits on the work area, in thousandths (default 500 and 180) |
+| `overlay.alpha` | how opaque the panel is (64–255, default 230) |
+| `overlay.colour.<role>` | one role over the template: `background`, `text`, `dim`, `accent`, `matched`, `good`, `selected`, `border`, as `#rrggbb` |
+| `hotkey` | the key that opens the window |
+| `tui.theme` | the terminal's template, with `tui.colour.<role>` beside it |
+| `fzf.theme` | the picker's template, with `fzf.colour.<role>` beside it |
+| `fzf-arg` | one argument for the picker, repeatable |
+
+The hotkey has two shapes, and the file spells both:
+
+```sh
+hotkey    double ctrl 400    # a lone modifier, tapped twice inside 400 ms
+hotkey    combo alt+space    # modifiers held with a key, the platform's own registration
+```
+
+The double tap watches `ctrl`, `alt` or `shift` — the panel cycles them,
+with the window in milliseconds beside (`hotkey    double shift 350`). A
+combo is a line in the file: `combo ctrl+shift+p`, the modifiers in any
+order, joined by `+` or spaces. Only one shape is armed at a time, and
+the panel re-arms where it stands.
+
+The three faces have their **own** themes: the window's, the terminal's
+and the picker's are three settings, so a warm window and a cool terminal
+is one line each. The picker's theme becomes `fzf`'s own `--color` flags
+(`fzf` only — `sk` and `peco` keep their own clothes), and the picker's
+free arguments are the file's `fzf-arg` lines: they come after the
+colours, and the command line's `--fzf-arg` is the last word.
+
+A file that cannot be read is the defaults plus a sentence on the line
+under the field — the launcher still comes up.
+
 ### The two faces
 
 The launcher has two faces, and the binary is the same on every platform: a

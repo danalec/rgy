@@ -197,9 +197,10 @@ vocabulary! {
     no_result_selected => "no result selected", "nenhum resultado selecionado";
     could_not_open_the_result => "could not be opened", "não pôde ser aberto";
 
-    // --- the history and the hotkey -----------------------------------------
+    // --- the history, the settings and the hotkey ---------------------------
     history_not_read => "the history could not be read: {err}", "o histórico não pôde ser lido: {err}";
     history_not_saved => "the history was not saved: {reason}", "o histórico não foi gravado: {reason}";
+    settings_not_read => "the settings could not be read: {err}", "as configurações não puderam ser lidas: {err}";
     hotkey_not_installed => "the global shortcut was not installed: {reason}",
         "o atalho global não foi instalado: {reason}";
     hotkey_not_installed_no_permission => "the global shortcut was not installed: no permission",
@@ -232,6 +233,8 @@ vocabulary! {
     terminal_copy_path => "the path, to copy", "o caminho, para copiar";
     terminal_preview => "the first lines of the file", "as primeiras linhas do ficheiro";
     terminal_menu => "this list", "esta lista";
+    terminal_settings => "the settings, in the file", "as configurações, no ficheiro";
+    terminal_settings_file => "the settings live in {}", "as configurações vivem em {}";
     notice_actions => "actions", "ações";
     notice_unknown_command => "unknown command", "comando desconhecido";
     terminal_prose_search => "every keystroke is a whole-disk search",
@@ -282,9 +285,27 @@ vocabulary! {
     latency_p90 => "p90", "p90";
 
     // --- the commands the user types -----------------------------------------
-    write_a_command => "write a command: >open, >folder, >copy, >preview, >menu",
-        "escreva um comando: >open, >folder, >copy, >preview, >menu";
+    write_a_command => "write a command: >open, >folder, >copy, >preview, >menu, >settings",
+        "escreva um comando: >open, >folder, >copy, >preview, >menu, >settings";
     unknown_command => "unknown command: >{name}", "comando desconhecido: >{name}";
+
+    // --- the settings panel --------------------------------------------------
+    settings => "Settings", "Configurações";
+    settings_theme => "theme", "tema";
+    settings_width => "width", "largura";
+    settings_rows => "rows", "linhas";
+    settings_position => "position", "posição";
+    settings_alpha => "translucency", "transparência";
+    settings_hotkey => "open with", "abrir com";
+    settings_hotkey_window => "double-tap window", "janela do duplo-toque";
+    settings_tui => "terminal theme", "tema do terminal";
+    settings_fzf => "picker theme", "tema do seletor";
+    settings_fzf_args => "picker arguments", "argumentos do seletor";
+    settings_defaults => "restore defaults", "restaurar padrões";
+    settings_not_saved => "the settings were not saved: {reason}",
+        "as configurações não foram gravadas: {reason}";
+    hotkey_not_armed => "the hotkey could not be armed: {reason}",
+        "o atalho não pôde ser ativado: {reason}";
 
     // --- the command line ----------------------------------------------------
     pick_needs_a_query => "--pick needs --query: a picker filters the results of a search",

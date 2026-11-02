@@ -526,6 +526,7 @@ dependencies = [
  "rgy-launcher",
  "rgy-name-core",
  "rgy-pick",
+ "rgy-proto",
 ]
 
 [[package]]

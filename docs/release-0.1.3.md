@@ -81,8 +81,8 @@ This release is the one that made the archive answer for itself.
   landed in 1.88. The promise is 1.89 now — the floor on every 64-bit x86
   target — the manifests declare it, and a CI job builds the tree with that
   exact rustc, so the sentence cannot rot with nobody noticing.
-- **The crates are at 0.1.3.** The thirty-two crates the binaries are made of
-  are published at 0.1.3. The command-line tool's crate is `rgy-search`; it was
+- **The crates are at 0.1.3.** The twenty crates this tree owns are published
+  at 0.1.3. The command-line tool's crate is `rgy-search`; it was
   published first as `rgy-searchctl`, and that name is **yanked** now, so
   `cargo install rgy-searchctl` says the version was yanked instead of
   installing a crate this project no longer has.

@@ -116,14 +116,22 @@ pub struct Client {
     transport: Box<dyn Transport + Send>,
     /// Where the questions go.
     writer: Box<dyn Writer + Send>,
-    /// Whether the connection is still good.
+    /// Why the connection can no longer be used, when it cannot.
     ///
     /// A question that ran out of time on the way out leaves the
     /// connection in an unknown state — some of the bytes may have gone
     /// out — and a client that wrote another question into it would be
     /// talking into a request the daemon never got whole. The client
     /// says so instead of writing.
-    broken: bool,
+    ///
+    /// The read has its own two. An answer that ran out of time leaves
+    /// the question asked and its answer still to come — the daemon will
+    /// write it after the caller has given up — and the next question
+    /// into that connection would read the previous answer as its own.
+    /// And an answer with a line the reader refuses has the rest of the
+    /// answer still behind that line, for the same reason. The client
+    /// says so instead of reading.
+    broken: Option<Spent>,
     /// The session id the client sends, when it has one.
     ///
     /// The daemon keys its incremental-search sessions on this, and a
@@ -165,7 +173,7 @@ impl Client {
         Ok(Client {
             transport,
             writer,
-            broken: false,
+            broken: None,
             session: None,
         })
     }
@@ -203,6 +211,14 @@ impl Client {
         req: &Request,
         window: Duration,
     ) -> std::io::Result<Vec<Response>> {
+        // A spent connection is refused before anything is written. The
+        // refusal says which of the ways it was spent, and the kind is
+        // the fact's: a daemon that did not take the question and one
+        // that did not answer are both daemons that are there, and a
+        // daemon that answered badly is one that is there too.
+        if let Some(spent) = &self.broken {
+            return Err(spent.refusal());
+        }
         // The deadline is computed once, and the question and the answer
         // share it: a caller that asks for two seconds waits two seconds
         // and not four.
@@ -251,7 +267,17 @@ impl Client {
             if line.trim().is_empty() {
                 continue;
             }
-            let resp = Response::from_json_checked(line).map_err(unreadable_line)?;
+            let resp = match Response::from_json_checked(line) {
+                Ok(resp) => resp,
+                Err(e) => {
+                    // The answer was refused, and the rest of it — the
+                    // terminator included — is still to come: the next
+                    // question into this connection would read its way in
+                    // through the tail of this one.
+                    self.broken = Some(Spent::UnreadAnswer);
+                    return Err(unreadable_line(e));
+                }
+            };
             let terminal = ends_the_answer(req, &resp);
             out.push(resp);
             if terminal {
@@ -278,20 +304,10 @@ impl Client {
     /// gone out, and the answer the daemon sends would be the answer to a
     /// question it never got whole.
     fn write_question(&mut self, bytes: &[u8], deadline: Instant) -> std::io::Result<()> {
-        if self.broken {
-            // The kind is the timeout's own, because the fact it reports
-            // is the same fact: the daemon is there and did not take the
-            // question. A kind that says "the daemon is gone" would be a
-            // lie about a daemon that is up.
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "the daemon did not take the question in time, and the connection cannot be used again",
-            ));
-        }
         match self.writer.write_until(bytes, deadline) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
-                self.broken = true;
+                self.broken = Some(Spent::HalfQuestion);
                 Err(e)
             }
             Err(e) => Err(e),
@@ -311,16 +327,24 @@ impl Client {
                 self.transport.consume(at + 1);
                 return match String::from_utf8(line) {
                     Ok(line) => Ok(Some(line)),
-                    Err(_) => Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "the daemon sent a line that is not text",
-                    )),
+                    Err(_) => {
+                        // The answer is still coming behind this line,
+                        // and the connection cannot be read from again.
+                        self.broken = Some(Spent::UnreadAnswer);
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "the daemon sent a line that is not text",
+                        ))
+                    }
                 };
             }
             // The line is not whole yet, and it must not grow without a
             // bound: a peer that never sends a newline would make the
             // client allocate until it dies.
             if self.transport.pending().len() > MAX_LINE {
+                // The rest of the line is still coming, for the same
+                // reason: the connection is spent.
+                self.broken = Some(Spent::UnreadAnswer);
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     format!("the daemon sent a line longer than {MAX_LINE} bytes"),
@@ -329,6 +353,11 @@ impl Client {
             match self.transport.fill(deadline)? {
                 Filled::Data => continue,
                 Filled::Timeout => {
+                    // The question went out whole, and the daemon will
+                    // answer it after the caller has given up: the answer
+                    // is still to come, and it must not be read as the
+                    // next question's.
+                    self.broken = Some(Spent::LateAnswer);
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::TimedOut,
                         "the daemon did not answer in time",
@@ -908,6 +937,46 @@ fn unreadable_line(e: LineError) -> std::io::Error {
         LineError::TooDeep => "the daemon sent a line that nests too deep to read",
     };
     std::io::Error::new(std::io::ErrorKind::InvalidData, message)
+}
+
+/// Why a connection was spent, and what the refusal of the next question
+/// says about it.
+///
+/// The three are three facts, and the sentence and the kind are the
+/// fact's: a write that ran out is a daemon that is there and did not
+/// take the question, a read that ran out is a daemon that is there and
+/// did not answer, and an answer that could not be read is a daemon that
+/// answered badly. A caller that reads the kind says one of those three
+/// and not a fourth thing that happened to none of them.
+enum Spent {
+    /// The question went out half: the write ran out of time.
+    HalfQuestion,
+    /// The answer did not come in the window: the question went out
+    /// whole, and the daemon may still be writing the answer to it.
+    LateAnswer,
+    /// The answer held a line the reader refuses, and the rest of it is
+    /// still behind that line.
+    UnreadAnswer,
+}
+
+impl Spent {
+    /// The error a question asked into a spent connection gets.
+    fn refusal(&self) -> std::io::Error {
+        match self {
+            Spent::HalfQuestion => std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "the daemon did not take the question in time, and the connection cannot be used again",
+            ),
+            Spent::LateAnswer => std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "the daemon did not answer in time, and the connection cannot be used again",
+            ),
+            Spent::UnreadAnswer => std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "the daemon's answer could not be read, and the connection cannot be used again",
+            ),
+        }
+    }
 }
 
 // --- the transports --------------------------------------------------------
@@ -2793,6 +2862,54 @@ mod tests {
         // The next question is refused at once: the connection is spent.
         // The refusal carries the timeout's kind, because it reports the
         // same fact — the daemon is there and did not take the question.
+        let started = Instant::now();
+        let err = client
+            .request_within(&Request::Status, SHORT)
+            .expect_err("a spent connection is refused");
+        assert!(
+            started.elapsed() < SHORT / 2,
+            "the client refused at once, not after a window: {started:?}"
+        );
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::TimedOut,
+            "the refusal is the same fact: {err}"
+        );
+        assert!(
+            err.to_string().contains("cannot be used again"),
+            "the reason says what happened: {err}"
+        );
+        drop(client);
+        server.join();
+    }
+
+    /// A client whose answer ran out of time cannot be used again either.
+    ///
+    /// The question went out whole, and the daemon will still answer it:
+    /// the answer is behind the window, and a client that asked another
+    /// question into the connection would read the previous answer as
+    /// this one's. The client refuses at once, and says why.
+    #[test]
+    fn a_client_that_timed_out_on_the_answer_refuses_the_next_question() {
+        let server = serve(|mut peer: Peer| {
+            // The question is read, like every daemon in this file, and
+            // the answer comes -- after the client's window.
+            let _ = peer.read_request();
+            std::thread::sleep(Duration::from_millis(1500));
+            let _ = peer.send(b"{\"op\":\"hits\",\"hits\":[],\"took_us\":1}\n");
+            let _ = peer.send(b"{\"op\":\"done\",\"count\":0}\n");
+        });
+        let mut client = Client::connect(&server.endpoint).expect("the client connects");
+        let err = client
+            .request_within(&Request::Status, SHORT)
+            .expect_err("the answer does not come in the window");
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::TimedOut,
+            "the read ran out: {err}"
+        );
+        // The next question is refused at once: the answer to the first
+        // one may still be coming, and it must not be read as this one's.
         let started = Instant::now();
         let err = client
             .request_within(&Request::Status, SHORT)

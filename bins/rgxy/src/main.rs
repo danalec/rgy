@@ -42,6 +42,17 @@ mod usage;
 
 #[cfg(windows)]
 mod gui;
+// The settings file: the one place the launcher's preferences live,
+// written by the panel and edited by hand.
+//
+// The file is read on every platform — the terminal interface and the
+// picker take their colours and their arguments from it — and only the
+// panel writes it, and the panel is a window. So on the platforms without
+// one the writer and the helpers it needs are compiled and never called,
+// and the lint that says so is silenced the way the tree says it: with the
+// reason next to it.
+#[cfg_attr(not(windows), allow(dead_code))]
+mod settings_store;
 
 use std::io::{IsTerminal, Write};
 use std::process::ExitCode;
@@ -102,16 +113,33 @@ fn usage(lang: Lang) -> String {
 }
 
 fn main() -> ExitCode {
-    // The console decides how the bytes are decoded, and a path with an
-    // accent has to reach the screen as itself.
-    rgy_engine::console::init();
-
     // The language is read once, here: the launcher speaks one language
     // for the whole of its life, and a launcher that changed its language
     // in the middle of a sentence would say two things at once.
     let lang = lang::from_env();
 
     let argv: Vec<String> = std::env::args().skip(1).collect();
+
+    // A resident launch gives the console it was started with back,
+    // before anything has been said on the streams: the library reads
+    // each standard handle once, and a write to a handle whose console
+    // has been given back is a panic. The launcher's face is the
+    // notification area, and the console under it would be a window the
+    // user has to close by hand. The guard is the call's own: a console
+    // somebody else's — a terminal's — stays where it is.
+    #[cfg(windows)]
+    if resident_launch(&argv, lang) {
+        // The answer is nobody's to read: the console is either gone or
+        // shared with a terminal, and the streams are about to point at
+        // the null device. The reason was read where the call was, and
+        // there is nobody here to hear what it said.
+        let _ = rgy_launcher_windows::put_the_console_away();
+    }
+
+    // The console decides how the bytes are decoded, and a path with an
+    // accent has to reach the screen as itself.
+    rgy_engine::console::init();
+
     match run(&argv, lang) {
         Ok(code) => code,
         Err(reason) => {
@@ -145,6 +173,26 @@ fn request(argv: &[String], lang: Lang) -> Result<Request, String> {
         Some("-h") | Some("--help") | Some("help") => Ok(Request::Help),
         Some("-V") | Some("--version") => Ok(Request::Version),
         _ => Ok(Request::Run(parse(argv, lang)?)),
+    }
+}
+
+/// Whether the command line asks for the resident launcher.
+///
+/// The resident launch is the one whose face is the window and the
+/// notification area — not the text modes, which answer on the console
+/// they were given and keep it. A command line that does not read at
+/// all is not a resident launch either: a refusal has to be said on the
+/// console it refused on.
+///
+/// The question is portable and the answer is Windows-only: the call
+/// that puts the console away is a Windows thing, and the function is
+/// called from there. The test is portable and runs everywhere, so the
+/// lint is silenced with the reason next to it.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn resident_launch(argv: &[String], lang: Lang) -> bool {
+    match request(argv, lang) {
+        Ok(Request::Run(options)) => options.query.is_none() && !options.tui && !options.pick,
+        _ => false,
     }
 }
 
@@ -412,8 +460,18 @@ fn pick(
         return Ok(ExitCode::from(1));
     }
 
+    // The picker's colours and its free arguments are the settings
+    // file's, and the command line is the last word: a file that says
+    // `--height 80%` and a caller that says `--height 40%` gets the
+    // caller's, because the command line is the one the user typed. A
+    // file that cannot be read is the defaults — the picker still runs,
+    // in the colours the faces were drawn in before settings existed.
+    let settings = settings_store::store_path()
+        .and_then(|path| settings_store::load(&path).ok())
+        .unwrap_or_default();
+    let args = picker_args(&settings, options);
     let req = rgy_pick::Request {
-        args: &options.fzf_arg,
+        args: &args,
         binary: options.fzf_binary.as_deref(),
         separator: rgy_pick::Separator::Nul,
         order: rgy_pick::Order::Keep,
@@ -446,6 +504,26 @@ fn pick(
         return Ok(ExitCode::from(write_failure(&err, lang)));
     }
     Ok(ExitCode::from(u8::try_from(code).unwrap_or(1)))
+}
+
+/// The arguments the picker is invoked with, in the order they win.
+///
+/// The theme's colours first — and only when the picker is `fzf`,
+/// because `--color` is its own vocabulary and a flag a picker does not
+/// understand is a picker that refuses to run — then the settings
+/// file's free arguments, then the command line's. The last word is the
+/// one the user typed, and the picker reads a repeated flag the way
+/// every program does: the last one.
+fn picker_args(settings: &rgy_launcher::settings::Settings, options: &Options) -> Vec<String> {
+    let mut args: Vec<String> = Vec::new();
+    if rgy_pick::takes_colour_flags(options.fzf_binary.as_deref()) {
+        args.extend(rgy_launcher::settings::fzf_colour_args(
+            &settings.fzf.palette.theme(rgy_launcher::Theme::WARM),
+        ));
+    }
+    args.extend(settings.fzf.args.iter().cloned());
+    args.extend(options.fzf_arg.iter().cloned());
+    args
 }
 
 /// The records rgy writes: the paths, separated by NUL.
@@ -547,8 +625,16 @@ fn run_tui(mut source: DaemonSource, reason: Option<&str>, lang: Lang) -> Result
     let root = home_dir();
     // The terminal is the launcher's other face: it says the same words in
     // the same language, and a launcher that speaks two languages at once
-    // is one the user has to read twice.
-    rgy_search_ui::run_with_source_and_lang(Box::new(source), root, lang).map(|_| ExitCode::SUCCESS)
+    // is one the user has to read twice. Its colours are the settings
+    // file's — a theme chosen for the terminal in the settings is the
+    // one it comes up in — and a file that cannot be read is the palette
+    // the interface was drawn in before settings existed.
+    let theme = settings_store::store_path()
+        .and_then(|path| settings_store::load(&path).ok())
+        .map(|settings| settings.tui.theme(rgy_launcher::Theme::MIDNIGHT))
+        .unwrap_or(rgy_launcher::Theme::MIDNIGHT);
+    rgy_search_ui::run_with_source_lang_and_theme(Box::new(source), root, lang, theme)
+        .map(|_| ExitCode::SUCCESS)
 }
 
 /// The sentences the terminal prints before the interface takes the screen.
@@ -594,9 +680,33 @@ fn run_window(
             lang,
         );
     }
+    // The settings are the file's, and the file is read once, here: the
+    // panel writes it, the next start reads it, and a file that cannot
+    // be read is the defaults plus a sentence on the line under the
+    // field — the launcher still comes up.
+    let (settings, settings_note) = match settings_store::store_path() {
+        Some(path) => match settings_store::load(&path) {
+            Ok(settings) => (settings, None),
+            Err(err) => (
+                rgy_launcher::settings::Settings::default(),
+                Some(
+                    Text::for_lang(lang)
+                        .settings_not_read
+                        .replace("{err}", &err.to_string()),
+                ),
+            ),
+        },
+        None => (rgy_launcher::settings::Settings::default(), None),
+    };
     // The launcher's own window: the window lives on the thread that
     // draws it, and it cannot wait the client's thirty seconds.
-    gui::run(DaemonSource::new(endpoint, rgx, lang), options).map(|_| ExitCode::SUCCESS)
+    gui::run(
+        DaemonSource::new(endpoint, rgx, lang),
+        options,
+        &settings,
+        settings_note,
+    )
+    .map(|_| ExitCode::SUCCESS)
 }
 
 /// The window, where there is a desktop to put it on.
@@ -692,6 +802,52 @@ mod tests {
         // Each `--fzf-arg` is one argument of the picker, and the order
         // is the order they were written in.
         assert_eq!(options.fzf_arg, vec!["--height", "--border"]);
+    }
+
+    /// The picker's arguments come in the order they win: the theme's
+    /// colours, the file's, the command line's last.
+    ///
+    /// A repeated flag is read the way every program reads it — the
+    /// last one — and the command line is the one the user typed, so it
+    /// has the last word over the settings file.
+    #[test]
+    fn the_picker_s_arguments_come_in_the_order_they_win() {
+        let settings = rgy_launcher::settings::Settings {
+            fzf: rgy_launcher::settings::Fzf {
+                args: vec!["--height".to_string(), "80%".to_string()],
+                ..rgy_launcher::settings::Fzf::default()
+            },
+            ..rgy_launcher::settings::Settings::default()
+        };
+        let options = Options {
+            fzf_binary: Some("C:/bin/fzf.exe".to_string()),
+            fzf_arg: vec!["--height".to_string(), "40%".to_string()],
+            ..Options::default()
+        };
+        let args = picker_args(&settings, &options);
+        assert!(
+            args.first()
+                .is_some_and(|first| first.starts_with("--color")),
+            "the theme's colours are first: {args:?}"
+        );
+        assert_eq!(
+            args.iter().filter(|arg| arg.starts_with("--color")).count(),
+            1,
+            "one colour flag: {args:?}"
+        );
+        // ...then the file's free arguments...
+        let height = args.iter().position(|arg| arg == "--height");
+        let first_height = height.expect("the file's flag is there");
+        assert_eq!(args[first_height + 1], "80%");
+        // ...and the command line's last, which wins the repeated flag:
+        // the second `--height` is the one the picker reads.
+        assert_eq!(args[args.len() - 2], "--height", "{args:?}");
+        assert_eq!(args.last(), Some(&"40%".to_string()), "{args:?}");
+        assert_eq!(
+            args.iter().filter(|arg| *arg == "--height").count(),
+            2,
+            "both flags are handed over: {args:?}"
+        );
     }
 
     #[test]
@@ -811,6 +967,49 @@ mod tests {
         assert!(!options.show, "the window waits for the hotkey");
         assert!(!options.tui, "the window is the launcher");
         assert!(options.query.is_none(), "no question was asked");
+    }
+
+    /// Only a resident launch puts the console away.
+    ///
+    /// The one-shot, the picker and the terminal interface answer on the
+    /// console they were given, and the help is the console's own
+    /// question: only the resident launcher — no query, no terminal
+    /// interface, no picker — has the notification area for a face.
+    #[test]
+    fn only_a_resident_launch_puts_the_console_away() {
+        let resident = |argv: &[&str]| {
+            let argv: Vec<String> = argv.iter().map(|s| s.to_string()).collect();
+            resident_launch(&argv, Lang::English)
+        };
+        assert!(resident(&[]), "a bare rgxy is the resident launcher");
+        assert!(
+            resident(&["--no-hook"]),
+            "the options of the window are the launcher's"
+        );
+        assert!(
+            resident(&["--show"]),
+            "the window that opens by itself is the launcher's"
+        );
+        assert!(
+            !resident(&["--query", "invoice"]),
+            "the one-shot answers on the console"
+        );
+        assert!(
+            !resident(&["--tui"]),
+            "the terminal interface is the console's"
+        );
+        assert!(
+            !resident(&["--pick", "--query", "invoice"]),
+            "the picker answers on the console"
+        );
+        assert!(
+            !resident(&["--help"]),
+            "the help is the console's own question"
+        );
+        assert!(
+            !resident(&["--nope"]),
+            "a refusal is said on the console it refused on"
+        );
     }
 
     /// The usage text is what the help asks for.

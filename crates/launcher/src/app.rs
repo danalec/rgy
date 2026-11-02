@@ -79,6 +79,8 @@ pub enum Mode {
     Typing,
     /// The actions of the selected result.
     Menu,
+    /// The launcher's own settings.
+    Settings,
 }
 
 /// What the preview panel shows.
@@ -279,6 +281,14 @@ pub struct App {
     preview: Option<Preview>,
     /// Which action of the menu is selected.
     menu_index: usize,
+    /// Which row of the settings panel is selected.
+    settings_index: usize,
+    /// How wide the window is, in model units.
+    ///
+    /// The width is the user's dimension: the height is the rows', and
+    /// the rows are the screen's. The default is the width the window
+    /// has always had.
+    width: u32,
 }
 
 impl Default for App {
@@ -305,6 +315,8 @@ impl App {
             warnings: Vec::new(),
             preview: None,
             menu_index: 0,
+            settings_index: 0,
+            width: Layout::default().width,
         }
     }
 
@@ -509,7 +521,7 @@ impl App {
     /// under the bottom of the screen.
     pub fn layout(&self) -> Layout {
         let (_, rows) = self.results.window();
-        let mut layout = Layout::with_rows(rows as u32);
+        let mut layout = Layout::with_rows(rows as u32).with_width(self.width);
         // The preview panel takes the room the results would have taken:
         // it is a panel **over** them, and a window that grew for it would
         // jump every time the user opened one.
@@ -534,6 +546,20 @@ impl App {
     /// The hotkey's state machine.
     pub fn hotkey(&mut self) -> &mut DoubleCtrl {
         &mut self.hotkey
+    }
+
+    /// How wide the window is, in model units.
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Set how wide the window is, in model units.
+    ///
+    /// The width is the settings' to give and the geometry's to use: a
+    /// value outside the range the settings hold is clamped here, so the
+    /// window can never be asked for a width the layout cannot carry.
+    pub fn set_width(&mut self, width: u32) {
+        self.width = width.clamp(400, 1000);
     }
 
     /// Open the actions of the selected result.
@@ -604,6 +630,53 @@ impl App {
     pub fn menu_closed(&mut self) {
         if self.mode == Mode::Menu {
             self.mode = Mode::Typing;
+        }
+    }
+
+    /// Open the settings panel.
+    ///
+    /// The panel is over the results, like the preview: the window does
+    /// not grow for it, and the results give up the room. The settings
+    /// themselves are the host's — the panel shows them and the host
+    /// adjusts them — and the model owns the part that is a decision
+    /// about the keyboard: which row is selected, and that the panel
+    /// has the keyboard while it is open.
+    pub fn open_settings(&mut self) {
+        self.mode = Mode::Settings;
+        self.settings_index = 0;
+    }
+
+    /// Close the settings panel, back to the field.
+    pub fn settings_closed(&mut self) {
+        if self.mode == Mode::Settings {
+            self.mode = Mode::Typing;
+        }
+    }
+
+    /// Which row of the settings panel is selected.
+    pub fn settings_index(&self) -> usize {
+        self.settings_index
+    }
+
+    /// Select the next row of the settings panel.
+    ///
+    /// The count is the caller's: the rows are the host's — the settings
+    /// are — and the model wraps the way every list of the launcher
+    /// wraps.
+    pub fn settings_next(&mut self, count: usize) {
+        if count > 0 {
+            self.settings_index = (self.settings_index + 1) % count;
+        }
+    }
+
+    /// Select the previous row of the settings panel.
+    pub fn settings_previous(&mut self, count: usize) {
+        if count > 0 {
+            self.settings_index = if self.settings_index == 0 {
+                count - 1
+            } else {
+                self.settings_index - 1
+            };
         }
     }
 
@@ -1232,6 +1305,62 @@ mod tests {
             open.height(),
             Layout::with_rows(4).height(),
             "the column did not make the window taller"
+        );
+    }
+
+    /// The width is the user's dimension, and the layout carries it.
+    ///
+    /// The default is the width the window has always had, a wider
+    /// window is a wider layout, and a width outside the range the
+    /// settings hold is clamped: the layout is asked for nothing it
+    /// cannot carry.
+    #[test]
+    fn the_width_is_the_user_s_dimension_and_the_layout_carries_it() {
+        let mut app = App::new();
+        app.show();
+        app.set_results(vec![row(0), row(1)]);
+        assert_eq!(app.layout().width, 600, "the default is today's width");
+        app.set_width(820);
+        assert_eq!(app.width(), 820);
+        assert_eq!(app.layout().width, 820, "the layout carries the width");
+        assert_eq!(app.layout().height(), Layout::with_rows(2).height());
+        app.set_width(10);
+        assert_eq!(app.width(), 400, "the narrowest is the floor");
+        app.set_width(100_000);
+        assert_eq!(app.width(), 1000, "the widest is the ceiling");
+    }
+
+    /// The settings panel holds the keyboard while it is open, and gives
+    /// it back when it closes.
+    ///
+    /// Like the menu: the rows wrap, the panel opens from the command
+    /// bar and closes on Escape, and the window it returns to is the
+    /// field it came from.
+    #[test]
+    fn the_settings_panel_holds_the_keyboard_while_it_is_open() {
+        let mut app = App::new();
+        app.show();
+        app.open_settings();
+        assert_eq!(app.mode(), Mode::Settings);
+        assert_eq!(app.settings_index(), 0, "the first row is selected");
+        app.settings_next(3);
+        assert_eq!(app.settings_index(), 1);
+        app.settings_next(3);
+        app.settings_next(3);
+        assert_eq!(app.settings_index(), 0, "the rows wrap");
+        app.settings_previous(3);
+        assert_eq!(app.settings_index(), 2, "the rows wrap backwards");
+        app.settings_closed();
+        assert_eq!(app.mode(), Mode::Typing, "the field has the keyboard back");
+        // Hiding the window takes the panel with it: a window that comes
+        // back up comes back to the field.
+        app.open_settings();
+        app.hide();
+        app.show();
+        assert_eq!(
+            app.mode(),
+            Mode::Typing,
+            "the panel does not survive its own window"
         );
     }
 }

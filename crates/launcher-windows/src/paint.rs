@@ -26,48 +26,100 @@ use rgy_launcher::layout::{
 };
 use rgy_launcher::results::IconKind;
 use rgy_launcher::text::{Lang, Text};
+use rgy_launcher::theme::Theme;
 use rgy_launcher::{Layout, Mode, Preview, Row};
 
 use crate::window::View;
 
 use crate::win::*;
 
-/// The window's own colours.
+/// The colours one paint is painted in.
 ///
 /// GDI's colours are `0x00BBGGRR`, so the bytes are in the order the
-/// platform wants and not the order a person reads.
-pub mod colour {
-    /// The query, and a name: almost white, a touch warm.
-    pub const TEXT: u32 = 0x00F5_F2F0;
-    /// The context: the folder, the placeholder.
-    pub const DIM: u32 = 0x0091_8782;
-    /// The matched characters: the accent.
-    pub const MATCH: u32 = 0x00FF_B478;
+/// platform wants and not the order a person reads. They were constants
+/// of the paint once, and a constant is a colour a theme cannot reach:
+/// the colours are the paint's parameters now, handed down by the window
+/// that holds the theme, and [`Colours::of`] is where a theme becomes
+/// them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Colours {
+    /// The query, and a name: what the user is looking for.
+    pub text: u32,
+    /// The context: the folder, the placeholder, the line under the
+    /// field.
+    pub dim: u32,
+    /// The matched characters: what the query earned.
+    pub match_: u32,
     /// The selected row's background.
-    pub const SELECTED: u32 = 0x002E_2826;
-    /// The bar on the left of the selected row.
-    pub const ACCENT: u32 = 0x00FF_965A;
+    pub selected: u32,
+    /// The machine's own mark: the bar on the left of the selected row,
+    /// and the column's hairline while the menu has the keyboard.
+    pub accent: u32,
     /// The time the answers take: the number and the chart.
-    ///
-    /// It is the terminal's green, so the two faces say the same thing in
-    /// the same colour.
-    pub const LATENCY: u32 = 0x008B_D977;
+    pub latency: u32,
     /// The window's own background, when there is no backdrop.
-    pub const BACKDROP: u32 = 0x0018_1514;
+    pub backdrop: u32,
     /// The border: a hairline, a little lighter than the background.
-    pub const BORDER: u32 = 0x0042_3C3A;
-
+    pub border: u32,
     /// The background's blue, on its own.
     ///
     /// The window that paints its own alpha has to know which pixels are
     /// the panel's own colour and which are the drawing on it, and it
-    /// reads the bitmap — where the colours are in the order the
-    /// platform stores them.
-    pub const BLUE: u8 = 0x18;
-    /// The background's green, on its own.
-    pub const GREEN: u8 = 0x15;
-    /// The background's red, on its own.
-    pub const RED: u8 = 0x14;
+    /// reads the bitmap — where the colours are separate channels and
+    /// not one word of the platform's own order.
+    pub background_blue: u8,
+    /// The background's green, on its own, for the alpha composition.
+    pub background_green: u8,
+    /// The background's red, on its own, for the alpha composition.
+    pub background_red: u8,
+}
+
+impl Colours {
+    /// The window's own palette, the one it was drawn in before themes
+    /// existed: warm near-whites on a warm near-black, the blue of the
+    /// matches and the green of the meter — the terminal's own green, so
+    /// the two faces say the same thing in the same colour.
+    ///
+    /// The tests that pin today's rendering draw with these, and the
+    /// theme's first duty is to reproduce them: a theme that changed the
+    /// colours nobody asked about is a theme that redraws the launcher
+    /// under its users.
+    pub const WARM: Colours = Colours {
+        text: 0x00F5_F2F0,
+        dim: 0x0091_8782,
+        match_: 0x00FF_B478,
+        selected: 0x002E_2826,
+        accent: 0x00FF_965A,
+        latency: 0x008B_D977,
+        backdrop: 0x0018_1514,
+        border: 0x0042_3C3A,
+        background_blue: 0x18,
+        background_green: 0x15,
+        background_red: 0x14,
+    };
+
+    /// The colours of a theme, in the order the platform takes them.
+    ///
+    /// Each role becomes the one word GDI wants (`0x00BBGGRR`, by
+    /// `Rgb::bgr`), and the background's channels go on their own as
+    /// well: the composition that works out the panel's alpha compares
+    /// the channels one by one, and a word of the platform's order is a
+    /// word it would have to take apart again.
+    pub fn of(theme: &Theme) -> Colours {
+        Colours {
+            text: theme.text.bgr(),
+            dim: theme.dim.bgr(),
+            match_: theme.matched.bgr(),
+            selected: theme.selected.bgr(),
+            accent: theme.accent.bgr(),
+            latency: theme.good.bgr(),
+            backdrop: theme.background.bgr(),
+            border: theme.border.bgr(),
+            background_blue: theme.background.b,
+            background_green: theme.background.g,
+            background_red: theme.background.r,
+        }
+    }
 }
 
 const DT_LEFT: u32 = 0x0000_0000;
@@ -524,9 +576,14 @@ fn draw_icon(hdc: HDC, icon: HICON, x: i32, y: i32, size: i32) {
 /// that drew the labels in another language would be a window the user
 /// reads in two languages at once.
 ///
-/// The picture is a context, a view, a few numbers and a language, and a
-/// struct would be a struct that only this function and its caller ever
-/// see.
+/// The colours are the paint's parameters and not the paint's own: the
+/// window holds the theme and hands its colours down, so a window whose
+/// theme changed draws the same picture in another palette and nothing
+/// else of the drawing moves.
+///
+/// The picture is a context, a view, a few numbers, a palette and a
+/// language, and a struct would be a struct that only this function and
+/// its caller ever see.
 ///
 /// # Safety
 ///
@@ -539,6 +596,7 @@ pub unsafe fn paint(
     backdrop: bool,
     icons: &mut Icons,
     fonts: &Fonts,
+    colours: &Colours,
     scale: u32,
     lang: Lang,
 ) {
@@ -582,11 +640,11 @@ pub unsafe fn paint(
         // there is nothing behind it, and the window paints its own
         // near-black.
         if !backdrop {
-            fill(hdc, 0, 0, width, height, colour::BACKDROP);
+            fill(hdc, 0, 0, width, height, colours.backdrop);
         }
 
         // The border: a hairline around the whole window.
-        frame(hdc, 0, 0, width, height, colour::BORDER);
+        frame(hdc, 0, 0, width, height, colours.border);
 
         let left = layout.content_left() as i32;
         let content = layout.content_width() as i32;
@@ -630,7 +688,7 @@ pub unsafe fn paint(
                 label,
                 left + content - latency_w,
                 field_top + px(scale, 14),
-                colour::LATENCY,
+                colours.latency,
                 latency_w,
             );
         }
@@ -642,7 +700,7 @@ pub unsafe fn paint(
                 &view.placeholder,
                 left,
                 field_top + px(scale, 14),
-                colour::DIM,
+                colours.dim,
                 query_room,
             );
             let _ = w;
@@ -658,7 +716,7 @@ pub unsafe fn paint(
                 before,
                 left,
                 field_top + px(scale, 14),
-                colour::TEXT,
+                colours.text,
                 query_room,
             );
             // The caret: two pixels, two pixels after the text before it.
@@ -671,7 +729,7 @@ pub unsafe fn paint(
                 field_top + px(scale, 12),
                 px(scale, 2),
                 px(scale, 21),
-                colour::TEXT,
+                colours.text,
             );
             // The text after the caret starts where the caret ends.
             draw_run(
@@ -679,7 +737,7 @@ pub unsafe fn paint(
                 after,
                 left + w + px(scale, 5),
                 field_top + px(scale, 14),
-                colour::TEXT,
+                colours.text,
                 query_room.saturating_sub(w + px(scale, 5)),
             );
         }
@@ -715,7 +773,7 @@ pub unsafe fn paint(
                 &view.status,
                 left,
                 field_top + field_h - px(scale, STATUS_HEIGHT),
-                colour::DIM,
+                colours.dim,
                 status_room,
             );
         }
@@ -725,7 +783,7 @@ pub unsafe fn paint(
                 &figures,
                 left + content - figures_w,
                 field_top + field_h - px(scale, STATUS_HEIGHT),
-                colour::LATENCY,
+                colours.latency,
                 figures_w,
             );
         }
@@ -739,22 +797,53 @@ pub unsafe fn paint(
             let top = layout.row_top(i as u32) as i32;
             let row_h = layout.row_height as i32;
             if i == view.selected {
-                fill(hdc, 0, top, edge, row_h, colour::SELECTED);
+                fill(hdc, 0, top, edge, row_h, colours.selected);
                 // The accent bar on the left: the selection's own edge.
-                fill(hdc, 0, top, px(scale, 3), row_h, colour::ACCENT);
+                fill(hdc, 0, top, px(scale, 3), row_h, colours.accent);
             }
-            draw_row(hdc, fonts, row, left, top, row_h, names, icons, scale);
+            draw_row(
+                hdc, fonts, colours, row, left, top, row_h, names, icons, scale,
+            );
         }
 
         // The actions, in the column on the right of the window.
         if column {
-            draw_column(hdc, fonts, view, &layout, height, scale, lang);
+            draw_column(hdc, fonts, colours, view, &layout, height, scale, lang);
         }
 
         // The preview panel, over everything the rows were.
         if let Some(preview) = &view.preview {
             let top = layout.list_top() as i32;
-            draw_preview(hdc, fonts, preview, left, top, edge, height - top, &layout);
+            draw_preview(
+                hdc,
+                fonts,
+                colours,
+                preview,
+                left,
+                top,
+                edge,
+                height - top,
+                &layout,
+            );
+        }
+
+        // The settings panel, over everything the rows were, like the
+        // preview: the window does not grow for a panel the user reads
+        // for a moment and closes.
+        if view.mode == Mode::Settings && !view.settings.is_empty() {
+            let top = layout.list_top() as i32;
+            draw_settings(
+                hdc,
+                fonts,
+                colours,
+                view,
+                left,
+                top,
+                edge,
+                height - top,
+                &layout,
+                scale,
+            );
         }
 
         // The context is left as it was found.
@@ -798,11 +887,13 @@ fn latency_figures(latency: &Latency, text: &Text) -> String {
 /// that draws a panel the window did not ask for.
 ///
 /// The scale is one of the numbers it is given, and a struct would be a
-/// struct that only this function and its caller ever see.
+/// struct that only this function and its caller ever see. The colours
+/// are the paint's, handed down from the window that holds the theme.
 #[allow(clippy::too_many_arguments)]
 fn draw_preview(
     hdc: HDC,
     fonts: &Fonts,
+    colours: &Colours,
     preview: &Preview,
     left: i32,
     top: i32,
@@ -813,15 +904,15 @@ fn draw_preview(
     if height <= 0 {
         return;
     }
-    fill(hdc, 0, top, width, height, colour::BACKDROP);
-    frame(hdc, 0, top, width, height, colour::BORDER);
+    fill(hdc, 0, top, width, height, colours.backdrop);
+    frame(hdc, 0, top, width, height, colours.border);
     select(hdc, fonts.row);
     draw_run(
         hdc,
         &preview.title,
         left,
         top + layout.preview_title_top as i32,
-        colour::TEXT,
+        colours.text,
         width.saturating_sub(left),
     );
     select(hdc, fonts.folder);
@@ -834,8 +925,75 @@ fn draw_preview(
         // The cut is in characters and not in pixels: it is a number of
         // letters, and a letter is a letter at any scale.
         let text = shorten(line, 90);
-        draw_run(hdc, &text, left, y, colour::DIM, width.saturating_sub(left));
+        draw_run(hdc, &text, left, y, colours.dim, width.saturating_sub(left));
         y += line_height;
+    }
+}
+
+/// The settings panel: a list of rows, a label and a value on each.
+///
+/// The picture is the menu's and the preview's, together: the panel
+/// covers the results the way the preview does, and the selected row is
+/// marked the way the menu marks its own — the band, and the accent bar
+/// at its left edge, only while the panel has the keyboard. The label
+/// has what is left of the width once the value is measured: a value
+/// that did not fit would be cut and not drawn over.
+#[allow(clippy::too_many_arguments)]
+fn draw_settings(
+    hdc: HDC,
+    fonts: &Fonts,
+    colours: &Colours,
+    view: &View,
+    left: i32,
+    top: i32,
+    width: i32,
+    height: i32,
+    layout: &Layout,
+    scale: u32,
+) {
+    if height <= 0 {
+        return;
+    }
+    fill(hdc, 0, top, width, height, colours.backdrop);
+    frame(hdc, 0, top, width, height, colours.border);
+    let row = layout.row_height as i32;
+    let inner = (width - px(scale, 12) * 2).max(0);
+    for (i, (label, value)) in view.settings.iter().enumerate() {
+        let y = top + px(scale, 6) + i as i32 * row;
+        if y + row > top + height {
+            // The panel ran out of room: the rows it could not show are
+            // the arrows' to reach, and a panel that drew half a row
+            // would be a panel that drew a word cut in its middle.
+            break;
+        }
+        if i == view.settings_selected {
+            fill(hdc, 0, y, width, row, colours.selected);
+            fill(hdc, 0, y, px(scale, 3), row, colours.accent);
+        }
+        // The value is measured first, the way the column measures the
+        // shortcut: the label has what is left, and neither is drawn
+        // over the other.
+        select(hdc, fonts.folder);
+        let value = shorten(value, 24);
+        let value_width = text_width(hdc, &value).min(inner);
+        select(hdc, fonts.row);
+        draw_run(
+            hdc,
+            label,
+            left,
+            y + px(scale, 5),
+            colours.dim,
+            inner - value_width,
+        );
+        select(hdc, fonts.folder);
+        draw_run(
+            hdc,
+            &value,
+            left + inner - value_width,
+            y + px(scale, 6),
+            colours.text,
+            value_width,
+        );
     }
 }
 
@@ -847,11 +1005,13 @@ fn draw_preview(
 /// edge of the results and not drawn over the column.
 ///
 /// The geometry is four numbers and three words, and a struct would be a
-/// struct that only this function and its caller ever see.
+/// struct that only this function and its caller ever see. The colours
+/// are the paint's, handed down from the window that holds the theme.
 #[allow(clippy::too_many_arguments)]
 fn draw_row(
     hdc: HDC,
     fonts: &Fonts,
+    colours: &Colours,
     row: &Row,
     left: i32,
     top: i32,
@@ -880,7 +1040,11 @@ fn draw_row(
             if room <= 0 {
                 break;
             }
-            let colour = if matched { colour::MATCH } else { colour::TEXT };
+            let colour = if matched {
+                colours.match_
+            } else {
+                colours.text
+            };
             x += draw_run(hdc, &text, x, top + px(scale, 5), colour, room);
             if x - text_left >= text_width {
                 break;
@@ -899,7 +1063,7 @@ fn draw_row(
                 &text,
                 text_left,
                 top + row_h - px(scale, 17),
-                colour::DIM,
+                colours.dim,
                 text_width,
             );
         }
@@ -1020,9 +1184,11 @@ fn results_right(layout: &Layout) -> i32 {
 /// The labels are the vocabulary's, in the language the window speaks: a
 /// menu that says "Open" to a user who reads "Abrir" is a menu the user
 /// has to guess.
+#[allow(clippy::too_many_arguments)]
 fn draw_column(
     hdc: HDC,
     fonts: &Fonts,
+    colours: &Colours,
     view: &View,
     layout: &Layout,
     window_height: i32,
@@ -1039,7 +1205,7 @@ fn draw_column(
     ) else {
         // The window has no room for the column: the column says so
         // instead of the window saying it over its own results.
-        draw_too_short(hdc, fonts, rect, scale, lang);
+        draw_too_short(hdc, fonts, colours, rect, scale, lang);
         return;
     };
     // Whether the menu has the keyboard: it is the difference between a
@@ -1053,7 +1219,7 @@ fn draw_column(
         rect.top,
         px(scale, 1),
         rect.height,
-        if live { colour::ACCENT } else { colour::BORDER },
+        if live { colours.accent } else { colours.border },
     );
     // The room inside the column, once its own margins are taken.
     let inner = (rect.width - px(scale, 12) * 2).max(0);
@@ -1065,8 +1231,8 @@ fn draw_column(
             // while the menu has the keyboard — the mark says which action
             // the arrows would run, and the arrows only run an action
             // while the menu has them.
-            fill(hdc, rect.left, y, rect.width, column.row, colour::SELECTED);
-            fill(hdc, rect.left, y, px(scale, 3), column.row, colour::ACCENT);
+            fill(hdc, rect.left, y, rect.width, column.row, colours.selected);
+            fill(hdc, rect.left, y, px(scale, 3), column.row, colours.accent);
         }
         // The shortcut is measured first: the label has what is left of
         // the column's width, and a label that does not fit is cut and
@@ -1080,7 +1246,7 @@ fn draw_column(
             action.label(lang),
             rect.left + px(scale, 12),
             y + px(scale, 6),
-            colour::TEXT,
+            colours.text,
             inner - shortcut_width,
         );
         select(hdc, fonts.folder);
@@ -1089,7 +1255,7 @@ fn draw_column(
             shortcut,
             rect.left + rect.width - px(scale, 12) - shortcut_width,
             y + px(scale, 7),
-            colour::DIM,
+            colours.dim,
             shortcut_width,
         );
     }
@@ -1107,14 +1273,14 @@ fn draw_column(
 /// inside the column and not over the window: the results are the
 /// window's own business, and a window that says "too short" over its
 /// own results has thrown them away.
-fn draw_too_short(hdc: HDC, fonts: &Fonts, rect: Rect, scale: u32, lang: Lang) {
+fn draw_too_short(hdc: HDC, fonts: &Fonts, colours: &Colours, rect: Rect, scale: u32, lang: Lang) {
     select(hdc, fonts.folder);
     draw_run(
         hdc,
         Text::for_lang(lang).no_room_for_the_actions,
         rect.left + px(scale, 12),
         rect.top + px(scale, 4),
-        colour::DIM,
+        colours.dim,
         rect.width.saturating_sub(px(scale, 24)),
     );
 }
@@ -1306,6 +1472,7 @@ mod tests {
                 false,
                 &mut icons,
                 &fonts,
+                &Colours::WARM,
                 SCALE_PERCENT,
                 Lang::English,
             );
@@ -1341,6 +1508,76 @@ mod tests {
             latency: meter.view(24),
             ..View::default()
         }
+    }
+
+    /// How many pixels of one exact colour the picture has.
+    ///
+    /// A fill is exact — GDI blends the glyphs, but a rectangle of one
+    /// colour is that colour everywhere it was not drawn over — and the
+    /// panel's own marks are fills.
+    fn count(canvas: &Canvas, width: i32, height: i32, colour: (u8, u8, u8)) -> usize {
+        let mut found = 0;
+        for y in 0..height {
+            for x in 0..width {
+                if canvas.pixel(x, y) == colour {
+                    found += 1;
+                }
+            }
+        }
+        found
+    }
+
+    /// The settings panel covers the rows and marks its selected row.
+    ///
+    /// The panel is over the results, like the preview: the names that
+    /// were under it are not on the screen, and the row the arrows are
+    /// on carries the band. Both are the picture's own facts, and the
+    /// picture is the only place they can be checked.
+    #[test]
+    fn the_settings_panel_covers_the_rows_and_marks_its_own() {
+        let mut view = view_with_menu(Mode::Typing);
+        view.settings = vec![
+            ("theme".to_string(), "warm".to_string()),
+            ("width".to_string(), "600".to_string()),
+        ];
+        let (plain, width, height) = draw(&view);
+        // The selected band of a result row, without the panel. The
+        // canvas answers in the order the platform stores a colour:
+        // blue first.
+        let band = (0x2E, 0x28, 0x26);
+        let with_rows = count(&plain, width, height, band);
+
+        view.mode = Mode::Settings;
+        view.settings_selected = 1;
+        let (panelled, width, height) = draw(&view);
+        // The panel's own selected row carries the band too — the same
+        // mark the menu makes — and the names under the panel are gone:
+        // the picture with the panel has strictly more of the band (the
+        // panel's row) and the rows' own glyphs are covered by it.
+        let with_panel = count(&panelled, width, height, band);
+        assert!(
+            with_panel > with_rows,
+            "the panel's selected row carries the band: {with_panel} over {with_rows}"
+        );
+        // The names were bright text on a dark panel; under the settings
+        // panel the list area is the panel's own near-black, and the
+        // only bright things left are the panel's own words.
+        let bright = |canvas: &Canvas| -> usize {
+            let mut found = 0;
+            for y in 0..height {
+                for x in 0..width {
+                    let (r, g, b) = canvas.pixel(x, y);
+                    if r > 200 && g > 200 && b > 200 {
+                        found += 1;
+                    }
+                }
+            }
+            found
+        };
+        assert!(
+            bright(&panelled) < bright(&plain),
+            "the panel covers the names that were under it"
+        );
     }
 
     /// A view with a column of actions, in the mode it was given.
@@ -1393,6 +1630,29 @@ mod tests {
         (rect, column.row)
     }
 
+    /// The warm theme is the palette the window was drawn in.
+    ///
+    /// `Colours::of` maps the theme's roles onto the paint's fields one
+    /// for one, and the theme's first duty is to answer the constants it
+    /// replaced: a theme that moved a colour nobody asked about is a
+    /// theme that redraws the launcher under its users. The fields are
+    /// compared one by one so a failure says which role moved.
+    #[test]
+    fn the_warm_theme_is_the_palette_the_window_was_drawn_in() {
+        let of = Colours::of(&Theme::WARM);
+        assert_eq!(of.text, Colours::WARM.text, "text");
+        assert_eq!(of.dim, Colours::WARM.dim, "dim");
+        assert_eq!(of.match_, Colours::WARM.match_, "matched");
+        assert_eq!(of.selected, Colours::WARM.selected, "selected");
+        assert_eq!(of.accent, Colours::WARM.accent, "accent");
+        assert_eq!(of.latency, Colours::WARM.latency, "latency");
+        assert_eq!(of.backdrop, Colours::WARM.backdrop, "backdrop");
+        assert_eq!(of.border, Colours::WARM.border, "border");
+        assert_eq!(of.background_blue, Colours::WARM.background_blue, "blue");
+        assert_eq!(of.background_green, Colours::WARM.background_green, "green");
+        assert_eq!(of.background_red, Colours::WARM.background_red, "red");
+    }
+
     /// The menu says that it has the keyboard.
     ///
     /// The column of actions is drawn whether the menu is open or not — it
@@ -1411,7 +1671,7 @@ mod tests {
         let (rect, _row) = column_geometry(&closed, height);
         assert_ne!(
             canvas.pixel(rect.left + 1, rect.top + 2),
-            in_pixels(colour::ACCENT),
+            in_pixels(Colours::WARM.accent),
             "the menu is closed and the action is still marked"
         );
 
@@ -1420,7 +1680,7 @@ mod tests {
         let (rect, _row) = column_geometry(&open, height);
         assert_eq!(
             canvas.pixel(rect.left + 1, rect.top + 2),
-            in_pixels(colour::ACCENT),
+            in_pixels(Colours::WARM.accent),
             "the action the arrows would run is not marked"
         );
     }
@@ -1438,7 +1698,7 @@ mod tests {
         let (rect, _row) = column_geometry(&closed, height);
         assert_eq!(
             canvas.pixel(rect.left, rect.top + 40),
-            in_pixels(colour::BORDER),
+            in_pixels(Colours::WARM.border),
             "the edge is not the border's colour"
         );
 
@@ -1447,7 +1707,7 @@ mod tests {
         let (rect, _row) = column_geometry(&open, height);
         assert_eq!(
             canvas.pixel(rect.left, rect.top + 40),
-            in_pixels(colour::ACCENT),
+            in_pixels(Colours::WARM.accent),
             "the edge does not say that the menu has the keyboard"
         );
     }
@@ -1538,6 +1798,7 @@ mod tests {
                 false,
                 &mut icons,
                 &fonts,
+                &Colours::WARM,
                 SCALE_PERCENT,
                 Lang::English,
             );
@@ -1549,7 +1810,7 @@ mod tests {
         let mut lowest = 0;
         for y in 0..height - 2 {
             for x in 1..width - 1 {
-                if canvas.pixel(x, y) != in_pixels(colour::BACKDROP) {
+                if canvas.pixel(x, y) != in_pixels(Colours::WARM.backdrop) {
                     lowest = y;
                 }
             }
@@ -2000,10 +2261,11 @@ mod tests {
         };
         // The surface is the window's own colour, so the column's edge
         // is the first thing on it that is not.
-        fill(canvas.dc, 0, 0, width, height, colour::BACKDROP);
+        fill(canvas.dc, 0, 0, width, height, Colours::WARM.backdrop);
         draw_column(
             canvas.dc,
             &fonts,
+            &Colours::WARM,
             &view,
             &layout,
             height,
@@ -2014,7 +2276,7 @@ mod tests {
         // the list opens.
         let edge = layout.side_bar_left() as i32;
         let top = (0..height)
-            .find(|&y| canvas.pixel(edge, y) != in_pixels(colour::BACKDROP))
+            .find(|&y| canvas.pixel(edge, y) != in_pixels(Colours::WARM.backdrop))
             .expect("the column drew its edge");
         assert_eq!(
             top,
@@ -2024,7 +2286,7 @@ mod tests {
         let x = layout.side_bar_left() as i32 + 10;
         assert_eq!(
             canvas.pixel(x, top),
-            in_pixels(colour::SELECTED),
+            in_pixels(Colours::WARM.selected),
             "and the first entry is the selected one"
         );
         unsafe {

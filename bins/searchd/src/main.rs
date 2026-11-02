@@ -1672,8 +1672,18 @@ fn resolve(path: &str, ctx: &Ctx) -> Answer {
                 .map_or(0, |b| b.id()),
         }
     };
+    // The answer is spelled the way every path the daemon says is: the
+    // index's own form is root-relative with `/`, and the platform's is
+    // the root and the platform's separator -- one daemon does not say
+    // one file two ways. The spelling is `platform_path`'s, because a
+    // second copy of the rule is a second way to drift.
+    let rel = rgy_engine::console::spell(&lookup.file_path(entry));
+    let rel = rel.trim_start_matches(['/', '\\']);
+    let mut full = rgy_engine::console::spell(&ctx.root);
+    full.push('/');
+    full.push_str(rel);
     Answer::Frame(Response::Resolved {
-        path: rgy_engine::console::spell(&lookup.file_path(entry)),
+        path: platform_path(full.as_bytes()),
         folder,
         backend,
     })
@@ -3096,6 +3106,19 @@ mod tests {
         assert!(
             path.ends_with("hello.txt"),
             "the path is the file's: {path}"
+        );
+        // The spelling is the platform's, root and all: the `search`
+        // answer is spelled that way, and the resolve answer does not
+        // say the same file another way.
+        let root_text = String::from_utf8(root.clone()).expect("the temp root is text");
+        assert_eq!(
+            path,
+            format!(
+                "{root_text}{}docs{}hello.txt",
+                std::path::MAIN_SEPARATOR,
+                std::path::MAIN_SEPARATOR
+            ),
+            "the path is spelled the way the platform spells it"
         );
         assert!(!folder, "it is a file, not a folder");
         assert_eq!(backend, 0, "the volume that owns it");

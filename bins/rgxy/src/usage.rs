@@ -63,8 +63,10 @@ fn english() -> String {
          fz — gets the list with one path per line.\n\
          \n\
          In the bar: file: folder: doc: pic: video: audio: — filters;\n\
-         >open >folder >copy >preview >menu — commands; grep: — the content\n\
-         of the files the name search chose.",
+         >open >folder >copy >preview >menu >settings — commands; grep: —\n\
+         the content of the files the name search chose. The settings\n\
+         live in settings.tsv, beside the index, and >settings is the\n\
+         panel that writes it.",
         version = env!("CARGO_PKG_VERSION"),
     )
 }
@@ -107,8 +109,10 @@ fn portuguese() -> String {
          fz — recebe a lista com um caminho por linha.\n\
          \n\
          Na barra: file: folder: doc: pic: video: audio: — filtros;\n\
-         >open >folder >copy >preview >menu — comandos; grep: — o conteúdo\n\
-         dos ficheiros que a busca de nomes escolheu.",
+         >open >folder >copy >preview >menu >settings — comandos; grep: —\n\
+         o conteúdo dos ficheiros que a busca de nomes escolheu. As\n\
+         configurações vivem em settings.tsv, ao lado do índice, e\n\
+         >settings é o painel que o escreve.",
         version = env!("CARGO_PKG_VERSION"),
     )
 }

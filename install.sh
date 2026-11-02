@@ -93,8 +93,13 @@ else
             _has_value=0
             case "$_name" in
                 *:*)
+                    # The value is the tail of the argument as it was
+                    # written, read before the name loses the tail itself:
+                    # the helper reads it from the whole token, and a value
+                    # taken from the truncated name would be the name
+                    # (`--version:x` would set version to `--version`).
+                    _value="${_arg#*:}"
                     _name="${_name%%:*}"
-                    _value="${_name#*:}"
                     _has_value=1
                     ;;
             esac

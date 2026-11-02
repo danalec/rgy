@@ -230,6 +230,11 @@ fn the_attributes_are_the_oracles_bytes() {
         String::from_utf8_lossy(&bold),
         oracle_bytes(SetAttribute(Attribute::Bold))
     );
+    let dim = written(|screen| screen.print("\x1b[2m"));
+    assert_eq!(
+        String::from_utf8_lossy(&dim),
+        oracle_bytes(SetAttribute(Attribute::Dim))
+    );
     let reverse = written(|screen| screen.print("\x1b[7m"));
     assert_eq!(
         String::from_utf8_lossy(&reverse),
@@ -255,21 +260,26 @@ fn the_text_is_the_oracles_bytes() {
 /// A styled span is the oracle's bytes.
 ///
 /// The span is the composition the oracle makes: the colour, the
-/// attributes, the text, and the reset that undoes them.
+/// attributes, the text, and the reset that undoes them. The dim arm is
+/// held to the oracle here too, because the attributes test can only
+/// compare the literal escape — the span is where the tree writes it.
 #[test]
 fn a_styled_span_is_the_oracles_bytes() {
     the_terminal_is_one();
     for colour in colours() {
-        for bold in [false, true] {
-            let mine = if bold {
-                "zen-rs".with(colour).bold().to_string()
-            } else {
-                "zen-rs".with(colour).to_string()
-            };
-            let oracle = oracle_bytes(PrintStyledContent(oracle_span("zen-rs", colour, bold)));
+        for (bold, dim) in [(false, false), (true, false), (false, true), (true, true)] {
+            let mut mine = "zen-rs".with(colour);
+            if bold {
+                mine = mine.bold();
+            }
+            if dim {
+                mine = mine.dim();
+            }
+            let mine = mine.to_string();
+            let oracle = oracle_bytes(PrintStyledContent(oracle_span("zen-rs", colour, bold, dim)));
             assert_eq!(
                 mine, oracle,
-                "the span {colour:?} (bold: {bold}) is not the oracle's bytes"
+                "the span {colour:?} (bold: {bold}, dim: {dim}) is not the oracle's bytes"
             );
         }
     }
@@ -279,10 +289,20 @@ fn a_styled_span_is_the_oracles_bytes() {
 ///
 /// The trait is named in full: the tree has a trait of its own with the
 /// same name, and the two cannot be in the same scope.
-fn oracle_span(text: &str, colour: Color, bold: bool) -> crossterm::style::StyledContent<String> {
+fn oracle_span(
+    text: &str,
+    colour: Color,
+    bold: bool,
+    dim: bool,
+) -> crossterm::style::StyledContent<String> {
     let styled = crossterm::style::Stylize::with(text.to_string(), oracle_colour(colour));
-    if bold {
+    let styled = if bold {
         crossterm::style::Stylize::bold(styled)
+    } else {
+        styled
+    };
+    if dim {
+        crossterm::style::Stylize::dim(styled)
     } else {
         styled
     }

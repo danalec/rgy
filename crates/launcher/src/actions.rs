@@ -51,6 +51,13 @@ pub enum Action {
     /// It is the action that opens the others, and it is not one of the
     /// ones the list shows: `Ctrl+K` and `>menu` still open it.
     Menu,
+    /// The launcher's own settings.
+    ///
+    /// Like the menu, it is not one of the actions a row is offered: it
+    /// is the panel where the launcher itself is adjusted — the colours,
+    /// the seat, the key that opens it — and `>settings` is how it
+    /// opens.
+    Settings,
 }
 
 impl Action {
@@ -66,6 +73,7 @@ impl Action {
             Action::CopyPath => text.copy_path,
             Action::Preview => text.preview,
             Action::Menu => text.actions,
+            Action::Settings => text.settings,
         }
     }
 
@@ -77,6 +85,10 @@ impl Action {
             Action::CopyPath => "Ctrl+C",
             Action::Preview => "Ctrl+P",
             Action::Menu => "Ctrl+K",
+            // The settings are the command bar's own: no accelerator is
+            // half of one somewhere, and an empty word is what a panel
+            // that no key opens says.
+            Action::Settings => "",
         }
     }
 

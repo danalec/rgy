@@ -38,9 +38,9 @@ pub struct Command {
 /// The commands, in the order the menu lists them.
 ///
 /// The names are the words a person types: `open`, `folder`, `copy`,
-/// `preview`, `menu`. They are English because they are the keys of an
-/// API, and the label the user reads is the action's own label — the
-/// two are the same word in the language the user reads.
+/// `preview`, `menu`, `settings`. They are English because they are the
+/// keys of an API, and the label the user reads is the action's own
+/// label — the two are the same word in the language the user reads.
 pub const COMMANDS: &[Command] = &[
     Command {
         name: "open",
@@ -61,6 +61,10 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "menu",
         action: Action::Menu,
+    },
+    Command {
+        name: "settings",
+        action: Action::Settings,
     },
 ];
 
@@ -131,7 +135,8 @@ mod tests {
             assert!(!c.label(Lang::English).is_empty());
             assert!(!c.label(Lang::Portuguese).is_empty());
             assert!(
-                c.action == Action::Menu || Action::all().contains(&c.action),
+                matches!(c.action, Action::Menu | Action::Settings)
+                    || Action::all().contains(&c.action),
                 "the command >{} is not an action of the launcher",
                 c.name
             );

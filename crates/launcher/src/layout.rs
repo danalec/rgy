@@ -165,6 +165,16 @@ impl Layout {
         }
     }
 
+    /// The geometry with a width of the user's choosing.
+    ///
+    /// The width is the one dimension the user has an opinion about: the
+    /// height is the rows', and the rows are the screen's. A wider window
+    /// shows a longer name, and that is the whole of what widening does.
+    pub fn with_width(mut self, width: u32) -> Layout {
+        self.width = width;
+        self
+    }
+
     /// The geometry at a screen's scale.
     ///
     /// The scale is in per cent (see [`SCALE_PERCENT`]). The pixel

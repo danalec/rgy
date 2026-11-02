@@ -285,6 +285,10 @@ pub const WM_PAINT: UINT = 0x000F;
 pub const WM_CLOSE: UINT = 0x0010;
 pub const WM_ERASEBKGND: UINT = 0x0014;
 pub const WM_TIMER: UINT = 0x0113;
+/// The platform's own message for a hotkey the process registered: it
+/// is **posted** to the queue, so the pump is where it arrives and the
+/// window procedure never sees it.
+pub const WM_HOTKEY: UINT = 0x0312;
 pub const WM_KEYDOWN: UINT = 0x0100;
 pub const WM_KEYUP: UINT = 0x0101;
 pub const WM_CHAR: UINT = 0x0102;
@@ -338,7 +342,9 @@ pub const SM_CXSMICON: i32 = 49;
 pub const VK_BACK: u32 = 0x08;
 pub const VK_TAB: u32 = 0x09;
 pub const VK_RETURN: u32 = 0x0D;
+pub const VK_SHIFT: u32 = 0x10;
 pub const VK_CONTROL: u32 = 0x11;
+pub const VK_MENU: u32 = 0x12;
 pub const VK_PRIOR: u32 = 0x21;
 pub const VK_NEXT: u32 = 0x22;
 pub const VK_END: u32 = 0x23;
@@ -357,6 +363,10 @@ pub const VK_DELETE: u32 = 0x2E;
 /// that opens the window.
 pub const VK_LCONTROL: u32 = 0xA2;
 pub const VK_RCONTROL: u32 = 0xA3;
+pub const VK_LSHIFT: u32 = 0xA0;
+pub const VK_RSHIFT: u32 = 0xA1;
+pub const VK_LMENU: u32 = 0xA4;
+pub const VK_RMENU: u32 = 0xA5;
 
 pub const SWP_NOMOVE: UINT = 0x0002;
 pub const SWP_NOACTIVATE: UINT = 0x0010;
@@ -540,6 +550,18 @@ unsafe extern "system" {
     pub fn PostQuitMessage(nExitCode: i32);
 
     pub fn PostMessageW(hWnd: HWND, Msg: UINT, wParam: WPARAM, lParam: LPARAM) -> BOOL;
+
+    /// Register a hotkey with the platform.
+    ///
+    /// The modifiers are the platform's own `MOD_*` bits and the key is
+    /// a virtual-key code; the answer says whether the platform took
+    /// it, and the last error is the difference between a combination
+    /// another program already has and a machine that could not. The
+    /// message it posts is `WM_HOTKEY`, to the window named here.
+    pub fn RegisterHotKey(hWnd: HWND, id: i32, fsModifiers: UINT, vk: UINT) -> BOOL;
+
+    /// Give a registered hotkey back.
+    pub fn UnregisterHotKey(hWnd: HWND, id: i32) -> BOOL;
 
     pub fn GetWindowLongPtrW(hWnd: HWND, nIndex: i32) -> isize;
 
@@ -897,6 +919,84 @@ unsafe extern "system" {
     pub fn Shell_NotifyIconW(dwMessage: DWORD, pnid: *const NOTIFYICONDATAW) -> BOOL;
 }
 
+// The console's calls are the kernel's own, and the seam is where the
+// platform's calls are written by hand.
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    /// The window of the console the process is attached to.
+    ///
+    /// The answer is null when there is no console — a launch that was
+    /// given pipes has none — and a window that belongs to the console
+    /// host, not to this process: the handle is for asking about the
+    /// console, and a console the process is attached to is not the same
+    /// thing as a console the process was given.
+    pub fn GetConsoleWindow() -> HWND;
+
+    /// The processes attached to this console, written into the buffer.
+    ///
+    /// The answer is how many processes are attached. A buffer too small
+    /// to hold them all answers the number the list needs, which is still
+    /// more than one — the question the caller asks is whether the
+    /// process is alone on the console, and a list that had to be longer
+    /// still answers it. Zero is the call's own refusal: there is no
+    /// console to ask about.
+    pub fn GetConsoleProcessList(lpdwProcessList: *mut DWORD, dwProcessCount: DWORD) -> DWORD;
+
+    /// Open the null device, the writer nobody has to read.
+    pub fn CreateFileW(
+        lpFileName: *const u16,
+        dwDesiredAccess: DWORD,
+        dwShareMode: DWORD,
+        lpSecurityAttributes: *const c_void,
+        dwCreationDisposition: DWORD,
+        dwFlagsAndAttributes: DWORD,
+        hTemplateFile: HANDLE,
+    ) -> HANDLE;
+
+    /// Point one of the process's standard streams at another handle.
+    ///
+    /// The answer says whether it did. The streams have to be pointed
+    /// somewhere before the console they came from is given back: the
+    /// library reads each standard handle once and keeps it, and a write
+    /// to a handle whose console is gone is a panic.
+    pub fn SetStdHandle(nStdHandle: DWORD, hHandle: HANDLE) -> BOOL;
+
+    /// Give the console back.
+    ///
+    /// The answer says whether the process left it. The console's window
+    /// — or its tab, when the host is a terminal with more of them —
+    /// closes with the last process on it.
+    pub fn FreeConsole() -> BOOL;
+
+    /// Give a handle back.
+    pub fn CloseHandle(hObject: HANDLE) -> BOOL;
+}
+
+/// The processes attached to the console.
+///
+/// The buffer is a **slice**: the platform takes a pointer and a length,
+/// and the slice carries both — a pointer that can be null is a pointer
+/// that can be wrong, and a length that does not belong to the pointer is
+/// a length that does not. The answer is what the platform says about
+/// the buffer: how many processes are attached, or how many the list
+/// needs when the buffer was too small.
+pub fn console_process_list(attached: &mut [DWORD]) -> DWORD {
+    unsafe { GetConsoleProcessList(attached.as_mut_ptr(), attached.len() as DWORD) }
+}
+
+/// The null device is opened for writing, by every one.
+pub const GENERIC_WRITE: DWORD = 0x8000_0000;
+/// The null device is opened for sharing, with every one.
+pub const FILE_SHARE_ALL: DWORD = 0x3;
+/// The null device is opened as the thing it already is.
+pub const OPEN_EXISTING: DWORD = 3;
+/// The standard output, as the platform numbers it.
+pub const STD_OUTPUT_HANDLE: DWORD = 0xFFFF_FFF5;
+/// The standard error, as the platform numbers it.
+pub const STD_ERROR_HANDLE: DWORD = 0xFFFF_FFF4;
+/// The handle no call answers with on success.
+pub const INVALID_HANDLE_VALUE: HANDLE = -1isize as HANDLE;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -952,8 +1052,18 @@ mod tests {
         assert_eq!(VK_DOWN, 0x28);
         assert_eq!(VK_ESCAPE, 0x1B);
         assert_eq!(VK_DELETE, 0x2E);
+        assert_eq!(VK_SHIFT, 0x10);
+        assert_eq!(VK_MENU, 0x12);
+        assert_eq!(VK_LSHIFT, 0xA0);
+        assert_eq!(VK_RSHIFT, 0xA1);
         assert_eq!(VK_LCONTROL, 0xA2);
         assert_eq!(VK_RCONTROL, 0xA3);
+        assert_eq!(VK_LMENU, 0xA4);
+        assert_eq!(VK_RMENU, 0xA5);
+        // The combo's own message, posted and not sent: the platform
+        // puts it in the queue, and the pump is where the answer is
+        // given.
+        assert_eq!(WM_HOTKEY, 0x0312);
     }
 
     /// The platform's window styles, pinned.
@@ -974,5 +1084,20 @@ mod tests {
         assert_eq!(SWP_NOMOVE, 0x0002);
         assert_eq!(SWP_NOACTIVATE, 0x0010);
         assert_eq!(GWL_USERDATA, -21);
+    }
+
+    /// The platform's console numbers, pinned.
+    ///
+    /// The standard streams are numbered by the platform, and the null
+    /// device is opened with the platform's own constants: a number that
+    /// is only ever compared against itself cannot catch a typo.
+    #[test]
+    fn the_console_numbers_are_the_platform_s_own() {
+        assert_eq!(STD_OUTPUT_HANDLE as i32, -11);
+        assert_eq!(STD_ERROR_HANDLE as i32, -12);
+        assert_eq!(OPEN_EXISTING, 3);
+        assert_eq!(GENERIC_WRITE, 0x8000_0000);
+        assert_eq!(FILE_SHARE_ALL, 0x1 | 0x2);
+        assert!(INVALID_HANDLE_VALUE as isize == -1);
     }
 }
