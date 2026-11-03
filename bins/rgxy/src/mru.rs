@@ -60,7 +60,7 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rgy_launcher::text::{Lang, Text};
 use rgy_launcher::usage::History;
@@ -73,14 +73,16 @@ use rgy_launcher::usage::History;
 /// behind is never the file the other one is writing.
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
-/// How many times the move that replaces the store is tried.
-const RENAME_TRIES: u32 = 100;
+/// How long the move that replaces the store is waited for, in
+/// milliseconds.
+const RENAME_WAIT_MS: u64 = 2_000;
 
-/// How many times the read of the store is tried.
-const READ_TRIES: u32 = 100;
+/// How long the read of the store is waited for, in milliseconds.
+const READ_WAIT_MS: u64 = 2_000;
 
-/// How many times the lock is tried before the write is given up on.
-const LOCK_TRIES: u32 = 100;
+/// How long the lock is waited for before the write is given up on, in
+/// milliseconds.
+const LOCK_WAIT_MS: u64 = 2_000;
 
 /// How long the writer waits between the tries, in milliseconds.
 ///
@@ -88,6 +90,15 @@ const LOCK_TRIES: u32 = 100;
 /// the same kind of refusal -- somebody else has the store for a moment --
 /// and a refusal that lasts a moment is not a refusal.
 const WAIT_MS: u64 = 5;
+
+/// The longest the wait between the tries is, in milliseconds.
+///
+/// The wait **backs off**, and the backoff is the point: the writers that
+/// wait for one store wake up together, and every wake-up takes the CPU
+/// the writer that holds the lock needs to finish. A wait that polls
+/// every few milliseconds makes the wait longer, and the update is lost
+/// at the end of it.
+const WAIT_MAX_MS: u64 = 100;
 
 /// The platform's own code for "the file is held by another process".
 #[cfg(windows)]
@@ -144,20 +155,40 @@ pub fn now() -> u64 {
 /// has to say that much. The **write** is what recovers: it moves the
 /// broken file aside and starts the memory again.
 pub fn load(path: &Path) -> Result<History, std::io::Error> {
-    let mut attempt = 0;
+    let deadline = Instant::now() + Duration::from_millis(READ_WAIT_MS);
+    let mut wait = WAIT_MS;
     loop {
         match std::fs::read_to_string(path) {
             Ok(text) => return Ok(parse(&text)),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(History::new()),
             Err(err) => {
-                attempt += 1;
-                if attempt >= READ_TRIES || !busy(&err) {
+                if !busy(&err) || !wait_a_little(&deadline, &mut wait) {
                     return Err(err);
                 }
-                std::thread::sleep(Duration::from_millis(WAIT_MS));
             }
         }
     }
+}
+
+/// Wait a little, or say that the wait is over.
+///
+/// The wait is a **deadline** and not a count of tries: a count of tries
+/// of a fixed sleep bounds the sleeping and not the waiting, and the two
+/// come apart on a machine that is busy. The writer that holds the lock
+/// is off the CPU for a while, the waiters poll, and a waiter that counts
+/// tries gives up while the lock is about to be free — and the update it
+/// was carrying is lost.
+///
+/// The sleep **backs off**, so the waiters do not take the CPU the holder
+/// needs to finish: the wait ends when the lock is free, and it is the
+/// wait that gets longer when the machine is busy.
+fn wait_a_little(deadline: &Instant, wait: &mut u64) -> bool {
+    if Instant::now() >= *deadline {
+        return false;
+    }
+    std::thread::sleep(Duration::from_millis(*wait));
+    *wait = (*wait * 2).min(WAIT_MAX_MS);
+    true
 }
 
 /// The sentence for a history that could not be read.
@@ -382,16 +413,15 @@ fn write_store(path: &Path, history: &History, id: u64) -> std::io::Result<()> {
 /// that fails because the store's path is a directory fails the same way
 /// every time, and waiting for it only makes the caller wait for nothing.
 fn replace(temp: &Path, store: &Path) -> std::io::Result<()> {
-    let mut attempt = 0;
+    let deadline = Instant::now() + Duration::from_millis(RENAME_WAIT_MS);
+    let mut wait = WAIT_MS;
     loop {
         match std::fs::rename(temp, store) {
             Ok(()) => return Ok(()),
             Err(err) => {
-                attempt += 1;
-                if attempt >= RENAME_TRIES || !busy(&err) {
+                if !busy(&err) || !wait_a_little(&deadline, &mut wait) {
                     return Err(err);
                 }
-                std::thread::sleep(Duration::from_millis(WAIT_MS));
             }
         }
     }
@@ -459,18 +489,20 @@ impl Lock {
     ///
     /// The wait is bounded: a store that cannot be written is a store
     /// the caller has to be told about, and a launcher that waits for
-    /// ever is a launcher the user cannot close.
+    /// ever is a launcher the user cannot close. The bound is a **deadline**
+    /// and not a count of tries, and the sleep backs off: the writer that
+    /// holds the lock needs the CPU to finish, and a waiter that polls
+    /// every few milliseconds takes it away from it.
     fn take(path: &Path) -> std::io::Result<Lock> {
-        let mut attempt = 0;
+        let deadline = Instant::now() + Duration::from_millis(LOCK_WAIT_MS);
+        let mut wait = WAIT_MS;
         loop {
             match Lock::once(path) {
                 Ok(file) => return Ok(Lock { _file: file }),
                 Err(err) => {
-                    attempt += 1;
-                    if attempt >= LOCK_TRIES || !busy(&err) {
+                    if !busy(&err) || !wait_a_little(&deadline, &mut wait) {
                         return Err(err);
                     }
-                    std::thread::sleep(Duration::from_millis(WAIT_MS));
                 }
             }
         }

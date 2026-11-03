@@ -520,7 +520,7 @@ impl State {
         self.history.record(path, mru::now());
         let lang = self.lang;
         // The write is on a thread of its own: the store is behind a
-        // lock, and the lock can be held for half a second. The
+        // lock, and the lock can be held for a couple of seconds. The
         // launcher that opened the result is already gone by then, and
         // the window that waits for a file lock is a window that does
         // not move.
@@ -1438,7 +1438,7 @@ fn run_action(state: &mut State, action: Action) -> Control {
                 Ok(()) => {
                     // The window goes down **before** the memory is
                     // written: the write is behind a lock that another
-                    // writer can hold for half a second, and the
+                    // writer can hold for a couple of seconds, and the
                     // launcher that opened the result does not wait for
                     // any of it.
                     state.app.hide();
@@ -1979,9 +1979,11 @@ mod tests {
     ///
     /// The write of the memory is on a thread of its own, and the test
     /// waits for it: a test that does not wait is a test that races the
-    /// machine.
+    /// machine. The wait is longer than the write's own deadline: the
+    /// write that cannot take the lock gives up when the deadline is
+    /// gone, and the note that says so comes after it.
     fn wait_for_note(state: &mut State) -> Option<String> {
-        for _ in 0..200 {
+        for _ in 0..300 {
             take_notes(state);
             if let Some(note) = state.note.clone() {
                 return Some(note);
