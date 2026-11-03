@@ -1,6 +1,6 @@
 [package]
 name = "rgy-par"
-version = "0.1.4"
+version = "0.1.6"
 edition = "2024"
 rust-version = "1.89"
 authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]

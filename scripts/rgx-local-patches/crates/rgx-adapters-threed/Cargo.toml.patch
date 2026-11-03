@@ -3,8 +3,8 @@
 @@ -1,6 +1,6 @@
  [package]
  name = "rgx-adapters-threed"
--version = "0.1.3"
-+version = "0.1.4"
+-version = "0.1.5"
++version = "0.1.6"
  edition = "2021"
  authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
  description = "rgx adapters: 3D model formats (glb, stl, ply, fbx, pcd, las, vtk, obj)"
@@ -21,8 +21,8 @@
  ]
  
  [dependencies]
--rgx-core = { path = "../rgx-core", version = "0.1.3", default-features = false, features = ["std", "sha256-hw"] }
-+rgx-core = { path = "../rgx-core", version = "0.1.4", default-features = false, features = ["std", "sha256-hw"] }
+-rgx-core = { path = "../rgx-core", version = "0.1.5", default-features = false, features = ["std", "sha256-hw"] }
++rgx-core = { path = "../rgx-core", version = "0.1.6", default-features = false, features = ["std", "sha256-hw"] }
  
  [features]
  # One feature per adapter, in the order `adapters()` returns them. The

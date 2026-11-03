@@ -1,6 +1,6 @@
 [package]
 name = "rgy-discovery-dispatch"
-version = "0.1.4"
+version = "0.1.6"
 edition = "2024"
 rust-version = "1.89"
 authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
@@ -22,7 +22,7 @@ default = ["std"]
 std = ["rgy-discovery/std", "rgy-discovery-macos/std"]
 
 [dependencies]
-rgy-discovery = { path = "../discovery", version = "0.1.4", default-features = false }
+rgy-discovery = { path = "../discovery", version = "0.1.6", default-features = false }
 # The catch-up rule answers with the wire value the status response carries
 # (`replayed` / `relisted`), so the rule and the spelling cannot drift.
 #
@@ -31,7 +31,7 @@ rgy-discovery = { path = "../discovery", version = "0.1.4", default-features = f
 # `std` half is the sockets and the environment — the machine. A crate
 # that is in the bare-metal gate cannot pull the machine in through a
 # side door, and this dependency is that side door.
-rgy-proto = { path = "../proto", version = "0.1.4", default-features = false }
+rgy-proto = { path = "../proto", version = "0.1.6", default-features = false }
 
 # The platform walks, pulled in per-target so `source_for` can build the
 # native one on its own OS. Every crate is empty off-target.
@@ -42,13 +42,13 @@ rgy-proto = { path = "../proto", version = "0.1.4", default-features = false }
 # otherwise pull the machine into this crate through a side door, and the
 # bare-metal gate would only find out when it stopped building.
 [target.'cfg(windows)'.dependencies]
-rgy-discovery-windows = { path = "../discovery-windows", version = "0.1.4", default-features = false }
+rgy-discovery-windows = { path = "../discovery-windows", version = "0.1.6", default-features = false }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-rgy-discovery-linux = { path = "../discovery-linux", version = "0.1.4", default-features = false }
+rgy-discovery-linux = { path = "../discovery-linux", version = "0.1.6", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-rgy-discovery-macos = { path = "../discovery-macos", version = "0.1.4", default-features = false }
+rgy-discovery-macos = { path = "../discovery-macos", version = "0.1.6", default-features = false }
 
 [target.'cfg(target_os = "freebsd")'.dependencies]
-rgy-discovery-freebsd = { path = "../discovery-freebsd", version = "0.1.4", default-features = false }
+rgy-discovery-freebsd = { path = "../discovery-freebsd", version = "0.1.6", default-features = false }

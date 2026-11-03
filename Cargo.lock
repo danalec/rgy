@@ -328,7 +328,7 @@ dependencies = [
 
 [[package]]
 name = "rar-codec"
-version = "0.1.4"
+version = "0.1.6"
 
 [[package]]
 name = "redox_syscall"
@@ -370,7 +370,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "rgx-adapters-archive"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "rar-codec",
  "rgx-core",
@@ -378,7 +378,7 @@ dependencies = [
 
 [[package]]
 name = "rgx-adapters-docs"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "rgx-adapters-office",
  "rgx-adapters-pdf",
@@ -387,14 +387,14 @@ dependencies = [
 
 [[package]]
 name = "rgx-adapters-inspect"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "rgx-core",
 ]
 
 [[package]]
 name = "rgx-adapters-llm"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "rgx-adapters-archive",
  "rgx-core",
@@ -402,21 +402,21 @@ dependencies = [
 
 [[package]]
 name = "rgx-adapters-mail"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "rgx-core",
 ]
 
 [[package]]
 name = "rgx-adapters-media"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "rgx-core",
 ]
 
 [[package]]
 name = "rgx-adapters-office"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "rgx-adapters-archive",
  "rgx-core",
@@ -424,14 +424,14 @@ dependencies = [
 
 [[package]]
 name = "rgx-adapters-pdf"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "rgx-core",
 ]
 
 [[package]]
 name = "rgx-adapters-tabular"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "rgx-core",
  "rusqlite",
@@ -439,14 +439,14 @@ dependencies = [
 
 [[package]]
 name = "rgx-adapters-threed"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "rgx-core",
 ]
 
 [[package]]
 name = "rgx-core"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "ignore",
  "regex",
@@ -454,7 +454,7 @@ dependencies = [
 
 [[package]]
 name = "rgxy"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "rgy-engine",
  "rgy-launcher",
@@ -466,7 +466,7 @@ dependencies = [
 
 [[package]]
 name = "rgy-adapters"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "rgx-adapters-archive",
  "rgx-adapters-docs",
@@ -484,21 +484,21 @@ dependencies = [
 
 [[package]]
 name = "rgy-autostart"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "rgy-proto",
 ]
 
 [[package]]
 name = "rgy-discovery"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "rgy-par",
 ]
 
 [[package]]
 name = "rgy-discovery-dispatch"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "rgy-discovery",
  "rgy-discovery-freebsd",
@@ -510,21 +510,21 @@ dependencies = [
 
 [[package]]
 name = "rgy-discovery-freebsd"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "rgy-discovery",
 ]
 
 [[package]]
 name = "rgy-discovery-linux"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "rgy-discovery",
 ]
 
 [[package]]
 name = "rgy-discovery-macos"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "rgy-discovery",
  "rgy-name-core",
@@ -533,7 +533,7 @@ dependencies = [
 
 [[package]]
 name = "rgy-discovery-windows"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "hashbrown 0.16.1",
  "rgy-discovery",
@@ -549,7 +549,7 @@ dependencies = [
 
 [[package]]
 name = "rgy-engine"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "rgx-core",
  "rgy-discovery",
@@ -558,18 +558,18 @@ dependencies = [
 
 [[package]]
 name = "rgy-launcher"
-version = "0.1.4"
+version = "0.1.6"
 
 [[package]]
 name = "rgy-launcher-windows"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "rgy-launcher",
 ]
 
 [[package]]
 name = "rgy-name-core"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "hashbrown 0.16.1",
  "rgx-core",
@@ -579,19 +579,19 @@ dependencies = [
 
 [[package]]
 name = "rgy-par"
-version = "0.1.4"
+version = "0.1.6"
 
 [[package]]
 name = "rgy-pick"
-version = "0.1.4"
+version = "0.1.6"
 
 [[package]]
 name = "rgy-proto"
-version = "0.1.4"
+version = "0.1.6"
 
 [[package]]
 name = "rgy-search"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "mimalloc",
  "rgy-adapters",
@@ -606,7 +606,7 @@ dependencies = [
 
 [[package]]
 name = "rgy-search-ui"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "crossterm",
  "rgy-discovery",
@@ -618,7 +618,7 @@ dependencies = [
 
 [[package]]
 name = "rgy-searchd"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "mimalloc",
  "rgx-core",
@@ -636,7 +636,7 @@ dependencies = [
 
 [[package]]
 name = "rgy-zen"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "mimalloc",
  "rgy-discovery",

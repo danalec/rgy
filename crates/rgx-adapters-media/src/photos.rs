@@ -915,10 +915,10 @@ fn exr_meta(data: &[u8]) -> Result<ExrMeta> {
             // The header ends with an empty name.
             break;
         }
-        let name = cstr(data, at)?;
-        at += name.len() + 1;
-        let typ = cstr(data, at)?;
-        at += typ.len() + 1;
+        let (name, used) = cstr(data, at)?;
+        at += used;
+        let (typ, used) = cstr(data, at)?;
+        at += used;
         let size = le32i(data, at)? as usize;
         at += 4;
         let value = data
@@ -952,14 +952,26 @@ fn exr_meta(data: &[u8]) -> Result<ExrMeta> {
     Ok(meta)
 }
 
-/// A NUL-terminated string at `at`.
+/// A NUL-terminated string at `at`, and the number of bytes it takes.
+///
+/// **The count is the bytes the string took in the data, not the length of
+/// the string that is returned.** `from_utf8_lossy` replaces every byte that
+/// is not valid UTF-8 with U+FFFD, and U+FFFD is three bytes: a name of ten
+/// invalid bytes is thirty bytes of `String`. A caller that advanced by the
+/// returned string's length therefore walked *past* the end of the data, and
+/// the next read panicked instead of refusing the file -- the fuzzer found
+/// it on the third of November of 2026 with thirty-eight bytes, and the
+/// reader's answer to a file it cannot parse is a refusal, not a crash.
 #[cfg(feature = "openexr")]
-fn cstr(data: &[u8], at: usize) -> Result<String> {
-    let end = data[at..]
+fn cstr(data: &[u8], at: usize) -> Result<(String, usize)> {
+    let rest = data
+        .get(at..)
+        .ok_or_else(|| rgx_core::anyhow!("OpenEXR attribute past the end of the file"))?;
+    let end = rest
         .iter()
         .position(|&b| b == 0)
         .ok_or_else(|| rgx_core::anyhow!("unterminated string"))?;
-    Ok(String::from_utf8_lossy(&data[at..at + end]).into_owned())
+    Ok((String::from_utf8_lossy(&rest[..end]).into_owned(), end + 1))
 }
 
 /// A `box2i`: four signed integers, the last two being the size.
@@ -1325,6 +1337,30 @@ mod tests {
             .extract(b"\x00\x01\x02\x03\x04\x05\x06\x07", "a.exr")
             .is_err());
         assert!(OpenExr.extract(b"", "a.exr").is_err());
+    }
+
+    /// The thirty-seven bytes the fuzzer found on the third of November of
+    /// 2026: an OpenEXR header whose first attribute name is not valid
+    /// UTF-8. The reader advanced by the length of the **lossy** string --
+    /// ten invalid bytes are thirty bytes of `String` -- and walked past the
+    /// end of the file, and the next read panicked. The reader's answer to a
+    /// file it cannot parse is a refusal, not a crash; here it *can* parse
+    /// it, so it reads it.
+    #[test]
+    #[cfg(feature = "openexr")]
+    fn an_openexr_whose_name_is_not_utf8_is_read_and_not_crashed() {
+        let bytes: Vec<u8> = vec![
+            0x76, 0x2f, 0x31, 0x01, 0xdf, 0xff, 0xda, 0x04, 0xff, 0xaa, 0xaa, 0xaa, 0xaa, 0xff,
+            0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x26,
+        ];
+        let s = text_of(
+            OpenExr
+                .extract(&bytes, "a.exr")
+                .expect("the header is readable"),
+        );
+        assert!(s.contains("channels: 0"), "{s}");
+        assert!(s.contains("version: 223"), "{s}");
     }
 
     #[test]

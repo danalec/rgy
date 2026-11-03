@@ -3,8 +3,8 @@
 @@ -1,6 +1,6 @@
  [package]
  name = "rar-codec"
--version = "0.1.3"
-+version = "0.1.4"
+-version = "0.1.5"
++version = "0.1.6"
  edition = "2021"
  authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
  description = "Pure-Rust, no_std RAR codec: RAR4/RAR5 parsing, LZ+Huffman and PPMd decode (solid, multivolume, VM filters), RAR5 store encode. Zero dependencies."

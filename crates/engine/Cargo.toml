@@ -1,6 +1,6 @@
 [package]
 name = "rgy-engine"
-version = "0.1.4"
+version = "0.1.6"
 edition = "2024"
 rust-version = "1.89"
 authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
@@ -33,8 +33,8 @@ rgx-core = { path = "../rgx-core", version = "0.1.4", default-features = false }
 # The examples measure the name engine against the discovery seam's
 # blocks. They are not the library's own dependencies: the library does
 # not walk anything.
-rgy-discovery = { path = "../discovery", version = "0.1.4" }
-rgy-name-core = { path = "../name-core", version = "0.1.4" }
+rgy-discovery = { path = "../discovery", version = "0.1.6" }
+rgy-name-core = { path = "../name-core", version = "0.1.6" }
 
 [[example]]
 name = "name_bench"

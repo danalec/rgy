@@ -1,6 +1,6 @@
 [package]
 name = "rgx-core"
-version = "0.1.4"
+version = "0.1.6"
 edition = "2021"
 authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
 description = "rgx's engine: the adapter contract, the byte-search kernels, the JSON arena and the pack store -- no_std + alloc, with an opt-in std feature"

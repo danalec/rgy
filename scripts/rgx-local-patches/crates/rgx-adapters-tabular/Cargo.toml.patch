@@ -3,8 +3,8 @@
 @@ -1,6 +1,6 @@
  [package]
  name = "rgx-adapters-tabular"
--version = "0.1.3"
-+version = "0.1.4"
+-version = "0.1.5"
++version = "0.1.6"
  edition = "2021"
  authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
  description = "rgx adapters for tabular & geospatial data (SQLite, DBF, Shapefile)"
@@ -47,9 +47,9 @@
  leveldb = ["rgx-core/snappy"]
  zarr = ["std", "rgx-core/blosc", "rgx-core/bzip2", "rgx-core/gzip", "rgx-core/zlib", "rgx-core/zstd"]
  [dependencies]
--rgx-core = { path = "../rgx-core", version = "0.1.3", default-features = false, features = ["std", "sha256-hw"] }
+-rgx-core = { path = "../rgx-core", version = "0.1.5", default-features = false, features = ["std", "sha256-hw"] }
 -rusqlite = { version = "0.40", features = ["bundled", "serialize"], optional = true }
-+rgx-core = { path = "../rgx-core", version = "0.1.4", default-features = false, features = ["std", "sha256-hw"] }
++rgx-core = { path = "../rgx-core", version = "0.1.6", default-features = false, features = ["std", "sha256-hw"] }
 +
 +[dev-dependencies]
 +# SQLite itself, as the oracle the in-house reader is held to: the
