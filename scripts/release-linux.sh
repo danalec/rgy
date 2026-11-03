@@ -65,7 +65,36 @@ echo ">> pushing $REF to forgejo"
 git push forgejo "$REF" 2>&1 | tail -1
 
 echo ">> syncing the source on $HOST"
-ssh "$HOST" "rm -rf '$REMOTE' && mkdir -p '$REMOTE' && git clone --depth 1 --branch '$REF' '$FORGEJO' '$REMOTE/src' 2>&1 | tail -1"
+# The clone is the transport when it works, and the clone needs a credential
+# the host does not always have: the forgejo repository is private, and a
+# machine without a credential for it cannot read it at all -- the clone dies
+# with "could not read Username", and the build then runs on whatever the
+# forgejo last held, which is not the code being released.
+#
+# So the clone is tried, and when it fails the bytes of the commit travel
+# instead: `git archive <ref>` is a tar of the tree the commit holds -- the
+# same bytes a clone would bring -- and it needs no credential on the far
+# side, because the tree is already here. The build does not use git, so the
+# tree it gets is the tree either way.
+#
+# Which transport was used is said out loud: a release that says "synced" and
+# built yesterday's code is the worst kind.
+if ssh "$HOST" "rm -rf '$REMOTE' && mkdir -p '$REMOTE' && git clone --depth 1 --branch '$REF' '$FORGEJO' '$REMOTE/src'" 2>/dev/null; then
+    echo "   the clone worked: the host read the forgejo itself"
+else
+    echo "   the clone did not work (a private repository and no credential on the host)"
+    echo "   falling back to the bytes of the commit: git archive + scp"
+    # The tar carries the prefix src/, so it unpacks into the remote and the
+    # tree lands where the clone would have left it: $REMOTE/src.
+    local_tar="$(mktemp)"
+    git archive --prefix=src/ --format=tar "$REF" > "$local_tar"
+    scp -q "$local_tar" "$HOST:/tmp/rgy-release-src.tar"
+    rm -f "$local_tar"
+    # The clone that failed may have left half a tree behind, and a file that
+    # is in that half and not in the commit would be built and published as
+    # if it were ours.
+    ssh "$HOST" "rm -rf '$REMOTE/src' && mkdir -p '$REMOTE' && tar -xf /tmp/rgy-release-src.tar -C '$REMOTE' && rm -f /tmp/rgy-release-src.tar"
+fi
 
 echo ">> building on $HOST (this takes a few minutes)"
 # The gate runs here too: the Windows release path runs it, and an asset
@@ -88,6 +117,13 @@ if [ -f .dist/SHA256SUMS.local ]; then
 else
     mv .dist/SHA256SUMS.host .dist/SHA256SUMS
 fi
+# The digests of the documents the archive carries. The publish step refuses
+# an archive without them -- "it was built by a build that did not write them"
+# -- and the build that wrote them is the one that ran on the host, so they
+# come from there too. Without this line the release stops at the publish and
+# the digests have to be fetched by hand.
+mkdir -p .dist/documents
+scp -q "$HOST:$REMOTE/src/.dist/documents/rgy-v$VERSION-*.sha256" .dist/documents/
 ssh "$HOST" "rm -rf '$REMOTE'"
 
 echo ">> .dist/ now holds:"
