@@ -1,6 +1,6 @@
 [package]
 name = "rgx-adapters-docs"
-version = "0.1.2"
+version = "0.1.4"
 edition = "2021"
 authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
 description = "rgx adapters that shell out to external tools (soffice, tesseract) when present on PATH"
@@ -47,17 +47,17 @@ soffice = ["dep:rgx-adapters-office", "rgx-adapters-office/office"]
 ocr = ["dep:rgx-adapters-pdf", "rgx-adapters-pdf/pdf"]
 
 [dependencies]
-rgx-core = { path = "../rgx-core", version = "0.1.2", default-features = false, features = ["std", "sha256-hw"] }
+rgx-core = { path = "../rgx-core", version = "0.1.4", default-features = false, features = ["std", "sha256-hw"] }
 # for `xml_to_text` only: the soffice adapter converts to flat ODF (see
 # Soffice::extract) and this is the tree's one XML → text pass. Compile-time
 # only -- `rgx-adapters-office` reaches the registry through the root's own
 # `adapters-office` feature, which this dependency does not imply.
 # Optional: only the `soffice` family needs it, and it switches off
 # with it.
-rgx-adapters-office = { path = "../rgx-adapters-office", version = "0.1.2", default-features = false, optional = true }
+rgx-adapters-office = { path = "../rgx-adapters-office", version = "0.1.4", default-features = false, optional = true }
 # for `pages_of_a_pdf` only: the ocr adapter claims `ocr.pdf`, and tesseract
 # refuses a PDF unless its build supports PDF input, so a scanned PDF is
 # opened here and its page images handed over instead (see the fn).
 # Optional: only the `ocr` family needs it, and it switches off with
 # it.
-rgx-adapters-pdf = { path = "../rgx-adapters-pdf", version = "0.1.2", default-features = false, optional = true }
+rgx-adapters-pdf = { path = "../rgx-adapters-pdf", version = "0.1.4", default-features = false, optional = true }

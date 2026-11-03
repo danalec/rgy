@@ -16,20 +16,20 @@ readme = "../../README.md"
 
 [dependencies]
 # The adapter trait, the registry and the pipeline that runs one.
-rgx-core = { path = "../rgx-core", version = "0.1.2", default-features = false }
+rgx-core = { path = "../rgx-core", version = "0.1.4", default-features = false }
 # The content engine's seam: the reader the adapters answer through, and
 # the document it hands back. It is `no_std` + `alloc` without its `std`
 # feature, and this crate needs the `std` half — the adapters read files.
 rgy-name-core = { path = "../name-core", version = "0.1.3" }
 # The ten adapter families, transported from upstream. Each one hands over
 # its adapters; the registry is what orders them.
-rgx-adapters-archive = { path = "../rgx-adapters-archive", version = "0.1.2" }
-rgx-adapters-docs = { path = "../rgx-adapters-docs", version = "0.1.2" }
-rgx-adapters-inspect = { path = "../rgx-adapters-inspect", version = "0.1.2" }
-rgx-adapters-llm = { path = "../rgx-adapters-llm", version = "0.1.2" }
-rgx-adapters-mail = { path = "../rgx-adapters-mail", version = "0.1.2" }
-rgx-adapters-media = { path = "../rgx-adapters-media", version = "0.1.2" }
-rgx-adapters-office = { path = "../rgx-adapters-office", version = "0.1.2" }
-rgx-adapters-pdf = { path = "../rgx-adapters-pdf", version = "0.1.2" }
-rgx-adapters-tabular = { path = "../rgx-adapters-tabular", version = "0.1.2" }
-rgx-adapters-threed = { path = "../rgx-adapters-threed", version = "0.1.2" }
+rgx-adapters-archive = { path = "../rgx-adapters-archive", version = "0.1.4" }
+rgx-adapters-docs = { path = "../rgx-adapters-docs", version = "0.1.4" }
+rgx-adapters-inspect = { path = "../rgx-adapters-inspect", version = "0.1.4" }
+rgx-adapters-llm = { path = "../rgx-adapters-llm", version = "0.1.4" }
+rgx-adapters-mail = { path = "../rgx-adapters-mail", version = "0.1.4" }
+rgx-adapters-media = { path = "../rgx-adapters-media", version = "0.1.4" }
+rgx-adapters-office = { path = "../rgx-adapters-office", version = "0.1.4" }
+rgx-adapters-pdf = { path = "../rgx-adapters-pdf", version = "0.1.4" }
+rgx-adapters-tabular = { path = "../rgx-adapters-tabular", version = "0.1.4" }
+rgx-adapters-threed = { path = "../rgx-adapters-threed", version = "0.1.4" }

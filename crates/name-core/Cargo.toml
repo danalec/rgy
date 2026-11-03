@@ -30,7 +30,7 @@ rgy-par = { path = "../par", version = "0.1.3", default-features = false }
 # One regex engine: the vendored zen-rs copy is gone; `re:`
 # path patterns compile through rgx-core's syntax/nfa/vm, the same engine
 # the copy was taken from (Apache-2.0).
-rgx-core = { path = "../rgx-core", version = "0.1.2", default-features = false }
+rgx-core = { path = "../rgx-core", version = "0.1.4", default-features = false }
 # The content grep runs on rgx-core's engine too -- the same one the name
 # path uses. There is no second engine behind it: a pattern that engine
 # refuses is a pattern the search refuses, and the refusal is said.

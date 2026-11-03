@@ -27,7 +27,7 @@ std = ["rgx-core/std", "rgx-core/tv-runtime"]
 # the `std` feature) the pack store the daemon greps in. Without the
 # default features it is `no_std` + `alloc`, which is what the engine's
 # own `no_std` configuration needs.
-rgx-core = { path = "../rgx-core", version = "0.1.2", default-features = false }
+rgx-core = { path = "../rgx-core", version = "0.1.4", default-features = false }
 
 [dev-dependencies]
 # The examples measure the name engine against the discovery seam's
