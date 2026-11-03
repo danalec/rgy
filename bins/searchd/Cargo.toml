@@ -29,7 +29,7 @@ rgy-name-core = { path = "../../crates/name-core", version = "0.1.6" }
 rgy-par = { path = "../../crates/par", version = "0.1.6" }
 rgy-proto = { path = "../../crates/proto", version = "0.1.6" }
 # rgx --serve front reads argv arrays with rgx's own JSON parser.
-rgx-core = { path = "../../crates/rgx-core", version = "0.1.2" }
+rgx-core = { path = "../../crates/rgx-core", version = "0.1.6" }
 # The adapter registry: the formats a search can read *into* — a PDF, a
 # .docx, a zip, a mail file. This is the second layer of the launcher, and
 # the reason the vendored adapters are here.

@@ -50,7 +50,7 @@ rgy-proto = { path = "../crates/proto", version = "0.1.6" }
 # content layer: the daemon started with `--tv-dir` answers from a packed
 # corpus instead of reading the files. The builder is upstream's, and it
 # is behind the `tv-runtime` feature because it is the only consumer.
-rgx-core = { path = "../crates/rgx-core", version = "0.1.2", default-features = false, features = [
+rgx-core = { path = "../crates/rgx-core", version = "0.1.6", default-features = false, features = [
     "std",
     "tv-runtime",
 ] }
