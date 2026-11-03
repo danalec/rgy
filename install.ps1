@@ -145,7 +145,7 @@ Read-RgyOptions -Switches @{ "skipchecksum" = "SkipChecksum"; "noautostart" = "N
 # an emulator, and an installer that hands it one installs something that
 # will not start.
 $expected = @{
-    'x86_64-windows.zip' = 'B2341B027D2A2E5D77CA92380EB10B099B593767C4508A72EC408BD7D49A193A'
+    'x86_64-windows.zip' = 'EFD23C6FD6198C03E7A8D8C91FDA0734C81F8D8CB42D9F4B58DEAFF79E1E33EE'
     'aarch64-windows.zip' = '0000000000000000000000000000000000000000000000000000000000000000'
 }
 
