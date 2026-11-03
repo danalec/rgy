@@ -1,6 +1,6 @@
 [package]
 name = "rgy-discovery-freebsd"
-version = "0.1.6"
+version = "0.1.8"
 edition = "2024"
 rust-version = "1.89"
 authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
@@ -17,10 +17,10 @@ readme = "../../README.md"
 [dependencies]
 # The backend is `no_std`: the seam comes in without its `std` feature, so
 # nothing here can drag the standard library in through the door.
-rgy-discovery = { path = "../discovery", version = "0.1.6", default-features = false }
+rgy-discovery = { path = "../discovery", version = "0.1.8", default-features = false }
 
 [dev-dependencies]
 # The oracle the reader is compared against is the portable walk, which is
 # `std`. The test needs it; the backend does not, and a normal build of
 # this crate does not see this edge.
-rgy-discovery = { path = "../discovery", version = "0.1.6", features = ["std"] }
+rgy-discovery = { path = "../discovery", version = "0.1.8", features = ["std"] }

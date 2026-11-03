@@ -88,18 +88,16 @@ fn be32(data: &[u8], at: usize) -> Result<u32> {
 }
 
 /// Read a little-endian `u32` at `at`.
+///
+/// **The size of an attribute is unsigned.** It was read as a signed `i32`,
+/// and a size with the top bit set came out negative -- and a negative
+/// number cast to `usize` is eighteen quintillion, not a size.
 #[cfg(feature = "openexr")]
 fn le32(data: &[u8], at: usize) -> Result<u32> {
     let b = data
         .get(at..at + 4)
         .ok_or_else(|| rgx_core::anyhow!("truncated at {at}"))?;
     Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-}
-
-/// Read a little-endian `i32` at `at`.
-#[cfg(feature = "openexr")]
-fn le32i(data: &[u8], at: usize) -> Result<i32> {
-    Ok(le32(data, at)? as i32)
 }
 
 // ===========================================================================
@@ -919,12 +917,26 @@ fn exr_meta(data: &[u8]) -> Result<ExrMeta> {
         at += used;
         let (typ, used) = cstr(data, at)?;
         at += used;
-        let size = le32i(data, at)? as usize;
+        let size = le32(data, at)? as usize;
         at += 4;
+        // The size is an unsigned 32-bit int in the format, and it was read as
+        // a signed one. A size with the top bit set became a negative number,
+        // and a negative number cast to `usize` is not a small number -- it is
+        // eighteen quintillion of them. The offset and the size were then
+        // added, the addition overflowed, and the reader panicked where it
+        // should have refused the file: the fuzzer found it on the third of
+        // November of 2026 with thirty-eight bytes.
+        //
+        // The end of the value is computed with an addition that cannot
+        // overflow, because on a 32-bit target four gigabytes is the end of
+        // the address space and the answer to that is a refusal.
+        let end = at
+            .checked_add(size)
+            .ok_or_else(|| rgx_core::anyhow!("OpenEXR attribute size overflows"))?;
         let value = data
-            .get(at..at + size)
+            .get(at..end)
             .ok_or_else(|| rgx_core::anyhow!("OpenEXR attribute truncated"))?;
-        at += size;
+        at = end;
         match typ.as_str() {
             "compression" => meta.compression = value.first().copied(),
             "lineOrder" => {}
@@ -988,7 +1000,15 @@ fn exr_box(value: &[u8]) -> Option<(u32, u32)> {
     let y1 = i32::from_le_bytes([value[4], value[5], value[6], value[7]]);
     let x2 = i32::from_le_bytes([value[8], value[9], value[10], value[11]]);
     let y2 = i32::from_le_bytes([value[12], value[13], value[14], value[15]]);
-    Some(((x2 - x1 + 1).max(0) as u32, (y2 - y1 + 1).max(0) as u32))
+    // The difference is computed in 64 bits: two corners at the ends of the
+    // signed range are four billion apart, and that subtraction overflows a
+    // 32-bit integer -- which is a panic where the answer is a window.
+    let w = (x2 as i64) - (x1 as i64) + 1;
+    let h = (y2 as i64) - (y1 as i64) + 1;
+    Some((
+        w.clamp(0, u32::MAX as i64) as u32,
+        h.clamp(0, u32::MAX as i64) as u32,
+    ))
 }
 
 /// The channel list: a name, a pixel type and the sampling.
@@ -1361,6 +1381,37 @@ mod tests {
         );
         assert!(s.contains("channels: 0"), "{s}");
         assert!(s.contains("version: 223"), "{s}");
+    }
+
+    /// The bytes that crash the reader, the second time the fuzzer found it
+    /// on the third of November of 2026: an OpenEXR header whose first
+    /// attribute says that its value is four gigabytes long.
+    ///
+    /// **The size is an unsigned 32-bit int, and it was read as a signed
+    /// one.** Four gigabytes came out negative, and a negative number cast to
+    /// `usize` is not a small number -- it is eighteen quintillion -- and the
+    /// offset plus that overflowed. A build with the overflow checks on
+    /// panics; a build without them wraps the sum and refuses the file, which
+    /// is the right answer by accident. The reader's answer to a file it
+    /// cannot parse is a refusal, not a crash, and it is a refusal on
+    /// purpose.
+    ///
+    /// The input the fuzzer itself wrote is not the one here: the run put it
+    /// in the artifacts directory and the workflow uploaded only the corpus,
+    /// so the file was lost -- and a crash that nobody keeps is a crash
+    /// nobody can fix. The workflow uploads the artifacts now. These bytes
+    /// are the same path -- the size is 0xffffffff -- and the test fails on
+    /// the code that has the signed read, which is the point.
+    #[test]
+    #[cfg(feature = "openexr")]
+    fn an_openexr_whose_attribute_size_is_not_a_size_is_refused_and_not_crashed() {
+        let bytes: Vec<u8> = vec![
+            0x76, 0x2f, 0x31, 0x01, 0x00, 0x00, 0x00, 0x00, 0x41, 0x00, 0x00, 0xff, 0xff, 0xff,
+            0xff,
+        ];
+        assert_eq!(bytes.len(), 15);
+        // A refusal, and not a panic: the size does not fit in the file.
+        assert!(OpenExr.extract(&bytes, "a.exr").is_err());
     }
 
     #[test]

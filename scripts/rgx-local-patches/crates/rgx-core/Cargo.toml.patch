@@ -1,13 +1,12 @@
 --- a/crates/rgx-core/Cargo.toml
 +++ b/crates/rgx-core/Cargo.toml
-@@ -1,6 +1,6 @@
+@@ -1,5 +1,5 @@
  [package]
- name = "rgx-core"
--version = "0.1.5"
-+version = "0.1.6"
+-name = "rgx-core"
++name = "rgy-vendored-core"
+ version = "0.1.8"
  edition = "2021"
  authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
- description = "rgx's engine: the adapter contract, the byte-search kernels, the JSON arena and the pack store -- no_std + alloc, with an opt-in std feature"
 @@ -11,7 +11,7 @@
  readme = "README.md"
  keywords = ["search", "regex", "engine", "ripgrep"]
@@ -17,7 +16,21 @@
  # What the published crate carries. The test corpus is the repository's:
  # the fixtures under `testdata/` are what this crate's own tests read, and
  # a user of the crate has no use for them. The examples are one-off
-@@ -45,7 +45,7 @@
+@@ -31,6 +31,13 @@
+     "/NOTICE",
+ ]
+ 
++# The package carries the rgy's own name on the registry, and the upstream's
++# name in the code: the crate a dependant sees is the crate the upstream
++# wrote, under the name its own code says (`rgx_core::`). The sources are
++# the upstream's byte for byte, and the name in the code is part of that.
++[lib]
++name = "rgx_core"
++
+ [features]
+ # rgx-core is `#![no_std]` + `alloc`; this feature decides what else it may
+ # use. It used to claim the opposite -- "always std" -- while carrying a
+@@ -45,7 +52,7 @@
  # flag, a core atomic, stays; and the JSON float parser becomes this crate's
  # own, since `f64::from_str` is std-only.
  default = ["std", "sha256-hw", "gzip", "zlib", "deflate", "bzip2", "lzma", "xz", "zstd", "snappy", "lz4", "blosc", "zip"]
@@ -26,7 +39,7 @@
  # The Tesla Valve pack store's codec, query vocabulary and planner. The
  # algorithmic half of `crates/rgx-tv`, held here so it can be `no_std` and so
  # `rgx` can take it without taking the thread pool with it. `rgx-tv` turns
-@@ -92,7 +92,7 @@
+@@ -92,7 +99,7 @@
  # that does not read a pack store should not link its format tables. The
  # engine alone, with no pack store, is `--no-default-features --features std`
  # (AVX2/SWAR + regex core).
@@ -35,7 +48,7 @@
  # SHA-256 hardware acceleration. It is in `default` above, and the path it
  # turns on replaces the scalar one rather than answering differently. One
  # backend is wired: SHA-NI on x86_64, detected at runtime by this crate's own
-@@ -119,32 +119,31 @@
+@@ -119,32 +126,31 @@
  # still loaded by the archive adapter's test suite.
  
  [dependencies]

@@ -1,6 +1,6 @@
 [package]
-name = "rgx-adapters-archive"
-version = "0.1.6"
+name = "rgy-vendored-adapters-archive"
+version = "0.1.8"
 edition = "2021"
 authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
 description = "rgx adapters: zip, tar, cpio, 7z, single-file decompressors"
@@ -32,6 +32,13 @@ include = [
     "/LICENSE-APACHE",
     "/NOTICE",
 ]
+
+# The package carries the rgy's own name on the registry, and the upstream's
+# name in the code: the crate a dependant sees is the crate the upstream
+# wrote, under the name its own code says (`rgx_adapters_archive::`). The sources are
+# the upstream's byte for byte, and the name in the code is part of that.
+[lib]
+name = "rgx_adapters_archive"
 
 [features]
 # Every adapter answers one format, so every format gets one feature and a
@@ -106,9 +113,8 @@ wim = ["std"]
 erofs = ["std"]
 squashfs = ["std", "rgx-core/lzma", "rgx-core/deflate", "rgx-core/xz", "rgx-core/zstd"]
 [dependencies]
-rgx-core = { path = "../rgx-core", version = "0.1.6", default-features = false, features = ["std", "sha256-hw"] }
-rar-codec = { path = "../rar-codec", version = "0.1.6", optional = true }
-
+rgx-core = { path = "../rgx-core", version = "0.1.8", default-features = false, features = ["std", "sha256-hw"], package = "rgy-vendored-core" }
+rar-codec = { path = "../rar-codec", version = "0.1.8", optional = true, package = "rgy-vendored-rar-codec" }
 # The benches are not declared here: they are rgx's own measurement tools,
 # and the copy does not carry them (scripts/sync-rgx-upstream.sh, EXCLUDE).
 # The manifest that declares them is upstream's; the patch beside this

@@ -347,21 +347,30 @@ if ($remainingOracle.Count -gt 0) {
 
 # --- 5. the vendored crates come from the tree --------------------------------
 # The vendored crates are the upstream's crates and they go out under the
-# upstream's names -- rgx-core, the rgx-adapters-* family and rar-codec --
-# carrying this tree's patches inside them, at the upstream's next version
-# (0.1.2; 0.1.1 is published and yanked). A dependency that names one of
-# them without a `path` resolves to the registry's copy instead of the
-# tree's -- silently, and that copy is the upstream's, without one of the
-# patches that live here. The tree would stop being upstream's bytes and the
-# drift check would have nothing to compare.
+# rgy's own names now -- rgy-vendored-core, the rgy-vendored-adapters-*
+# family and rgy-vendored-rar-codec -- carrying this tree's patches inside
+# them, at this tree's version (0.1.8). They used to go out under the
+# upstream's names, and that was a collision: the upstream publishes the
+# same names, and a name and a number is one thing on the registry, so two
+# publishers cannot both take it. The upstream's names are the upstream's.
 #
-# So the rule is: every dependency on a vendored name carries a path, and no
+# The dependency that names one of them carries a path, and no lock file
+# resolves one of them from a registry. A dependency that names one without
+# a `path` resolves to the registry's copy instead of the tree's --
+# silently, and that copy is the upstream's, without one of the patches that
+# live here. The tree would stop being upstream's bytes and the drift check
+# would have nothing to compare.
+#
+# The rule is: every dependency on a vendored name carries a path, and no
 # lock file resolves one of them from a registry. The scan covers every
 # manifest in the tree, not only the vendored ones: the offending
 # declaration would sit in rgy's own crate, not in the vendored tree.
+#
+# Both names are matched: the key the tree writes (`rgx-core`, the name the
+# code says) and the package the registry knows (`rgy-vendored-core`).
 Write-Host "`n[5/6] the vendored crates come from the tree" -ForegroundColor Cyan
 
-$vendoredRe = '^(rgx-core|rgx-adapters-[a-z0-9-]+|rar-codec)$'
+$vendoredRe = '^(rgx-core|rgx-adapters-[a-z0-9-]+|rar-codec|rgy-vendored-[a-z0-9-]+)$'
 $vendoredFails = New-Object System.Collections.Generic.List[string]
 $vendoredCount = 0
 
