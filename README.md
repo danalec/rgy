@@ -23,7 +23,7 @@ Two faces, one daemon. Click either one to watch it move.
 
 ## Install
 
-The release is **0.1.6**. It is on [GitHub](https://github.com/danalec/rgy/releases/tag/rgy-v0.1.6), and the crates are on crates.io.
+The release is **0.1.8**. It is on [GitHub](https://github.com/danalec/rgy/releases/tag/rgy-v0.1.8), and the crates are on crates.io.
 
 **One line**, and it installs the tool, the daemon and the launcher:
 
@@ -49,7 +49,7 @@ macOS and on aarch64 the installer says so and installs nothing.
 **From crates.io:**
 
 ```sh
-cargo install rgy-search --version 0.1.6         # gives you `searchctl`
+cargo install rgy-search --version 0.1.8         # gives you `searchctl`
 ```
 
 That is the whole install for the tool you actually type, and it drops the
@@ -62,9 +62,9 @@ The other binaries are separate crates, because most people only want the
 first one:
 
 ```sh
-cargo install rgy-searchd --version 0.1.6       # the daemon: searchd
-cargo install rgy-autostart --version 0.1.6     # the login item: rgy-autostart
-cargo install rgxy --version 0.1.6            # the window: rgxy
+cargo install rgy-searchd --version 0.1.8       # the daemon: searchd
+cargo install rgy-autostart --version 0.1.8     # the login item: rgy-autostart
+cargo install rgxy --version 0.1.8            # the window: rgxy
 ```
 
 **From the release** — the archive carries the four binaries, the `rgy`
@@ -72,8 +72,8 @@ alias and the documents, and it needs neither Rust nor a compiler:
 
 | platform | archive |
 |---|---|
-| Windows x86_64 | `rgy-v0.1.6-x86_64-windows.zip` |
-| Linux x86_64 | `rgy-v0.1.6-x86_64-linux.tar.gz` |
+| Windows x86_64 | `rgy-v0.1.8-x86_64-windows.zip` |
+| Linux x86_64 | `rgy-v0.1.8-x86_64-linux.tar.gz` |
 
 The release page carries a `SHA256SUMS` beside the archives.
 
@@ -372,10 +372,10 @@ stderr, zero matches, exit 1.
 
 ## Status
 
-The release is out: **0.1.6**, tagged `rgy-v0.1.6`, with the Windows and
+The release is out: **0.1.8**, tagged `rgy-v0.1.8`, with the Windows and
 Linux archives beside a `SHA256SUMS`, and all thirty-two crates on crates.io.
 The release page is the changelog — it is
-[`docs/release-0.1.6.md`](docs/release-0.1.6.md), the file the release
+[`docs/release-0.1.8.md`](docs/release-0.1.8.md), the file the release
 publishes.
 
 ### The packages that are not out yet
@@ -408,45 +408,64 @@ measurement does not reproduce on the host is measured and reported instead.
 
 ### The crates
 
-All thirty-two are on crates.io at 0.1.6. Five are the programs — `rgy-search`,
+All thirty-two are on crates.io at 0.1.8. Five are the programs — `rgy-search`,
 `rgy-searchd`, `rgy-autostart`, `rgxy` and `rgy-zen` — and twenty-seven are
 the libraries under them: `rgy-name-core`, `rgy-discovery`,
 `rgy-discovery-dispatch`, `rgy-discovery-linux`, `rgy-discovery-macos`,
 `rgy-discovery-freebsd`, `rgy-discovery-windows`, `rgy-engine`, `rgy-proto`,
 `rgy-launcher`, `rgy-launcher-windows`, `rgy-pick`, `rgy-adapters`,
 `rgy-par`, `rgy-search-ui`, and the twelve the upstream's engine is
-transported as: `rgx-core`, `rgx-adapters-archive`,
-`rgx-adapters-docs`, `rgx-adapters-inspect`, `rgx-adapters-llm`,
-`rgx-adapters-mail`, `rgx-adapters-media`, `rgx-adapters-office`,
-`rgx-adapters-pdf`, `rgx-adapters-tabular`, `rgx-adapters-threed`
-and `rar-codec`.
+transported as: `rgy-vendored-core`, `rgy-vendored-adapters-archive`,
+`rgy-vendored-adapters-docs`, `rgy-vendored-adapters-inspect`,
+`rgy-vendored-adapters-llm`, `rgy-vendored-adapters-mail`,
+`rgy-vendored-adapters-media`, `rgy-vendored-adapters-office`,
+`rgy-vendored-adapters-pdf`, `rgy-vendored-adapters-tabular`,
+`rgy-vendored-adapters-threed` and `rgy-vendored-rar-codec`.
 
-Three prefixes, three owners. A crate that is the upstream's keeps the
-upstream's name — `rgx-core`, the `rgx-adapters-*` family and `rar-codec` —
-because the code inside is the upstream's, and this tree carries fixes in it
-that the upstream has not taken. The backend is this project's: `rgy-*`,
-because `rgy`, `discovery`, `engine`, `proto`, `par`, `zen-rs` and `autostart`
-are taken on crates.io. And the front is `rgxy`: the launcher, the one program
-the user runs with the daemon behind it.
+Two owners, two prefixes. A crate that is this project's is `rgy-*`, and the
+front is `rgxy`: the launcher, the one program the user runs with the daemon
+behind it. The twelve trees that come from the upstream are published as
+`rgy-vendored-*`, and the reason is the registry's, not this project's taste: a
+crate on crates.io has one name and one version, and the upstream's names —
+`rgx-core`, the `rgx-adapters-*` family and `rar-codec` — are the upstream's to
+publish. Until this release the two projects took turns on that line — 0.1.2
+and 0.1.4 and 0.1.6 are this project's copies, 0.1.3 and 0.1.5 are the
+upstream's — each one stepping over the number the other had taken, because a
+number one repository has taken is a number the other cannot have. This
+release is the one where the two meet on it: the copies take a name of their
+own, and the numbers stay the same.
 
-The upstream's names are published by this project, at the next free version of
-the line both repositories draw from — 0.1.6, because the upstream published
-0.1.5 on the third of November and a version that exists cannot be published
-again. The binaries skip 0.1.5 on purpose: the number is on the line, and a
-number one repository has taken is a number the other cannot have. The code
-inside is the upstream's, with this tree's fixes on top, so the crates.io
-artifacts carry the fixes the archives carry.
+The code inside the transported crates is still the upstream's, and a dependant
+writes the same code either way: the crate's Rust name is the upstream's
+(`rgx_core::`), so the sources are the upstream's byte for byte and not one
+line of them was touched to make the package answer to another name. The
+package carries this project's name on the registry; the library keeps the
+name its own code says. What the copy carries on top is this tree's fixes —
+the EXR attribute-size overflow among them, which no published version of that
+adapter had before 0.1.8: every earlier one on crates.io read the attribute's
+size as a signed `i32`, and a file with a large enough attribute overflows it.
 
-The upstream's own published versions of those crates — 0.1.0 and 0.1.1 — are
-**yanked** now: crates.io does not delete, so a yank is the most it does, and
-it is reversible. Those are the versions the 0.1.2 artifacts of this project
-resolved, and a yanked dependency breaks every published crate that names it:
-`cargo install rgy-search` asked for `rgx-adapters-archive ^0.1.1` and was
-told "version 0.1.1 is yanked". The 0.1.6 artifacts ask for `^0.1.6` and
-resolve; the 0.1.3 artifacts ask for `^0.1.2` and still do; and the 0.1.2
-artifacts resolve again now that 0.1.2 is there. The
-[release page](docs/release-0.1.6.md) says what the change costs and when it
-lands.
+The number is **0.1.8**, and it is the upstream's line as much as this
+project's: the upstream published 0.1.8 with the EXR overflow fixed, and this
+project's copy is taken from the upstream's 0.1.8, so the two stand at the
+same version with the same fix in them. A dependant that asks for
+`rgy-vendored-core ^0.1.8` gets this project's copy; one that asks for
+`rgx-core ^0.1.8` gets the upstream's. Before this release the two could not
+both be had — they wanted the same name at the same version, and the registry
+gives that to one of them.
+
+The versions this project published under the upstream's names — 0.1.2, 0.1.4
+and 0.1.6 — stay where they are, and they are not yanked: they are the
+artifacts of older builds, and the registry keeps what it keeps. The upstream's
+own first versions — 0.1.0 and 0.1.1 — are **yanked**: crates.io does not
+delete, so a yank is the most it does, and it is reversible. Those are the
+versions the 0.1.2 artifacts of this project resolved, and a yanked dependency
+breaks every published crate that names it: `cargo install rgy-search` asked
+for `rgx-adapters-archive ^0.1.1` and was told "version 0.1.1 is yanked". The
+0.1.6 artifacts ask for `^0.1.6` and resolve; the 0.1.3 artifacts ask for
+`^0.1.2` and still do; and the 0.1.2 artifacts resolve again now that 0.1.2 is
+there. The [release page](docs/release-0.1.8.md) says what the change costs
+and when it lands.
 
 The command-line tool's crate was published as `rgy-searchctl` first;
 `rgy-search` is the name the package managers already use, and the binary it
@@ -465,9 +484,9 @@ PowerShell twin, `scripts/publish-crates.ps1`).
 The 0.1.1, 0.1.2, 0.1.3 and 0.1.4 numbers are taken as well, by earlier builds
 of this same project — the registry keeps what it keeps, and a version number
 is as permanent as a name. Those builds are not this tree: the protocol they
-shipped has neither the limits nor the count rules that 0.1.6 has, and a
+shipped has neither the limits nor the count rules that 0.1.8 has, and a
 program pinned to them does not build against it. The version names the
-bytes, and this release is **0.1.6** because these are the bytes.
+bytes, and this release is **0.1.8** because these are the bytes.
 
 ## Related projects
 

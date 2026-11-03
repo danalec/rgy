@@ -48,14 +48,14 @@ everything with it.
 
 ## 2. Install it
 
-The release is **0.1.6**. It is on
-[GitHub](https://github.com/danalec/rgy/releases/tag/rgy-v0.1.6), and the
+The release is **0.1.8**. It is on
+[GitHub](https://github.com/danalec/rgy/releases/tag/rgy-v0.1.8), and the
 crates are on crates.io.
 
 ### From crates.io
 
 ```sh
-cargo install rgy-search --version 0.1.6         # gives you `searchctl`
+cargo install rgy-search --version 0.1.8         # gives you `searchctl`
 ```
 
 That is the whole install for the tool you actually type. It needs **Rust
@@ -67,10 +67,10 @@ The other binaries are separate crates, because most people only want the
 first one:
 
 ```sh
-cargo install rgy-searchd --version 0.1.6       # the daemon: searchd
-cargo install rgy-autostart --version 0.1.6     # the login item: rgy-autostart
-cargo install rgxy --version 0.1.6            # the window: rgxy
-cargo install rgy-zen --version 0.1.6           # the zen CLI: zen-rs (Windows)
+cargo install rgy-searchd --version 0.1.8       # the daemon: searchd
+cargo install rgy-autostart --version 0.1.8     # the login item: rgy-autostart
+cargo install rgxy --version 0.1.8            # the window: rgxy
+cargo install rgy-zen --version 0.1.8           # the zen CLI: zen-rs (Windows)
 ```
 
 ### From the release
@@ -82,8 +82,8 @@ administrator — and a symlink on Linux and macOS:
 
 | platform | archive |
 |---|---|
-| Windows x86_64 | `rgy-v0.1.6-x86_64-windows.zip` |
-| Linux x86_64 | `rgy-v0.1.6-x86_64-linux.tar.gz` |
+| Windows x86_64 | `rgy-v0.1.8-x86_64-windows.zip` |
+| Linux x86_64 | `rgy-v0.1.8-x86_64-linux.tar.gz` |
 
 The release page carries a `SHA256SUMS` beside the archives. The archive
 that matches the machine is the one that gets installed: the operating
@@ -142,7 +142,7 @@ they have everywhere else, and the project itself is still rgy.
 
 ### The library
 
-The crates are on crates.io too, all thirty-two at 0.1.6, and fifteen of them
+The crates are on crates.io too, all thirty-two at 0.1.8, and fifteen of them
 are this project's own library:
 
 | crate | what it gives you |
@@ -251,12 +251,12 @@ The binaries land in `target/release/`. On Windows that is
 `target\release\searchctl.exe`.
 
 The pack store tool (section 9) is `rgx-tv`, and a default build already
-makes it: the engine's `std` feature asks for `rgx-core/tv-runtime`, and that
+makes it: the engine's `std` feature asks for `rgy-vendored-core/tv-runtime`, and that
 feature is what carries the binary. `cargo build --release` therefore leaves
 `rgx-tv` in `target/release/` as well. To build that one binary on its own:
 
 ```sh
-cargo build --release -p rgx-core --bin rgx-tv --features tv-runtime
+cargo build --release -p rgy-vendored-core --bin rgx-tv --features tv-runtime
 ```
 
 The release scripts build the shippable archives: `scripts/build-release.sh`
@@ -1297,12 +1297,12 @@ being written. rgy skips it and lists it rather than failing the run.
 |---|---|
 | [README.md](README.md) | the map: what rgy is, how it compares to rgx |
 | [FORMATS.md](FORMATS.md) | what it reads inside a file, format by format |
-| [docs/release-0.1.6.md](docs/release-0.1.6.md) | the 0.1.6 release page, with the changelog in it |
+| [docs/release-0.1.8.md](docs/release-0.1.8.md) | the 0.1.8 release page, with the changelog in it |
 | [benchmark/](benchmark/) | the measured numbers |
 | [rgx](https://github.com/danalec/rgx) | the content-search specialist this workspace is built on |
 
 | link | what it is |
 |---|---|
-| [the 0.1.6 release](https://github.com/danalec/rgy/releases/tag/rgy-v0.1.6) | the archives, the `SHA256SUMS`, and the changelog |
-| [crates.io](https://crates.io/crates/rgy-search) | the twenty crates, all at 0.1.6 |
+| [the 0.1.8 release](https://github.com/danalec/rgy/releases/tag/rgy-v0.1.8) | the archives, the `SHA256SUMS`, and the changelog |
+| [crates.io](https://crates.io/crates/rgy-search) | the thirty-two crates, all at 0.1.8 |
 | [docs.rs](https://docs.rs/rgy-name-core) | the API of each crate |
