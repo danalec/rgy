@@ -1,6 +1,6 @@
 [package]
 name = "rgy-adapters"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 rust-version = "1.89"
 authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
@@ -20,7 +20,7 @@ rgx-core = { path = "../rgx-core", version = "0.1.4", default-features = false }
 # The content engine's seam: the reader the adapters answer through, and
 # the document it hands back. It is `no_std` + `alloc` without its `std`
 # feature, and this crate needs the `std` half — the adapters read files.
-rgy-name-core = { path = "../name-core", version = "0.1.3" }
+rgy-name-core = { path = "../name-core", version = "0.1.4" }
 # The ten adapter families, transported from upstream. Each one hands over
 # its adapters; the registry is what orders them.
 rgx-adapters-archive = { path = "../rgx-adapters-archive", version = "0.1.4" }

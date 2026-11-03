@@ -1,6 +1,6 @@
 [package]
 name = "rgy-name-core"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 rust-version = "1.89"
 authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
@@ -23,10 +23,10 @@ default = ["std"]
 std = ["rgy-par/std", "rgx-core/std", "rgy-discovery/std"]
 
 [dependencies]
-rgy-discovery = { path = "../discovery", version = "0.1.3", default-features = false }
+rgy-discovery = { path = "../discovery", version = "0.1.4", default-features = false }
 # The parallelism: split the work, run the pieces, join them. The width is
 # the user's (`RGY_NUM_THREADS`, or what the caller sets).
-rgy-par = { path = "../par", version = "0.1.3", default-features = false }
+rgy-par = { path = "../par", version = "0.1.4", default-features = false }
 # One regex engine: the vendored zen-rs copy is gone; `re:`
 # path patterns compile through rgx-core's syntax/nfa/vm, the same engine
 # the copy was taken from (Apache-2.0).

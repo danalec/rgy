@@ -124,7 +124,7 @@ if ($here -and (Test-Path -LiteralPath (Join-Path $here 'scripts/lib/digest.ps1'
 # exit code.
 $InstallDir = "$env:LOCALAPPDATA\Programs\rgy"
 $BaseUrl = 'https://github.com/danalec/rgy/releases/download'
-$Version = 'rgy-v0.1.3'
+$Version = 'rgy-v0.1.4'
 $SkipChecksum = $false
 $NoAutostart = $false
 $NoLauncher = $false

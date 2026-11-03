@@ -1,6 +1,6 @@
 [package]
 name = "rgy-discovery-linux"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 rust-version = "1.89"
 authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
@@ -17,7 +17,7 @@ readme = "../../README.md"
 [dependencies]
 # The backend is `no_std`: the seam comes in without its `std` feature, so
 # nothing here can drag the standard library in through the door.
-rgy-discovery = { path = "../discovery", version = "0.1.3", default-features = false }
+rgy-discovery = { path = "../discovery", version = "0.1.4", default-features = false }
 
 # The backend has no dependency of its own: the kernel is asked through
 # the calls declared by hand in `src/walk.rs` and `src/watch.rs`, and the

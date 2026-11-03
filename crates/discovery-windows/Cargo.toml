@@ -1,6 +1,6 @@
 [package]
 name = "rgy-discovery-windows"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 rust-version = "1.89"
 authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
@@ -23,7 +23,7 @@ readme = "../../README.md"
 # The seam, without its `std` feature. The backend only speaks the block
 # types and the change vocabulary, and neither needs a filesystem -- so the
 # seam must not drag `std` in through the back door.
-rgy-discovery = { path = "../discovery", version = "0.1.3", default-features = false }
+rgy-discovery = { path = "../discovery", version = "0.1.4", default-features = false }
 
 # The Win32 calls are declared by hand, in `src/win.rs`, so there is no
 # dependency to gate here: the calls themselves are the Windows-only part of
