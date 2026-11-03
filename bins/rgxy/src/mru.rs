@@ -74,13 +74,20 @@ use rgy_launcher::usage::History;
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
 /// How many times the move that replaces the store is tried.
-const RENAME_TRIES: u32 = 5;
+const RENAME_TRIES: u32 = 100;
+
+/// How many times the read of the store is tried.
+const READ_TRIES: u32 = 100;
 
 /// How many times the lock is tried before the write is given up on.
 const LOCK_TRIES: u32 = 100;
 
 /// How long the writer waits between the tries, in milliseconds.
-const LOCK_WAIT_MS: u64 = 5;
+///
+/// The read and the move wait the same wait the lock waits: the three are
+/// the same kind of refusal -- somebody else has the store for a moment --
+/// and a refusal that lasts a moment is not a refusal.
+const WAIT_MS: u64 = 5;
 
 /// The platform's own code for "the file is held by another process".
 #[cfg(windows)]
@@ -123,16 +130,33 @@ pub fn now() -> u64 {
 /// launcher that has never run has no memory, and that is the normal
 /// state of a new machine.
 ///
+/// A file that is there and **busy** is read a moment later: somebody else
+/// has it open, and on Windows the platform refuses the read of a file that
+/// is open without the sharing the reader asks for. That is not a file that
+/// cannot be read — it is a file that is held for a moment, and a refusal
+/// that lasts a moment is not a refusal. The read waits, the way the lock
+/// waits. The wait is bounded: a store that stays held is a store the
+/// caller has to be told about.
+///
 /// A file that is there and cannot be read is an error, and it is kept:
 /// the history is gone for this run, the ranking falls back to the
 /// daemon's order and the nudge does not come back — and the launcher
 /// has to say that much. The **write** is what recovers: it moves the
 /// broken file aside and starts the memory again.
 pub fn load(path: &Path) -> Result<History, std::io::Error> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => Ok(parse(&text)),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(History::new()),
-        Err(err) => Err(err),
+    let mut attempt = 0;
+    loop {
+        match std::fs::read_to_string(path) {
+            Ok(text) => return Ok(parse(&text)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(History::new()),
+            Err(err) => {
+                attempt += 1;
+                if attempt >= READ_TRIES || !busy(&err) {
+                    return Err(err);
+                }
+                std::thread::sleep(Duration::from_millis(WAIT_MS));
+            }
+        }
     }
 }
 
@@ -248,6 +272,14 @@ pub fn save(path: &Path, history: &History) -> std::io::Result<()> {
     let on_disk = match load(path) {
         Ok(history) => history,
         Err(err) => {
+            // A store that is **busy** is not a store that is broken, and a
+            // busy store is not moved aside: the move would take the
+            // history away from a file that is perfectly good, and the
+            // file that is there is the user's memory. The update is lost
+            // -- the caller is told -- but the history is not.
+            if busy(&err) {
+                return Err(err);
+            }
             // A file that cannot be read is not a file with no history:
             // the merge would throw away what is in it, and the write is
             // refused rather than the history lost. But a store that
@@ -345,7 +377,10 @@ fn write_store(path: &Path, history: &History, id: u64) -> std::io::Result<()> {
 /// process can have the store open at that exact instant, and the
 /// platform refuses the replace while it is. A refusal that lasts a
 /// moment is not a refusal, and a history update dropped over it is a
-/// history the user never had.
+/// history the user never had. The wait is the lock's wait, and the
+/// refusal that is waited for is the one that is about **time**: a move
+/// that fails because the store's path is a directory fails the same way
+/// every time, and waiting for it only makes the caller wait for nothing.
 fn replace(temp: &Path, store: &Path) -> std::io::Result<()> {
     let mut attempt = 0;
     loop {
@@ -353,10 +388,10 @@ fn replace(temp: &Path, store: &Path) -> std::io::Result<()> {
             Ok(()) => return Ok(()),
             Err(err) => {
                 attempt += 1;
-                if attempt >= RENAME_TRIES {
+                if attempt >= RENAME_TRIES || !busy(&err) {
                     return Err(err);
                 }
-                std::thread::sleep(Duration::from_millis(2));
+                std::thread::sleep(Duration::from_millis(WAIT_MS));
             }
         }
     }
@@ -435,7 +470,7 @@ impl Lock {
                     if attempt >= LOCK_TRIES || !busy(&err) {
                         return Err(err);
                     }
-                    std::thread::sleep(Duration::from_millis(LOCK_WAIT_MS));
+                    std::thread::sleep(Duration::from_millis(WAIT_MS));
                 }
             }
         }
@@ -906,6 +941,59 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A store that is held is not moved aside.
+    ///
+    /// The write that cannot read the store used to move it aside. The
+    /// code read "a file that cannot be read" and "a file that somebody
+    /// else has open" as the same thing, and a store that was held for a
+    /// moment was renamed to `.broken` — the user's memory gone, because
+    /// another process had the file open at that exact instant. The store
+    /// that was moved aside is a store the user cannot get back.
+    ///
+    /// The store is held here with no sharing at all, so the read is
+    /// refused the way the platform refuses it: with the sharing
+    /// violation, and not with the "this file is broken" that the
+    /// quarantine is for. The write fails, the caller is told, and the
+    /// store is where it was.
+    #[cfg(windows)]
+    #[test]
+    fn a_store_that_is_held_is_not_moved_aside() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let dir = scratch("mru-held");
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("usage.tsv");
+
+        let mut history = History::new();
+        history.record("C:/Users/dana/notas.txt", 1_000);
+        save(&path, &history).expect("the store is written");
+        let before = std::fs::read(&path).expect("the store is there");
+
+        // The store, there and held: nobody can read it and nobody can
+        // move it, and the write has to say so.
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .expect("the store is held");
+
+        let mut other = History::new();
+        other.record("C:/Users/dana/outro.txt", 2_000);
+        assert!(save(&path, &other).is_err(), "the store cannot be read");
+
+        drop(held);
+        assert_eq!(
+            std::fs::read(&path).expect("the store is there"),
+            before,
+            "the store survived the failed write"
+        );
+        assert!(
+            !quarantine_path(&path).exists(),
+            "the store was moved aside"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A move that fails leaves no temporary file behind.
     ///
     /// The store's own path is taken by a directory here, so the move
@@ -949,11 +1037,22 @@ mod tests {
     /// everybody, a move fails about one time in eight, and 320 saves do
     /// not get that lucky.
     ///
-    /// The test is not flaky: every writer writes to a file of its own,
-    /// the move over the store is the platform's own and nobody holds
-    /// the store while it happens, and the writers do not read the
-    /// store — there is nothing in the test that can make a writer's
-    /// move fail.
+    /// The test was flaky, and the comment that stood here said it was
+    /// not. The claim was about the writers: every writer writes to a
+    /// file of its own, the writers do not read the store, and the lock
+    /// holds one writer at a time. All of that is true — and none of it
+    /// is the whole story. On Windows the platform refuses the read and
+    /// the move of a file that another **process** has open, and the
+    /// writers of this test are not the only processes on the machine.
+    /// The platform does not say who has the file; it says that somebody
+    /// does. The write that happened to be on the store at that instant
+    /// was dropped, with the caller's update lost and the launcher never
+    /// told.
+    ///
+    /// The fix is not in the test. A refusal that lasts a moment is not a
+    /// refusal: the read and the move wait now, the wait the lock waits.
+    /// The test still says what it says — no writer loses an update — and
+    /// it says it on a machine that is busy.
     #[test]
     fn concurrent_writers_lose_no_update_and_leave_no_temporary_file() {
         const WRITERS: usize = 8;
