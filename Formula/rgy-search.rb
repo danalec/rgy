@@ -17,15 +17,15 @@ class RgySearch < Formula
   desc "Whole-filesystem name search and content search in one stack"
   homepage "https://github.com/danalec/rgy"
   license "Apache-2.0"
-  version "0.1.4"
+  version "0.1.6"
 
   on_arm do
-    url "https://github.com/danalec/rgy/releases/download/rgy-v0.1.4/rgy-v0.1.4-aarch64-apple-darwin.tar.gz"
+    url "https://github.com/danalec/rgy/releases/download/rgy-v0.1.6/rgy-v0.1.6-aarch64-apple-darwin.tar.gz"
     sha256 "0000000000000000000000000000000000000000000000000000000000000000"
   end
 
   on_intel do
-    url "https://github.com/danalec/rgy/releases/download/rgy-v0.1.4/rgy-v0.1.4-x86_64-apple-darwin.tar.gz"
+    url "https://github.com/danalec/rgy/releases/download/rgy-v0.1.6/rgy-v0.1.6-x86_64-apple-darwin.tar.gz"
     sha256 "0000000000000000000000000000000000000000000000000000000000000000"
   end
 

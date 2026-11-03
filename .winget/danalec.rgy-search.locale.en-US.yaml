@@ -1,7 +1,8 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.9.0.schema.json
 # SPDX-License-Identifier: Apache-2.0
 # STAGED: the release this manifest names exists -- on the GitHub mirror and
-# on the forgejo -- but the manifest is not in microsoft/winget-pkgs yet.
+# on the forgejo -- and the manifest is in a pull request on
+# microsoft/winget-pkgs, waiting for a moderator of the community to merge it.
 # scripts/publish-release.ps1 rewrites the version and the release-notes URL
 # when it publishes one.
 PackageIdentifier: danalec.rgy-search

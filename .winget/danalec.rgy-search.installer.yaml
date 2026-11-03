@@ -1,8 +1,9 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.9.0.schema.json
 # SPDX-License-Identifier: Apache-2.0
 # STAGED: the release this manifest names exists -- on the GitHub mirror and
-# on the forgejo -- but the manifest itself is not in microsoft/winget-pkgs,
-# so `winget install danalec.rgy-search` installs nothing today.
+# on the forgejo -- and the manifest is in a pull request on
+# microsoft/winget-pkgs, waiting for a moderator of the community to merge
+# it, so `winget install danalec.rgy-search` installs nothing today.
 # scripts/publish-release.ps1 rewrites the version, the URL, the digest and
 # the date when it publishes one.
 PackageIdentifier: danalec.rgy-search
