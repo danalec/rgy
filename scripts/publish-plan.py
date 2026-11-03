@@ -40,16 +40,21 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-# The vendored trees are the upstream's crates and they go out under the
-# upstream's names -- `rgx-core`, the `rgx-adapters-*` family and
-# `rar-codec`. That is not a fork of somebody else's crate: the upstream is
-# the same owner's project, and what the house publishes under the upstream's
-# name is the upstream's engine with this tree's patches inside it.
+# The vendored trees are the upstream's crates and they go out under this
+# repository's own names -- `rgy-vendored-core`, the
+# `rgy-vendored-adapters-*` family and `rgy-vendored-rar-codec` -- with this
+# tree's patches inside them. That is not a fork of somebody else's crate:
+# the upstream is the same owner's project, and what is published here is
+# the upstream's engine with this tree's patches on top. The name is this
+# repository's because the upstream's names are the upstream's to publish:
+# a name and a number is one thing on the registry, and two publishers
+# cannot both take it.
 #
-# Their version is the upstream's next one: 0.1.1 is published (and yanked),
-# and a version that exists cannot be published again. The bump is a patch
-# like any other divergence -- the sync copies the upstream's manifests, and
-# the patch says what the house changed.
+# Their version is this repository's version, the same one every other
+# crate of ours carries, because they are published from here. The vendored
+# manifests are upstream's files plus a patch, and the patch is what carries
+# the name and the number -- `scripts/derive-vendored-patches.py` writes it,
+# and `scripts/check-drift.sh` says whether the patch and the tree agree.
 #
 # So nothing is withheld from the plan: the vendored trees are ours to
 # publish, and the plan says so.

@@ -299,9 +299,9 @@ jobs:
       #
       # Three crates are not in the list, and each one says why.
       #
-      # `rgx-adapters-docs` is upstream's crate, transported verbatim, and
-      # it spawns processes (soffice, tesseract), which is `std` by
-      # definition.
+      # `rgy-vendored-adapters-docs` is the upstream's crate, transported
+      # verbatim, and it spawns processes (soffice, tesseract), which is `std`
+      # by definition.
       #
       # `rgy-adapters` is this repository's, and for the same reason one
       # step further: it orders the ten upstream families, and every
@@ -322,15 +322,17 @@ jobs:
       # embedded search box was in no build in the tree. With it, that
       # half is compiled on a target that has no filesystem to reach for.
       #
-      # The flag says `rgx-core` and the crate is `rgx-core`: the vendored
-      # tree carries the upstream's name, so the key in `[dependencies]` and
-      # the package name are one word. Cargo resolves `package/feature` on
-      # the command line by the name the dependency is REFERRED TO -- the
-      # key -- and the two used to differ here, when the vendored crates
-      # went out under the house's names and the key stayed. A flag that
+      # The flag says `rgx-core` and the package is `rgy-vendored-core`: the
+      # key the tree writes is the upstream's, and the package the registry
+      # knows is this repository's. Cargo resolves `package/feature` on the
+      # command line by the name the dependency is REFERRED TO -- the key --
+      # and the two differ here, since the vendored crates go out under this
+      # repository's names and the key stayed the upstream's. A flag that
       # names the package where the key is spelled differently fails with
-      # "none of the selected packages contains this feature" -- a failure
-      # that reads like a missing feature and is a misspelled name.
+      # "the package 'rgy-engine' does not contain this feature:
+      # rgy-vendored-core/tv" -- a failure that reads like a missing
+      # feature and is a misspelled name. Measured on 2026-11-03: the flag
+      # below builds, the package's spelling does not.
       - run: cargo build --release --locked --no-default-features -p rgy-par -p rgy-discovery -p rgy-name-core -p rgy-proto -p rgy-engine -p rgy-discovery-dispatch -p rgy-autostart -p rgy-discovery-linux -p rgy-discovery-freebsd -p rgy-discovery-windows -p rgy-discovery-macos -p rgy-launcher -p rgy-pick -p rgy-launcher-windows --features rgx-core/tv --target x86_64-unknown-none
       # The lint of the same tree. A build that prints a warning is a
       # warning somebody has to read, and the code that only exists

@@ -113,6 +113,19 @@ function Get-Requirement([string]$line) {
     return ""
 }
 
+# The package a renamed dependency names, read the way the unix twin reads
+# it: the first `package = "..."` on the line, and the value ends at the
+# first quote after it.
+#
+# The key of a renamed dependency is the upstream's -- `rgx-core` -- and the
+# package is this repository's -- `rgy-vendored-core` -- so the key alone
+# does not say whose requirement the line carries. The line that says it is
+# the one that names the package.
+function Get-PackageName([string]$line) {
+    if ($line -cmatch 'package[ \t]*=[ \t]*"([^"]*)"') { return $matches[1] }
+    return ""
+}
+
 # --- 1. the version ---------------------------------------------------------
 #
 # The workspace root is virtual: it has no version of its own. The crates
@@ -129,10 +142,10 @@ function Get-Requirement([string]$line) {
 # line of twenty manifests is found by the reader, not by the script.
 #
 # The manifests are the workspace's own: the crates this repository
-# publishes and the binaries it ships. The vendored trees (crates/rgx-*,
-# crates/rar-codec) are upstream rgx's -- they carry upstream's version,
-# upstream publishes them, and a bump here would be a fork. The e2e
-# harness is not published either, and keeps its 0.0.0.
+# publishes and the binaries it ships -- and the vendored trees
+# (crates/rgx-*, crates/rar-codec) too, because this repository publishes
+# them, under this repository's names, at this repository's version. The
+# e2e harness is not published either, and keeps its 0.0.0.
 #
 # The version and the line it stands on are read the same way the unix
 # twin reads them: the [package] table is the first table in every
@@ -142,7 +155,6 @@ function Get-Requirement([string]$line) {
 # different versions out of the same manifest.
 $manifests = @(
     Get-ChildItem -Path "crates/*/Cargo.toml", "bins/*/Cargo.toml" |
-        Where-Object { $_.FullName -notmatch '[\\/]crates[\\/]rgx-' -and $_.FullName -notmatch '[\\/]crates[\\/]rar-codec[\\/]' } |
         ForEach-Object { $_.FullName.Substring((Get-Location).Path.Length + 1).Replace('\', '/') } |
         Sort-Object
 )
@@ -170,12 +182,15 @@ foreach ($m in $manifests) {
 # release carries. A dependency that still asks for the old one breaks
 # `cargo build --locked`, and that is the release build itself.
 #
-# The names that start with `rgy-` are ours: the same rule
-# scripts/bump-version.py bumps by, so the check reads the lines the bump
-# writes, and a requirement the bump would not have touched is a
-# requirement the check does not read either. The requirement of an
-# upstream crate is not ours to write -- it names upstream's version, and
-# it stays where upstream put it.
+# A requirement is ours when the entry names one of our packages: the key
+# is one of ours (`rgy-...`), or the entry names the package with
+# `package = "rgy-vendored-..."` -- the same rule scripts/bump-version.py
+# bumps by, so the check reads the lines the bump writes, and a requirement
+# the bump would not have touched is a requirement the check does not read
+# either. The key of a renamed dependency is the upstream's, so the key
+# alone does not say whose requirement the line carries; the package does.
+# The requirement of a crate that is not ours is not ours to write -- it
+# names somebody else's version, and it stays where it was put.
 #
 # A dependency entry can span lines, and the requirement can be on one of
 # them, so the entry is read to its closing brace: a requirement the check
@@ -186,8 +201,14 @@ foreach ($m in $manifests) {
     foreach ($line in Get-Content $m) {
         $at++
         if (-not $dep) {
-            if ($line -cmatch '^[ \t]*(rgy-[a-z0-9-]+)[ \t]*=') {
-                $dep = $matches[1]
+            if ($line -cmatch '^[ \t]*([A-Za-z0-9_-]+)[ \t]*=') {
+                $key = $matches[1]
+                $pkg = Get-PackageName $line
+                if (-not ($key.StartsWith('rgy-') -or $pkg.StartsWith('rgy-vendored-'))) {
+                    continue
+                }
+                $dep = $key
+                if ($pkg) { $dep = $pkg }
                 $req = Get-Requirement $line
                 if ($req -ne "") {
                     if ($req -ne $Version -and $req -ne "^$Version") {

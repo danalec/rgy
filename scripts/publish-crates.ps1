@@ -29,7 +29,7 @@
       powershell -File scripts/publish-crates.ps1
 
     A real run needs CARGO_REGISTRY_TOKEN in the environment. The vendored
-    rgx trees go out under the upstream's names, patches and all.
+    rgx trees go out under this repository's own names, patches and all.
 #>
 
 $ErrorActionPreference = 'Stop'
@@ -49,7 +49,7 @@ function Write-Usage {
         "forgotten."
         ""
         "A real run needs CARGO_REGISTRY_TOKEN in the environment. The vendored"
-        "rgx trees go out under the upstream's names, patches and all."
+        "rgx trees go out under this repository's own names, patches and all."
         ""
         "Exits 0 when every crate the plan names is published, 1 when the run"
         "stops before that."

@@ -13,17 +13,35 @@ lines are what the resolver reads when somebody installs the tree, and
 a requirement left at the old number lets a stale crate back into a
 build that needs the new one.
 
-**What it touches.** Every manifest of ours: the version of the
-package, and the requirement of every dependency that names one of our
-own crates. The vendored trees are not touched at all -- they are
-upstream rgx's crates, they carry upstream's versions, and upstream
-publishes them. Their *requirement* lines in our manifests are ours and
-are left alone too: a version bump is not a place to change what
-upstream's crate is called.
+**What it touches.** Every manifest in the tree: the version of the
+package, and the requirement of every dependency that names one of our own
+crates. The vendored trees are in that list now. They used to be out of it,
+because the upstream published them and a version here would have been a
+claim about somebody else's crate; since the rename they are published by
+this repository, under this repository's names (`rgy-vendored-core` and the
+`rgy-vendored-adapters-*` family), and a package this repository publishes
+at a number this repository does not carry is a package crates.io refuses.
+The vendored trees' *sources* are still upstream's, byte for byte; what the
+repository publishes is the upstream's code with this tree's patches on top,
+and the version of that package is ours.
+
+A requirement is ours when the entry names one of our packages: either the
+key is one of ours (`rgy-...`), or the entry carries `package = "rgy-..."`,
+which is how a renamed dependency says which package it is. The upstream's
+own requirements -- on crates that are not vendored -- are left alone, and
+so are the requirement lines the upstream's manifests carry on the upstream's
+crates.
 
 **What it does not touch.** The e2e harness crate (`publish = false`)
 keeps its `0.0.0`: it is not a published crate, and a number that
 looks published is a number somebody will try to publish.
+
+**What has to follow it.** The vendored manifests' patches. The vendored
+manifests are upstream's files plus a patch, and the patch is what carries
+this repository's version and this repository's package names. A bump that
+changes a vendored manifest changes the difference between it and upstream's,
+so `scripts/derive-vendored-patches.py` re-derives the twelve patches
+afterwards, and `scripts/check-drift.sh` says whether the two agree.
 
 The installers are touched too, and they are touched for the same reason:
 an installer names the release it installs, and a release whose installer
@@ -52,24 +70,34 @@ import subprocess
 import sys
 from pathlib import Path
 
-# The vendored trees: upstream rgx's crates. Their manifests carry
-# upstream's versions, and upstream publishes them -- a bump here would
-# be a claim about somebody else's crate.
-VENDORED_DIRS = ("crates/rgx-", "crates/rar-codec")
-
 # Our own crates: the names that start with this are ours, and a
 # requirement on one of them is ours to write.
 OUR_PREFIX = "rgy-"
 
+# The packages this repository publishes under a name of its own: the
+# vendored trees, carried from the upstream's code and published under this
+# repository's name. A dependency that names one of them is ours to write,
+# and the entry says so with `package = "rgy-vendored-..."`.
+VENDORED_PREFIX = "rgy-vendored-"
+
 # The package version, in the `[package]` table.
 PACKAGE_VERSION = re.compile(r'^(version\s*=\s*)"([^"]+)"', re.MULTILINE)
 
-# A dependency on one of our crates, with its requirement:
-#   rgy-proto = { path = "../../crates/proto", version = "0.1.0" }
-OUR_DEPENDENCY = re.compile(
-    r'^(?P<head>\s*' + OUR_PREFIX + r'[a-z0-9-]*\s*=\s*\{[^}]*?version\s*=\s*)"(?P<version>[^"]+)"',
-    re.MULTILINE,
+# The sections a dependency can live in.
+DEPENDENCY_SECTIONS = (
+    "[dependencies]",
+    "[dev-dependencies]",
+    "[build-dependencies]",
 )
+
+# A dependency entry: the key and the table that opens it. The entry can
+# span lines -- a `features = [...]` list does -- so it is read to its
+# closing brace and not to the end of its first line.
+ENTRY_START = re.compile(r'^(?P<indent>\s*)(?P<key>[A-Za-z0-9_-]+)\s*=\s*\{')
+
+# The requirement inside an entry, and the package a renamed entry names.
+ENTRY_VERSION = re.compile(r'(?P<head>\bversion\s*=\s*)"(?P<version>[^"]+)"')
+ENTRY_PACKAGE = re.compile(r'\bpackage\s*=\s*"(?P<package>[^"]+)"')
 
 # The installers name the release they install, and the release's name is
 # the tag: "rgy-v<version>". The tag is rewritten wherever it is written,
@@ -88,12 +116,6 @@ INSTALLER_TAG = {
 
 def repo_root() -> Path:
     return Path(__file__).resolve().parent.parent
-
-
-def is_ours(manifest: Path, root: Path) -> bool:
-    """Is this manifest one of ours? The vendored trees are not."""
-    rel = manifest.relative_to(root).as_posix()
-    return not any(rel.startswith(prefix) for prefix in VENDORED_DIRS)
 
 
 def is_published(manifest: Path) -> bool:
@@ -176,6 +198,64 @@ def rewrite_installer(path: Path, version: str, write: bool) -> bool:
     return True
 
 
+def rewrite_requirements(text: str, version: str) -> tuple[str, int]:
+    """The manifest with our requirements on the new version, and how many.
+
+    A requirement is ours when the entry names one of our packages: the key
+    is one of ours (`rgy-...`), or the entry carries `package =
+    "rgy-vendored-..."`, which is how a renamed dependency says which
+    package it is. The key of a renamed dependency is the upstream's --
+    `rgx-core` -- so the key alone does not say whose requirement it is.
+
+    The entries are read one at a time, to their closing brace: a
+    dependency whose `features = [...]` list spans lines has its
+    requirement on the first of them, and an entry read to the end of its
+    line is an entry whose second half nobody looked at.
+    """
+    lines = text.split("\n")
+    out: list[str] = []
+    section = ""
+    count = 0
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            section = stripped
+            out.append(line)
+            i += 1
+            continue
+        start = ENTRY_START.match(line)
+        if start is None or section not in DEPENDENCY_SECTIONS:
+            out.append(line)
+            i += 1
+            continue
+        # The entry, to its closing brace.
+        depth = line.count("{") - line.count("}")
+        last = i
+        while depth > 0 and last + 1 < len(lines):
+            last += 1
+            depth += lines[last].count("{") - lines[last].count("}")
+        entry = "\n".join(lines[i:last + 1])
+
+        package = ENTRY_PACKAGE.search(entry)
+        ours = start.group("key").startswith(OUR_PREFIX) or (
+            package is not None
+            and package.group("package").startswith(VENDORED_PREFIX)
+        )
+        version_match = ENTRY_VERSION.search(entry) if ours else None
+        if version_match is not None:
+            entry = (
+                entry[:version_match.start("version")]
+                + version
+                + entry[version_match.end("version"):]
+            )
+            count += 1
+        out.extend(entry.split("\n"))
+        i = last + 1
+    return "\n".join(out), count
+
+
 def rewrite(text: str, version: str, packages: bool = True) -> tuple[str, int, int]:
     """The manifest with the new version, and how much changed.
 
@@ -186,22 +266,16 @@ def rewrite(text: str, version: str, packages: bool = True) -> tuple[str, int, i
     does.
     """
     packages_changed = 0
-    dependencies = 0
 
     def package(m: re.Match[str]) -> str:
         nonlocal packages_changed
         packages_changed += 1
         return f'{m.group(1)}"{version}"'
 
-    def dependency(m: re.Match[str]) -> str:
-        nonlocal dependencies
-        dependencies += 1
-        return f'{m.group("head")}"{version}"'
-
     out = text
     if packages:
         out = PACKAGE_VERSION.sub(package, out, count=1)
-    out = OUR_DEPENDENCY.sub(dependency, out)
+    out, dependencies = rewrite_requirements(out, version)
     return out, packages_changed, dependencies
 
 
@@ -227,8 +301,6 @@ def main() -> int:
     changed: list[str] = []
     manifests_changed = 0
     for manifest in manifests(root):
-        if not is_ours(manifest, root):
-            continue
         published = is_published(manifest)
         with io.open(manifest, "r", encoding="utf-8", newline="") as handle:
             text = handle.read()
