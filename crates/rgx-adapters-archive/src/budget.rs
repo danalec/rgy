@@ -356,7 +356,15 @@ impl Default for MemberSink {
     }
 }
 
-#[cfg(all(test, any(feature = "decompress", feature = "sevenz", feature = "zip")))]
+#[cfg(all(
+    test,
+    any(
+        feature = "cpio",
+        feature = "decompress",
+        feature = "sevenz",
+        feature = "zip"
+    )
+))]
 pub(crate) mod testing {
     use super::{reset_budget, set_budget, Budget};
     use std::sync::Mutex;

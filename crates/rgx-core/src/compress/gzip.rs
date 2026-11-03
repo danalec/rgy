@@ -16,7 +16,8 @@
 //! past 4 GiB.
 
 use super::cap::{Bounded, OutputCap};
-use alloc::string::String;
+use super::error::CompressError;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,7 +191,9 @@ pub enum GzipError {
     InvalidComment,
     MissingTrailer,
     CrcMismatch,
-    DeflateFailed,
+    /// The DEFLATE body refused it, and the reason is the DEFLATE
+    /// layer's own.
+    DeflateFailed(String),
 }
 
 impl core::fmt::Display for GzipError {
@@ -205,8 +208,24 @@ impl core::fmt::Display for GzipError {
             Self::InvalidComment => write!(f, "Invalid comment"),
             Self::MissingTrailer => write!(f, "Missing GZIP trailer"),
             Self::CrcMismatch => write!(f, "CRC mismatch"),
-            Self::DeflateFailed => write!(f, "Deflate stream decode failed"),
+            Self::DeflateFailed(reason) => write!(f, "Deflate stream decode failed: {reason}"),
         }
+    }
+}
+
+/// The reason the DEFLATE layer gave, in its own words.
+///
+/// The layer below says what it refused and why, and this one is a
+/// wrapper around it. A note that only says "the deflate stream failed"
+/// leaves the reader -- and the search that will look for the note --
+/// without the reason the layer underneath named, and the note is the
+/// part of the answer that is searchable.
+fn deflate_reason(err: &CompressError) -> String {
+    match err {
+        CompressError::InvalidFormat(msg) => (*msg).into(),
+        CompressError::CorruptedData(msg) => (*msg).into(),
+        CompressError::UnexpectedEof => "unexpected end of input".into(),
+        other => other.to_string(),
     }
 }
 
@@ -560,7 +579,7 @@ fn find_trailer_bounded(data: &[u8], start: usize, limit: u64) -> GzipResult<(us
     let stream = &data[start..];
     let (decoded, consumed) = DeflateDecoder::new()
         .decode_bounded_with_consumed(stream, limit)
-        .map_err(|_| GzipError::DeflateFailed)?;
+        .map_err(|e| GzipError::DeflateFailed(deflate_reason(&e)))?;
     if decoded.capped {
         // The trailer is past the bytes the cap allowed, so there is no
         // trailer to find. The caller keeps the prefix and stops.
@@ -806,6 +825,33 @@ two
         assert!(cut.capped);
         assert!(cut.bytes.len() < full.len());
         assert_eq!(&cut.bytes[..], &full[..cut.bytes.len()]);
+    }
+
+    /// The gzip member the fuzzer found on the third of November of 2026:
+    /// a fixed Huffman block followed by a dynamic one whose tables claim
+    /// more of the code space than there is, so the codes they describe
+    /// do not exist.
+    const THE_GZIP_MEMBER: &[u8] = &[
+        0x1F, 0x8B, 0x08, 0x00, 0x00, 0xDC, 0x01, 0x00, 0x00, 0x0A, 0x8D, 0xD2, 0xBD, 0x46, 0x37,
+        0x7A, 0xBC, 0xAF, 0x27, 0x1C, 0x2D, 0xF8, 0xDC, 0x01, 0x00, 0x00, 0x0A, 0x8D, 0xD2, 0xBD,
+        0x46, 0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C, 0x2D, 0xF8, 0x5E, 0x00, 0x67, 0x64, 0x62, 0x00,
+        0x00, 0x00, 0x2B, 0x00, 0x00, 0x2D, 0x5E, 0x00, 0x27, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x6A, 0x7B, 0x7B, 0x73, 0x01, 0x6A, 0x0B, 0x0A, 0x44, 0x33, 0xB5, 0x3F, 0x0A, 0x0A,
+        0x4A, 0x0A, 0x64, 0x6F, 0x71, 0xFC, 0xA2, 0x04, 0x6A, 0x7B, 0x7B, 0x7B, 0x01, 0x6A, 0x0B,
+        0x0A, 0x44, 0x64, 0x91, 0x8E, 0x03, 0xFC, 0xCF, 0xFF, 0xFF, 0xF3, 0x00, 0x43, 0x00, 0x00,
+        0x33, 0x33, 0x33, 0x72, 0x6A, 0x33, 0xFF, 0x33, 0x0A, 0x33, 0x31, 0x62, 0x0A,
+    ];
+
+    /// The DEFLATE layer names what it refused, and the gzip layer keeps
+    /// the name. The note that the pipeline renders is the part of the
+    /// answer that is searchable, and a note that says only "the deflate
+    /// stream failed" is searchable by nothing.
+    #[test]
+    fn the_deflate_refusal_keeps_its_reason() {
+        let err = GzipReader::decode_bounded(THE_GZIP_MEMBER, crate::compress::cap::UNLIMITED)
+            .expect_err("the tables of that block are not codes");
+        let text = err.to_string();
+        assert!(text.contains("invalid code lengths set"), "{text}");
     }
 }
 

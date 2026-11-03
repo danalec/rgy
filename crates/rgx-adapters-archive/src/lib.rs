@@ -383,25 +383,62 @@ impl Adapter for Cpio {
         };
         let mut pos = 0usize;
         let mut sink = budget::MemberSink::new();
-        loop {
-            if pos + 110 > data.len() {
+        while let Some(hdr_end) = pos.checked_add(110) {
+            if hdr_end > data.len() {
                 break;
             }
-            let hdr = &data[pos..pos + 110];
-            let namesize = hex(&hdr[94..102])? as usize;
-            let filesize = hex(&hdr[54..62])? | (hex(&hdr[62..70])? << 32);
-            let name_start = pos + 110;
-            let name_end = name_start + namesize;
-            if name_end > data.len() {
+            let hdr = &data[pos..hdr_end];
+            // Every entry of a newc archive carries the magic, and the
+            // archive is padded to a block boundary with NULs. A header
+            // of NULs is that padding and it ends the walk; a header
+            // with another magic is an archive that stopped being a
+            // newc one half way through, and that is a refusal and not
+            // a quiet end.
+            if hdr.starts_with(&[0u8; 6]) {
                 break;
             }
-            let name_raw = &data[name_start..name_end.saturating_sub(1)];
+            if !(hdr.starts_with(b"070701") || hdr.starts_with(b"070702")) {
+                rgx_core::bail!("cpio: a header does not carry the newc magic");
+            }
+            // The length of the name is in the file, so the place the name
+            // ends is a sum the file chooses -- and the newc format
+            // counts the NUL that ends the name, so a name of no length
+            // is not a name at all. The slice below takes the name
+            // without that NUL, and a range that starts after it ends is
+            // a range that does not exist.
+            let namesize = hex(&hdr[94..102])
+                .context("cpio: the name length in a header is not a hexadecimal number")?;
+            if namesize == 0 {
+                rgx_core::bail!("cpio: a header names a name of no length");
+            }
+            let name_start = hdr_end;
+            let Some(name_end) = (name_start as u64).checked_add(namesize) else {
+                rgx_core::bail!("cpio: the length of a name overflows the archive");
+            };
+            if name_end > data.len() as u64 {
+                rgx_core::bail!("cpio: a member names more bytes than the archive holds");
+            }
+            let name_end = name_end as usize;
+            let name_raw = &data[name_start..name_end - 1];
             let name = String::from_utf8_lossy(name_raw).to_string();
-            let data_start = (name_end + 3) & !3;
-            let data_end = data_start + filesize as usize;
-            if name == "TRAILER!!!" || data_end > data.len() {
+            // The size of the member's body is in the file as well, so
+            // the place the body ends is a sum the file chooses too.
+            let filesize = hex(&hdr[54..62])
+                .context("cpio: the size of a member is not a hexadecimal number")?
+                | (hex(&hdr[62..70])
+                    .context("cpio: the size of a member is not a hexadecimal number")?
+                    << 32);
+            let data_start = ((name_end + 3) & !3).min(data.len());
+            let Some(data_end) = (data_start as u64).checked_add(filesize) else {
+                rgx_core::bail!("cpio: the size of a member overflows the archive");
+            };
+            if name == "TRAILER!!!" {
                 break;
             }
+            if data_end > data.len() as u64 {
+                rgx_core::bail!("cpio: a member claims more bytes than the archive holds");
+            }
+            let data_end = data_end as usize;
             if !sink.reserve(filesize) {
                 break;
             }
@@ -690,10 +727,40 @@ mod tests {
     use super::*;
     #[cfg(any(feature = "decompress", feature = "sevenz", feature = "zip"))]
     use alloc::string::String;
-    #[cfg(any(feature = "decompress", feature = "sevenz", feature = "zip"))]
+    #[cfg(any(
+        feature = "cpio",
+        feature = "decompress",
+        feature = "sevenz",
+        feature = "zip"
+    ))]
     use rgx_core::Outcome;
     #[cfg(feature = "decompress")]
     use std::eprintln;
+
+    /// The newc trailer: an entry whose name is `TRAILER!!!` and
+    /// whose header says so.
+    ///
+    /// The name length is **11**, because the format counts the NUL
+    /// that ends the name, and the header is the magic plus **13**
+    /// eight-hex-digit fields. A trailer that leaves the fields out
+    /// is not a trailer: the reader then reads the name as if it
+    /// were the name length, and the archive stops being readable
+    /// half way through it.
+    #[cfg(feature = "cpio")]
+    fn cpio_trailer() -> Vec<u8> {
+        let mut fields = [0u64; 13];
+        fields[4] = 1; // nlink
+        fields[11] = 11; // the name length: "TRAILER!!!\0"
+        let mut t = b"070701".to_vec();
+        for f in fields {
+            t.extend_from_slice(format!("{f:08x}").as_bytes());
+        }
+        t.extend_from_slice(b"TRAILER!!!\0");
+        while !t.len().is_multiple_of(4) {
+            t.push(0);
+        }
+        t
+    }
 
     /// The in-house XZ container and the legacy FORMAT_ALONE `.lzma`
     /// stream, both produced by liblzma via python.
@@ -2249,15 +2316,7 @@ mod tests {
                 }
                 out.extend_from_slice(&h);
             }
-            let mut t = b"070701".to_vec();
-            for _ in 0..11 {
-                t.extend_from_slice(b"00000000");
-            }
-            t.extend_from_slice(b"TRAILER!!!\0");
-            while !t.len().is_multiple_of(4) {
-                t.push(0);
-            }
-            out.extend_from_slice(&t);
+            out.extend_from_slice(&cpio_trailer());
             out
         }
 
@@ -2684,17 +2743,18 @@ mod tests {
             while !h.len().is_multiple_of(4) {
                 h.push(0);
             }
-            // TRAILER!!!
-            let mut t = b"070701".to_vec();
-            for _ in 0..11 {
-                t.extend_from_slice(b"00000000");
-            }
-            t.extend_from_slice(b"TRAILER!!!\0");
-            while !t.len().is_multiple_of(4) {
-                t.push(0);
-            }
-            h.extend_from_slice(&t);
+            h.extend_from_slice(&cpio_trailer());
             h
+        }
+
+        /// The same archive without its trailer: a newc archive that
+        /// was cut before its last entry.
+        #[cfg(feature = "cpio")]
+        fn mini_cpio_without_trailer() -> Vec<u8> {
+            let mut data = mini_cpio();
+            let trailer = cpio_trailer();
+            data.truncate(data.len() - trailer.len());
+            data
         }
 
         #[cfg(feature = "decompress")]
@@ -2751,6 +2811,89 @@ mod tests {
                     let _ = Cpio.extract(data, "fuzz.cpio");
                 },
             );
+        }
+
+        /// The bytes the fuzzer found on the third of November of 2026.
+        ///
+        /// The first byte of the fuzz input is the one the harness reads
+        /// to pick the extension, and the rest is the file: a `newc`
+        /// archive whose header names a name of **no length**. The newc
+        /// format counts the NUL that ends the name, so the name is at
+        /// least one byte, and a name of no length is not a name.
+        ///
+        /// The reader took the name without that NUL, which made the
+        /// range start after it ended, and a range that starts after it
+        /// ends is a range that does not exist.
+        const THE_CPIO_FILE: &[u8] = &[
+            0x30, 0x37, 0x30, 0x37, 0x30, 0x32, 0x17, 0x3C, 0x3C, 0x3C, 0x3C, 0x3C, 0x3C, 0x3C,
+            0x3C, 0x28, 0x3C, 0x3C, 0xFA, 0x49, 0x49, 0x2A, 0x00, 0x69, 0x00, 0x00, 0x00, 0x03,
+            0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x34, 0x00, 0x00, 0x00, 0xFA, 0x61, 0x20, 0xFC,
+            0xFC, 0xFC, 0xFC, 0xFC, 0xFC, 0xFC, 0xFC, 0xFC, 0xFC, 0xFC, 0x30, 0x30, 0x30, 0x30,
+            0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30,
+            0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30,
+            0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30,
+            0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30,
+            0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30,
+            0x30, 0x30, 0x30, 0x30, 0x30, 0xFC, 0xFC, 0xFC, 0xFC, 0xFC, 0xFC, 0xFC, 0xFC, 0xFC,
+            0xFC, 0xFC, 0xFC, 0xFC, 0xFC, 0xFC, 0xFC, 0xFC, 0xFC, 0xFC, 0x32, 0x32, 0x32, 0x32,
+            0x32, 0x32, 0x32, 0x32, 0x3A, 0x00, 0x31, 0x2E, 0x78, 0x31, 0x02, 0x01, 0x63, 0x2C,
+            0x32, 0x32, 0x32, 0x32, 0x32, 0x32, 0x32, 0x32, 0x32, 0x32, 0x32, 0x32, 0x32, 0x32,
+            0x32, 0x32, 0x32, 0x00, 0x00, 0x00, 0x00, 0x32, 0x32, 0x32, 0x32, 0x32, 0x32, 0x32,
+            0x32, 0x32, 0x32, 0x32, 0x32, 0x32, 0x32, 0xFC, 0xFC, 0xFC, 0xFC, 0xFC, 0xFC, 0xFC,
+            0x13, 0x61, 0x59, 0x49, 0x00, 0x00, 0xFA, 0x61, 0x61, 0x2B, 0x0D, 0x15, 0x3D, 0xFE,
+            0xFF, 0x0A, 0x3A, 0x00, 0x30, 0x49, 0x49, 0x2E, 0x78, 0x2E, 0x0A, 0x00, 0x31,
+        ];
+
+        #[test]
+        #[cfg(feature = "cpio")]
+        fn a_cpio_header_that_names_no_name_is_not_a_name() {
+            use crate::budget::testing::locked;
+            let Err(err) = locked(|| Cpio.extract(THE_CPIO_FILE, "fuzz.cpio")) else {
+                panic!("a name of no length is not a name");
+            };
+            // The refusal has to say why, because the note is the part
+            // of the answer that is searchable: a refusal that says
+            // only "error" leaves the reader with nothing to act on.
+            let text = format!("{err:#}");
+            assert!(
+                text.contains("a header names a name of no length"),
+                "the refusal must name the reason: {text}"
+            );
+        }
+
+        /// A newc archive that is whole -- every entry and then the
+        /// trailer -- must yield its members.
+        ///
+        /// The trailer is an entry like any other, and a reader that
+        /// cannot read it cannot tell a whole archive from a cut one.
+        #[test]
+        #[cfg(feature = "cpio")]
+        fn a_complete_cpio_archive_yields_its_members() {
+            use crate::budget::testing::locked;
+            let Ok(Outcome::Members(members)) = locked(|| Cpio.extract(&mini_cpio(), "a.cpio"))
+            else {
+                panic!("a whole archive is not a refusal");
+            };
+            assert_eq!(members.len(), 1);
+            assert_eq!(members[0].0, "a.txt");
+            assert_eq!(members[0].1, b"ZIRCALOY");
+        }
+
+        /// A block-aligned archive ends with NULs, and a header of NULs
+        /// is that padding: the walk ends there and the entries it read
+        /// are the answer. Reading the padding as an entry is how a
+        /// reader ends up refusing an archive that is perfectly whole.
+        #[test]
+        #[cfg(feature = "cpio")]
+        fn a_cpio_archive_padded_with_nul_bytes_yields_its_members() {
+            use crate::budget::testing::locked;
+            let mut data = mini_cpio_without_trailer();
+            data.extend_from_slice(&[0u8; 512]);
+            let Ok(Outcome::Members(members)) = locked(|| Cpio.extract(&data, "a.cpio")) else {
+                panic!("padding is not a refusal");
+            };
+            assert_eq!(members.len(), 1);
+            assert_eq!(members[0].0, "a.txt");
         }
 
         #[cfg(feature = "decompress")]
