@@ -17,7 +17,8 @@
 use super::cap::Bounded;
 use super::error::{CompressError, CompressResult};
 use super::huffman::{
-    build_canonical_codes, reverse_bits, BitReader, BitWriter, HuffmanDecoder, MAX_DEFLATE_CODE_LEN,
+    build_canonical_codes, code_lengths_are_valid, reverse_bits, BitReader, BitWriter,
+    HuffmanDecoder, MAX_DEFLATE_CODE_LEN,
 };
 use super::lz77::{Lz77Decoder, Lz77Encoder, Lz77Token};
 use alloc::vec::Vec;
@@ -381,6 +382,15 @@ impl DeflateDecoder {
                 reader.read_bits(3).ok_or(CompressError::UnexpectedEof)? as u8;
         }
 
+        // The code length code is the one that reads the lengths of the
+        // other two, so it has to be a code that can exist before it is
+        // used: a table that is over-subscribed describes codes that do
+        // not exist, and the running code of its canonical assignment
+        // leaves the width the length claims.
+        if !code_lengths_are_valid(&code_length_lengths, 7) {
+            return Err(CompressError::InvalidFormat("invalid code lengths set"));
+        }
+
         let cl_decoder = HuffmanDecoder::from_lengths(&code_length_lengths, 7);
 
         // Read literal/length and distance code lengths
@@ -434,6 +444,18 @@ impl DeflateDecoder {
 
         let literal_lengths = &all_lengths[..hlit];
         let distance_lengths = &all_lengths[hlit..];
+
+        // The two tables the block body is decoded against have to be
+        // codes that can exist as well. The literal/length table is the
+        // one whose canonical assignment runs off the end of the number
+        // when the lengths are over-subscribed, so it is checked before
+        // the tables are built.
+        if !code_lengths_are_valid(literal_lengths, MAX_DEFLATE_CODE_LEN) {
+            return Err(CompressError::InvalidFormat("invalid literal/lengths set"));
+        }
+        if !code_lengths_are_valid(distance_lengths, MAX_DEFLATE_CODE_LEN) {
+            return Err(CompressError::InvalidFormat("invalid distances set"));
+        }
 
         let lit_decoder = HuffmanDecoder::from_lengths(literal_lengths, MAX_DEFLATE_CODE_LEN as u8);
         let dist_decoder =
@@ -938,6 +960,66 @@ mod tests {
         case!("mixed", "fixed");
         case!("mixed", "dyn");
         case!("mixed", "max");
+    }
+
+    /// The bytes the fuzzer found on the third of November of 2026.
+    ///
+    /// The first byte of the fuzz input is the one the harness reads to
+    /// pick the extension, and the rest is the file. This is the DEFLATE
+    /// stream inside the gzip member of that file: a fixed Huffman block
+    /// followed by a dynamic one whose tables claim more of the code
+    /// space than there is.
+    ///
+    /// The code length code of the dynamic block asks for one code of one
+    /// bit, two of two, two of three, four of five, three of six and four
+    /// of seven -- a Kraft sum of 1.45, so the table is over-subscribed
+    /// and the codes it describes do not exist. The literal/length table
+    /// asks for twelve code spaces' worth, and its canonical assignment
+    /// runs the running code off the end of the number: at the last
+    /// length it stood at 65520, and the count of the codes of the length
+    /// before it took it over.
+    const THE_DEFLATE_STREAM: &[u8] = &[
+        0x8D, 0xD2, 0xBD, 0x46, 0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C, 0x2D, 0xF8, 0xDC, 0x01, 0x00,
+        0x00, 0x0A, 0x8D, 0xD2, 0xBD, 0x46, 0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C, 0x2D, 0xF8, 0x5E,
+        0x00, 0x67, 0x64, 0x62, 0x00, 0x00, 0x00, 0x2B, 0x00, 0x00, 0x2D, 0x5E, 0x00, 0x27, 0x00,
+        0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x6A, 0x7B, 0x7B, 0x73, 0x01, 0x6A, 0x0B, 0x0A, 0x44,
+        0x33, 0xB5, 0x3F, 0x0A, 0x0A, 0x4A, 0x0A, 0x64, 0x6F, 0x71, 0xFC, 0xA2, 0x04, 0x6A, 0x7B,
+        0x7B, 0x7B, 0x01, 0x6A, 0x0B, 0x0A, 0x44, 0x64, 0x91, 0x8E, 0x03, 0xFC, 0xCF, 0xFF, 0xFF,
+        0xF3, 0x00, 0x43, 0x00, 0x00, 0x33, 0x33, 0x33, 0x72, 0x6A,
+    ];
+
+    #[test]
+    fn a_block_whose_code_lengths_do_not_exist_is_refused_by_name() {
+        let mut decoder = DeflateDecoder::new();
+        let err = decoder
+            .decode(THE_DEFLATE_STREAM)
+            .expect_err("the tables of that block are not codes");
+        // The reason is the code lengths, and not that something failed:
+        // the build without the overflow checks does not panic on these
+        // bytes -- it computes a code that is not a code, and decodes
+        // whatever that adds up to -- so a test that asked only "is this
+        // an error?" would pass on the defect it is written for.
+        assert_eq!(
+            err,
+            CompressError::InvalidFormat("invalid code lengths set"),
+            "{err}"
+        );
+    }
+
+    /// A code length table that is over-subscribed is not a code, and the
+    /// reader says so before it uses it.
+    #[test]
+    fn a_table_that_is_over_subscribed_is_not_a_code() {
+        // Two codes of one bit fill the space; three do not fit in it.
+        assert!(code_lengths_are_valid(&[1, 1], MAX_DEFLATE_CODE_LEN));
+        assert!(!code_lengths_are_valid(&[1, 1, 1], MAX_DEFLATE_CODE_LEN));
+        // The example of RFC 1951 section 3.2.2 is a complete code.
+        assert!(code_lengths_are_valid(
+            &[3, 3, 3, 3, 3, 2, 4, 4],
+            MAX_DEFLATE_CODE_LEN
+        ));
+        // And a code longer than the table allows cannot exist at all.
+        assert!(!code_lengths_are_valid(&[16], MAX_DEFLATE_CODE_LEN));
     }
 }
 

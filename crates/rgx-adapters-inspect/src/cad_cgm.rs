@@ -145,8 +145,13 @@ fn render_cgm(data: &[u8]) -> Result<String> {
                 }
                 params.extend_from_slice(&data[pos..pos + n]);
                 pos += n;
-                // Every chunk is padded to a word boundary.
+                // Every chunk is padded to a word boundary, and the pad
+                // byte is part of the file: a chunk that ends the file
+                // without it is a file that was cut short.
                 if n % 2 == 1 {
+                    if pos + 1 > data.len() {
+                        bail!("cgm: the file ends inside a long-form element's padding");
+                    }
                     pos += 1;
                 }
                 if chunk & 0x8000 == 0 {
@@ -161,8 +166,17 @@ fn render_cgm(data: &[u8]) -> Result<String> {
             pos += len;
             // The parameter list of every element is padded to a word
             // boundary, so the next header always starts on an even
-            // offset.
+            // offset. The pad byte is part of the file: an element whose
+            // parameter list ends at the last byte of the file has no
+            // pad byte, and the file was cut short. Reading the pad
+            // that is not there steps past the end of the bytes, and
+            // the walk that ends there is not a walk that can say how
+            // many bytes are left over -- so the reader refuses the
+            // file instead.
             if len % 2 == 1 {
+                if pos + 1 > data.len() {
+                    bail!("cgm: the file ends inside an element's padding");
+                }
                 pos += 1;
             }
         }
@@ -181,6 +195,10 @@ fn render_cgm(data: &[u8]) -> Result<String> {
     }
 
     if pos != data.len() {
+        // The walk never steps past the end of the bytes -- the pad byte
+        // of a parameter list is read only when it is there -- so the
+        // count of the bytes that are left over is the difference of two
+        // numbers that are in order.
         bail!(
             "cgm: the file ends with {} bytes that are not an element",
             data.len() - pos
@@ -1258,6 +1276,77 @@ mod tests {
         file.push(0);
         let err = render_cgm(&file).expect_err("a trailing byte");
         assert!(!err.is_decline(), "{err}");
+    }
+
+    /// The bytes the fuzzer found on the third of November of 2026.
+    ///
+    /// The first byte is the one the fuzz harness reads to pick the
+    /// extension, and the rest is the file: a BEGIN METAFILE element
+    /// whose parameter list is seventeen bytes long and ends at the last
+    /// byte of the file. The framing asks for a pad byte after a list of
+    /// odd length, and the pad byte is not there — so the walk stepped
+    /// past the end of the bytes, and the count of what was left over
+    /// was a subtraction that went under.
+    const CGM_WITHOUT_ITS_PAD: &[u8] = &[
+        0x00, 0x31, 0x2e, 0x78, 0x30, 0x02, 0x01, 0x63, 0x2c, 0x2b, 0x0d, 0x15, 0x3d, 0xfe, 0xff,
+        0x0a, 0x00, 0xff, 0x93,
+    ];
+
+    #[test]
+    fn a_file_that_ends_inside_the_padding_is_an_error_and_not_a_panic() {
+        // The file is a metafile that was cut short: the parameter list
+        // is whole, and the pad byte that the framing asks for is not
+        // there. The reader's answer to a file it cannot parse is a
+        // refusal, and never a walk that counts what is left over by
+        // subtracting the smaller from the larger.
+        assert_eq!(CGM_WITHOUT_ITS_PAD.len(), 19);
+        let err = render_cgm(CGM_WITHOUT_ITS_PAD).expect_err("the file ends inside the padding");
+        // It claims to be a metafile, so it is a failure and not a step
+        // aside: the next adapter has nothing to do with it.
+        assert!(!err.is_decline(), "{err}");
+        // The reason is the padding. The build without the overflow
+        // checks answers the same question with a count of the bytes
+        // that are left over, and that count is a number that is not a
+        // number -- so a test that only asks "is this an error" would
+        // pass on the defect it is written for.
+        assert!(
+            err.to_string().contains("padding"),
+            "the refusal is about the padding: {err}"
+        );
+    }
+
+    #[test]
+    fn a_long_form_element_that_ends_inside_the_padding_is_an_error() {
+        // The same cut, in the long form: the chunk's length is one byte
+        // and the file ends there, so the chunk's pad byte is not there
+        // either. The two pads are the same rule, and the rule is the
+        // rule whether the list is short or long.
+        let mut file = Vec::new();
+        // BEGIN METAFILE, the long form: a length of 31 is the one that
+        // says the parameter list is a run of chunks.
+        let word = (1u16 << 5) | 31;
+        file.extend_from_slice(&word.to_be_bytes());
+        // One chunk of one byte, and no chunk after it.
+        file.extend_from_slice(&1u16.to_be_bytes());
+        file.push(0xaa);
+        let err = render_cgm(&file).expect_err("the file ends inside the padding");
+        assert!(!err.is_decline(), "{err}");
+        assert!(
+            err.to_string().contains("padding"),
+            "the refusal is about the padding: {err}"
+        );
+    }
+
+    #[test]
+    fn the_pad_byte_is_read_when_it_is_there() {
+        // The same file with one byte more: the pad byte the framing
+        // asks for is there, so the walk goes past it and the file is a
+        // metafile. The refusal above is about the byte that is missing,
+        // and not about the rule.
+        let mut file = CGM_WITHOUT_ITS_PAD.to_vec();
+        file.push(0);
+        let out = render_cgm(&file).expect("the pad byte is there");
+        assert!(out.starts_with("metafile:"), "{out}");
     }
 
     /// Whether the bytes hold the needle.

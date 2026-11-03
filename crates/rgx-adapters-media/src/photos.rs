@@ -564,7 +564,14 @@ fn jp2_boxes(data: &[u8], out: &mut String) -> Result<()> {
         if size == 0 {
             break;
         }
-        at = body_at.saturating_add(body_len);
+        // The walk never steps past the end of the bytes. A box that
+        // declares more than the file holds is a box that was cut
+        // short -- and the 64-bit size can declare eighteen quintillion
+        // bytes, which the offset would follow if it were not held
+        // here: the sum saturates at the top of the number, and the
+        // next header would be read at an offset that is not in the
+        // file -- or at one that is not a number at all.
+        at = body_at.saturating_add(body_len).min(data.len());
         if at <= body_at {
             break;
         }
@@ -603,7 +610,9 @@ fn jp2_superbox(body: &[u8], out: &mut String) -> Result<()> {
         if size == 0 {
             break;
         }
-        at = body_at.saturating_add(body_len);
+        // The same rule as the container's walk: the offset is held at
+        // the end of the bytes.
+        at = body_at.saturating_add(body_len).min(body.len());
         if at <= body_at {
             break;
         }
@@ -678,7 +687,8 @@ fn jp2_dimensions(data: &[u8]) -> Option<(u32, u32)> {
             data.len() - body_at
         } else {
             size.saturating_sub(8)
-        };
+        }
+        .min(data.len() - body_at);
         if typ == b"jp2h" {
             let mut inner_at = 0usize;
             let inner = data.get(body_at..body_at + body_len).unwrap_or(&[]);
@@ -700,13 +710,13 @@ fn jp2_dimensions(data: &[u8]) -> Option<(u32, u32)> {
                         return Some((width, height));
                     }
                 }
-                inner_at = ibody.saturating_add(ilen);
+                inner_at = ibody.saturating_add(ilen).min(inner.len());
             }
         }
         if size == 0 {
             break;
         }
-        at = body_at.saturating_add(body_len);
+        at = body_at.saturating_add(body_len).min(data.len());
     }
     None
 }
@@ -807,7 +817,11 @@ fn jxl_boxes(data: &[u8], out: &mut String) -> Result<()> {
         if size == 0 {
             break;
         }
-        at = body_at.saturating_add(body_len);
+        // The same rule as the container's walk: the offset is held at
+        // the end of the bytes. The 64-bit size is the one that can
+        // declare eighteen quintillion bytes, and the offset that
+        // follows it has to stop at the end of the file.
+        at = body_at.saturating_add(body_len).min(data.len());
         if at <= body_at {
             break;
         }
@@ -1254,6 +1268,66 @@ mod tests {
                 .map(|f| f.value.as_str()),
             Some("64")
         );
+    }
+
+    /// A box that declares more bytes than the file holds.
+    ///
+    /// The size of a box is a 32-bit number, and a size of one is the
+    /// form that says the real size follows as a 64-bit number. A file
+    /// can put any 64-bit number there -- and eighteen quintillion
+    /// bytes is a number the offset follows: the sum saturates at the
+    /// top of the number, and the next header would be read at an
+    /// offset that is not in the file.
+    ///
+    /// The box that declares it is not the first one, because the sum
+    /// only saturates when the box's own body starts past the sixteenth
+    /// byte -- which is where the walk is when the first box has been
+    /// read.
+    #[cfg(any(feature = "jpeg2000", feature = "jpegxl"))]
+    fn box_with_a_sixty_four_bit_size() -> Vec<u8> {
+        let mut v = Vec::new();
+        // The first box: twenty-four bytes, of which sixteen are body.
+        v.extend_from_slice(&24u32.to_be_bytes());
+        v.extend_from_slice(b"junk");
+        v.extend_from_slice(&[0u8; 16]);
+        // The second box: the 64-bit form, and a size of eighteen
+        // quintillion bytes.
+        v.extend_from_slice(&1u32.to_be_bytes());
+        v.extend_from_slice(b"junk");
+        v.extend_from_slice(&u64::MAX.to_be_bytes());
+        v
+    }
+
+    #[test]
+    #[cfg(feature = "jpeg2000")]
+    fn a_jp2_box_that_declares_more_than_the_file_holds_is_read_as_far_as_it_goes() {
+        // The file is read up to the end of its bytes and the walk
+        // stops there. The build without the overflow checks answers
+        // the same question with a refusal that names an offset that is
+        // not a number, and a test that only asks "is this an error?"
+        // would pass on that.
+        let mut out = String::new();
+        jp2_boxes(&box_with_a_sixty_four_bit_size(), &mut out).expect("the walk stops at the end");
+        assert!(!out.contains("18446744073709551615"), "{out}");
+    }
+
+    #[test]
+    #[cfg(feature = "jpegxl")]
+    fn a_jxl_box_that_declares_more_than_the_file_holds_is_read_as_far_as_it_goes() {
+        // The same rule in the other container: the two walks are the
+        // same walk, and the rule is the rule in both.
+        let mut out = String::new();
+        jxl_boxes(&box_with_a_sixty_four_bit_size(), &mut out).expect("the walk stops at the end");
+        assert!(!out.contains("18446744073709551615"), "{out}");
+    }
+
+    #[test]
+    #[cfg(feature = "jpeg2000")]
+    fn the_jpeg2000_facts_survive_a_box_that_declares_more_than_the_file_holds() {
+        // The dimensions are read by the other walk, and that one had
+        // the same shape.
+        let facts = Jpeg2000.facts(&box_with_a_sixty_four_bit_size(), "a.jp2");
+        assert!(facts.is_empty(), "{facts:?}");
     }
 
     // -------------------------------------------------------------- JPEG XL

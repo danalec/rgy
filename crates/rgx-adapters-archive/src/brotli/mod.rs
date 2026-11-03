@@ -711,6 +711,17 @@ impl<'a> State<'a> {
             // The word's transformed length is the distance the remainder
             // copies at; `copy_back` handles the overlap, which is the
             // repetition. The whole copy is `len` bytes.
+            //
+            // A copy that is SHORTER than the word it names is a stream
+            // the reference encoder does not emit -- the encoder's copy
+            // always covers the transformed word, because the word is
+            // what the copy reproduces -- and the reference decoder
+            // refuses such a stream ("corrupt input"). So the reader
+            // refuses it too, instead of subtracting a length that is
+            // larger than the number it is subtracted from.
+            if n > len {
+                return Err(Error::Range);
+            }
             self.copy_back(n as u64, (len - n) as u32)?;
             Ok(len as u32)
         } else {
@@ -867,5 +878,41 @@ fn ferment(word: &mut [u8], at: usize) -> usize {
             word[at + 2] ^= 5;
         }
         3
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bytes the fuzzer found on the third of November of 2026.
+    ///
+    /// The stream's copy is shorter than the dictionary word it names: the
+    /// word is the longest one there is and the transform makes it longer
+    /// still, and the copy asks for fewer bytes than the word produced.
+    /// The reference encoder does not emit such a stream, and the
+    /// reference decoder refuses it ("corrupt input").
+    const COPY_SHORTER_THAN_THE_WORD: &[u8] = &[
+        0x00, 0xB1, 0x03, 0x03, 0x8C, 0x75, 0x8C, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x8C, 0x8C, 0x8C, 0x00, 0x62, 0x72, 0x03, 0x03, 0x31, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03,
+        0x03, 0x03, 0x8C, 0x75, 0x00, 0x61, 0x61, 0x72, 0x32, 0x8C, 0x8C, 0x8C, 0x8C, 0x8C, 0x75,
+        0x8C, 0x8C, 0x8C, 0x8C, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7E, 0x7F, 0x7F, 0x7F, 0x00, 0x28,
+        0x8C, 0x8C, 0x8C, 0x8C, 0x8C, 0x75, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0xFF, 0x7E, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x8C, 0x8C, 0x8C, 0x8C, 0x31,
+    ];
+
+    #[test]
+    fn a_copy_shorter_than_the_word_it_names_is_refused_and_not_a_panic() {
+        // The remainder of a long copy is what is left of the copy after
+        // the transformed word, and a copy that asks for fewer bytes than
+        // the word produced has no remainder: the number was smaller than
+        // the number it was subtracted from. The reader refuses the
+        // stream, the way the reference decoder refuses it.
+        let err = match BrotliDecoder::new().decode_bounded(COPY_SHORTER_THAN_THE_WORD, 1 << 20) {
+            Ok(_) => panic!("the stream is not one the format allows"),
+            Err(e) => e,
+        };
+        assert_eq!(err, Error::Range);
     }
 }

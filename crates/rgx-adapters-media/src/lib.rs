@@ -407,7 +407,13 @@ fn tiff_ifd_count(data: &[u8]) -> usize {
     };
     let mut at = if big {
         match data.get(8..16) {
-            Some(b) => rd(b) as usize,
+            Some(b) => match usize::try_from(rd(b)) {
+                Ok(v) => v,
+                // An offset the platform cannot hold is an offset the file
+                // does not have: the chain starts nowhere, so it holds one
+                // directory.
+                Err(_) => return 1,
+            },
             None => return 1,
         }
     } else {
@@ -427,14 +433,29 @@ fn tiff_ifd_count(data: &[u8]) -> usize {
     };
     let mut n = 1usize;
     while n < 1024 {
-        let Some(raw) = data.get(at..at + count_w).map(rd) else {
+        // Every offset here is a number the file chooses, and the chain
+        // pointer's place in the file is computed from the entry count --
+        // so the arithmetic that places it has to be checked. An offset
+        // that wraps around the end of the number lands on a page the file
+        // never described.
+        let Some(head_end) = at.checked_add(count_w) else {
             return n;
         };
-        let link_at = at + count_w + (raw as usize).saturating_mul(entry_w);
-        let Some(next) = data.get(link_at..link_at + link_w).map(rd) else {
+        let Some(raw) = data.get(at..head_end).map(rd) else {
             return n;
         };
-        let next = next as usize;
+        let Some(link_at) = head_end.checked_add((raw as usize).saturating_mul(entry_w)) else {
+            return n;
+        };
+        let Some(link_end) = link_at.checked_add(link_w) else {
+            return n;
+        };
+        let Some(next) = data.get(link_at..link_end).map(rd) else {
+            return n;
+        };
+        let Some(next) = usize::try_from(next).ok() else {
+            return n;
+        };
         if next == 0 || next == at {
             return n;
         }
@@ -1356,6 +1377,31 @@ mod tests {
                     let _ = Tiff.extract(data, "fuzz.tiff");
                 },
             );
+        }
+
+        /// The chain walker counts the pages of a TIFF by following the
+        /// link that closes each directory, and the place that link has in
+        /// the file is computed from the directory's entry count. A count
+        /// of 2^64 - 1 puts the link past the end of every number, and the
+        /// arithmetic that places it wraps around the end of the number --
+        /// landing on a page the file never described.
+        ///
+        /// The BigTIFF is the one that can hold such a count: a classic
+        /// TIFF's count is two bytes wide and its first-IFD offset is
+        /// four.
+        #[test]
+        #[cfg(feature = "tiff")]
+        fn a_bigtiff_whose_page_claims_too_many_entries_counts_one_page() {
+            let mut f = Vec::new();
+            f.extend_from_slice(b"II\x2b\x00"); // BigTIFF, little-endian
+            f.extend_from_slice(&8u16.to_le_bytes()); // the width of an offset
+            f.extend_from_slice(&0u16.to_le_bytes()); // reserved
+            f.extend_from_slice(&16u64.to_le_bytes()); // the first IFD is at 16
+            f.extend_from_slice(&u64::MAX.to_le_bytes()); // the entry count
+                                                          // One entry and the link that closes the directory, so the
+                                                          // file is long enough for a wrapped offset to land on it.
+            f.extend_from_slice(&[0u8; 28]);
+            assert_eq!(tiff_ifd_count(&f), 1);
         }
 
         /// The facts are asked of whatever the bytes turned out to be,

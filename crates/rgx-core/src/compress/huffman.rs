@@ -119,6 +119,49 @@ pub struct CodeLength {
     pub code: u16,
 }
 
+/// Whether the code lengths describe a code that can exist.
+///
+/// The Kraft sum of a set of lengths -- the sum of `2^-len` over the
+/// symbols that have one -- must not be above one: a code of `len` bits
+/// occupies that share of the code space, and two codes cannot occupy the
+/// same share. A table above one is **over-subscribed**, and its
+/// canonical codes do not exist: the running code of RFC 1951 §3.2.2
+/// leaves the width the length claims before the last length is reached.
+///
+/// This is the check the reference decoder makes before it builds the
+/// table, and it is what turns a file that carries such a table into a
+/// refusal instead of an arithmetic accident.
+pub fn code_lengths_are_valid(lengths: &[u8], max_bits: usize) -> bool {
+    if max_bits > 62 {
+        // A code that long is not a code this tree speaks, and the space
+        // that is left would not fit in the number that counts it.
+        return false;
+    }
+    let mut bl_count = vec![0u32; max_bits + 1];
+    for &len in lengths {
+        if len == 0 {
+            continue;
+        }
+        if len as usize > max_bits {
+            // A code longer than the table allows cannot exist.
+            return false;
+        }
+        bl_count[len as usize] += 1;
+    }
+    // The space that is left, in units of one whole code. The space
+    // starts as one, and every length takes its share out of what is
+    // left; what is left going negative is the over-subscription.
+    let mut left: i64 = 1;
+    for count in bl_count.iter().skip(1) {
+        left <<= 1;
+        left -= *count as i64;
+        if left < 0 {
+            return false;
+        }
+    }
+    true
+}
+
 /// Build canonical Huffman codes from code lengths.
 ///
 /// Uses the algorithm from RFC 1951 section 3.2.2.
@@ -127,18 +170,28 @@ pub fn build_canonical_codes(lengths: &[u8], max_bits: usize) -> Vec<CodeLength>
     let mut codes = vec![CodeLength::default(); n];
 
     // Count codes of each length
-    let mut bl_count = vec![0u16; max_bits + 1];
+    let mut bl_count = vec![0u32; max_bits + 1];
     for &len in lengths {
         if len > 0 && (len as usize) <= max_bits {
             bl_count[len as usize] += 1;
         }
     }
 
-    // Find the numerical value of the smallest code for each code length
-    let mut next_code = vec![0u16; max_bits + 1];
-    let mut code: u16 = 0;
+    // Find the numerical value of the smallest code for each code length.
+    //
+    // The running code is the first code of the length being computed,
+    // and a code of `bits` bits has a value below `2^bits` -- so the
+    // running code is computed in a type wide enough to hold the sum the
+    // file asks for. A table whose running code leaves that width is a
+    // table whose codes do not exist: the lengths are over-subscribed,
+    // and the reader that reads a hostile file refuses the table with
+    // [`code_lengths_are_valid`] before it gets here. Computing it in a
+    // wide type is what keeps the refusal from being an arithmetic
+    // accident: the sum the file asks for is a number like any other.
+    let mut next_code = vec![0u64; max_bits + 1];
+    let mut code: u64 = 0;
     for bits in 1..=max_bits {
-        code = (code + bl_count[bits - 1]) << 1;
+        code = (code + bl_count[bits - 1] as u64) << 1;
         next_code[bits] = code;
     }
 
@@ -146,7 +199,7 @@ pub fn build_canonical_codes(lengths: &[u8], max_bits: usize) -> Vec<CodeLength>
     for (symbol, &len) in lengths.iter().enumerate() {
         if len > 0 && (len as usize) <= max_bits {
             codes[symbol].bits = len;
-            codes[symbol].code = next_code[len as usize];
+            codes[symbol].code = next_code[len as usize] as u16;
             next_code[len as usize] += 1;
         }
     }
@@ -230,7 +283,18 @@ impl HuffmanDecoder {
         let mut table = vec![empty; table_size];
         let mut sub_slots: Vec<Slot> = Vec::new();
 
-        let codes = build_canonical_codes(lengths, max_bits as usize);
+        // A table whose lengths describe codes that cannot exist is left
+        // empty, so every lookup misses and the stream that carries it
+        // is refused rather than decoded into something else. The
+        // decoder that reads a hostile file checks the lengths first and
+        // names the refusal; this is the net under it, so that a caller
+        // that does not check is not left with a table of codes that do
+        // not exist.
+        let codes = if code_lengths_are_valid(lengths, max_bits as usize) {
+            build_canonical_codes(lengths, max_bits as usize)
+        } else {
+            Vec::new()
+        };
 
         // Group the codes that run past the first level by the low
         // `table_bits` of their reversed value — that is the first-level

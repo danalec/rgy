@@ -170,7 +170,7 @@ impl<'a> TiffReader<'a> {
     }
 
     fn u16(&self, at: usize) -> Option<u16> {
-        let b = self.d.get(at..at + 2)?;
+        let b = self.d.get(at..at.checked_add(2)?)?;
         Some(if self.big {
             u16::from_be_bytes([b[0], b[1]])
         } else {
@@ -179,7 +179,7 @@ impl<'a> TiffReader<'a> {
     }
 
     fn u32(&self, at: usize) -> Option<u32> {
-        let b = self.d.get(at..at + 4)?;
+        let b = self.d.get(at..at.checked_add(4)?)?;
         Some(if self.big {
             u32::from_be_bytes([b[0], b[1], b[2], b[3]])
         } else {
@@ -188,7 +188,7 @@ impl<'a> TiffReader<'a> {
     }
 
     fn u64(&self, at: usize) -> Option<u64> {
-        let b = self.d.get(at..at + 8)?;
+        let b = self.d.get(at..at.checked_add(8)?)?;
         let a: [u8; 8] = [b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]];
         Some(if self.big {
             u64::from_be_bytes(a)
@@ -287,7 +287,9 @@ impl<'a> TiffReader<'a> {
         // count-width past it, and an entry is tag(2) + type(2) + count +
         // slot. Reaching it by offset width instead lands on the count itself
         // for a classic TIFF, which then reads every value as 0 or 1.
-        let slot = at + self.entry_count_width();
+        let Some(slot) = at.checked_add(self.entry_count_width()) else {
+            return Vec::new();
+        };
         let inline = self.offset_width();
         let base = if total <= inline {
             // A value shorter than the slot is stored **left-justified**, with
@@ -299,7 +301,14 @@ impl<'a> TiffReader<'a> {
             let Some(o) = self.offset_at(slot) else {
                 return Vec::new();
             };
-            o as usize
+            // The offset is 64 bits wide in a BigTIFF and the file chooses
+            // it, so it can be a number this platform cannot even hold: on a
+            // 32-bit target `as usize` would silently truncate it into a
+            // perfectly ordinary-looking offset into the middle of the file.
+            let Some(o) = usize::try_from(o).ok() else {
+                return Vec::new();
+            };
+            o
         };
         let mut out = Vec::new();
         let mut p = base;
@@ -318,7 +327,7 @@ impl<'a> TiffReader<'a> {
                     None => break,
                 },
             }
-            p += size;
+            p = p.saturating_add(size);
         }
         out
     }
@@ -400,24 +409,45 @@ fn tiff_report(data: &[u8]) -> Vec<u8> {
             break;
         }
         seen.push(off);
-        let Some(count) = r.ifd_count_at(off as usize) else {
+        // The offset is 64 bits wide in a BigTIFF, and it is a number the
+        // file chooses: one that is past the end of the file, or past
+        // the end of the number that holds it, is a file the reader
+        // cannot read -- and the reader's answer is to stop, not to
+        // walk past the end of its own arithmetic.
+        let Some(off_usize) = usize::try_from(off).ok() else {
             break;
         };
-        let body = off as usize + r.ifd_count_width();
+        let Some(count) = r.ifd_count_at(off_usize) else {
+            break;
+        };
+        let Some(body) = off_usize.checked_add(r.ifd_count_width()) else {
+            break;
+        };
         page += 1;
         let _ = writeln!(out, "page {page}:");
 
         let mut width = 0u64;
         let mut height = 0u64;
         for i in 0..count.min(1 << 12) {
-            let e = body + i as usize * r.entry_size();
-            let (Some(tag), Some(ty)) = (r.u16(e), r.u16(e + 2)) else {
+            let Some(span) = (i as usize).checked_mul(r.entry_size()) else {
                 break;
             };
-            let Some(n) = r.entry_count_at(e + 4) else {
+            let Some(e) = body.checked_add(span) else {
                 break;
             };
-            let v = r.value(e + 4, ty, n);
+            let Some(e2) = e.checked_add(2) else {
+                break;
+            };
+            let Some(e4) = e.checked_add(4) else {
+                break;
+            };
+            let (Some(tag), Some(ty)) = (r.u16(e), r.u16(e2)) else {
+                break;
+            };
+            let Some(n) = r.entry_count_at(e4) else {
+                break;
+            };
+            let v = r.value(e4, ty, n);
             let first = v.first().copied().unwrap_or(0);
             match tag {
                 TAG_WIDTH => width = first,
@@ -465,7 +495,7 @@ fn tiff_report(data: &[u8]) -> Vec<u8> {
                     let _ = writeln!(out, "  fax options: {first}");
                 }
                 TAG_DESCRIPTION | TAG_MAKE | TAG_MODEL | TAG_SOFTWARE | TAG_DATETIME => {
-                    if let Some(t) = text_value(data, &r, e + 4, ty, n) {
+                    if let Some(t) = text_value(data, &r, e4, ty, n) {
                         let _ = writeln!(out, "  {}: {t}", tag_name(tag));
                     }
                 }
@@ -517,8 +547,20 @@ fn tiff_report(data: &[u8]) -> Vec<u8> {
             let _ = writeln!(out, "  {width} x {height} pixels");
         }
         // The chain pointer sits immediately after the last entry, and it is
-        // an offset rather than a count.
-        at = r.offset_at(body + count as usize * r.entry_size());
+        // an offset rather than a count. The count is a number the file
+        // chooses, so the span it describes has to be checked before it is
+        // added to anything: a directory that claims more entries than any
+        // offset can name puts the pointer past the end of the file, and a
+        // pointer that cannot be placed is not a pointer.
+        let next_at = usize::try_from(count)
+            .ok()
+            .and_then(|c| c.checked_mul(r.entry_size()))
+            .and_then(|span| body.checked_add(span));
+        let Some(next_at) = next_at else {
+            let _ = writeln!(out, "the page claims more entries than the file can hold");
+            break;
+        };
+        at = r.offset_at(next_at);
         if at == Some(0) {
             break;
         }
@@ -562,13 +604,14 @@ fn text_value(data: &[u8], r: &TiffReader<'_>, at: usize, ty: u16, n: u64) -> Op
     }
     let size = type_size(ty);
     let total = size.saturating_mul(n.min(1 << 20) as usize);
-    let slot = at + r.entry_count_width();
+    let slot = at.checked_add(r.entry_count_width())?;
     let inline = r.offset_width();
     let start = if total <= inline {
         // Left-justified, as in [`TiffReader::value`].
         slot
     } else {
-        r.offset_at(slot)? as usize
+        let o = r.offset_at(slot)?;
+        usize::try_from(o).ok()?
     };
     let body = data.get(start..start.checked_add(total)?)?;
     let end = body.iter().position(|b| *b == 0).unwrap_or(body.len());
@@ -970,6 +1013,139 @@ mod tests {
             };
             assert!(err.is_decline(), "{:?}: {err}", magic.escape_ascii());
         }
+    }
+
+    /// A BigTIFF: the same IFD chain as a classic TIFF, with every
+    /// offset, count and value slot widened from 32 bits to 64.
+    ///
+    /// The count that opens a directory is two bytes in a classic TIFF
+    /// and eight in a BigTIFF, and so is the slot a value lives in -- so
+    /// a fixture written for one is not a fixture for the other.
+    #[cfg(feature = "tiff")]
+    fn bigtiff(entries: &[(u16, u16, u64)]) -> Vec<u8> {
+        let mut f = b"II\x2b\x00".to_vec();
+        f.extend_from_slice(&8u16.to_le_bytes()); // the width of an offset
+        f.extend_from_slice(&0u16.to_le_bytes()); // reserved
+        f.extend_from_slice(&16u64.to_le_bytes()); // the first IFD is at 16
+        f.extend_from_slice(&(entries.len() as u64).to_le_bytes());
+        for (tag, ty, v) in entries {
+            f.extend_from_slice(&tag.to_le_bytes());
+            f.extend_from_slice(&ty.to_le_bytes());
+            f.extend_from_slice(&1u64.to_le_bytes());
+            // A value that fits in the slot is stored left-justified, so
+            // it starts at the slot itself and the padding is on the right.
+            f.extend_from_slice(&v.to_le_bytes());
+        }
+        f.extend_from_slice(&0u64.to_le_bytes()); // no next page
+        f
+    }
+
+    #[test]
+    #[cfg(feature = "tiff")]
+    fn a_big_tiff_reports_its_page_geometry() {
+        let f = bigtiff(&[(TAG_WIDTH, 4, 2480), (TAG_HEIGHT, 4, 3508)]);
+        let out = text_of(Tiff.extract(&f, "x.tif"));
+        assert!(out.contains("BigTIFF"), "{out}");
+        assert!(out.contains("2480 x 3508"), "{out}");
+        assert!(out.contains("pages: 1"), "{out}");
+    }
+
+    /// The bytes the fuzzer found on the third of November of 2026.
+    ///
+    /// The first byte of the fuzz input is the one the harness reads to
+    /// pick the extension, and the rest is the file: a BigTIFF whose
+    /// first directory is the header itself, whose directory claims two
+    /// and a half million entries, and whose third entry points its value
+    /// at 0xFFFFFFFFFFFFFFFF -- an offset no file can hold. The reader
+    /// read the value at that offset by adding four to it, and the
+    /// addition went over the top of the number.
+    const BIGTIFF_WITH_AN_OFFSET_NO_FILE_CAN_HOLD: &[u8] = &[
+        0x49, 0x49, 0x2B, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0xFF, 0xFF, 0xFF,
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0x00,
+    ];
+
+    #[test]
+    #[cfg(feature = "tiff")]
+    fn a_big_tiff_whose_value_points_past_the_end_of_the_file_is_read() {
+        assert_eq!(BIGTIFF_WITH_AN_OFFSET_NO_FILE_CAN_HOLD.len(), 106);
+        let out = text_of(Tiff.extract(BIGTIFF_WITH_AN_OFFSET_NO_FILE_CAN_HOLD, "x.tif"));
+        // The reader answers with what the file holds: one page, and no
+        // geometry -- because the geometry lives in the entries, and the
+        // entries this file has are the ones it can read.
+        assert!(out.contains("pages: 1"), "{out}");
+        assert!(out.contains("no ImageWidth/ImageLength"), "{out}");
+        // And nothing that came from the offset the file named: that
+        // offset is past the end of the file, so there is no value there
+        // to report.
+        assert!(!out.contains("18446744073709551615"), "{out}");
+    }
+
+    /// A directory that claims more entries than the file can hold.
+    ///
+    /// The chain pointer sits after the last entry, so the place it has in
+    /// the file is computed from the entry count -- and the count here is
+    /// 2^64 - 1. Twenty bytes to the entry times that count does not fit
+    /// in a 64-bit number, so the place of the pointer is computed by an
+    /// arithmetic that wrapped: it lands twelve bytes BEFORE the
+    /// directory, which is inside this file, and the bytes there are a
+    /// second directory that the file never said was next.
+    ///
+    /// The reader does not follow it. A pointer that cannot be placed is
+    /// not a pointer, and the walk stops at the one page the file
+    /// describes.
+    #[test]
+    #[cfg(feature = "tiff")]
+    fn a_page_that_claims_more_entries_than_the_file_can_hold_stops_the_walk() {
+        // A BigTIFF whose first directory is at 100 and claims 2^64 - 1
+        // entries. The bytes at 88 -- twelve before the directory -- are
+        // a second directory, and a reader whose arithmetic wrapped would
+        // follow the pointer it finds there.
+        let mut f = vec![0u8; 236];
+        f[0..4].copy_from_slice(b"II\x2b\x00");
+        f[4..6].copy_from_slice(&8u16.to_le_bytes()); // the width of an offset
+        f[8..16].copy_from_slice(&100u64.to_le_bytes()); // the first IFD
+        f[88..96].copy_from_slice(&200u64.to_le_bytes()); // a second directory
+        f[100..108].copy_from_slice(&u64::MAX.to_le_bytes()); // the entry count
+                                                              // The two entries of the first directory: the geometry.
+        f[108..110].copy_from_slice(&TAG_WIDTH.to_le_bytes());
+        f[110..112].copy_from_slice(&4u16.to_le_bytes()); // LONG
+        f[112..120].copy_from_slice(&1u64.to_le_bytes()); // the count
+        f[120..128].copy_from_slice(&2480u64.to_le_bytes()); // the value
+        f[128..130].copy_from_slice(&TAG_HEIGHT.to_le_bytes());
+        f[130..132].copy_from_slice(&4u16.to_le_bytes());
+        f[132..140].copy_from_slice(&1u64.to_le_bytes());
+        f[140..148].copy_from_slice(&3508u64.to_le_bytes());
+        // The next-page pointer of that directory: none.
+        f[148..156].copy_from_slice(&0u64.to_le_bytes());
+        // And the second directory, at 200: one entry, the same width.
+        f[200..208].copy_from_slice(&1u64.to_le_bytes()); // the entry count
+        f[208..210].copy_from_slice(&TAG_WIDTH.to_le_bytes());
+        f[210..212].copy_from_slice(&4u16.to_le_bytes());
+        f[212..220].copy_from_slice(&1u64.to_le_bytes());
+        f[220..228].copy_from_slice(&2480u64.to_le_bytes());
+        f[228..236].copy_from_slice(&0u64.to_le_bytes());
+
+        let out = text_of(Tiff.extract(&f, "x.tif"));
+        // One page: the one the header points at. The arithmetic that
+        // places the chain pointer wraps around the end of the number, and
+        // the page it lands on is a page the file never described -- so the
+        // build without the overflow checks answers this question with two
+        // pages, and a test that only asked "does it read" would pass on
+        // the defect it is written for.
+        assert!(out.contains("pages: 1"), "{out}");
+        assert!(!out.contains("pages: 2"), "{out}");
+        // And the reason, because a walk that stops and a walk that wraps
+        // look the same until the arithmetic is what stops it.
+        assert!(
+            out.contains("the page claims more entries than the file can hold"),
+            "{out}"
+        );
     }
 
     #[cfg(feature = "djvu")]
