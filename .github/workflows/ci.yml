@@ -613,6 +613,33 @@ jobs:
       # below read it -- and the target directory is dropped before the VM
       # stops: the archive is what comes back through the workspace sync, and a
       # target directory of gigabytes is not.
+      # The FreeBSD row is the one row whose archive the publish step cannot
+      # rebuild: the target needs a FreeBSD linker and libc, the runner links
+      # with its own, and the build is the VM's. So the page that archive
+      # carries is the page the publish will compare it against, and the
+      # row's own marker is written here -- while the page is still the
+      # release's page, which is where the check that it names every row's
+      # archive happens. The eleven other rows write the same marker after
+      # their own build and are rebuilt from it; the pair agrees either way.
+      - name: the page this row's archive carries (FreeBSD)
+        if: matrix.vm == 'freebsd'
+        shell: bash
+        run: |
+          set -eu
+          version=$(bash scripts/lib/version.sh) || exit 1
+          name="rgy-v$version-${{ matrix.asset }}.tar.gz"
+          page="docs/release-$version.md"
+          [ -f "$page" ] || { echo "the tree has no $page"; exit 1; }
+          marker=$(sed -n 's|^<!-- assets: \(.*\) -->$|\1|p' "$page")
+          case " $marker " in
+            *" $name "*) ;;
+            *)
+              echo "the release page does not name the archive this row built ($name)"
+              exit 1
+              ;;
+          esac
+          sed "s|^<!-- assets: .* -->$|<!-- assets: $name SHA256SUMS -->|" "$page" > "$page.tmp"
+          mv "$page.tmp" "$page"
       - name: build the archive (FreeBSD, in a FreeBSD VM)
         if: matrix.vm == 'freebsd'
         uses: vmactions/freebsd-vm@v1
@@ -849,12 +876,16 @@ jobs:
           # is the page of the release.
           sed "s|^<!-- assets: .* -->$|<!-- assets: $name SHA256SUMS -->|" "$page" > "$page.tmp"
           mv "$page.tmp" "$page"
-          # The build is not run again: the step above built the archive and
-          # this one reads what it left in .dist/. Without --skip-build the
-          # publish script builds the target a second time, which the FreeBSD
-          # row cannot do on this runner at all -- a FreeBSD binary needs a
-          # FreeBSD linker and libc, and the runner links with its own.
-          bash scripts/publish-release.sh --manifests-only --skip-tests --skip-build --target ${{ matrix.target }} --variant ${{ matrix.variant }}
+          # The build is not run again for the row whose archive this runner
+          # cannot build: a FreeBSD binary needs a FreeBSD linker and libc,
+          # and this runner links with its own -- so that row's archive is
+          # the VM's, and the page it carries was written to agree with this
+          # tree before the VM packed it. The eleven other rows rebuild from
+          # the page this step just rewrote, which is what makes the archive
+          # and the tree agree for them.
+          skip=""
+          if [ "${{ matrix.vm }}" = "freebsd" ]; then skip="--skip-build"; fi
+          bash scripts/publish-release.sh --manifests-only --skip-tests $skip --target ${{ matrix.target }} --variant ${{ matrix.variant }}
       - name: the manifests, rewritten (nothing published)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -894,12 +925,10 @@ jobs:
           $markerLine = "<!-- assets: $name SHA256SUMS -->"
           $new = [regex]::Replace($text, '(?m)^<!-- assets: .* -->(\r?)$', ($markerLine + "`$1"))
           [IO.File]::WriteAllText($page, $new, [Text.UTF8Encoding]::new($false))
-          # The build is not run again: the step above built the archive and
-          # this one reads what it left in .dist/. Without -SkipBuild the
-          # publish script builds the target a second time, which the FreeBSD
-          # row cannot do on this runner at all -- a FreeBSD binary needs a
-          # FreeBSD linker and libc, and the runner links with its own.
-          ./scripts/publish-release.ps1 -ManifestsOnly -SkipTests -SkipBuild -Target ${{ matrix.target }} -Variant ${{ matrix.variant }}
+          # No row on this runner is a VM, so the publish rebuilds the
+          # archive from the page this step rewrote -- which is what makes
+          # the archive and the tree agree on the page it carries.
+          ./scripts/publish-release.ps1 -ManifestsOnly -SkipTests -Target ${{ matrix.target }} -Variant ${{ matrix.variant }}
       # A script that ignores an option it does not understand does the real
       # thing when the caller asked for a dry run, and in this directory the
       # real thing is a release: a tag, an archive, a release page on two

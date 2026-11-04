@@ -104,7 +104,6 @@ pub fn command_for(text: &str) -> Option<&'static Command> {
 fn command_word(text: &str) -> Option<&str> {
     text.trim()
         .strip_prefix(COMMAND_PREFIX)?
-        .trim_start()
         .split_whitespace()
         .next()
 }
@@ -127,7 +126,6 @@ pub fn unknown(text: &str, lang: Lang) -> alloc::string::String {
         .trim()
         .strip_prefix(COMMAND_PREFIX)
         .unwrap_or("")
-        .trim_start()
         .split_whitespace()
         .next()
         .unwrap_or("");
