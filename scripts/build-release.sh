@@ -38,6 +38,7 @@
 #   aarch64-unknown-linux-gnu       aarch64-linux.tar.gz     portable
 #   aarch64-apple-darwin            aarch64-apple-darwin.tar.gz  portable
 #   x86_64-apple-darwin             x86_64-apple-darwin.tar.gz   portable
+#   x86_64-unknown-freebsd          x86_64-freebsd.tar.gz        portable
 #
 # The three x86_64 portable names are the ones the installers ask for
 # (install.sh wants x86_64-linux.tar.gz, install.ps1 wants
@@ -275,6 +276,7 @@ asset_of() {
         aarch64-unknown-linux-gnu) echo "aarch64-linux" ;;
         aarch64-apple-darwin) echo "aarch64-apple-darwin" ;;
         x86_64-apple-darwin) echo "x86_64-apple-darwin" ;;
+        x86_64-unknown-freebsd) echo "x86_64-freebsd" ;;
         *) echo "unknown target: $1" >&2; return 1 ;;
     esac
 }

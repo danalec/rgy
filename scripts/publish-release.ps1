@@ -1111,6 +1111,7 @@ $pins = @(
     @{ File = "install.sh"; Asset = "rgy-v$Version-aarch64-linux.tar.gz"; Pattern = '(?m)^(expected_linux_aarch64=")[0-9A-Fa-f]{64}(")$'; Line = '^expected_linux_aarch64=' }
     @{ File = "install.sh"; Asset = "rgy-v$Version-x86_64-apple-darwin.tar.gz"; Pattern = '(?m)^(expected_macos_x86_64=")[0-9A-Fa-f]{64}(")$'; Line = '^expected_macos_x86_64=' }
     @{ File = "install.sh"; Asset = "rgy-v$Version-aarch64-apple-darwin.tar.gz"; Pattern = '(?m)^(expected_macos_aarch64=")[0-9A-Fa-f]{64}(")$'; Line = '^expected_macos_aarch64=' }
+    @{ File = "install.sh"; Asset = "rgy-v$Version-x86_64-freebsd.tar.gz"; Pattern = '(?m)^(expected_freebsd_x86_64=")[0-9A-Fa-f]{64}(")$'; Line = '^expected_freebsd_x86_64=' }
 )
 
 # Is the pin on that line still the placeholder? The placeholder is a pin

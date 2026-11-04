@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install.sh -- install rgy on Linux and macOS.
+# install.sh -- install rgy on Linux, macOS and FreeBSD.
 #
 # The unix counterpart of install.ps1.
 #
@@ -58,6 +58,7 @@ expected_linux_x86_64="830D1A767C19CBF6EAB486B5B613229D215319BAB46FC67EA6B586011
 expected_linux_aarch64="0000000000000000000000000000000000000000000000000000000000000000"
 expected_macos_x86_64="0000000000000000000000000000000000000000000000000000000000000000"
 expected_macos_aarch64="0000000000000000000000000000000000000000000000000000000000000000"
+expected_freebsd_x86_64="0000000000000000000000000000000000000000000000000000000000000000"
 
 # The pin of an archive nobody has published yet.
 placeholder="0000000000000000000000000000000000000000000000000000000000000000"
@@ -208,6 +209,19 @@ case "$os" in
             arm64|aarch64)
                 asset="$version-aarch64-apple-darwin.tar.gz"
                 expected="$expected_macos_aarch64"
+                ;;
+            *)
+                echo "there is no rgy release for this architecture: $arch" >&2
+                exit 1
+                ;;
+        esac
+        ;;
+    FreeBSD)
+        os_name="FreeBSD"
+        case "$arch" in
+            x86_64|amd64)
+                asset="$version-x86_64-freebsd.tar.gz"
+                expected="$expected_freebsd_x86_64"
                 ;;
             *)
                 echo "there is no rgy release for this architecture: $arch" >&2

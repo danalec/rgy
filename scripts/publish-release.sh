@@ -902,6 +902,7 @@ else
         "install.sh|aarch64-linux.tar.gz|^(expected_linux_aarch64=\")[0-9A-Fa-f]{64}(\")$|^expected_linux_aarch64="
         "install.sh|x86_64-apple-darwin.tar.gz|^(expected_macos_x86_64=\")[0-9A-Fa-f]{64}(\")$|^expected_macos_x86_64="
         "install.sh|aarch64-apple-darwin.tar.gz|^(expected_macos_aarch64=\")[0-9A-Fa-f]{64}(\")$|^expected_macos_aarch64="
+    "install.sh|x86_64-freebsd.tar.gz|^(expected_freebsd_x86_64=\")[0-9A-Fa-f]{64}(\")$|^expected_freebsd_x86_64="
     )
     # Is the pin on that line still the placeholder? The placeholder is a
     # pin that says "there is no release for this platform yet"; a real

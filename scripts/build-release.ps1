@@ -41,6 +41,7 @@
 #   aarch64-unknown-linux-gnu       aarch64-linux.tar.gz     portable
 #   aarch64-apple-darwin            aarch64-apple-darwin.tar.gz  portable
 #   x86_64-apple-darwin             x86_64-apple-darwin.tar.gz   portable
+#   x86_64-unknown-freebsd          x86_64-freebsd.tar.gz        portable
 #
 # The three x86_64 portable names are the ones the installers ask for
 # (install.sh wants x86_64-linux.tar.gz, install.ps1 wants
@@ -291,6 +292,7 @@ function Get-AssetName([string]$target) {
         "aarch64-unknown-linux-gnu" { return "aarch64-linux" }
         "aarch64-apple-darwin"      { return "aarch64-apple-darwin" }
         "x86_64-apple-darwin"       { return "x86_64-apple-darwin" }
+        "x86_64-unknown-freebsd"    { return "x86_64-freebsd" }
         default {
             [Console]::Error.Write("unknown target: $target`n")
             exit 2
