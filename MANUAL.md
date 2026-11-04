@@ -48,14 +48,15 @@ everything with it.
 
 ## 2. Install it
 
-The release is **0.1.8**. It is on
-[GitHub](https://github.com/danalec/rgy/releases/tag/rgy-v0.1.8), and the
-crates are on crates.io.
+The release is **0.1.9.0**. It is on
+[GitHub](https://github.com/danalec/rgy/releases/tag/rgy-v0.1.9.0), and the
+crates are on crates.io at 0.1.9 — the release's number carries a fourth
+place, the fix count of the line, and the registry takes three.
 
 ### From crates.io
 
 ```sh
-cargo install rgy-search --version 0.1.8         # gives you `searchctl`
+cargo install rgy-search --version 0.1.9         # gives you `searchctl`
 ```
 
 That is the whole install for the tool you actually type. It needs **Rust
@@ -67,10 +68,10 @@ The other binaries are separate crates, because most people only want the
 first one:
 
 ```sh
-cargo install rgy-searchd --version 0.1.8       # the daemon: searchd
-cargo install rgy-autostart --version 0.1.8     # the login item: rgy-autostart
-cargo install rgxy --version 0.1.8            # the window: rgxy
-cargo install rgy-zen --version 0.1.8           # the zen CLI: zen-rs (Windows)
+cargo install rgy-searchd --version 0.1.9       # the daemon: searchd
+cargo install rgy-autostart --version 0.1.9     # the login item: rgy-autostart
+cargo install rgxy --version 0.1.9            # the window: rgxy
+cargo install rgy-zen --version 0.1.9           # the zen CLI: zen-rs (Windows)
 ```
 
 ### From the release
@@ -82,8 +83,8 @@ administrator — and a symlink on Linux and macOS:
 
 | platform | archive |
 |---|---|
-| Windows x86_64 | `rgy-v0.1.8-x86_64-windows.zip` |
-| Linux x86_64 | `rgy-v0.1.8-x86_64-linux.tar.gz` |
+| Windows x86_64 | `rgy-v0.1.9.0-x86_64-windows.zip` |
+| Linux x86_64 | `rgy-v0.1.9.0-x86_64-linux.tar.gz` |
 
 The release page carries a `SHA256SUMS` beside the archives. The archive
 that matches the machine is the one that gets installed: the operating
@@ -110,19 +111,26 @@ before anything is unpacked. The pins are release data — the release flow
 rewrites them from the archive it has just built.
 
 An archive the release does not carry is refused too, and the installer says
-which one it wanted. **There is no macOS archive yet** — it needs a Mac to
-build — and no aarch64 one, so on those the installer installs nothing.
+which one it wanted. **This release carries the two archives it was cut
+from** — Windows x86_64 and Linux x86_64. The CI builds the other nine on
+their own runners, the macOS ones on a Mac, and it publishes none of them, so
+on macOS and on aarch64 the installer says so and installs nothing.
 
-### What is not out yet
+### The packages
 
 | platform | package | state |
 |---|---|---|
-| Windows | winget | the manifest is in the repository and validates, but it is not in `microsoft/winget-pkgs`: `winget install danalec.rgy-search` installs nothing today |
-| macOS | Homebrew | the formula is in the repository with its digests as placeholders, and the tap is not published: `brew install danalec/rgy/rgy-search` installs nothing today |
+| Windows | Scoop | **out** — `scoop bucket add danalec/scoop-alts` and `scoop install rgy`. The same bucket carries `rgx`, the upstream engine this repository is built on |
+| Windows | winget | the manifest in this repository validates and is refreshed by every release; the submission to `microsoft/winget-pkgs` ([#469679](https://github.com/microsoft/winget-pkgs/pull/469679)) was closed unmerged — `winget install danalec.rgy-search` installs nothing today |
+| macOS | Homebrew | the formula's digests are placeholders, and the tap is not published — `brew install danalec/rgy/rgy-search` installs nothing today |
 
-The packages are called **rgy-search** because `rgy` is taken on crates.io
-(a GameBoy emulator library from 2019). The binaries inside keep the names
-they have everywhere else, and the project itself is still rgy.
+The **packages** — the winget manifest, the Scoop manifest and the Homebrew
+formula — are called **rgy-search**, and not `rgy`, because `rgy` is taken on
+crates.io (a GameBoy emulator library from 2019). The command-line tool's
+crate carries the same name, so the package manager and the registry say one
+thing: beside it are `rgy-searchd`, `rgy-autostart` and `rgxy`, and the
+binaries keep the names they have everywhere else. The project itself is
+still rgy.
 
 ### The binaries
 
@@ -142,7 +150,7 @@ they have everywhere else, and the project itself is still rgy.
 
 ### The library
 
-The crates are on crates.io too, all thirty-two at 0.1.8, and fifteen of them
+The crates are on crates.io too, all thirty-two at 0.1.9, and fifteen of them
 are this project's own library:
 
 | crate | what it gives you |
@@ -1347,12 +1355,12 @@ being written. rgy skips it and lists it rather than failing the run.
 |---|---|
 | [README.md](README.md) | the map: what rgy is, how it compares to rgx |
 | [FORMATS.md](FORMATS.md) | what it reads inside a file, format by format |
-| [docs/release-0.1.8.md](docs/release-0.1.8.md) | the 0.1.8 release page, with the changelog in it |
+| [docs/release-0.1.9.0.md](docs/release-0.1.9.0.md) | the 0.1.9.0 release page, with the changelog in it |
 | [benchmark/](benchmark/) | the measured numbers |
 | [rgx](https://github.com/danalec/rgx) | the content-search specialist this workspace is built on |
 
 | link | what it is |
 |---|---|
-| [the 0.1.8 release](https://github.com/danalec/rgy/releases/tag/rgy-v0.1.8) | the archives, the `SHA256SUMS`, and the changelog |
-| [crates.io](https://crates.io/crates/rgy-search) | the thirty-two crates, all at 0.1.8 |
+| [the 0.1.9.0 release](https://github.com/danalec/rgy/releases/tag/rgy-v0.1.9.0) | the archives, the `SHA256SUMS`, and the changelog |
+| [crates.io](https://crates.io/crates/rgy-search) | the thirty-two crates, all at 0.1.9 |
 | [docs.rs](https://docs.rs/rgy-name-core) | the API of each crate |

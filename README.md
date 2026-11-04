@@ -23,7 +23,7 @@ Two faces, one daemon. Click either one to watch it move.
 
 ## Install
 
-The release is **0.1.8**. It is on [GitHub](https://github.com/danalec/rgy/releases/tag/rgy-v0.1.8), and the crates are on crates.io.
+The release is **0.1.9.0**. It is on [GitHub](https://github.com/danalec/rgy/releases/tag/rgy-v0.1.9.0), and the crates are on crates.io at 0.1.9 — the release's number carries a fourth place, the fix count of the line, and the registry takes three.
 
 **One line**, and it installs the tool, the daemon and the launcher:
 
@@ -49,7 +49,7 @@ macOS and on aarch64 the installer says so and installs nothing.
 **From crates.io:**
 
 ```sh
-cargo install rgy-search --version 0.1.8         # gives you `searchctl`
+cargo install rgy-search --version 0.1.9         # gives you `searchctl`
 ```
 
 That is the whole install for the tool you actually type, and it drops the
@@ -62,9 +62,9 @@ The other binaries are separate crates, because most people only want the
 first one:
 
 ```sh
-cargo install rgy-searchd --version 0.1.8       # the daemon: searchd
-cargo install rgy-autostart --version 0.1.8     # the login item: rgy-autostart
-cargo install rgxy --version 0.1.8            # the window: rgxy
+cargo install rgy-searchd --version 0.1.9       # the daemon: searchd
+cargo install rgy-autostart --version 0.1.9     # the login item: rgy-autostart
+cargo install rgxy --version 0.1.9            # the window: rgxy
 ```
 
 **From the release** — the archive carries the four binaries, the `rgy`
@@ -72,8 +72,8 @@ alias and the documents, and it needs neither Rust nor a compiler:
 
 | platform | archive |
 |---|---|
-| Windows x86_64 | `rgy-v0.1.8-x86_64-windows.zip` |
-| Linux x86_64 | `rgy-v0.1.8-x86_64-linux.tar.gz` |
+| Windows x86_64 | `rgy-v0.1.9.0-x86_64-windows.zip` |
+| Linux x86_64 | `rgy-v0.1.9.0-x86_64-linux.tar.gz` |
 
 The release page carries a `SHA256SUMS` beside the archives.
 
@@ -409,7 +409,7 @@ measurement does not reproduce on the host is measured and reported instead.
 
 ### The crates
 
-All thirty-two are on crates.io at 0.1.8. Five are the programs — `rgy-search`,
+All thirty-two are on crates.io at 0.1.9. Five are the programs — `rgy-search`,
 `rgy-searchd`, `rgy-autostart`, `rgxy` and `rgy-zen` — and twenty-seven are
 the libraries under them: `rgy-name-core`, `rgy-discovery`,
 `rgy-discovery-dispatch`, `rgy-discovery-linux`, `rgy-discovery-macos`,
@@ -446,14 +446,15 @@ the EXR attribute-size overflow among them, which no published version of that
 adapter had before 0.1.8: every earlier one on crates.io read the attribute's
 size as a signed `i32`, and a file with a large enough attribute overflows it.
 
-The number is **0.1.8**, and it is the upstream's line as much as this
-project's: the upstream published 0.1.8 with the EXR overflow fixed, and this
-project's copy is taken from the upstream's 0.1.8, so the two stand at the
-same version with the same fix in them. A dependant that asks for
-`rgy-vendored-core ^0.1.8` gets this project's copy; one that asks for
-`rgx-core ^0.1.8` gets the upstream's. Before this release the two could not
-both be had — they wanted the same name at the same version, and the registry
-gives that to one of them.
+The number is **0.1.9**, and it is the upstream's line as much as this
+project's: the upstream published 0.1.9 with the two fixes this repository had
+carried as patches taken into it — the Firebird reader's day fraction and the
+HFS+ volume header's bit sixty-four — and this project's copy is taken from
+the upstream's 0.1.9, so the two stand at the same version with the same
+fixes in them. A dependant that asks for `rgy-vendored-core ^0.1.9` gets this
+project's copy; one that asks for `rgx-core ^0.1.9` gets the upstream's.
+Before this release the two could not both be had — they wanted the same name
+at the same version, and the registry gives that to one of them.
 
 The versions this project published under the upstream's names — 0.1.2, 0.1.4
 and 0.1.6 — stay where they are, and they are not yanked: they are the
@@ -485,9 +486,9 @@ PowerShell twin, `scripts/publish-crates.ps1`).
 The 0.1.1, 0.1.2, 0.1.3 and 0.1.4 numbers are taken as well, by earlier builds
 of this same project — the registry keeps what it keeps, and a version number
 is as permanent as a name. Those builds are not this tree: the protocol they
-shipped has neither the limits nor the count rules that 0.1.8 has, and a
+shipped has neither the limits nor the count rules that 0.1.9 has, and a
 program pinned to them does not build against it. The version names the
-bytes, and this release is **0.1.8** because these are the bytes.
+bytes, and this release is **0.1.9** because these are the bytes.
 
 ## Related projects
 

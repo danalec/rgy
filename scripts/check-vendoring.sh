@@ -516,7 +516,7 @@ fi
 # The vendored crates are the upstream's crates and they go out under the
 # rgy's own names now -- rgy-vendored-core, the rgy-vendored-adapters-*
 # family and rgy-vendored-rar-codec -- carrying this tree's patches inside
-# them, at this tree's version (0.1.8). They used to go out under the
+# them, at this tree's version (0.1.9). They used to go out under the
 # upstream's names, and that was a collision: the upstream publishes the
 # same names, and a name and a number is one thing on the registry, so two
 # publishers cannot both take it. The upstream's names are the upstream's.
