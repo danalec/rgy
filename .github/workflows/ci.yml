@@ -628,33 +628,6 @@ jobs:
       # below read it -- and the target directory is dropped before the VM
       # stops: the archive is what comes back through the workspace sync, and a
       # target directory of gigabytes is not.
-      # The FreeBSD row is the one row whose archive the publish step cannot
-      # rebuild: the target needs a FreeBSD linker and libc, the runner links
-      # with its own, and the build is the VM's. So the page that archive
-      # carries is the page the publish will compare it against, and the
-      # row's own marker is written here -- while the page is still the
-      # release's page, which is where the check that it names every row's
-      # archive happens. The eleven other rows write the same marker after
-      # their own build and are rebuilt from it; the pair agrees either way.
-      - name: the page this row's archive carries (FreeBSD)
-        if: matrix.vm == 'freebsd'
-        shell: bash
-        run: |
-          set -eu
-          version=$(bash scripts/lib/version.sh) || exit 1
-          name="rgy-v$version-${{ matrix.asset }}.tar.gz"
-          page="docs/release-$version.md"
-          [ -f "$page" ] || { echo "the tree has no $page"; exit 1; }
-          marker=$(sed -n 's|^<!-- assets: \(.*\) -->$|\1|p' "$page")
-          case " $marker " in
-            *" $name "*) ;;
-            *)
-              echo "the release page does not name the archive this row built ($name)"
-              exit 1
-              ;;
-          esac
-          sed "s|^<!-- assets: .* -->$|<!-- assets: $name SHA256SUMS -->|" "$page" > "$page.tmp"
-          mv "$page.tmp" "$page"
       - name: build the archive (FreeBSD, in a FreeBSD VM)
         if: matrix.vm == 'freebsd'
         uses: vmactions/freebsd-vm@v1
@@ -855,8 +828,13 @@ jobs:
       # built and the digests file beside it, and the script compares a page
       # with the .dist/ that goes with it. The checkout that runs here is
       # thrown away when the job ends.
+      # The row whose archive the VM built does not run this step: the
+      # publish compares an archive's own copy of the release page with
+      # the tree's, and the VM packed the page the release publishes --
+      # the one that names every row's archive -- while this step
+      # rewrites the page to name one. The eleven other rows run it.
       - name: the manifests, rewritten (nothing published)
-        if: runner.os != 'Windows'
+        if: runner.os != 'Windows' && matrix.vm == null
         env:
           RGY_FORGEJO_URL: http://forgejo.invalid
         run: |
@@ -891,16 +869,7 @@ jobs:
           # is the page of the release.
           sed "s|^<!-- assets: .* -->$|<!-- assets: $name SHA256SUMS -->|" "$page" > "$page.tmp"
           mv "$page.tmp" "$page"
-          # The build is not run again for the row whose archive this runner
-          # cannot build: a FreeBSD binary needs a FreeBSD linker and libc,
-          # and this runner links with its own -- so that row's archive is
-          # the VM's, and the page it carries was written to agree with this
-          # tree before the VM packed it. The eleven other rows rebuild from
-          # the page this step just rewrote, which is what makes the archive
-          # and the tree agree for them.
-          skip=""
-          if [ "${{ matrix.vm }}" = "freebsd" ]; then skip="--skip-build"; fi
-          bash scripts/publish-release.sh --manifests-only --skip-tests $skip --target ${{ matrix.target }} --variant ${{ matrix.variant }}
+          bash scripts/publish-release.sh --manifests-only --skip-tests --target ${{ matrix.target }} --variant ${{ matrix.variant }}
       - name: the manifests, rewritten (nothing published)
         if: runner.os == 'Windows'
         shell: pwsh
