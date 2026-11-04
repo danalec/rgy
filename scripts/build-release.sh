@@ -141,9 +141,18 @@ if [ -z "$version" ]; then
 fi
 [ -n "$version" ] || { echo "no version in bins/searchctl/Cargo.toml" >&2; exit 1; }
 
+# The release's number and the crates' number. The registry takes a version
+# of three numbers and nothing else, and a release line that will carry
+# fixes for a while wants a fourth -- the fix count. With four numbers the
+# release carries all of them and every manifest carries the first three,
+# the same rule scripts/bump-version.py bumps by, so the agreement checks
+# below read the three the manifests hold and the archive carries the four
+# the tag is made of.
+crate_version=$(printf '%s\n' "$version" | cut -d. -f1-3)
+
 for m in $manifests; do
     v=$(read_manifest_version "$m")
-    if [ "$v" != "$version" ]; then
+    if [ "$v" != "$crate_version" ]; then
         echo "$m:$(manifest_version_line "$m") says version $v, but the release is $version" >&2
         echo "the crates must agree about their version" >&2
         exit 1
@@ -171,7 +180,7 @@ done
 # The findings come out as "line:dependency:requirement", and the shell
 # turns the first one into the sentence the reader reads.
 for m in $manifests; do
-    for finding in $(awk -v release="$version" '
+    for finding in $(awk -v release="$crate_version" '
         function req_of(line,   rest, v) {
             if (!match(line, /version[ \t]*=[ \t]*/)) return ""
             rest = substr(line, RSTART + RLENGTH)

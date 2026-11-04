@@ -165,9 +165,18 @@ if (-not $Version) {
     exit 1
 }
 
+# The release's number and the crates' number. The registry takes a version
+# of three numbers and nothing else, and a release line that will carry
+# fixes for a while wants a fourth -- the fix count. With four numbers the
+# release carries all of them and every manifest carries the first three,
+# the same rule scripts/bump-version.py bumps by, so the agreement checks
+# below read the three the manifests hold and the archive carries the four
+# the tag is made of.
+$CrateVersion = (($Version -split '\.')[0..2]) -join '.'
+
 foreach ($m in $manifests) {
     $v = Get-ManifestVersion $m
-    if ($v -ne $Version) {
+    if ($v -ne $CrateVersion) {
         # Plain lines on stderr, not `Write-Error`: the POSIX twin writes
         # the same two lines with `echo >&2`, and an error record would
         # print the script's path and line number on top of them.
@@ -211,7 +220,7 @@ foreach ($m in $manifests) {
                 if ($pkg) { $dep = $pkg }
                 $req = Get-Requirement $line
                 if ($req -ne "") {
-                    if ($req -ne $Version -and $req -ne "^$Version") {
+                    if ($req -ne $CrateVersion -and $req -ne "^$CrateVersion") {
                         [Console]::Error.Write("$($m):$at asks for $dep $req where the release is $Version`n")
                         [Console]::Error.Write("the dependency lines have to be bumped with the manifests`n")
                         exit 1
@@ -227,7 +236,7 @@ foreach ($m in $manifests) {
         }
         $req = Get-Requirement $line
         if ($req -ne "") {
-            if ($req -ne $Version -and $req -ne "^$Version") {
+            if ($req -ne $CrateVersion -and $req -ne "^$CrateVersion") {
                 [Console]::Error.Write("$($m):$at asks for $dep $req where the release is $Version`n")
                 [Console]::Error.Write("the dependency lines have to be bumped with the manifests`n")
                 exit 1

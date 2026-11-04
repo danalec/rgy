@@ -372,26 +372,27 @@ stderr, zero matches, exit 1.
 
 ## Status
 
-The release is out: **0.1.8**, tagged `rgy-v0.1.8`, with the Windows and
-Linux archives beside a `SHA256SUMS`, and all thirty-two crates on crates.io.
-The release page is the changelog — it is
-[`docs/release-0.1.8.md`](docs/release-0.1.8.md), the file the release
-publishes.
+The release is out: **0.1.9.0**, tagged `rgy-v0.1.9.0`, with the Windows and
+Linux archives beside a `SHA256SUMS`, and all thirty-two crates on crates.io
+at 0.1.9 — the release's number carries a fourth place now, the fix count of
+the line, and the registry takes three. The release page is the changelog —
+it is [`docs/release-0.1.9.0.md`](docs/release-0.1.9.0.md), the file the
+release publishes.
 
-### The packages that are not out yet
+### The packages
 
-The **packages** — the winget manifest and the Homebrew formula — are called
-**rgy-search**, and not `rgy`, because `rgy` is taken on crates.io (a GameBoy
-emulator library from 2019). The command-line tool's crate carries the same
-name, so the package manager and the registry say one thing: beside it are
-`rgy-searchd`, `rgy-autostart` and `rgxy`, and the binaries keep the
-names they have everywhere else. The project itself is still rgy.
-
-Both manifests are in the repository; neither is in a package manager yet:
+The **packages** — the winget manifest, the Scoop manifest and the Homebrew
+formula — are called **rgy-search**, and not `rgy`, because `rgy` is taken on
+crates.io (a GameBoy emulator library from 2019). The command-line tool's
+crate carries the same name, so the package manager and the registry say one
+thing: beside it are `rgy-searchd`, `rgy-autostart` and `rgxy`, and the
+binaries keep the names they have everywhere else. The project itself is
+still rgy.
 
 | platform | package | state |
 |---|---|---|
-| Windows | winget | the manifest validates and is **in a pull request** on `microsoft/winget-pkgs` ([#469679](https://github.com/microsoft/winget-pkgs/pull/469679)), waiting for a moderator of the community to merge it — `winget install danalec.rgy-search` installs nothing today |
+| Windows | Scoop | **out** — `scoop bucket add danalec/scoop-alts` and `scoop install rgy`. The same bucket carries `rgx`, the upstream engine this repository is built on |
+| Windows | winget | the manifest in this repository validates and is refreshed by every release; the submission to `microsoft/winget-pkgs` ([#469679](https://github.com/microsoft/winget-pkgs/pull/469679)) was closed unmerged — `winget install danalec.rgy-search` installs nothing today |
 | macOS | Homebrew | the formula's digests are placeholders, and the tap is not published — `brew install danalec/rgy/rgy-search` installs nothing today |
 
 The merge is landed end to end: name search,
@@ -464,7 +465,7 @@ breaks every published crate that names it: `cargo install rgy-search` asked
 for `rgx-adapters-archive ^0.1.1` and was told "version 0.1.1 is yanked". The
 0.1.6 artifacts ask for `^0.1.6` and resolve; the 0.1.3 artifacts ask for
 `^0.1.2` and still do; and the 0.1.2 artifacts resolve again now that 0.1.2 is
-there. The [release page](docs/release-0.1.8.md) says what the change costs
+there. The [release page](docs/release-0.1.9.0.md) says what the change costs
 and when it lands.
 
 The command-line tool's crate was published as `rgy-searchctl` first;
