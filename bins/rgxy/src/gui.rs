@@ -302,17 +302,15 @@ struct Daemon {
 }
 
 impl Daemon {
-    /// The daemon, asked on a worker thread.
-    fn new(source: DaemonSource) -> Daemon {
-        Daemon::in_window(source, None)
-    }
-
     /// The daemon, asked on a worker thread that wakes the window.
     ///
     /// The handle is the window's own: when an answer lands in the
     /// channel the worker wakes the loop with it, so the answer is
     /// applied when it arrives and not at the next tick of the clock.
-    fn in_window(source: DaemonSource, wake: Option<usize>) -> Daemon {
+    /// `None` is a daemon with no window to wake — the tests' sources
+    /// answer questions, and the window's own daemon is the one with a
+    /// handle.
+    fn new(source: DaemonSource, wake: Option<usize>) -> Daemon {
         // The source that answers is the worker's: the window's thread
         // must not hold the connection, because the connection is what
         // waits.
@@ -706,7 +704,7 @@ pub fn run(
         hwnd: window.hwnd(),
         rows_fit: rgy_launcher::app::rows_that_fit(window.work_area_height()),
         settings_path: crate::settings_store::store_path(),
-        source: Box::new(Daemon::in_window(source, Some(window.hwnd() as usize))),
+        source: Box::new(Daemon::new(source, Some(window.hwnd() as usize))),
         clipboard: Box::new(actions::paste_text),
         // The seams answer in the user's language: the machine's own
         // refusal is said in the language the user reads.

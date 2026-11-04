@@ -1615,13 +1615,15 @@ mod tests {
     /// its own, like the preview, and the picture says so.
     #[test]
     fn the_settings_panel_makes_its_own_room_in_a_picture_with_no_rows() {
-        let mut view = View::default();
-        view.query = ">settings".to_string();
-        view.mode = Mode::Settings;
-        view.settings = (0..12)
-            .map(|i| (alloc::format!("row{i}"), "value".to_string()))
-            .collect();
-        view.settings_selected = 0;
+        let view = View {
+            query: ">settings".to_string(),
+            mode: Mode::Settings,
+            settings: (0..12)
+                .map(|i| (alloc::format!("row{i}"), "value".to_string()))
+                .collect(),
+            settings_selected: 0,
+            ..View::default()
+        };
         let (canvas, width, height) = draw(&view);
         // The window is the field, the line under it, and twelve rows of
         // the panel: the row worth of room is what the panel brings.

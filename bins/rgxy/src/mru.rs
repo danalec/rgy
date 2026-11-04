@@ -1085,10 +1085,26 @@ mod tests {
     /// refusal: the read and the move wait now, the wait the lock waits.
     /// The test still says what it says — no writer loses an update — and
     /// it says it on a machine that is busy.
+    ///
+    /// The **caller's** half is this test's too, and it was missing. The
+    /// lock's wait is bounded (`LOCK_WAIT_MS`), and the bound is the
+    /// store's: a machine slow enough that one writer waits out the bound
+    /// answers `WouldBlock`, and a caller that gives up on that answer
+    /// loses the update. Measured on 2026-11-04, on the CI's ubuntu
+    /// runners: eight writers started together, the winner's writes took
+    /// longer than the two seconds, and the other seven answered
+    /// "Resource temporarily unavailable (os error 11)" on their first
+    /// round — the suite was red on x86 and on arm while it was green on
+    /// the owner's machines. The launcher's own policy is the fix, and it
+    /// is what this test now does: the use is remembered, and a busy store
+    /// is tried again (the launcher does it on its next use; here the
+    /// writer does it at once, with a wait).
     #[test]
     fn concurrent_writers_lose_no_update_and_leave_no_temporary_file() {
         const WRITERS: usize = 8;
         const ROUNDS: usize = 40;
+        /// How many times a caller tries a store that says it is busy.
+        const TRIES: u32 = 20;
 
         let dir = scratch("mru-concurrent");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1101,13 +1117,25 @@ mod tests {
             let path = path.clone();
             handles.push(std::thread::spawn(move || {
                 start.wait();
+                // The history is the writer's own and it accumulates: a
+                // retry carries every use the writer has, which is the
+                // launcher's own memory. A fresh history per round would
+                // make the retry write only the round's entry, and the
+                // refused round's use would be lost with nothing to carry
+                // it.
+                let mut history = History::new();
                 let mut dropped = Vec::new();
                 for round in 0..ROUNDS {
-                    let mut history = History::new();
                     history.record(&format!("/writer-{writer}/round-{round}.txt"), 1_000);
-                    if let Err(err) = save(&path, &history) {
+                    if let Err(err) = save_trying(&path, &history, TRIES) {
                         dropped.push(format!("writer {writer} round {round}: {err}"));
                     }
+                }
+                // One last write, so a writer whose last round was refused
+                // is still in the store: the store's final state is what
+                // the test reads.
+                if let Err(err) = save_trying(&path, &history, TRIES) {
+                    dropped.push(format!("writer {writer} at the end: {err}"));
                 }
                 dropped
             }));
@@ -1143,6 +1171,29 @@ mod tests {
             "a temporary file was left behind"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Save, and try again while the store says another writer has it.
+    ///
+    /// The lock's wait is bounded, and the bound is the **store's**: the
+    /// answer when the bound runs out is `WouldBlock`, and a caller that
+    /// gives up on it loses the update. The launcher's own policy is to
+    /// try again — it does it on the next use — and the test's writers do
+    /// it here, with a wait that grows so the waiters do not take the CPU
+    /// the holder needs.
+    fn save_trying(path: &Path, history: &History, tries: u32) -> std::io::Result<()> {
+        let mut attempt = 0;
+        loop {
+            match save(path, history) {
+                Ok(()) => return Ok(()),
+                Err(err) if busy(&err) && attempt < tries => {
+                    attempt += 1;
+                    let wait = (10 * attempt).min(100);
+                    std::thread::sleep(Duration::from_millis(u64::from(wait)));
+                }
+                Err(err) => return Err(err),
+            }
+        }
     }
 
     /// The path that carries a character a line cannot carry.

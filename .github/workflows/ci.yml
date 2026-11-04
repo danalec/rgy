@@ -418,9 +418,24 @@ jobs:
           # different tree would test something the repository does not
           # describe, and the floor job above would be the only gate
           # left holding the lockfile.
+          #
+          # And the build's own directory is **not a result to bring
+          # back**. The action copies the whole work directory back into
+          # the runner with rsync, and this VM has just built a target/ of
+          # gigabytes: measured on 2026-11-04, the copyback of this job
+          # moved 2,155,940,845 bytes, the connection to the VM closed in
+          # the middle, and the job failed with `rsync ... code 255` after
+          # the suite had already passed. The target goes before the
+          # copyback, and it goes even when the suite failed: a job that
+          # fails in the copyback fails with the wrong reason, and the
+          # reason the suite gave is the one the reader needs.
           run: |
+            set -eu
             cargo build --workspace --locked
-            cargo test --workspace --no-fail-fast --locked
+            status=0
+            cargo test --workspace --no-fail-fast --locked || status=$?
+            rm -rf target
+            exit "$status"
 
   suite:
     name: suite on ${{ matrix.os }}

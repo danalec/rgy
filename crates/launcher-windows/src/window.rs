@@ -2388,7 +2388,7 @@ fn wide(s: &str) -> Vec<u16> {
 /// this, and asks it to show itself instead of starting a second
 /// launcher. Measured on 2026-11-04: two starts were two residents, two
 /// keyboard hooks and two icons in the notification area.
-pub fn find_window() -> Option<HWND> {
+pub(crate) fn find_window() -> Option<HWND> {
     // SAFETY: the class name is the crate's own, NUL-terminated array,
     // and the window name is null, which asks for any title.
     let hwnd = unsafe { FindWindowW(CLASS_NAME.as_ptr(), core::ptr::null()) };
@@ -2402,7 +2402,7 @@ pub fn find_window() -> Option<HWND> {
 /// posted comes out of the queue. The window may be up already — asking
 /// it to show itself when it is up leaves it up, which is what the user
 /// asked for.
-pub fn ask_to_show(hwnd: HWND) {
+pub(crate) fn ask_to_show(hwnd: HWND) {
     // SAFETY: the window is the launcher's own, and the message is one
     // the window's own dispatch handles.
     unsafe {
@@ -3043,8 +3043,27 @@ mod tests {
         // The window that had the keyboard is given it back at the end:
         // the suite runs on the machine the user is working on, and a
         // test that leaves the keyboard on a hidden window is a test the
-        // user has to find their way out of.
+        // user has to find their way out of. It is read before the probe,
+        // so the window given back is the user's and not the probe.
         let before = unsafe { GetForegroundWindow() };
+        // A session that will not let a window take the foreground cannot
+        // answer this question: the CI's windows runner has no user at a
+        // keyboard, the platform refuses the call for every window there,
+        // and a test that failed on the refusal would say the launcher is
+        // broken on a machine where nothing can be foreground. The probe
+        // is a window of this test's own, and the test says nothing about
+        // a session where the probe cannot take it.
+        let mut probe = Window::new("rgxy-test").expect("the probe window was made");
+        unsafe {
+            ShowWindow(probe.hwnd(), SW_SHOWNOACTIVATE);
+            SetForegroundWindow(probe.hwnd());
+        }
+        let can_take = unsafe { GetForegroundWindow() } == probe.hwnd();
+        probe.hide();
+        drop(probe);
+        if !can_take {
+            return;
+        }
         let mut first = Window::new("rgxy-test").expect("the window was made");
         let mut second = Window::new("rgxy-test").expect("the second window was made");
 
