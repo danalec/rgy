@@ -40,4 +40,4 @@ rgy-pick = { path = "../../crates/pick", version = "0.1.9" }
 # has one. The binary is the same everywhere: the launcher falls back to
 # the terminal where there is no desktop.
 [target.'cfg(windows)'.dependencies]
-rgy-launcher-windows = { path = "../../crates/launcher-windows", version = "0.1.8" }
+rgy-launcher-windows = { path = "../../crates/launcher-windows", version = "0.1.9" }

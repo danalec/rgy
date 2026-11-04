@@ -42,10 +42,10 @@ mimalloc = { version = "0.1", default-features = false }
 # `rgy_discovery::Watch` for its OS. Pulled in per-platform so `open_watch` can
 # build the right one.
 [target.'cfg(windows)'.dependencies]
-rgy-discovery-windows = { path = "../../crates/discovery-windows", version = "0.1.8" }
+rgy-discovery-windows = { path = "../../crates/discovery-windows", version = "0.1.9" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-rgy-discovery-linux = { path = "../../crates/discovery-linux", version = "0.1.8" }
+rgy-discovery-linux = { path = "../../crates/discovery-linux", version = "0.1.9" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-rgy-discovery-macos = { path = "../../crates/discovery-macos", version = "0.1.8" }
+rgy-discovery-macos = { path = "../../crates/discovery-macos", version = "0.1.9" }

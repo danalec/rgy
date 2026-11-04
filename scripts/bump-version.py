@@ -93,12 +93,13 @@ VENDORED_PREFIX = "rgy-vendored-"
 # The package version, in the `[package]` table.
 PACKAGE_VERSION = re.compile(r'^(version\s*=\s*)"([^"]+)"', re.MULTILINE)
 
-# The sections a dependency can live in.
-DEPENDENCY_SECTIONS = (
-    "[dependencies]",
-    "[dev-dependencies]",
-    "[build-dependencies]",
-)
+# The sections a dependency can live in. A target-specific table is one of
+# them -- `[target.'cfg(windows)'.dependencies]` -- because a dependency the
+# platform gates is a dependency all the same, and a requirement left at the
+# old number in one of them breaks `cargo build --locked` on exactly the
+# platform the table names. The section is read by its END: every
+# dependencies table, plain or gated, ends with the word before its bracket.
+DEPENDENCY_SECTION = "dependencies]"
 
 # A dependency entry: the key and the table that opens it. The entry can
 # span lines -- a `features = [...]` list does -- so it is read to its
@@ -236,7 +237,7 @@ def rewrite_requirements(text: str, version: str) -> tuple[str, int]:
             i += 1
             continue
         start = ENTRY_START.match(line)
-        if start is None or section not in DEPENDENCY_SECTIONS:
+        if start is None or not section.endswith(DEPENDENCY_SECTION):
             out.append(line)
             i += 1
             continue
