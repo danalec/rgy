@@ -1,0 +1,86 @@
+# Fixtures are compared byte for byte, so git must not rewrite them.
+#
+# With core.autocrlf=true (the Windows default) a checkout turns an LF blob
+# into CRLF on disk. For source that is harmless -- rustc and rustfmt do not
+# care. For a fixture it is not, and it fails in the worst possible way: the
+# suite is green in the working tree and red in a fresh clone, because the
+# working tree is not a faithful copy of the repository.
+#
+# Two independent instances of that, both found by cloning clean and running
+# the suite there:
+#
+#   crates/rar-codec/testdata/rar/rar5-body.expected
+#   crates/rgx-adapters-archive/testdata/rar/rar4-lz29.expected
+#   crates/rgx-adapters-archive/testdata/rar/rar5-body.expected
+#
+# were stored as LF but hold bytes that came out of a RAR archive, where they
+# are CRLF. The checkout rewrote the LF blobs, which by accident fixed the
+# three body fixtures and broke rar5-note.expected (whose payload really is
+# LF) in the same stroke. Two opposite errors cancelling out on one machine.
+#
+# Five PDF fixtures were outright corrupted the same way, which made the PDF
+# adapter bail on its font tests. Git decides text-vs-binary by inspecting the
+# blob, and it happened to classify two of the seven PDFs correctly and five
+# of them as text -- so any rule has to name them, not ask git.
+# Text, LF in the index and on disk. Stated explicitly so the tree does not
+# depend on each developer's autocrlf setting -- which also keeps the shell
+# scripts runnable on a unix checkout, where a CRLF pgo.sh does not run at
+# all.
+*.rs text eol=lf
+*.toml text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.sh text eol=lf
+*.tsv text eol=lf
+*.csv text eol=lf
+*.ps1 text eol=lf
+# These two name the rules above, so they are read under the same ones:
+# a checkout that rewrote them would rewrite the rules themselves.
+.gitattributes text eol=lf
+Cargo.lock text eol=lf
+# The licence files are text like the rest. The audit reads them, and a
+# checkout that rewrote them would leave the tree depending on the
+# reader's autocrlf -- one of them came out of a checkout with the
+# endings mixed.
+COPYING text eol=lf
+NOTICE text eol=lf
+LICENSE* text eol=lf
+# The workflow files carry shell inside YAML: a `run: |` block is a shell
+# script, and a CRLF one has a carriage return at the end of every command.
+# On a unix runner that is "command not found" for the first line.
+*.yml text eol=lf
+*.yaml text eol=lf
+*.rb text eol=lf
+
+# The fixtures and the patches, byte for byte -- and THIS is where the rules
+# have to be.
+#
+# In gitattributes the LAST matching pattern wins, so a `-text` rule that
+# sits above a `text eol=lf` rule loses, and the fixture is rewritten
+# anyway. The order here is the rule, and it was the other way round until
+# the drift gate caught it: four testdata READMEs that upstream holds as
+# CRLF were committed as LF, because the `*.md text eol=lf` rule sat below
+# the `-text` rule and won. The working tree hid it -- `core.autocrlf`
+# turned the LF blobs back into CRLF on checkout, so the tree matched
+# upstream and the repository did not. A fresh clone showed the difference
+# the working tree had hidden, which is the whole failure the rules above
+# are written against.
+**/testdata/** -text
+**/fixtures/** -text
+*.expected -text
+*.pdf -text
+# The README's screenshot is a PNG. Git would sniff it as binary on its own
+# -- the signature carries a NUL -- but a rule that is not written is a rule
+# that depends on the guess, and the guess is not what keeps a picture a
+# picture.
+*.png -text
+# The clips are MP4, and the README links them: the same rule, for the same
+# reason. A checkout that rewrote a clip would put a different movie in the
+# release.
+*.mp4 -text
+# The local patches, byte for byte. `git apply` matches the context lines of
+# a patch against the file it is applied to, and a checkout that rewrote the
+# line endings would leave every context line ending in a CR that the file
+# does not have: the patch would apply to nothing. The patches are LF and
+# have to stay LF.
+scripts/rgx-local-patches/** -text

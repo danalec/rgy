@@ -1,0 +1,24 @@
+[package]
+name = "rgy-pick"
+version = "0.1.9"
+edition = "2024"
+rust-version = "1.89"
+authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
+description = "Handing rgy's results to an external picker (fzf and its family)"
+license = "Apache-2.0"
+repository = "https://github.com/danalec/rgy"
+homepage = "https://github.com/danalec/rgy"
+documentation = "https://docs.rs/rgy-pick"
+keywords = ["search", "fzf", "picker", "tui"]
+categories = ["command-line-utilities"]
+readme = "../../README.md"
+
+
+[features]
+default = ["std"]
+# The machine: the process, the PATH, the pipes. Without it the crate is
+# `core` plus `alloc`, and what is left is the decision -- which picker,
+# and what its exit status means.
+std = []
+
+[dependencies]

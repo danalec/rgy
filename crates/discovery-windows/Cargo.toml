@@ -1,0 +1,36 @@
+[package]
+name = "rgy-discovery-windows"
+version = "0.1.9"
+edition = "2024"
+rust-version = "1.89"
+authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
+description = "Windows discovery backend: NTFS MFT streaming + USN journal (from zen-rs)"
+license = "Apache-2.0"
+repository = "https://github.com/danalec/rgy"
+homepage = "https://github.com/danalec/rgy"
+documentation = "https://docs.rs/rgy-discovery-windows"
+keywords = ["filesystem", "search", "mft", "usn"]
+categories = ["filesystem"]
+readme = "../../README.md"
+
+
+# The crate is `no_std` in every configuration, so it declares no features of
+# its own: there is nothing to turn off and nothing to turn on. What needs a
+# filesystem (the portable walk, the Ctrl-C handler) stays in the seam and in
+# the product, not here.
+
+[dependencies]
+# The seam, without its `std` feature. The backend only speaks the block
+# types and the change vocabulary, and neither needs a filesystem -- so the
+# seam must not drag `std` in through the back door.
+rgy-discovery = { path = "../discovery", version = "0.1.9", default-features = false }
+
+# The Win32 calls are declared by hand, in `src/win.rs`, so there is no
+# dependency to gate here: the calls themselves are the Windows-only part of
+# the crate, and the crate's body is empty everywhere else.
+
+[dev-dependencies]
+# The oracle the tree's own path cache is held to: the same operations, in
+# the same order, on the same inputs, with the same answers. A dev-dependency
+# does not enter a binary, so the library tree links no external crate.
+hashbrown = { version = "0.16", default-features = false, features = ["default-hasher", "inline-more"] }

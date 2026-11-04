@@ -1,0 +1,560 @@
+--- a/crates/rgx-core/src/memchr/memmem.rs
++++ b/crates/rgx-core/src/memchr/memmem.rs
+@@ -29,13 +29,33 @@
+ //! build with `std` and a build without it reach the same kernel and
+ //! produce comparable numbers.
+ //!
+-//! ## Where the upstream crate's search still runs
+-//!
+-//! On a CPU without AVX2, and on every architecture where the upstream
+-//! crate's vector width is decided at compile time -- aarch64's NEON, for
+-//! instance -- the upstream search is used unchanged. There is nothing to
+-//! fix there: those paths never needed `std` to be chosen, so they are the
+-//! same in both builds already.
++//! ## The portable path
++//!
++//! **Where the pair scanner has no vector to work with -- a CPU without
++//! AVX2, and every architecture that is not x86_64 -- the search is
++//! Boyer--Moore--Horspool**, written out in this module: the needle's own
++//! bytes decide how far a failed window may jump, and the jump is what
++//! makes the search fast. A byte the needle does not hold moves the window
++//! by the needle's whole length.
++//!
++//! The jump is computed from the needle's bytes *except its last one*, and
++//! that exclusion is the whole of the safety argument. The window's last
++//! byte is compared before the jump is computed, so a window that ends in
++//! the needle's own last byte is never stepped over: that byte is not in
++//! the table, and a byte that is not in the table moves the window by the
++//! needle's whole length, which lands on the next window rather than past
++//! it. The backwards search is the same search with the two ends swapped --
++//! the window is aligned by its first byte and the table is built over the
++//! needle's bytes except its first one.
++//!
++//! **The rare byte is checked before the window is compared**, and that is
++//! what keeps the search from degenerating. Horspool's own worst case is
++//! quadratic in the needle's length: a needle whose *last* byte is the
++//! common one, over a haystack full of that byte, pays the whole
++//! comparison at every window. The needle's rarest byte -- the same choice
++//! [`crate::frequency::rarest_pair`] makes for the pair scanner -- is almost
++//! never there, and a window that fails the cheap check is never compared
++//! at all.
+ //!
+ //! ## What is different from the upstream crate
+ //!
+@@ -52,6 +72,127 @@
+ 
+ use core::fmt;
+ 
++/// The biggest jump a jump table entry can hold.
++///
++/// A jump that is *smaller* than the one the table asks for is still safe --
++/// it steps over fewer windows -- so the cap costs speed and nothing else.
++const MAX_JUMP: u8 = u8::MAX;
++
++/// The jump, capped at what a table entry can hold.
++#[inline]
++fn cap(jump: usize) -> u8 {
++    if jump > MAX_JUMP as usize {
++        MAX_JUMP
++    } else {
++        jump as u8
++    }
++}
++
++/// The forward jump table.
++///
++/// `table[c]` is how far the window may move when it ends in `c`: the
++/// distance from the needle's *last* copy of `c` to the needle's end, or
++/// the needle's whole length when the needle holds no copy of `c`.
++///
++/// The needle's last byte is deliberately not in the table, and that is what
++/// makes the jump safe. A window that ends in the needle's own last byte is
++/// stepped over by exactly one window -- the byte is not in the table, and
++/// a byte that is not in the table moves the window by the needle's whole
++/// length -- and never by more.
++fn forward_table(needle: &[u8]) -> [u8; 256] {
++    let m = needle.len();
++    let mut table = [cap(m); 256];
++    // The last write wins, and the last write is the *largest* offset, which
++    // is the needle's last copy of the byte.
++    for (i, &b) in needle.iter().enumerate().take(m.saturating_sub(1)) {
++        table[b as usize] = cap(m - 1 - i);
++    }
++    table
++}
++
++/// The backward jump table.
++///
++/// The mirror of [`forward_table`]: `table[c]` is how far the window may
++/// move *down* when it starts in `c`, and the needle's *first* byte is the
++/// one that is not in the table.
++fn backward_table(needle: &[u8]) -> [u8; 256] {
++    let m = needle.len();
++    let mut table = [cap(m); 256];
++    // The last write wins, and the walk is backwards, so the last write is
++    // the *smallest* offset -- the needle's first copy of the byte.
++    for (i, &b) in needle.iter().enumerate().skip(1).rev() {
++        table[b as usize] = cap(i);
++    }
++    table
++}
++
++/// The needle's rarest byte and where it sits.
++///
++/// The needle's own bytes decide the jump, and the *rarest* of them decides
++/// whether the window is worth comparing at all. It is the same choice the
++/// pair scanner makes -- [`crate::frequency::rarest_pair`] is a port of the
++/// upstream selection, tie-break included -- so the two paths filter on the
++/// same byte.
++fn rare_byte(needle: &[u8]) -> (usize, u8) {
++    match crate::frequency::rarest_pair(needle) {
++        Some(pair) => (pair.first, needle[pair.first]),
++        None => (0, needle.first().copied().unwrap_or(0)),
++    }
++}
++
++/// The first occurrence of `needle` in `haystack`, by the jump table.
++///
++/// This is the portable search: it is what runs where the pair scanner has
++/// no vector to work with.
++fn horspool_find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
++    let m = needle.len();
++    if m == 0 {
++        return Some(0);
++    }
++    if haystack.len() < m {
++        return None;
++    }
++    let table = forward_table(needle);
++    let (rare_at, rare) = rare_byte(needle);
++    let limit = haystack.len() - m;
++    let mut at = 0usize;
++    while at <= limit {
++        if haystack[at + rare_at] == rare && haystack[at..at + m] == *needle {
++            return Some(at);
++        }
++        at += table[haystack[at + m - 1] as usize] as usize;
++    }
++    None
++}
++
++/// The last occurrence of `needle` in `haystack`, by the jump table.
++///
++/// The mirror of [`horspool_find`]: the window is aligned by its first
++/// byte, and the jump table is the one built over the needle's bytes except
++/// its first.
++fn horspool_rfind(haystack: &[u8], needle: &[u8]) -> Option<usize> {
++    let m = needle.len();
++    if m == 0 {
++        return Some(haystack.len());
++    }
++    if haystack.len() < m {
++        return None;
++    }
++    let table = backward_table(needle);
++    let (rare_at, rare) = rare_byte(needle);
++    let mut at = haystack.len() - m;
++    loop {
++        if haystack[at + rare_at] == rare && haystack[at..at + m] == *needle {
++            return Some(at);
++        }
++        let step = table[haystack[at] as usize] as usize;
++        if step > at {
++            return None;
++        }
++        at -= step;
++    }
++}
++
+ /// Returns the index of the first occurrence of `needle` in `haystack`.
+ ///
+ /// If `needle` is empty, this returns `Some(0)`.
+@@ -78,7 +219,7 @@
+             return crate::scan::pair_find(needle, haystack);
+         }
+     }
+-    ::memchr::memmem::find(haystack, needle)
++    horspool_find(haystack, needle)
+ }
+ 
+ /// Returns the index of the last occurrence to `needle` in `haystack`.
+@@ -107,7 +248,7 @@
+             return crate::scan::pair_rfind(needle, haystack);
+         }
+     }
+-    ::memchr::memmem::rfind(haystack, needle)
++    horspool_rfind(haystack, needle)
+ }
+ 
+ /// Returns an iterator over all non-overlapping occurrences of a substring
+@@ -459,66 +600,157 @@
+ mod tests {
+     use alloc::vec::Vec;
+ 
+-    /// The answers must be the upstream crate's answers.
++    /// The oracle: the first occurrence, byte at a time.
+     ///
+-    /// The upstream crate's substring search is the oracle: it is the
+-    /// implementation this module replaces, and a difference in the offsets
+-    /// it reports is a difference in what rgx finds. The corpus is the
+-    /// shapes that break a scanner -- the empty haystack, a haystack
+-    /// shorter than the needle, a needle at the very end, a needle that
+-    /// repeats itself, a needle whose two rarest bytes are at neither end,
+-    /// and a needle long enough to leave the first block.
++    /// It is a loop and it is obviously right, and that is the whole point
++    /// of an oracle -- it must not share a single line with the code it
++    /// judges. The upstream crate cannot be the oracle any more: it is the
++    /// thing this module replaces, and an oracle that *is* the
++    /// implementation proves only that the implementation agrees with
++    /// itself.
++    fn naive_find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
++        if needle.is_empty() {
++            return Some(0);
++        }
++        if needle.len() > haystack.len() {
++            return None;
++        }
++        (0..=haystack.len() - needle.len()).find(|&at| &haystack[at..at + needle.len()] == needle)
++    }
++
++    /// The oracle: the last occurrence, byte at a time.
++    fn naive_rfind(haystack: &[u8], needle: &[u8]) -> Option<usize> {
++        if needle.is_empty() {
++            return Some(haystack.len());
++        }
++        if needle.len() > haystack.len() {
++            return None;
++        }
++        (0..=haystack.len() - needle.len())
++            .rev()
++            .find(|&at| &haystack[at..at + needle.len()] == needle)
++    }
++
++    /// The oracle for the iterator: the non-overlapping matches, from the
++    /// front.
++    fn naive_find_iter(haystack: &[u8], needle: &[u8]) -> Vec<usize> {
++        let mut out = Vec::new();
++        let mut at = 0usize;
++        while at <= haystack.len() {
++            match naive_find(&haystack[at..], needle) {
++                Some(found) => {
++                    out.push(at + found);
++                    at += found + needle.len().max(1);
++                }
++                None => break,
++            }
++        }
++        out
++    }
++
++    /// The oracle for the reverse iterator: the non-overlapping matches,
++    /// from the back.
++    ///
++    /// The backwards walk is not the forward walk reversed: the forward walk
++    /// takes the first match and steps over it, and the backwards walk takes
++    /// the last match and bounds itself by it, so the two can land on
++    /// different offsets over the same haystack. The empty needle is the
++    /// case where they do not: it matches at every offset, and the
++    /// backwards walk yields them from the end down to zero.
++    fn naive_rfind_iter(haystack: &[u8], needle: &[u8]) -> Vec<usize> {
++        if needle.is_empty() {
++            return (0..=haystack.len()).rev().collect();
++        }
++        let mut out = Vec::new();
++        let mut end = haystack.len();
++        while end > 0 {
++            match naive_rfind(&haystack[..end], needle) {
++                Some(at) => {
++                    out.push(at);
++                    if at == 0 {
++                        break;
++                    }
++                    end = at;
++                }
++                None => break,
++            }
++        }
++        out
++    }
++
++    /// The haystacks and needles every path is checked against.
++    ///
++    /// The shapes are the ones that break a scanner: the empty haystack, a
++    /// haystack shorter than the needle, a needle at the very end, a needle
++    /// that repeats itself, a needle whose two rarest bytes are at neither
++    /// end, a needle long enough to leave the first block, and a haystack
++    /// that is nothing but the needle.
++    fn corpus() -> Vec<Vec<u8>> {
++        vec![
++            Vec::new(),
++            b"a".to_vec(),
++            b"ab".to_vec(),
++            b"abc".to_vec(),
++            b"abcabcabc".to_vec(),
++            b"aaaaaaaaaaaaaaaa".to_vec(),
++            b"the quick brown fox jumps over the lazy dog".to_vec(),
++            b"needle12345".to_vec(),
++            b"needle12345 needle12345 needle12345".to_vec(),
++            vec![b'x'; 64],
++            vec![b'x'; 65],
++            vec![b'x'; 128],
++            vec![b'a'; 40],
++        ]
++    }
++
++    /// The needles every haystack is searched with.
++    fn needles() -> Vec<Vec<u8>> {
++        vec![
++            Vec::new(),
++            b"a".to_vec(),
++            b"ab".to_vec(),
++            b"abc".to_vec(),
++            b"xx".to_vec(),
++            b"needle".to_vec(),
++            b"needle12345".to_vec(),
++            b"zz".to_vec(),
++            b"quick".to_vec(),
++            b"e".to_vec(),
++            b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_vec(),
++        ]
++    }
++
++    /// The answers must be the naive answers.
++    ///
++    /// The corpus is the shapes that break a scanner -- the empty haystack,
++    /// a haystack shorter than the needle, a needle at the very end, a
++    /// needle that repeats itself, a needle whose two rarest bytes are at
++    /// neither end, and a needle long enough to leave the first block.
+     #[test]
+-    fn the_answers_are_the_upstream_crates_answers() {
+-        let haystacks: &[&[u8]] = &[
+-            b"",
+-            b"a",
+-            b"ab",
+-            b"abc",
+-            b"abcabcabc",
+-            b"aaaaaaaaaaaaaaaa",
+-            b"the quick brown fox jumps over the lazy dog",
+-            b"needle12345",
+-            b"needle12345 needle12345 needle12345",
+-            &[b'x'; 64],
+-            &[b'x'; 65],
+-            &[b'x'; 128],
+-        ];
+-        let needles: &[&[u8]] = &[
+-            b"",
+-            b"a",
+-            b"ab",
+-            b"abc",
+-            b"xx",
+-            b"needle",
+-            b"needle12345",
+-            b"zz",
+-            b"quick",
+-            b"e",
+-        ];
+-        for hay in haystacks {
+-            for needle in needles {
++    fn the_answers_are_the_naive_answers() {
++        for hay in corpus() {
++            for needle in needles() {
+                 assert_eq!(
+-                    super::find(hay, needle),
+-                    ::memchr::memmem::find(hay, needle),
++                    super::find(&hay, &needle),
++                    naive_find(&hay, &needle),
+                     "find({needle:?}) over {} bytes",
+                     hay.len()
+                 );
+                 assert_eq!(
+-                    super::rfind(hay, needle),
+-                    ::memchr::memmem::rfind(hay, needle),
++                    super::rfind(&hay, &needle),
++                    naive_rfind(&hay, &needle),
+                     "rfind({needle:?}) over {} bytes",
+                     hay.len()
+                 );
+                 assert_eq!(
+-                    super::find_iter(hay, needle).collect::<Vec<_>>(),
+-                    ::memchr::memmem::find_iter(hay, needle).collect::<Vec<_>>(),
++                    super::find_iter(&hay, &needle).collect::<Vec<_>>(),
++                    naive_find_iter(&hay, &needle),
+                     "find_iter({needle:?}) over {} bytes",
+                     hay.len()
+                 );
+                 assert_eq!(
+-                    super::rfind_iter(hay, needle).collect::<Vec<_>>(),
+-                    ::memchr::memmem::rfind_iter(hay, needle).collect::<Vec<_>>(),
++                    super::rfind_iter(&hay, &needle).collect::<Vec<_>>(),
++                    naive_rfind_iter(&hay, &needle),
+                     "rfind_iter({needle:?}) over {} bytes",
+                     hay.len()
+                 );
+@@ -526,8 +758,73 @@
+         }
+     }
+ 
+-    /// The pair scanner and the upstream crate must agree on a haystack
+-    /// long enough to leave the first block.
++    /// The portable search and the naive one must answer the same question
++    /// the same way.
++    ///
++    /// The portable search is the one every CPU without AVX2 runs, so it is
++    /// the one that has to be right on its own.
++    #[test]
++    fn the_portable_search_agrees_with_the_naive_one() {
++        for hay in corpus() {
++            for needle in needles() {
++                assert_eq!(
++                    super::horspool_find(&hay, &needle),
++                    naive_find(&hay, &needle),
++                    "horspool_find({needle:?}) over {} bytes",
++                    hay.len()
++                );
++                assert_eq!(
++                    super::horspool_rfind(&hay, &needle),
++                    naive_rfind(&hay, &needle),
++                    "horspool_rfind({needle:?}) over {} bytes",
++                    hay.len()
++                );
++            }
++        }
++    }
++
++    /// The matches do not overlap.
++    ///
++    /// `aa` in `aaaa` is two matches and not three: the search resumes one
++    /// needle's length after each hit, so the offsets are 0 and 2.
++    #[test]
++    fn the_matches_do_not_overlap() {
++        assert_eq!(
++            super::find_iter(b"aaaa", b"aa").collect::<Vec<_>>(),
++            vec![0, 2]
++        );
++        assert_eq!(
++            super::rfind_iter(b"aaaa", b"aa").collect::<Vec<_>>(),
++            vec![2, 0]
++        );
++        assert_eq!(super::find(b"aaaa", b"aa"), Some(0));
++        assert_eq!(super::rfind(b"aaaa", b"aa"), Some(2));
++    }
++
++    /// The needle's own edge cases.
++    ///
++    /// The empty needle matches at every offset; a needle longer than the
++    /// haystack does not match at all; a needle at the very end does.
++    #[test]
++    fn the_needles_edge_cases() {
++        assert_eq!(super::find(b"", b""), Some(0));
++        assert_eq!(super::rfind(b"", b""), Some(0));
++        assert_eq!(super::find(b"abc", b""), Some(0));
++        assert_eq!(super::rfind(b"abc", b""), Some(3));
++        assert_eq!(super::find(b"abc", b"abcd"), None);
++        assert_eq!(super::rfind(b"abc", b"abcd"), None);
++        assert_eq!(super::find(b"abc", b"c"), Some(2));
++        assert_eq!(super::rfind(b"abc", b"c"), Some(2));
++        // The haystack is nothing but the needle.
++        assert_eq!(super::find(b"aaaa", b"aaaa"), Some(0));
++        assert_eq!(super::rfind(b"aaaa", b"aaaa"), Some(0));
++        // The haystack is nothing but the needle, twice.
++        assert_eq!(super::find(b"aaaaaaaa", b"aaaa"), Some(0));
++        assert_eq!(super::rfind(b"aaaaaaaa", b"aaaa"), Some(4));
++    }
++
++    /// The pair scanner and the naive one must agree on a haystack long
++    /// enough to leave the first block.
+     ///
+     /// The scanner's blocks are 32 bytes wide (64 with AVX-512) and the
+     /// pair is the needle's two rarest bytes, which may sit at any two
+@@ -535,7 +832,7 @@
+     /// occurs at many offsets exercises the block walk, the tail, and the
+     /// confirmation at both ends.
+     #[test]
+-    fn the_pair_scanner_agrees_with_the_upstream_crate() {
++    fn the_pair_scanner_agrees_with_the_naive_one() {
+         let mut hay = Vec::new();
+         let mut x: u64 = 0x243f_6a88_85a3_08d3;
+         for _ in 0..300 {
+@@ -558,14 +855,79 @@
+             h[at..at + needle.len()].copy_from_slice(needle);
+             assert_eq!(
+                 super::find(&h, needle),
+-                ::memchr::memmem::find(&h, needle),
++                naive_find(&h, needle),
+                 "find({needle:?}) planted at {at}"
+             );
+             assert_eq!(
+                 super::rfind(&h, needle),
+-                ::memchr::memmem::rfind(&h, needle),
++                naive_rfind(&h, needle),
+                 "rfind({needle:?}) planted at {at}"
+             );
+         }
+     }
+-}
++
++    /// The search and the naive one must agree on haystacks nobody wrote.
++    ///
++    /// The shapes above are the ones a person thinks of; the shapes a
++    /// generator produces are the ones that break a jump table. The
++    /// alphabet is deliberately tiny -- two and three letters make the
++    /// needles repeat themselves, which is exactly what the jump table's
++    /// "the byte is not in the needle" rule has to get right.
++    #[test]
++    fn the_search_agrees_with_the_naive_one_on_generated_input() {
++        let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
++        let mut next = move || {
++            x ^= x << 13;
++            x ^= x >> 7;
++            x ^= x << 17;
++            x
++        };
++        for _ in 0..400 {
++            let hay_len = (next() % 200) as usize;
++            let needle_len = (next() % 12) as usize;
++            let alphabet = 1 + (next() % 3) as u8;
++            let hay: Vec<u8> = (0..hay_len)
++                .map(|_| (next() % u64::from(alphabet)) as u8)
++                .collect();
++            let needle: Vec<u8> = (0..needle_len)
++                .map(|_| (next() % u64::from(alphabet)) as u8)
++                .collect();
++            assert_eq!(
++                super::find(&hay, &needle),
++                naive_find(&hay, &needle),
++                "find({needle:?}) over {} bytes",
++                hay.len()
++            );
++            assert_eq!(
++                super::rfind(&hay, &needle),
++                naive_rfind(&hay, &needle),
++                "rfind({needle:?}) over {} bytes",
++                hay.len()
++            );
++            assert_eq!(
++                super::horspool_find(&hay, &needle),
++                naive_find(&hay, &needle),
++                "horspool_find({needle:?}) over {} bytes",
++                hay.len()
++            );
++            assert_eq!(
++                super::horspool_rfind(&hay, &needle),
++                naive_rfind(&hay, &needle),
++                "horspool_rfind({needle:?}) over {} bytes",
++                hay.len()
++            );
++            assert_eq!(
++                super::find_iter(&hay, &needle).collect::<Vec<_>>(),
++                naive_find_iter(&hay, &needle),
++                "find_iter({needle:?}) over {} bytes",
++                hay.len()
++            );
++            assert_eq!(
++                super::rfind_iter(&hay, &needle).collect::<Vec<_>>(),
++                naive_rfind_iter(&hay, &needle),
++                "rfind_iter({needle:?}) over {} bytes",
++                hay.len()
++            );
++        }
++    }
++}

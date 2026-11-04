@@ -1,0 +1,141 @@
+rgy — Notices
+=============
+
+Lineage
+-------
+rgy merges three prior projects into one workspace:
+
+- `fsearch` (Rust) — name indexing, fuzzy ranking, and the query engine in
+  `crates/name-core`. Three of its files (`name_index`, `name_query` and
+  `content`) keep fsearch's MIT terms, and the notice travels with them in
+  `LICENSE-MIT-FSEARCH`; the rest of the crate is Apache-2.0.
+- the `zen` project (this workspace's `zen-rs`, `search-ui`, and
+  `discovery-windows`) - Windows NTFS discovery and the terminal UI.
+  Apache-2.0 only here; see COPYING.
+- `rgx` — the content-search engine, the adapters and the Tesla Valve pack
+  store in `crates/rgx-*` and `crates/rar-codec`. Apache-2.0, as upstream
+  offers it and as this workspace transports it verbatim; see COPYING.
+
+Ideas, protocols, and behavioral parity (query syntax, rg-compatible
+flags, on-disk format layouts) are not code and are not subject to
+copyright. Named projects are referenced nominatively; no affiliation is
+implied.
+
+Third-party components
+----------------------
+This project is split-licensed — Apache-2.0 for its product, its end-to-end
+harness and the vendored rgx crates, MIT OR Apache-2.0 for the tooling
+around them (see COPYING). Its Rust dependencies carry their own permissive
+licenses. The full dependency license set can be reproduced with:
+
+    cargo metadata --format-version 1 --locked \
+      | jq -r '.packages[].license' | sort -u
+
+Third-party files in this repository
+------------------------------------
+crates/rgx-adapters-inspect/testdata/sample.plt
+    A capture from an HP 8595E plotter, taken from the HPGL-Plotter project
+    (https://github.com/VK2BEA/HPGL-Plotter), used unmodified.
+    Apache License 2.0. Copyright 2022 Michael G. Katzmann.
+
+crates/rgx-core/src/frequency.rs
+    The byte-rank table in `RANK` is copied from the `memchr` crate
+    (MIT OR Apache-2.0), under its Apache-2.0 option. The file's own header
+    names the upstream and says that the values are copied, not measured
+    here.
+
+What is not this project's code
+-------------------------------
+No source file of any upstream project is included in this repository. What
+the tree carries of other people is *knowledge* — the layout of a file
+format — and the record of where that knowledge came from. The code that
+encodes it was written for this project, in this project's idiom, and it is
+held against the corpora each format's own producer writes. The five files
+below are the ones where that knowledge came from a particular source; the
+rest of the vendored trees carry upstream rgx's own provenance headers,
+which say the same about the work upstream did.
+
+crates/rgx-adapters-inspect/src/cad_sat.rs
+    The ACIS SAT record layout, learned from the writer side of ezdxf
+    (https://github.com/mozman/ezdxf).
+
+crates/rgx-adapters-archive/src/borg.rs
+    The borg segment framing, the payload envelope, the compressor tags and
+    the item metadata, learned from borg 1.2's own source
+    (https://github.com/borgbackup/borg).
+
+crates/rgx-adapters-archive/src/pgdump.rs
+    The custom-dump framing and the table of contents, learned from
+    PostgreSQL's own `pg_dump` source (https://github.com/postgres/postgres).
+
+crates/rgx-adapters-tabular/src/databases.rs
+    The Redis RDB type table and length encoding, learned from Redis's own
+    source (https://github.com/redis/redis), and the LZF decompressor,
+    written from liblzf's `lzfP.h` (https://github.com/libarchive/liblzf),
+    which Redis vendors rather than depends on.
+
+crates/rgx-adapters-tabular/src/lmdb.rs
+    The `MDB_meta` layout, learned from LMDB's own `mdb.c`
+    (https://github.com/LMDB/lmdb).
+
+Not in this repository
+----------------------
+No file of the W3C/OASIS WebCGM 2.1 test suite is here. Its terms are free
+for use and redistribution but forbid modification, and a subset of it is
+a derivative work — so the CGM reader was checked against that corpus from
+outside the tree, and the fixture in the tree was written here, byte by byte.
+
+Code origins
+------------
+Several files implement a published algorithm, specification or upstream API,
+and each was written for this project: the RAR and 7z decoders, the
+compression codecs, the TIFF/EXIF and X.509 parsers, the argument parser,
+the memory-mapping layer, and the JSON structural scanner. What is named
+upstream is the specification each was written from, and the provenance
+header in each file records which one.
+
+Two lineages are worth naming, because a reader who wants to know what the
+code is standing on deserves to be told:
+
+  * The 7z tree (`crates/rgx-adapters-archive/src/sevenz/`) was written from
+    the LZMA SDK (https://7-zip.org/sdk.html), which its publisher placed in
+    the public domain: "Anyone is free to copy, modify, publish, use,
+    compile, sell, or distribute the original LZMA SDK code, either in
+    source code form or as a compiled binary, for any purpose, commercial
+    or non-commercial, and by any means." (Copyright (C) Igor Pavlov.)
+    Public domain carries no conditions, so that tree is licensed here
+    under Apache-2.0 like the rest.
+
+  * The RAR codec (`crates/rar-codec/`) was originally a port of libarchive's
+    RAR support (`archive_read_support_format_rar{5,}.c`), which libarchive
+    distributes under the BSD 2-Clause license. Every module of it has since
+    been rewritten as an independent reimplementation, and no upstream file
+    remains in the tree. The terms the port inherited are kept on the record
+    here; the copyright notice itself names libarchive's own holders and
+    travels with the upstream LICENSE:
+
+        Redistribution and use in source and binary forms, with or without
+        modification, are permitted provided that the following conditions
+        are met:
+        1. Redistributions of source code must retain the above copyright
+           notice, this list of conditions and the following disclaimer.
+        2. Redistributions in binary form must reproduce the above copyright
+           notice, this list of conditions and the following disclaimer in
+           the documentation and/or other materials provided with the
+           distribution.
+
+        THIS SOFTWARE IS PROVIDED BY THE AUTHOR(S) ``AS IS'' AND ANY
+        EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+        IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+        PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE AUTHOR(S) BE LIABLE
+        FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+        CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+        SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR
+        BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+        LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+        (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
+        USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
+        DAMAGE.
+
+"ripgrep" and "ripgrep-all" are names of their respective projects;
+references to them here are nominative and do not imply affiliation.

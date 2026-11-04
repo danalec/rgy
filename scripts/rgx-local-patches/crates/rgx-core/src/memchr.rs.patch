@@ -1,0 +1,44 @@
+--- a/crates/rgx-core/src/memchr.rs
++++ b/crates/rgx-core/src/memchr.rs
+@@ -24,27 +24,27 @@
+ //! The two configurations now take the *same* path. There is no
+ //! `feature = "std"` anywhere in the dispatch: a build with `std` and a
+ //! build without it ask the same probe and reach the same kernel, so the
+-//! numbers the two builds produce are comparable. The upstream crate's own
+-//! dispatch is still what runs when this CPU has no AVX2 -- there it picks
+-//! SSE2, and on aarch64 it picks NEON, both of which are decisions the
+-//! upstream crate makes at compile time and that need no probe.
++//! numbers the two builds produce are comparable.
+ //!
+-//! ## What is re-exported
++//! ## What is here now
+ //!
+-//! Everything else the upstream crate offers is re-exported unchanged, so
+-//! every call site keeps the `rgx_core::memchr::*` path it has used since
+-//! the in-house module was deleted.
++//! **The upstream crate is gone, and with it the dependency.** The kernels
++//! are this crate's own: the vector ones are written out with `core::arch`
++//! intrinsics -- the same 32-byte block, one comparison per needle and one
++//! mask of candidates the upstream searchers have -- and the portable one
++//! is a word-at-a-time scan with a byte-at-a-time tail. The substring
++//! search is this crate's own too: a packed-pair scanner where the CPU has
++//! AVX2, and Boyer--Moore--Horspool where it does not. See [`memmem`]'s own
++//! documentation for the whole of it.
+ //!
+-//! The substring search is the one exception: [`memmem`] is this crate's
+-//! own, because the upstream crate's packed-pair kernel cannot be reached
+-//! without `std` -- see that module's own documentation for the whole of
+-//! it.
++//! Every call site keeps the `rgx_core::memchr::*` path it has used since
++//! the in-house module was deleted: the names, the arguments and the
++//! answers are the same, and the tests hold them to a naive byte-at-a-time
++//! scan rather than to another implementation.
+ //!
+ //! `memmem::find_iter` yields the *start* of each match, and the matches
+ //! do not overlap. A caller that wants the overlapping ones has to step
+ //! one byte on, which is what `crate::regex`'s `sub_offsets` does.
+-
+-pub use ::memchr::*;
+ 
+ pub mod memmem;
+ 

@@ -1,0 +1,367 @@
+--- a/crates/rgx-adapters-archive/src/lib.rs
++++ b/crates/rgx-adapters-archive/src/lib.rs
+@@ -536,35 +536,30 @@
+             "zst" | "zstd" | "tzst" => {
+                 // The in-house decoder refuses a bomb from the frame header
+                 // before it expands one and enforces the cap while it runs.
++                //
+                 // It declines exactly one shape -- a frame carrying a
+-                // Dictionary_ID, which cannot be read without the dictionary
+-                // -- and libzstd gets those, so a file shape this build has
+-                // not seen degrades to a slower answer rather than no answer.
+-                // It does not fall back on a decode *error*: a broken frame
+-                // is broken, and handing it to a second implementation only
+-                // risks one of the two being wrong.
++                // Dictionary_ID -- and there is no second implementation to
++                // hand that one to: the dictionary is not in the frame, and
++                // rgx ships none, so libzstd was asked for the same frame
++                // without one and refused it too ("Dictionary mismatch").
++                // The fallback was a slower path to the failure this branch
++                // reports, so it is gone and the refusal is the answer.
++                // A decode *error* was never a reason to fall back either:
++                // a broken frame is broken, and handing it to a second
++                // implementation only risks one of the two being wrong.
+                 let stem = strip_suffix(path, if ext == "tzst" { ".tzst" } else { ".zst" });
+                 let in_house =
+                     rgx_core::compress::zstd::ZstdDecoder::new().decode_bounded(data, limit);
+-                let (bytes, declared, capped) = match in_house {
+-                    Ok(b) => (b.bytes, b.declared, b.capped),
++                let b = match in_house {
++                    Ok(b) => b,
+                     Err(rgx_core::compress::error::CompressError::UnsupportedFormat(why)) => {
+-                        let mut bytes = Vec::new();
+-                        let capped = stream_bounded(
+-                            || zstd::stream::read::Decoder::new(data),
+-                            limit,
+-                            &mut bytes,
+-                        )
+-                        .map_err(|e| rgx_core::Error::msg(format!("zstd: {why}; {e}")))?;
+-                        let declared = zstd::zstd_safe::get_frame_content_size(data)
+-                            .ok()
+-                            .flatten()
+-                            .filter(|n| *n != zstd::zstd_safe::CONTENTSIZE_UNKNOWN);
+-                        (bytes, declared, capped)
++                        return Err(rgx_core::Error::msg(format!(
++                            "{why}: rgx ships no zstd dictionary"
++                        )));
+                     }
+                     Err(e) => return Err(rgx_core::Error::msg(e).context("zstd frame")),
+                 };
+-                (stem, bytes, declared, capped)
++                (stem, b.bytes, b.declared, b.capped)
+             }
+             "lz4" => {
+                 // In-house decoder covering both the modern frame and the
+@@ -681,28 +676,6 @@
+     Outcome::Members(vec![note, (inner, bytes)])
+ }
+ 
+-/// Read a streaming decoder into `out`, stopping at `limit` bytes.
+-///
+-/// `.take(limit + 1)` rather than `limit`: the extra byte is what tells a
+-/// stream that filled the budget exactly from one that went past it, which
+-/// is the difference between "decoded whole" and "stopped here" when the
+-/// real size is not declared anywhere.
+-#[cfg(feature = "decompress")]
+-fn stream_bounded<R: std::io::Read>(
+-    make: impl FnOnce() -> std::io::Result<R>,
+-    limit: u64,
+-    out: &mut Vec<u8>,
+-) -> Result<bool> {
+-    use std::io::Read as _;
+-    let mut reader = make()?.take(limit.saturating_add(1));
+-    reader.read_to_end(out)?;
+-    if (out.len() as u64) <= limit {
+-        return Ok(false);
+-    }
+-    out.truncate(limit as usize);
+-    Ok(true)
+-}
+-
+ #[cfg(all(
+     test,
+     any(
+@@ -900,99 +873,6 @@
+                     .unwrap_or_else(|e| panic!("{label}: {e:?}"));
+                 assert!(!b.capped, "{label}");
+                 assert_eq!(b.bytes, *want, "{label}");
+-                assert_eq!(
+-                    b.bytes,
+-                    zstd::stream::decode_all(*frame).expect(label),
+-                    "{label}"
+-                );
+-            }
+-        });
+-    }
+-
+-    /// The in-house decoder and the `zstd` crate must agree byte for byte on
+-    /// frames neither of them produced: a corpus of inputs encoded at every
+-    /// level the `zstd` crate offers, plus mutations of a real frame that
+-    /// either decode to the same bytes or are refused by both.
+-    #[cfg(feature = "decompress")]
+-    #[test]
+-    fn the_in_house_decoder_agrees_with_the_zstd_crate() {
+-        use crate::budget::testing::locked;
+-        /// Deterministic, no `rand` in the dependency set.
+-        fn corpus() -> Vec<Vec<u8>> {
+-            let mut out = Vec::new();
+-            let mut x: u64 = 0x243F_6A88_85A3_08D3;
+-            let mut next = move || {
+-                x ^= x << 13;
+-                x ^= x >> 7;
+-                x ^= x << 17;
+-                x
+-            };
+-            // empty, tiny, and each awkward size around a block boundary
+-            out.push(Vec::new());
+-            for n in [
+-                1usize, 2, 3, 7, 31, 32, 33, 255, 256, 1023, 1024, 4095, 4096, 65_535, 65_536,
+-                131_071, 131_072, 131_073,
+-            ] {
+-                out.push((0..n).map(|i| (i % 251) as u8).collect());
+-                out.push(vec![b'x'; n]);
+-            }
+-            // incompressible
+-            for n in [1000usize, 40_000, 150_000] {
+-                out.push((0..n).map(|_| (next() >> 33) as u8).collect());
+-            }
+-            // one byte value only, and two alternating
+-            out.push(vec![b'A'; 200_000]);
+-            out.push(
+-                (0..200_000)
+-                    .map(|i| if i % 2 == 0 { b'A' } else { b'B' })
+-                    .collect(),
+-            );
+-            // highly repetitive, and text-shaped
+-            let lorem = b"the quick brown fox jumps over the lazy dog. ";
+-            out.push(lorem.iter().cycle().take(200_000).copied().collect());
+-            let mut rec = Vec::new();
+-            for i in 0..8_000u32 {
+-                rec.extend_from_slice(
+-                    format!("id={i},name=w{},price={}.50,tag=a,b,c\n", i % 97, i % 13).as_bytes(),
+-                );
+-            }
+-            out.push(rec);
+-            // long-distance matches: the same block again, far apart
+-            let base: Vec<u8> = (0..65_536).map(|_| (next() >> 33) as u8).collect();
+-            let mut far = base.clone();
+-            far.extend(std::iter::repeat_n(0u8, 150_000));
+-            far.extend_from_slice(&base);
+-            far.extend(std::iter::repeat_n(0xFFu8, 100_000));
+-            far.extend_from_slice(&base);
+-            out.push(far);
+-            // sequences by the thousand: 4-byte runs of one letter each
+-            let mut many = Vec::new();
+-            for _ in 0..40_000 {
+-                many.extend(std::iter::repeat_n((next() >> 33) as u8, 4));
+-            }
+-            out.push(many);
+-            out
+-        }
+-
+-        // Every level on the small inputs, which is where a block-boundary
+-        // bug shows; a representative spread on the large ones, which cost
+-        // the same to encode and dominate the runtime.
+-        locked(|| {
+-            for (i, plain) in corpus().iter().enumerate() {
+-                let levels: &[i32] = match plain.len() {
+-                    0..=4096 => &[1, 2, 3, 5, 9, 12, 15, 19, 22],
+-                    4097..=65_536 => &[1, 3, 9, 19, 22],
+-                    _ => &[1, 3, 19],
+-                };
+-                for &level in levels {
+-                    let frame = zstd::stream::encode_all(&plain[..], level)
+-                        .unwrap_or_else(|e| panic!("corpus {i} level {level}: {e}"));
+-                    let ours = rgx_core::compress::zstd::ZstdDecoder::new()
+-                        .decode_bounded(&frame, u64::MAX)
+-                        .unwrap_or_else(|e| panic!("corpus {i} level {level}: {e:?}"));
+-                    assert!(!ours.capped);
+-                    assert_eq!(ours.bytes, *plain, "corpus {i} level {level}");
+-                }
+             }
+         });
+     }
+@@ -1015,7 +895,6 @@
+                 .decode(&both)
+                 .expect("two frames");
+             assert_eq!(got, want);
+-            assert_eq!(got, zstd::stream::decode_all(&both[..]).expect("libzstd"));
+ 
+             // Skippable frame: magic 0x184D2A5x, then a 4-byte length.
+             let mut skipped = vec![0x5f, 0x2a, 0x4d, 0x18, 0x04, 0x00, 0x00, 0x00, 1, 2, 3, 4];
+@@ -1029,19 +908,14 @@
+     }
+ 
+     /// A frame carrying a Dictionary_ID is the one shape the in-house
+-    /// decoder declines; the adapter must hand it to the `zstd` crate
+-    /// rather than decode it without the dictionary it was written against.
+-    ///
+-    /// libzstd refuses it too -- rgx ships no dictionary -- so the answer is
+-    /// an error, never a short read that looks like text. The message the
+-    /// fallback builds is the one that carries both the reason the in-house
+-    /// decoder gave up and libzstd's own refusal, so asserting on that is
+-    /// what makes this a test of the fallback rather than of the refusal:
+-    /// the in-house path alone renders as `zstd frame: ...` and would fail
+-    /// the prefix check.
++    /// decoder declines, and it is the one shape the tree cannot answer:
++    /// the dictionary is not in the frame, and rgx ships none, so libzstd
++    /// was asked for the same frame without one and refused it too
++    /// ("Dictionary mismatch"). The answer is an error, never a short read
++    /// that looks like text, and it says what is missing.
+     #[cfg(feature = "decompress")]
+     #[test]
+-    fn a_dictionary_frame_falls_back_and_is_still_not_decoded() {
++    fn a_dictionary_frame_is_refused_and_not_decoded() {
+         use crate::budget::testing::locked;
+         let frame = [
+             0x28u8, 0xb5, 0x2f, 0xfd, 0xa3, 0x44, 0x33, 0x22, 0x11, 0x00, 0x00, 0x00,
+@@ -1055,24 +929,21 @@
+         locked(|| match Decompress.extract(&frame, "d.zst") {
+             Err(e) => {
+                 let text = format!("{e}");
+-                assert!(
+-                    text.starts_with("zstd: "),
+-                    "the fallback did not run: {text}"
+-                );
+                 assert!(text.contains("dictionary"), "{text}");
+-                // libzstd's own refusal, so the crate really was called
+-                assert!(text.contains("incomplete frame"), "{text}");
++                assert!(text.contains("rgx ships no zstd dictionary"), "{text}");
+             }
+             Ok(_) => panic!("decoded a frame that needs a dictionary rgx does not have"),
+         });
+     }
+ 
+     /// The RLE_Literals_Block shape (RFC 8878 §3.1.1.3.1.3) that no encoder
+-    /// in the reference corpus produces, hand-built and checked against
+-    /// libzstd, so "libzstd accepts it" is the evidence that it is real.
++    /// in the reference corpus produces, hand-built from the RFC. The
++    /// builder and the decoder are two independent readings of the same
++    /// section, and they agree on the bytes: that is what makes the frame
++    /// evidence about the shape rather than a guess.
+     #[cfg(feature = "decompress")]
+     #[test]
+-    fn libzstd_agrees_on_the_hand_built_rle_literals_frame() {
++    fn the_hand_built_rle_literals_frame_decodes_to_what_it_says() {
+         use crate::budget::testing::locked;
+         const N: usize = 31;
+         let mut frame = vec![0x28, 0xb5, 0x2f, 0xfd, 0xa0];
+@@ -1084,12 +955,10 @@
+         frame.extend_from_slice(&header.to_le_bytes()[..3]);
+         frame.extend_from_slice(&block);
+         locked(|| {
+-            let libzstd = zstd::stream::decode_all(&frame[..]).expect("libzstd accepts the frame");
+-            assert_eq!(libzstd, vec![b'Z'; N]);
+             let ours = rgx_core::compress::zstd::ZstdDecoder::new()
+                 .decode(&frame)
+                 .expect("ours");
+-            assert_eq!(ours, libzstd);
++            assert_eq!(ours, vec![b'Z'; N]);
+         });
+     }
+ 
+@@ -1098,12 +967,20 @@
+     #[cfg(feature = "decompress")]
+     #[test]
+     fn a_declared_bomb_stops_at_the_byte_budget() {
++        use crate::budget::testing::locked;
+         const LIMIT: u64 = 1 << 20;
+         let bomb = bzst_of_runs(8 << 20);
+-        assert!(
+-            zstd::stream::decode_all(&bomb[..]).is_ok(),
+-            "libzstd calls it a real frame"
+-        );
++        // The bomb is a real frame and not a malformed one: the in-house
++        // decoder reads it as the eight megabytes of one byte value it
++        // claims to hold, when nothing stops it.
++        locked(|| {
++            let whole = rgx_core::compress::zstd::ZstdDecoder::new()
++                .decode_bounded(&bomb, u64::MAX)
++                .expect("the bomb is a frame");
++            assert!(!whole.capped);
++            assert_eq!(whole.bytes.len(), 8 << 20);
++            assert!(whole.bytes.iter().all(|&b| b == b'Q'));
++        });
+         crate::budget::testing::under_budget(64, LIMIT, || {
+             let Outcome::Members(m) = Decompress.extract(&bomb, "bomb.zst").expect("bomb") else {
+                 panic!("members")
+@@ -1122,10 +999,11 @@
+     }
+ 
+     /// Eight megabytes of one byte in about twenty bytes of RLE blocks.
+-    /// Valid per RFC 8878, so `zstd -t` calls it good: a bomb, not a
+-    /// malformed file. Hand-built because no reference encoder will make one
+-    /// at this ratio, and it is not evidence about any real `.zst` -- the
+-    /// fixtures above are.
++    /// Valid per RFC 8878: the in-house decoder reads it as the eight
++    /// megabytes it claims to hold, so it is a bomb and not a malformed
++    /// file. Hand-built because no reference encoder will make one at this
++    /// ratio, and it is not evidence about any real `.zst` -- the fixtures
++    /// above are.
+     #[cfg(feature = "decompress")]
+     fn bzst_of_runs(total: u32) -> Vec<u8> {
+         let mut frame = vec![0x28, 0xb5, 0x2f, 0xfd, 0xa0];
+@@ -1440,7 +1318,7 @@
+             assert!(got, "the corpus does not exercise {what}");
+         }
+         // RLE_Literals_Block is the one shape no encoder in reach produces;
+-        // it is covered by a hand-built frame checked against libzstd above.
++        // it is covered by the hand-built frame above.
+         assert!(
+             !seen.rle_literals,
+             "an encoder did produce RLE literals: add them here"
+@@ -1976,11 +1854,6 @@
+             rgx_core::compress::zlib::ZlibEncoder::new().encode(data)
+         }
+ 
+-        /// libzstd, through this crate's `zstd` dependency.
+-        fn zst_of(data: &[u8]) -> Vec<u8> {
+-            zstd::stream::encode_all(data, 3).expect("zstd")
+-        }
+-
+         fn members(out: Outcome) -> Vec<(String, Vec<u8>)> {
+             let Outcome::Members(m) = out else {
+                 panic!("expected members")
+@@ -2056,7 +1929,6 @@
+         fn every_decompressed_format_stops_at_the_byte_budget() {
+             const LIMIT: u64 = 1000;
+             let zlib = zlib_of(&b"needle ".repeat(500));
+-            let zst = zst_of(&b"needle ".repeat(500));
+             let cases: [(&[u8], &str, &str); 9] = [
+                 (
+                     include_bytes!("../testdata/bzip2_cli_l9_rep.bz2"),
+@@ -2094,7 +1966,11 @@
+                     "brotli, brotli 1.2.0",
+                 ),
+                 (&zlib, "fixture.z", "zlib framing, in-house encoder"),
+-                (&zst, "fixture.zst", "zstd, libzstd"),
++                (
++                    include_bytes!("../testdata/zstd_text_l1.zst"),
++                    "fixture.zst",
++                    "zstd, reference CLI, refused from the frame header",
++                ),
+             ];
+             for (data, path, label) in cases {
+                 let out = under_budget(64, LIMIT, || {
+@@ -2122,7 +1998,6 @@
+         fn legitimate_streams_are_not_truncated() {
+             let payload = b"needle ".repeat(500);
+             let zlib = zlib_of(&payload);
+-            let zst = zst_of(&payload);
+             let cases: [(&[u8], &[u8], &str, &str); 8] = [
+                 (
+                     include_bytes!("../testdata/bzip2_cli_l9_rep.bz2"),
+@@ -2161,7 +2036,12 @@
+                     "fixture",
+                 ),
+                 (&zlib, &payload, "fixture.z", "fixture"),
+-                (&zst, &payload, "fixture.zst", "fixture"),
++                (
++                    include_bytes!("../testdata/zstd_text_l1.zst"),
++                    include_bytes!("../testdata/zstd_text.plain"),
++                    "fixture.zst",
++                    "fixture",
++                ),
+             ];
+             for (data, expected, path, inner) in cases {
+                 let out = locked(|| members(Decompress.extract(data, path).unwrap()));

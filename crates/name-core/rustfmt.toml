@@ -1,0 +1,4 @@
+# fsearch's files were formatted with these settings; keep them so diffs
+# against ../fsearch stay readable.
+max_width = 150
+use_small_heuristics = "Max"

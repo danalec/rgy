@@ -1,0 +1,234 @@
+--- a/crates/rgx-core/src/memmap2/platform/mod.rs
++++ b/crates/rgx-core/src/memmap2/platform/mod.rs
+@@ -4,8 +4,6 @@
+ 
+ use std::fs::File;
+ use std::io;
+-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
+-use std::mem;
+ use std::ops::{Deref, DerefMut};
+ use std::slice;
+ 
+@@ -44,10 +42,178 @@
+ )))]
+ pub(crate) use self::fallback::MmapInner;
+ 
++/// The unix calls the memory map is made of.
++///
++/// The `libc` crate used to carry them: the calls themselves, the
++/// protection and mapping flags, and the number that asks the kernel for
++/// the page size. They are declared here, by hand, the way
++/// `crates/name-core/src/clock.rs` declares the clock and the way
++/// `crates/discovery/src/file.rs` declares the file calls — the tree
++/// carries no crate to make a syscall for it, and the constants are the
++/// platform's, spelled with the platform's numbers.
++///
++/// The numbers are not the same everywhere, and a number the platform does
++/// not use is an instruction it does use: Linux's `MS_SYNC` is 4, macOS's
++/// is 16 and FreeBSD's is 0, and the anonymous-map flag is 0x20 on Linux
++/// and 0x1000 on the BSDs. Each one is declared with the value the
++/// platform gives it.
++#[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
++mod unix {
++    use core::ffi::{c_int, c_long, c_void};
++
++    /// The protection of the pages of a mapping: what they may be.
++    pub const PROT_NONE: c_int = 0;
++    pub const PROT_READ: c_int = 1;
++    pub const PROT_WRITE: c_int = 2;
++    pub const PROT_EXEC: c_int = 4;
++
++    /// The mapping is shared with the file behind it.
++    pub const MAP_SHARED: c_int = 0x0001;
++
++    /// The mapping is private to the process.
++    pub const MAP_PRIVATE: c_int = 0x0002;
++
++    /// The anonymous mapping: a mapping with no file behind it.
++    ///
++    /// Linux gives the flag 0x20 and the BSDs give it 0x1000, and each
++    /// platform spells it twice: `MAP_ANON` and `MAP_ANONYMOUS` are the
++    /// same number on all of them.
++    #[cfg(all(
++        target_os = "linux",
++        not(any(target_arch = "mips", target_arch = "mips64"))
++    ))]
++    pub const MAP_ANON: c_int = 0x0020;
++    #[cfg(all(target_os = "linux", any(target_arch = "mips", target_arch = "mips64")))]
++    pub const MAP_ANON: c_int = 0x0800;
++    #[cfg(not(target_os = "linux"))]
++    pub const MAP_ANON: c_int = 0x1000;
++
++    /// The same flag under its other name.
++    pub const MAP_ANONYMOUS: c_int = MAP_ANON;
++
++    /// The pages are read in as the mapping is made: `MAP_POPULATE`.
++    ///
++    /// Linux has the flag and the BSDs do not, so there it is 0 — which
++    /// is no flag at all, and the mapping is made the same way.
++    #[cfg(all(
++        target_os = "linux",
++        not(any(target_arch = "mips", target_arch = "mips64"))
++    ))]
++    pub const MAP_POPULATE: c_int = 0x8000;
++    #[cfg(all(target_os = "linux", any(target_arch = "mips", target_arch = "mips64")))]
++    pub const MAP_POPULATE: c_int = 0x10000;
++    #[cfg(not(target_os = "linux"))]
++    pub const MAP_POPULATE: c_int = 0;
++
++    /// The mapping is a stack: `MAP_STACK`.
++    ///
++    /// Linux gives it 0x20000, FreeBSD gives it 0x400 and macOS has no
++    /// such flag at all — there it is 0.
++    #[cfg(all(
++        target_os = "linux",
++        not(any(target_arch = "mips", target_arch = "mips64"))
++    ))]
++    pub const MAP_STACK: c_int = 0x20000;
++    #[cfg(all(target_os = "linux", any(target_arch = "mips", target_arch = "mips64")))]
++    pub const MAP_STACK: c_int = 0x40000;
++    #[cfg(target_os = "freebsd")]
++    pub const MAP_STACK: c_int = 0x0400;
++    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
++    pub const MAP_STACK: c_int = 0;
++
++    /// The mapping failed: `MAP_FAILED`, which is the address no map
++    /// ever has.
++    pub const MAP_FAILED: *mut c_void = -1isize as *mut c_void;
++
++    /// The write-back is immediate: `MS_SYNC`.
++    ///
++    /// Linux's is 4, macOS's is 16 and FreeBSD's is 0 — where 0 is a flag
++    /// of its own and not "no flag".
++    #[cfg(target_os = "linux")]
++    pub const MS_SYNC: c_int = 0x0004;
++    #[cfg(target_os = "macos")]
++    pub const MS_SYNC: c_int = 0x0010;
++    #[cfg(target_os = "freebsd")]
++    pub const MS_SYNC: c_int = 0x0000;
++
++    /// The write-back is in the background: `MS_ASYNC`. It is 1 on every
++    /// unix.
++    pub const MS_ASYNC: c_int = 0x0001;
++
++    /// The question `sysconf(3)` answers with the page size. The number
++    /// is the platform's: 30 on Linux, 29 on macOS and 47 on FreeBSD.
++    #[cfg(target_os = "linux")]
++    pub const SC_PAGESIZE: c_int = 30;
++    #[cfg(target_os = "macos")]
++    pub const SC_PAGESIZE: c_int = 29;
++    #[cfg(target_os = "freebsd")]
++    pub const SC_PAGESIZE: c_int = 47;
++
++    /// Where a seek is measured from: the start of the file, the current
++    /// position, or its end. The three are 0, 1 and 2 on every unix.
++    pub const SEEK_SET: c_int = 0;
++    pub const SEEK_CUR: c_int = 1;
++    pub const SEEK_END: c_int = 2;
++
++    unsafe extern "C" {
++        /// The mapping is made: `mmap(2)`.
++        ///
++        /// The offset is 64 bits on every platform the tree builds for. A
++        /// 32-bit glibc links the large-file symbol `mmap64`: `mmap`
++        /// there reads 32 bits, and a file over 4 GiB would be mapped at
++        /// the wrong place.
++        #[cfg_attr(
++            all(target_os = "linux", target_env = "gnu", target_pointer_width = "32"),
++            link_name = "mmap64"
++        )]
++        pub fn mmap(
++            addr: *mut c_void,
++            len: usize,
++            prot: c_int,
++            flags: c_int,
++            fd: c_int,
++            offset: i64,
++        ) -> *mut c_void;
++
++        /// The mapping is given back: `munmap(2)`.
++        pub fn munmap(addr: *mut c_void, len: usize) -> c_int;
++
++        /// The pages are written back: `msync(2)`.
++        pub fn msync(addr: *mut c_void, len: usize, flags: c_int) -> c_int;
++
++        /// The protection of the pages is changed: `mprotect(2)`.
++        pub fn mprotect(addr: *mut c_void, len: usize, prot: c_int) -> c_int;
++
++        /// The kernel is told how the pages will be used: `madvise(2)`.
++        pub fn madvise(addr: *mut c_void, len: usize, advice: c_int) -> c_int;
++
++        /// The pages are pinned in memory: `mlock(2)`.
++        pub fn mlock(addr: *const c_void, len: usize) -> c_int;
++
++        /// The pages are let go: `munlock(2)`.
++        pub fn munlock(addr: *const c_void, len: usize) -> c_int;
++
++        /// The platform is asked a question: `sysconf(3)`.
++        pub fn sysconf(name: c_int) -> c_long;
++
++        /// The position in the file is moved, and the new one is
++        /// answered: `lseek(2)`.
++        ///
++        /// The offset is 64 bits, as it is for `mmap(2)`, and a 32-bit
++        /// glibc links the large-file symbol `lseek64` for the same
++        /// reason.
++        #[cfg_attr(
++            all(target_os = "linux", target_env = "gnu", target_pointer_width = "32"),
++            link_name = "lseek64"
++        )]
++        pub fn lseek(fd: c_int, offset: i64, whence: c_int) -> i64;
++    }
++}
++
+ pub(crate) fn page_size() -> usize {
+     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
+     {
+-        let p = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
++        let p = unsafe { unix::sysconf(unix::SC_PAGESIZE) };
+         if p > 0 {
+             p as usize
+         } else {
+@@ -109,7 +275,7 @@
+ /// and refuses nothing, and the two BSDs have the five that every unix
+ /// kernel has and refuse the other seven.
+ #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
+-pub(crate) fn refuse_unavailable(advice: libc::c_int) -> io::Result<()> {
++pub(crate) fn refuse_unavailable(advice: core::ffi::c_int) -> io::Result<()> {
+     if crate::memmap2::advice::is_available(advice) {
+         return Ok(());
+     }
+@@ -122,13 +288,27 @@
+ pub(crate) fn file_len_for_desc(desc: &MmapRawDescriptor) -> io::Result<u64> {
+     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
+     {
+-        let mut stat: libc::stat = unsafe { mem::zeroed() };
+-        let r = unsafe { libc::fstat(desc.0, &mut stat) };
+-        if r == 0 {
+-            Ok(stat.st_size as u64)
+-        } else {
+-            Err(io::Error::last_os_error())
++        // The size of a file is where its end is, and `lseek(2)` says
++        // where that is without the kernel writing a struct into our
++        // stack. The `stat` layout is the platform's, and the BSDs have
++        // five of them -- FreeBSD 11 to 15 -- so a size read through one
++        // would be a layout written out here and kept right by hand. The
++        // tree's own reader says the same about its `stat`, in
++        // `crates/discovery/src/dir.rs`: the offsets come from the
++        // platform's layout, "never hand-remembered".
++        //
++        // The position the caller had is the caller's: asking a file how
++        // long it is must not move it, so it is put back where it was.
++        let here = unsafe { unix::lseek(desc.0, 0, unix::SEEK_CUR) };
++        if here < 0 {
++            return Err(io::Error::last_os_error());
+         }
++        let end = unsafe { unix::lseek(desc.0, 0, unix::SEEK_END) };
++        if end < 0 {
++            return Err(io::Error::last_os_error());
++        }
++        unsafe { unix::lseek(desc.0, here, unix::SEEK_SET) };
++        Ok(end as u64)
+     }
+     #[cfg(target_os = "windows")]
+     {

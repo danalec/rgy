@@ -1,0 +1,108 @@
+Licensing
+=========
+
+This project is Apache-2.0 for the product and the end-to-end harness, and
+MIT OR Apache-2.0 for the tooling around them. The split is not a matter of
+taste: it follows what each file's own `SPDX-License-Identifier:` header
+says, and the audit in `tests/license.rs` checks every source file against
+the claim made here.
+
+Apache-2.0 only
+----------------
+
+The product. Every source file in these trees carries
+`SPDX-License-Identifier: Apache-2.0` on its first line, and the crate
+manifests state the same terms -- with one exception, named here so the
+claim is not read as a claim about something else: `crates/name-core/`
+states `Apache-2.0 AND MIT`, because three of its files arrived from
+fsearch under MIT and keep its terms (see NOTICE and LICENSE-MIT-FSEARCH).
+`tests/license.rs` names those three files, and fails if a fourth one
+appears or if one of them stops being MIT.
+
+    crates/name-core/                  the name index, the query engine, the fuzzy ranker
+    crates/par/                        the parallelism: split the work, run the pieces
+    crates/discovery/                  the discovery seam
+    crates/discovery-windows/          MFT + USN discovery
+    crates/discovery-linux/            getdents64 walk
+    crates/discovery-macos/            FSEvents + getattrlistbulk
+    crates/discovery-freebsd/          the FreeBSD walk
+    crates/discovery-dispatch/         the per-OS chooser
+    crates/engine/                     orchestration: keep-warm, TV pack store glue
+    crates/proto/                      the daemon protocol
+    crates/autostart/                  the login-item registration (parity row 4.13)
+    crates/launcher/                   the launcher's model: query, results, actions, geometry
+    crates/launcher-windows/           the launcher's window on Windows: Win32 + GDI
+    crates/pick/                       the hand-off to an external picker (fzf and its family)
+    crates/adapters/                   the rgx adapter registry: the formats a search reads into
+    bins/searchctl/                   the CLI
+    bins/searchd/                      the daemon
+    bins/search-ui/                    the terminal UI
+    bins/zen-rs/                       the zen CLI (NTFS indexer)
+    bins/rgxy/                         the launcher over the daemon
+    tests/                             the end-to-end harness over the user-facing bins
+    .winget/                           the winget package manifests (parity row 4.15)
+    Formula/                           the Homebrew formula (parity row 4.15)
+
+The two packaging trees carry the same header as everything else, with one
+exception worth stating: the winget manifests put it on the line *after* the
+`yaml-language-server` schema comment, because that comment has to be the
+first line for the schema to be picked up. The formula carries it on the
+first line like the rest.
+
+The vendored rgx crates are Apache-2.0 as well, and for the same reason
+they are Apache-2.0 everywhere: they are upstream rgx's own files,
+transported verbatim, and upstream offers Apache-2.0 and no other option.
+This project does not relicense somebody else's files.
+
+    crates/rgx-core/                   the content engine, the codecs, the pack store
+    crates/rar-codec/                  the RAR decoder
+    crates/rgx-adapters-archive/       archives: 7z, tar, zip, rar, ar, lz4, ...
+    crates/rgx-adapters-docs/          soffice and tesseract adapters
+    crates/rgx-adapters-inspect/       PE, ELF, Mach-O, x509, CAD, CRAM, ...
+    crates/rgx-adapters-llm/           gguf, safetensors, npy, protobuf, ...
+    crates/rgx-adapters-mail/          mbox, eml, msg, pst, ...
+    crates/rgx-adapters-media/         EXIF/TIFF, avi, asf, flv, mpeg, ...
+    crates/rgx-adapters-office/        docx, pptx, xlsx, rtf, tex, visio, ...
+    crates/rgx-adapters-pdf/           the PDF reader, JBIG2, fax, security
+    crates/rgx-adapters-tabular/       dbf, mdb, hdf5, netcdf, zarr, ...
+    crates/rgx-adapters-threed/        glb, stl, ply, fbx, blend, nifti, ...
+
+Five of those files encode a file *layout* that was learned from somebody
+else's implementation, and upstream records where that knowledge came from
+in its NOTICE. A layout is a fact about a file format rather than code,
+the code that encodes it was written here, and no upstream source file is
+in the tree — so no second licence composes into these files, and every
+one of them carries Apache-2.0 and nothing else. `NOTICE` names them.
+
+MIT OR Apache-2.0
+-------------------
+
+The tooling. You may use this code under the terms of either licence;
+commercial use of it is licensed under Apache-2.0, which is the licence
+this project intends for commercial deployment, and the MIT option remains
+available to anyone who prefers its terms.
+
+    scripts/                           the tooling: vendoring, drift, the protocol harness
+    tools/                             helper programs
+    benchmark/                         the measured tables and the write-ups behind them
+    install.sh, install.ps1            the one-line installers (one per platform)
+
+The three files in `crates/name-core/` that came from `fsearch` (MIT) keep
+fsearch's terms: a file that arrives under one licence does not change
+licence because it moved. Their notice is in `LICENSE-MIT-FSEARCH`.
+
+    crates/name-core/src/name_index.rs     MIT, from fsearch
+    crates/name-core/src/name_query.rs     MIT, from fsearch
+    crates/name-core/src/content.rs        MIT, from fsearch
+
+Full texts: LICENSE-APACHE and LICENSE-MIT. Third-party notices: NOTICE,
+and the notice of the upstream whose code is carried here in `LICENSE-MIT-FSEARCH`.
+
+Consequence for the distributed binaries
+----------------------------------------
+
+Every binary this project ships is Apache-2.0: the product is Apache-2.0,
+the end-to-end harness is Apache-2.0, and the vendored rgx crates are
+Apache-2.0 too. The toolkit is the exception: `scripts/`, `tools/`,
+`benchmark/` and the two installers are MIT OR Apache-2.0, and a
+distribution that includes them is governed by Apache-2.0 for that part.

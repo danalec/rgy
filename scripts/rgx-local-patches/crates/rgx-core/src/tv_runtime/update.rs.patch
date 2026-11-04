@@ -1,0 +1,23 @@
+--- a/crates/rgx-core/src/tv_runtime/update.rs
++++ b/crates/rgx-core/src/tv_runtime/update.rs
+@@ -627,6 +627,20 @@
+             format!("y\t{}\n", hex("the second member text")),
+         )
+         .unwrap();
++        // The length is not enough, and the mtime is set here for that
++        // reason: a member record's length is the member's and never the
++        // container's, so the length cannot pin a change in the container
++        // -- only the mtime can, and the mtime of a file written twice in
++        // the same tick of the clock is the mtime of the first write. The
++        // update compares the container's mtime with the one the manifest
++        // holds, so the test sets that mtime itself: the change is then
++        // the change on every machine, whatever its clock does.
++        let container = root.join("a.box");
++        let handle = fs::File::options().write(true).open(&container).unwrap();
++        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(2);
++        handle
++            .set_times(fs::FileTimes::new().set_modified(later))
++            .unwrap();
+         let stats = update_store_with(
+             &root,
+             &store,
