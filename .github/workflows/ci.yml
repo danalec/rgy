@@ -619,7 +619,11 @@ jobs:
         with:
           usesh: true
           release: "15.1"
-          prepare: pkg install -y rust git
+          # bash is not in the FreeBSD base system, and the build script is
+          # this tree's bash twin: a `bash` the VM does not have is exit 127
+          # from the ssh that runs it, which reads like a script that is not
+          # there.
+          prepare: pkg install -y rust git bash
           run: |
             set -eu
             bash scripts/build-release.sh --skip-tests
@@ -891,8 +895,10 @@ jobs:
       # had asked for. So the refusal is a gate, not a habit.
       #
       # Every standalone shell script in scripts/ is in this list -- the
-      # twelve .sh files, and the ten of them that have a .ps1 twin
-      # (release-linux.sh and sync-rgx-upstream.sh are the two without) --
+      # thirteen the gate covers, and the eleven of them that have a .ps1
+      # twin (release-linux.sh and sync-rgx-upstream.sh are the two
+      # without; check-twins.sh is the one left out, because it is the gate
+      # that runs the twins) --
       # and not only the ones that publish: a gate that ignores an option
       # it does not know is a gate that ran something else, and the drift
       # check and the vendoring check are gates too. A script that takes
@@ -930,8 +936,8 @@ jobs:
             fi
           }
           for script in publish-release build-release publish-crates publish-homebrew apply-vendored-edits \
-                        check-drift check-vendoring rgy-name-protocol smoke-serve test-publish-release \
-                        release-linux sync-rgx-upstream; do
+                        check-drift check-vendoring fetch-ci-assets rgy-name-protocol smoke-serve \
+                        test-publish-release release-linux sync-rgx-upstream; do
             refuse "scripts/$script.sh"
           done
           refuse install.sh
@@ -950,7 +956,8 @@ jobs:
           $PSNativeCommandUseErrorActionPreference = $false
           foreach ($script in @('scripts/publish-release.ps1','scripts/build-release.ps1','scripts/publish-crates.ps1',
                                  'scripts/publish-homebrew.ps1','scripts/apply-vendored-edits.ps1','scripts/check-drift.ps1',
-                                 'scripts/check-vendoring.ps1','scripts/rgy-name-protocol.ps1','scripts/smoke-serve.ps1',
+                                 'scripts/check-vendoring.ps1','scripts/fetch-ci-assets.ps1',
+                                 'scripts/rgy-name-protocol.ps1','scripts/smoke-serve.ps1',
                                  'scripts/test-publish-release.ps1','install.ps1')) {
             $out = & pwsh -NoProfile -File $script --rgy-nonsense 2>&1
             $rc = $LASTEXITCODE
