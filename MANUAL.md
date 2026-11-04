@@ -1034,7 +1034,11 @@ launcher's own blue, and the launcher draws it itself.
 |---|---|
 | click the icon | the window comes up |
 | double-click the icon | the window comes up |
-| right-click the icon | the menu: **Search** and **Quit** |
+| right-click the icon | the menu: **Search**, **Settings** and **Quit** |
+
+**Settings** is the panel `>settings` opens: the window comes up with the
+panel already at the keyboard, so the icon is the way there for a user who
+has forgotten the command.
 
 The icon never closes the window: a double click is two clicks, and a
 window that opens and closes again is a window that is not there. The

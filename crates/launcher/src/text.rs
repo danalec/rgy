@@ -223,6 +223,9 @@ vocabulary! {
     tray_tip => "rgxy — search files, apps or commands",
         "rgxy — buscar arquivos, apps ou comandos";
     tray_search => "Search", "Buscar";
+    // The panel is opened by `>settings` from the field, and the icon's
+    // menu is where a user who has forgotten the command looks for it.
+    tray_settings => "Settings", "Configurações";
     tray_quit => "Quit", "Sair";
 
     // --- the terminal's own words --------------------------------------------

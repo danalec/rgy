@@ -64,6 +64,9 @@ const ACCENT: (u8, u8, u8) = (0x5A, 0x96, 0xFF);
 pub enum Command {
     /// Open the window — the same thing the hotkey does.
     Search,
+    /// Open the window with the settings panel open — the same thing
+    /// `>settings` does, for the user who has forgotten the command.
+    Settings,
     /// End the program.
     Quit,
 }
@@ -298,9 +301,11 @@ impl Tray {
                 return None;
             }
             let search: Vec<u16> = text.tray_search.encode_utf16().chain(Some(0)).collect();
+            let settings: Vec<u16> = text.tray_settings.encode_utf16().chain(Some(0)).collect();
             let quit: Vec<u16> = text.tray_quit.encode_utf16().chain(Some(0)).collect();
             AppendMenuW(menu, MF_STRING, 1, search.as_ptr());
-            AppendMenuW(menu, MF_STRING, 2, quit.as_ptr());
+            AppendMenuW(menu, MF_STRING, 2, settings.as_ptr());
+            AppendMenuW(menu, MF_STRING, 3, quit.as_ptr());
 
             let mut at = POINT { x: 0, y: 0 };
             GetCursorPos(&mut at);
@@ -327,7 +332,8 @@ impl Tray {
 
             match chosen {
                 1 => Some(Command::Search),
-                2 => Some(Command::Quit),
+                2 => Some(Command::Settings),
+                3 => Some(Command::Quit),
                 _ => None,
             }
         }

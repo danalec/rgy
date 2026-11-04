@@ -146,6 +146,13 @@ pub enum Event {
     /// is not there — and the shell sends the same click twice when the
     /// user double-clicks.
     Show,
+    /// The launcher's settings were asked for: show the window with the
+    /// panel open.
+    ///
+    /// The notification area's menu asks with this. The panel is opened
+    /// from the field by `>settings`, and the menu is where a user who
+    /// has forgotten the command looks for it.
+    Settings,
     /// Something the window is waiting for has arrived.
     ///
     /// The worker that asks the daemon posts this when the answer is in
@@ -1853,10 +1860,22 @@ impl Window {
             return Control::None;
         };
         match tray.menu(self.hwnd, Text::for_lang(lang)) {
-            Some(crate::tray::Command::Search) => on_event(Event::Show),
-            Some(crate::tray::Command::Quit) => on_event(Event::Quit),
+            Some(command) => on_event(menu_event(command)),
             None => Control::None,
         }
+    }
+}
+
+/// What one item of the notification area's menu asks the host for.
+///
+/// The menu is the platform's own and it is modal, so what a test can hold
+/// is this mapping: the three items are the three events, and the settings
+/// item opens the panel and not the field.
+fn menu_event(command: crate::tray::Command) -> Event {
+    match command {
+        crate::tray::Command::Search => Event::Show,
+        crate::tray::Command::Settings => Event::Settings,
+        crate::tray::Command::Quit => Event::Quit,
     }
 }
 
@@ -2893,6 +2912,21 @@ mod tests {
             &[Event::Show],
             "the double click asks too"
         );
+    }
+
+    /// The icon's menu says what each of its items asks for.
+    ///
+    /// The menu is the platform's own and it is modal — a test cannot click
+    /// an item of it — so the mapping is what a test can hold: Search shows
+    /// the window, Settings shows the panel, Quit ends the program. The
+    /// settings item is the one a user who has forgotten `>settings` looks
+    /// for, and an item that opened the field instead of the panel would be
+    /// a menu item that does not do its job.
+    #[test]
+    fn the_icons_menu_items_ask_for_the_three_things() {
+        assert_eq!(menu_event(crate::tray::Command::Search), Event::Show);
+        assert_eq!(menu_event(crate::tray::Command::Settings), Event::Settings);
+        assert_eq!(menu_event(crate::tray::Command::Quit), Event::Quit);
     }
 
     /// Two windows at once are two windows.

@@ -854,6 +854,22 @@ fn handle(state: &mut State, event: Event) -> Control {
             }
             show(state)
         }
+        Event::Settings => {
+            // The icon's menu asked for the panel. The window comes up with
+            // the panel open: the panel is the launcher's own and needs no
+            // daemon, and the menu is where a user who has forgotten
+            // `>settings` looks for it. The window goes up before the
+            // daemon's question is answered, the way the shortcut's does.
+            let was_up = state.app.is_visible();
+            state.app.show();
+            if !was_up {
+                state.source.set_session(state.app.session());
+                state.waiting = state.waiting_for();
+                state.ask_daemon = true;
+            }
+            state.app.open_settings();
+            show(state)
+        }
         Event::Key(key) => on_key(state, key),
         Event::Tick => tick(state),
         Event::Wake => {
@@ -2290,6 +2306,26 @@ mod tests {
         let _ = handle(&mut state, Event::Toggle);
         let line = status_line(&state);
         assert!(line.contains("searching"), "{line}");
+    }
+
+    /// The icon's menu can open the settings panel.
+    ///
+    /// The panel is opened from the field by `>settings`, and the icon's
+    /// menu is where a user who has forgotten the command looks for it: the
+    /// window comes up with the panel already at the keyboard.
+    #[test]
+    fn the_trays_settings_item_opens_the_panel() {
+        let (mut state, _) = recording();
+        let control = handle(&mut state, Event::Settings);
+        assert_eq!(
+            state.app.mode(),
+            Mode::Settings,
+            "the panel has the keyboard"
+        );
+        assert!(
+            matches!(control, Control::Show(..)),
+            "the window comes up with the panel open"
+        );
     }
 
     #[test]
