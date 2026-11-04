@@ -47,10 +47,21 @@ use rgy_search_ui::term::{
 fn the_terminal_is_one() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        // SAFETY: the variable is set once, to one value, before any test
+        // SAFETY: the variables are set once, to one value, before any test
         // in this binary reaches the oracle: every test calls this first,
-        // and the `Once` makes the write happen before the first read.
-        unsafe { std::env::set_var("TERM", "xterm-256color") };
+        // and the `Once` makes the writes happen before the first read.
+        unsafe {
+            std::env::set_var("TERM", "xterm-256color");
+            // The oracle answers whether to write a colour **at write
+            // time**, and `NO_COLOR` is its answer to a question that is
+            // not this test's: this test pins the encoding of a colour,
+            // and the tree's own answer to `NO_COLOR` is the palette's
+            // (`palette::no_colour`), made once and carried by the colours
+            // the frame is drawn in. Measured on 2026-11-04 in a shell
+            // with `NO_COLOR=1`: the tree wrote `\x1b[39m` and the oracle
+            // `\x1b[m`, and the test called the encoding wrong.
+            std::env::remove_var("NO_COLOR");
+        }
     });
 }
 

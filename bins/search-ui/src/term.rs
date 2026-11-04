@@ -77,33 +77,26 @@ pub enum Color {
     },
 }
 
-/// Whether the terminal is to be told about colours at all.
-///
-/// `NO_COLOR` is the convention: a terminal that is not to be painted says
-/// so in the environment, and the sequences are written without the colour
-/// in them. The answer is read once — the environment does not change under
-/// a program — and it is the rule the oracle follows too.
-fn colors_disabled() -> bool {
-    static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *DISABLED.get_or_init(|| !std::env::var("NO_COLOR").unwrap_or_default().is_empty())
-}
-
 /// The escape that sets a colour.
 ///
 /// The channel is the prefix (`38;` for the foreground, `48;` for the
 /// background) and the parameters are the colour itself: the ANSI palette
 /// is an index, the 24-bit form is three numbers.
+///
+/// What the caller is given is what the terminal is told. Whether the
+/// terminal is to be painted at all is the **palette's** question
+/// (`palette::no_colour`): an emitter that read the environment itself
+/// answered that question again for every span, and made a test that pins
+/// a colour's bytes depend on the shell it ran in.
 fn colour_escape(foreground: bool, colour: Color) -> String {
     let mut out = String::from("\x1b[");
-    if !colors_disabled() {
-        match colour {
-            // The reset is the channel's own number, so it is written
-            // without the prefix.
-            Color::Reset => out.push_str(if foreground { "39" } else { "49" }),
-            _ => {
-                out.push_str(if foreground { "38;" } else { "48;" });
-                out.push_str(&parameters(colour));
-            }
+    match colour {
+        // The reset is the channel's own number, so it is written
+        // without the prefix.
+        Color::Reset => out.push_str(if foreground { "39" } else { "49" }),
+        _ => {
+            out.push_str(if foreground { "38;" } else { "48;" });
+            out.push_str(&parameters(colour));
         }
     }
     out.push('m');

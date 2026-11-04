@@ -56,6 +56,22 @@ mod palette {
             )
         })
     }
+
+    /// Whether the environment said the terminal is not to be painted.
+    ///
+    /// `NO_COLOR` is the convention: a terminal that is not to be painted
+    /// says so in the environment. The rule lives here, beside the other
+    /// question the environment answers, and it is answered **once**: the
+    /// palette is what carries the answer, and the emitter that turns a
+    /// colour into bytes writes what it is given. A colour read from the
+    /// environment at emit time was the same answer a dozen times a frame,
+    /// and it made every test that pins a colour's bytes depend on the
+    /// shell it ran in.
+    pub fn no_colour() -> bool {
+        use std::sync::OnceLock;
+        static DISABLED: OnceLock<bool> = OnceLock::new();
+        *DISABLED.get_or_init(|| !std::env::var("NO_COLOR").unwrap_or_default().is_empty())
+    }
 }
 
 /// The colours one frame is drawn in.
@@ -88,7 +104,29 @@ struct Palette {
 impl Palette {
     /// The palette a theme resolves to on this terminal.
     fn of(theme: Theme) -> Palette {
-        Palette::resolved(theme, palette::truecolor())
+        let palette = Palette::resolved(theme, palette::truecolor());
+        if palette::no_colour() {
+            return palette.without_colour();
+        }
+        palette
+    }
+
+    /// The palette a terminal that was told not to paint gets: no colour at
+    /// all, and every role the terminal's own.
+    ///
+    /// The attributes still apply — the bold of a header and the reverse of
+    /// the selected row are not colours — and a frame drawn in this palette
+    /// is a frame the terminal paints in its own colour, which is what
+    /// `NO_COLOR` asks for.
+    fn without_colour(self) -> Palette {
+        Palette {
+            bg: Color::Reset,
+            ink: Color::Reset,
+            dim: Color::Reset,
+            accent: Color::Reset,
+            matched: Color::Reset,
+            good: Color::Reset,
+        }
     }
 
     /// The palette a theme resolves to, given whether the terminal takes
@@ -2261,6 +2299,26 @@ mod tests {
             !said.contains("38;2;255;255;255"),
             "the default's ink is in the light frame: {said:?}"
         );
+    }
+
+    /// A terminal that was told not to paint gets no colour from the
+    /// palette, and the attributes still apply.
+    ///
+    /// `NO_COLOR` is answered once, in the palette (`palette::no_colour`),
+    /// and the emitter writes what it is given. An emitter that read the
+    /// environment itself answered the question again for every span and
+    /// made every test that pins a colour's bytes depend on the shell it
+    /// ran in — measured on 2026-11-04, in a shell with `NO_COLOR=1`, where
+    /// two colour tests were red and the tree was right.
+    #[test]
+    fn a_terminal_that_is_not_to_be_painted_gets_no_colour() {
+        let palette = Palette::resolved(Theme::WARM, true).without_colour();
+        assert_eq!(palette.bg, Color::Reset, "the screen keeps its colour");
+        assert_eq!(palette.ink, Color::Reset, "the names keep their colour");
+        assert_eq!(palette.dim, Color::Reset, "the dim words keep theirs");
+        assert_eq!(palette.accent, Color::Reset, "the prompt keeps its own");
+        assert_eq!(palette.matched, Color::Reset, "the matches keep theirs");
+        assert_eq!(palette.good, Color::Reset, "the figures keep theirs");
     }
 
     /// A keystroke asks for the screens the arrows can page through, not
