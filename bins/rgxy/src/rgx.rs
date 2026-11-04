@@ -227,6 +227,25 @@ fn only_files(paths: &[String], deadline: Instant, lang: Lang) -> Result<Vec<Str
         return Ok(Vec::new());
     }
     let started = Instant::now();
+    // A window that is gone before the stats start is not a window.
+    //
+    // The two answers are not the same thing: an empty scope reads as "there
+    // are no files", and a caller handed it greps nothing and reports zero
+    // hits -- a wrong answer with no reason in it. The truth is that the stats
+    // were never looked at, and the caller is told so.
+    //
+    // It is also the race this used to lose on one platform and win on the
+    // others: the worker was spawned and then waited for with nothing left on
+    // the clock, so whether the answer was the empty scope or the refusal
+    // depended on whether the thread reached its send before the caller
+    // reached its zero-length receive. The check below takes the race out of
+    // it.
+    if started >= deadline {
+        return Err(rgy_launcher::text::fill(
+            Text::for_lang(lang).scope_not_ready_in,
+            &[&said(deadline.saturating_duration_since(started))],
+        ));
+    }
     let (tx, rx) = mpsc::channel();
     let scope: Vec<String> = paths.to_vec();
     std::thread::spawn(move || {
