@@ -17,6 +17,7 @@
 use std::io::Read;
 
 use rgy_launcher::Preview;
+use rgy_launcher::text::{Lang, Text};
 
 /// How many bytes of the file the preview reads.
 const MAX_BYTES: u64 = 64 * 1024;
@@ -28,14 +29,19 @@ const MAX_LINES: usize = 12;
 ///
 /// A file that cannot be read has a preview that says so: an empty panel
 /// would look like a bug, and a sentence does not.
-pub fn of(path: &str) -> Preview {
+///
+/// The sentences are the vocabulary's, in the language the launcher read
+/// once at start-up: the preview is part of a notice, and a notice is a
+/// word of the product like the panel's title.
+pub fn of(path: &str, lang: Lang) -> Preview {
+    let text = Text::for_lang(lang);
     let title = name_of(path);
     let bytes = match read_head(path) {
         Ok(b) => b,
         Err(e) => {
             return Preview {
                 title,
-                lines: vec![format!("could not read the file: {e}")],
+                lines: vec![text.file_not_read.replace("{e}", &e.to_string())],
             };
         }
     };
@@ -43,16 +49,21 @@ pub fn of(path: &str) -> Preview {
     if is_binary(&bytes) {
         return Preview {
             title,
-            lines: vec![format!(
-                "binary file · {} bytes",
-                std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
-            )],
+            lines: vec![
+                text.binary_file.replace(
+                    "{}",
+                    &std::fs::metadata(path)
+                        .map(|m| m.len())
+                        .unwrap_or(0)
+                        .to_string(),
+                ),
+            ],
         };
     }
 
-    let text = String::from_utf8_lossy(&bytes);
+    let content = String::from_utf8_lossy(&bytes);
     let mut lines = Vec::new();
-    for line in text.lines() {
+    for line in content.lines() {
         if lines.len() >= MAX_LINES {
             lines.push("…".to_string());
             break;
@@ -60,7 +71,7 @@ pub fn of(path: &str) -> Preview {
         lines.push(line.to_string());
     }
     if lines.is_empty() {
-        lines.push("(empty file)".to_string());
+        lines.push(text.empty_file.to_string());
     }
     Preview { title, lines }
 }
@@ -148,10 +159,10 @@ mod tests {
 
     #[test]
     fn a_file_that_is_not_there_says_so() {
-        let preview = of("/tmp/rgy-search-ui-no-such-file-12345");
+        let preview = of("/tmp/rgy-search-ui-no-such-file-12345", Lang::English);
         assert!(!preview.lines.is_empty());
         assert!(
-            preview.lines[0].contains("could not read"),
+            preview.lines[0].contains("could not be read"),
             "{:?}",
             preview.lines
         );
@@ -175,7 +186,7 @@ mod tests {
     fn the_preview_shows_the_first_lines_of_a_text_file() {
         let path = temp_path("notas.txt");
         std::fs::write(&path, "first line\nsegunda linha\n").expect("the file is written");
-        let preview = of(path.to_str().expect("the path is text"));
+        let preview = of(path.to_str().expect("the path is text"), Lang::English);
         let _ = std::fs::remove_file(&path);
         assert!(preview.title.contains("notas.txt"), "{}", preview.title);
         assert_eq!(preview.lines, vec!["first line", "segunda linha"]);
@@ -187,7 +198,7 @@ mod tests {
         let mut data = vec![b'a'; 32];
         data.push(0);
         std::fs::write(&path, &data).expect("the file is written");
-        let preview = of(path.to_str().expect("the path is text"));
+        let preview = of(path.to_str().expect("the path is text"), Lang::English);
         let _ = std::fs::remove_file(&path);
         assert!(preview.lines[0].contains("binary"), "{:?}", preview.lines);
     }
@@ -196,7 +207,7 @@ mod tests {
     fn an_empty_file_says_so() {
         let path = temp_path("vazio.txt");
         std::fs::write(&path, b"").expect("the file is written");
-        let preview = of(path.to_str().expect("the path is text"));
+        let preview = of(path.to_str().expect("the path is text"), Lang::English);
         let _ = std::fs::remove_file(&path);
         assert!(preview.lines[0].contains("empty"), "{:?}", preview.lines);
     }

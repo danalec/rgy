@@ -47,9 +47,9 @@ curl -fsSL https://raw.githubusercontent.com/danalec/rgy/main/install.sh | bash
 The installer checks the archive's SHA256 before it unpacks anything, puts the
 binaries in `~/.local/bin` (Linux and FreeBSD) or
 `%LOCALAPPDATA%\Programs\rgy` (Windows), adds that directory to the PATH, and
-registers the daemon and the launcher to start at login. The digest is pinned
-inside the installer, so a substituted download is refused before anything is
-unpacked.
+registers the daemon and the launcher to start at login on Windows, Linux and
+macOS (FreeBSD has no login item yet). The digest is pinned inside the
+installer, so a substituted download is refused before anything is unpacked.
 
 On Windows, Scoop installs the same release from the owner's bucket — the
 package is `rgy`, and the same bucket carries `rgx`, the upstream engine this
@@ -76,12 +76,13 @@ the archives.
   built and smoked on the machine that has the platform, kept by the run that
   built it, and uploaded with the release, so the installer and the package
   managers pin an archive that exists for every platform they name.
-- **FreeBSD has an archive of its own.** The backend was there — the walk, the
-  change feed — and the release carried nothing for it: the platform is now a
-  row of its own, built inside a FreeBSD VM on an ubuntu runner (there is no
-  FreeBSD runner, and a cross-link to a libc the runner does not have is a
+- **FreeBSD has an archive of its own.** The backend was there — the
+  `getdirentries` walk — and the release carried nothing for it: the platform is
+  now a row of its own, built inside a FreeBSD VM on an ubuntu runner (there is
+  no FreeBSD runner, and a cross-link to a libc the runner does not have is a
   binary nobody can vouch for), and `install.sh` picks it from `uname -s` with
-  no argument.
+  no argument. There is no wired change feed on FreeBSD yet, so the index
+  there is a snapshot until the next rebuild.
 - **The scope's stats do not answer with an empty scope when the window is
   already gone.** The stats run on their own thread, and the caller waited for
   them with nothing left on the clock: whether the answer was the empty scope

@@ -2662,9 +2662,38 @@ fn on_disk(root: &[u8], rel: &[u8]) -> Vec<u8> {
     full
 }
 
+/// Bind a unix socket and make it the user's alone.
+///
+/// The mode is set **after** the bind, where the socket exists to be set:
+/// a socket another local user can connect to is a daemon that answers
+/// somebody else's questions, and the path the caller asked for need not
+/// be private — `uds:/tmp/rgy.sock` is in a directory every user can
+/// write, and the manual showed exactly that spelling. The cache
+/// directory the registered daemon uses is the user's (`~/.cache/rgy`),
+/// but a path the caller names is the caller's to choose.
+///
+/// A mode that could not be set is said out loud and is **not fatal**: the
+/// daemon is bound and answering, and a warning is the truth about a
+/// socket that is still shared. A daemon that refused to start would be a
+/// launcher with no daemon at all, which is worse than a socket the user
+/// has to narrow.
+#[cfg(unix)]
+fn bind_private_socket(
+    path: &std::path::Path,
+) -> std::io::Result<std::os::unix::net::UnixListener> {
+    use std::os::unix::fs::PermissionsExt;
+    let listener = std::os::unix::net::UnixListener::bind(path)?;
+    if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+        rgy_engine::errln!(
+            "searchd: the socket {} could not be made private (0600): {e}",
+            path.display()
+        );
+    }
+    Ok(listener)
+}
+
 #[cfg(unix)]
 fn serve_uds(path: &str, ctx: &std::sync::Arc<Ctx>, serve: bool) {
-    use std::os::unix::net::UnixListener;
     // The path the caller asked for is not always a path the platform can
     // carry: `sun_path` is 104 bytes on macOS and 108 on Linux, and a
     // deeper cache directory is a daemon that cannot start at all. The
@@ -2696,7 +2725,7 @@ fn serve_uds(path: &str, ctx: &std::sync::Arc<Ctx>, serve: bool) {
         std::process::exit(2);
     }
     let _ = std::fs::remove_file(&path);
-    let listener = match UnixListener::bind(&path) {
+    let listener = match bind_private_socket(&path) {
         Ok(l) => l,
         Err(e) => {
             rgy_engine::errln!("searchd: bind {}: {e}", path.display());
@@ -2838,6 +2867,32 @@ fn now_secs() -> u32 {
 
 #[cfg(test)]
 mod tests {
+
+    /// The socket is the user's alone.
+    ///
+    /// A socket in a folder another local user can reach is a daemon that
+    /// answers somebody else's questions, and the manual's own example,
+    /// `uds:/tmp/rgy.sock`, is in exactly such a folder. Measured on the
+    /// CachyOS box before the mode was set: `srwxr-xr-x`.
+    #[cfg(unix)]
+    #[test]
+    fn the_socket_is_private_to_the_user() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!(
+            "rgy-searchd-socket-mode-{}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let listener = super::bind_private_socket(&path).expect("the socket binds");
+        let mode = std::fs::metadata(&path)
+            .expect("the socket exists")
+            .permissions()
+            .mode()
+            & 0o777;
+        drop(listener);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(mode, 0o600, "the socket is the user's alone");
+    }
 
     /// A tree in the temporary directory that takes itself away.
     ///

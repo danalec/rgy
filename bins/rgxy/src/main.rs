@@ -680,6 +680,39 @@ fn run_window(
             lang,
         );
     }
+    // One launcher per session. The resident launcher holds a global
+    // keyboard hook, an icon in the notification area and a topmost
+    // window, and a second `rgxy` is a second one of each: two hooks
+    // competing for the double tap, two icons, two windows. The claim is
+    // taken **before** anything is built, and a start that finds it taken
+    // asks the launcher that is there to show itself and leaves — which
+    // is what a user who typed the command again asked for.
+    //
+    // The claim lives as long as the run: it is dropped when the window
+    // says goodbye, and a launcher that is killed gives its name back
+    // with its process, so the next start is a first start again.
+    let (_claim, claim_note) = match rgy_launcher_windows::Sole::take() {
+        rgy_launcher_windows::Taken::First(sole) => (Some(sole), None),
+        rgy_launcher_windows::Taken::Other => {
+            // The window belongs to the launcher that is running, and the
+            // start that arrives while it is still being built waits for
+            // it: the claim is taken before the window exists, and a
+            // second start that concluded "there is none" from a window
+            // that is not there yet would be a second launcher after all.
+            rgy_launcher_windows::sole::ask_the_running_one_to_show();
+            return Ok(ExitCode::SUCCESS);
+        }
+        rgy_launcher_windows::Taken::Unknown(reason) => {
+            // The platform would not say whether another launcher is
+            // there. The launcher runs — a question that cannot be asked
+            // is not a reason to refuse to start — and the reason goes to
+            // the line under the field, where the launcher says what is
+            // true of the machine it is on. It does **not** go to the
+            // stderr: a resident launch gave its console back, and a
+            // write to a handle whose console is gone is a panic.
+            (None, Some(reason))
+        }
+    };
     // The settings are the file's, and the file is read once, here: the
     // panel writes it, the next start reads it, and a file that cannot
     // be read is the defaults plus a sentence on the line under the
@@ -700,6 +733,11 @@ fn run_window(
     };
     // The launcher's own window: the window lives on the thread that
     // draws it, and it cannot wait the client's thirty seconds.
+    let settings_note = match (claim_note, settings_note) {
+        (Some(claim), Some(settings)) => Some(format!("{claim}; {settings}")),
+        (Some(claim), None) => Some(claim),
+        (None, settings) => settings,
+    };
     gui::run(
         DaemonSource::new(endpoint, rgx, lang),
         options,

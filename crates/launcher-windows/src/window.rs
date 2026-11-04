@@ -68,6 +68,23 @@ const CLASS_NAME: &[u16] = &[
 /// The message the hotkey posts, so the window wakes up and shows itself.
 pub const WM_TOGGLE: UINT = WM_APP + 1;
 
+/// The message that asks the window to **show** itself, and not to toggle.
+///
+/// A second launcher posts this to the first one's window: the user
+/// started the launcher again, and what they asked for is to see it. A
+/// toggle would hide a window that was already up — the same reason the
+/// notification area's click asks for a showing and not for a toggle.
+pub const WM_SHOW: UINT = WM_APP + 2;
+
+/// The message the worker posts when an answer is in the channel.
+///
+/// The window's thread is asleep in its message loop until something
+/// happens, and the something is this: the answer arrived, and the loop
+/// has to look at it now. Without it the answer waits for the next tick
+/// of the clock — measured on 2026-11-04, the wait was up to a clock
+/// (120 ms) and the median a paint later than it had to be.
+pub const WM_WAKE: UINT = WM_APP + 3;
+
 /// The timer the debounce rides on.
 const TIMER_TICK: usize = 1;
 
@@ -129,6 +146,12 @@ pub enum Event {
     /// is not there — and the shell sends the same click twice when the
     /// user double-clicks.
     Show,
+    /// Something the window is waiting for has arrived.
+    ///
+    /// The worker that asks the daemon posts this when the answer is in
+    /// the channel: without it the window would look at the channel at
+    /// the next tick of the clock, up to a clock later than the answer.
+    Wake,
     /// The window was closed.
     Quit,
     /// The clock ticked: the host decides whether the typing has settled.
@@ -1108,7 +1131,7 @@ impl Window {
     ///
     /// The window is shown with `SW_SHOWNOACTIVATE` so the window
     /// underneath is not raised or restored — the desktop the user was
-    /// looking at is still there, untouched — and the focus is taken
+    /// looking at is still there, untouched — and the keyboard is taken
     /// afterwards, because a search box that cannot be typed into is not a
     /// search box.
     pub fn show(&mut self) {
@@ -1120,8 +1143,7 @@ impl Window {
         unsafe {
             self.place();
             ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
-            SetForegroundWindow(self.hwnd);
-            SetFocus(self.hwnd);
+            take_the_keyboard(self.hwnd);
             // The window is invalidated before it is updated: a window
             // that composites itself has no backing store for the
             // system to mark as dirty, and a window that is never
@@ -1686,9 +1708,20 @@ impl Window {
                 true
             }
             Control::Paint(view, width, height) => {
+                // A frame that is the one on the screen is not painted
+                // again, and a frame nobody can see is not painted at
+                // all. Measured on 2026-11-04, with the daemon away: the
+                // window repainted sixteen times a second on a clock
+                // that had no news, for 4.3% of a core, and every answer
+                // was painted twice. The picture is the view and the
+                // size, and the platform needs a repaint for neither of
+                // them changing.
+                let same_frame = self.state().view == view && self.model == (width, height);
                 self.install(view);
                 self.resize(width, height);
-                self.repaint();
+                if !same_frame && self.is_visible() {
+                    self.repaint();
+                }
                 true
             }
             Control::Quit => false,
@@ -1728,6 +1761,17 @@ impl Window {
         unsafe {
             if msg.message == WM_TOGGLE {
                 return on_event(Event::Toggle);
+            }
+            // The second launcher's own message: the user started the
+            // launcher again, and a launcher that is there is a launcher
+            // to show.
+            if msg.message == WM_SHOW {
+                return on_event(Event::Show);
+            }
+            // The worker's own message: the answer is in the channel, and
+            // the loop is awake to look at it.
+            if msg.message == WM_WAKE {
+                return on_event(Event::Wake);
             }
             // A registered combo: the platform posts this message when
             // the keys were pressed anywhere on the machine, and a
@@ -1828,6 +1872,52 @@ fn scale_of(dpi: u32) -> u32 {
         return SCALE_PERCENT;
     }
     dpi * SCALE_PERCENT / BASE_DPI
+}
+
+/// Take the keyboard for the window.
+///
+/// The platform has a **foreground lock**: a process that is not the
+/// foreground one, and that did not receive the last input event, is
+/// refused `SetForegroundWindow`. The launcher is exactly that process —
+/// it is resident, the user's last keystroke went to the editor behind it,
+/// and the window is shown with `SW_SHOWNOACTIVATE` so the desktop under
+/// it is not restored — so the plain call is refused and the window comes
+/// up with the *other* application still holding the keyboard: the user
+/// types, and the text lands in the editor behind a search box that looks
+/// ready for it. Measured on 2026-11-04: with Notepad focused, the
+/// double-Control hotkey showed the window and `GetForegroundWindow` still
+/// answered Notepad; the same call with the input queues joined answered
+/// the window.
+///
+/// The documented way around the lock is to **join** the foreground
+/// window's input queue for the length of the call: the two threads then
+/// share one input state, and `SetForegroundWindow` and `SetFocus` are
+/// allowed. The join is undone at once — the queue is not a thing to keep.
+///
+/// A foreground window that belongs to this very thread is the case where
+/// the join is neither possible nor needed: the call already has the
+/// right to the keyboard.
+fn take_the_keyboard(hwnd: HWND) {
+    // SAFETY: the calls are the platform's own, the window is this
+    // process's, and the ids are the platform's answers.
+    unsafe {
+        let foreground = GetForegroundWindow();
+        let own = GetCurrentThreadId();
+        let foreground_thread = if foreground.is_null() {
+            0
+        } else {
+            GetWindowThreadProcessId(foreground, core::ptr::null_mut())
+        };
+        let joined = foreground_thread != 0
+            && foreground_thread != own
+            && AttachThreadInput(own, foreground_thread, 1) != 0;
+        BringWindowToTop(hwnd);
+        SetForegroundWindow(hwnd);
+        SetFocus(hwnd);
+        if joined {
+            AttachThreadInput(own, foreground_thread, 0);
+        }
+    }
 }
 
 /// Whether the backdrop the desktop window manager named is one a
@@ -2291,8 +2381,90 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(core::iter::once(0)).collect()
 }
 
+/// The handle of a launcher window, when one is on this session.
+///
+/// The class is the launcher's own and it is the only name two launcher
+/// processes share: a second `rgxy` finds the first one's window with
+/// this, and asks it to show itself instead of starting a second
+/// launcher. Measured on 2026-11-04: two starts were two residents, two
+/// keyboard hooks and two icons in the notification area.
+pub fn find_window() -> Option<HWND> {
+    // SAFETY: the class name is the crate's own, NUL-terminated array,
+    // and the window name is null, which asks for any title.
+    let hwnd = unsafe { FindWindowW(CLASS_NAME.as_ptr(), core::ptr::null()) };
+    if hwnd.is_null() { None } else { Some(hwnd) }
+}
+
+/// Ask a launcher window to show itself.
+///
+/// The message is the window's own (`WM_SHOW`), and it is **posted**:
+/// the window's pump answers it where the host is, and a message that is
+/// posted comes out of the queue. The window may be up already — asking
+/// it to show itself when it is up leaves it up, which is what the user
+/// asked for.
+pub fn ask_to_show(hwnd: HWND) {
+    // SAFETY: the window is the launcher's own, and the message is one
+    // the window's own dispatch handles.
+    unsafe {
+        PostMessageW(hwnd, WM_SHOW, 0, 0);
+    }
+}
+
+/// Wake a window's message loop, from any thread.
+///
+/// The worker that asks the daemon calls this with the window's handle
+/// as a number: a window handle is the platform's, and the thread that
+/// asks the daemon holds no window.
+pub fn wake(hwnd: usize) {
+    // SAFETY: the handle is the launcher's own, and the message is one
+    // the window's own dispatch handles.
+    unsafe {
+        PostMessageW(hwnd as HWND, WM_WAKE, 0, 0);
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    /// The lock the tests that put a window on the screen hold.
+    ///
+    /// A shown window is a **process-wide** thing: the platform has one
+    /// foreground window per input queue, and two tests that both take
+    /// the keyboard are two tests that fail each other — measured on
+    /// 2026-11-04, when `the_window_takes_the_keyboard` ran beside
+    /// `a_focus_loss_under_a_hidden_window_opens_nothing`'s shown window
+    /// and the foreground was the other test's window. The tests that
+    /// show one take the lock; the rest only make windows, and a window
+    /// nobody shows is not on the screen to be contended for.
+    ///
+    /// The lock is a spin: the crate has no `std` outside its tests, and
+    /// the sections it guards are a handful of platform calls.
+    static SCREEN: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+    /// Hold the screen for as long as the guard lives.
+    struct Screen;
+
+    impl Screen {
+        fn take() -> Screen {
+            while SCREEN
+                .compare_exchange(
+                    false,
+                    true,
+                    core::sync::atomic::Ordering::Acquire,
+                    core::sync::atomic::Ordering::Relaxed,
+                )
+                .is_err()
+            {
+                core::hint::spin_loop();
+            }
+            Screen
+        }
+    }
+
+    impl Drop for Screen {
+        fn drop(&mut self) {
+            SCREEN.store(false, core::sync::atomic::Ordering::Release);
+        }
+    }
 
     /// A message with one key in it.
     fn key_message(vk: u32) -> MSG {
@@ -2777,6 +2949,131 @@ mod tests {
         }
     }
 
+    /// The second launcher's message shows the window, and does not hide
+    /// it when it is already up.
+    ///
+    /// The product's rule: a start of `rgxy` that finds the launcher
+    /// already running asks the window to show itself and leaves, and a
+    /// user who typed the command twice is a user asking to *see* the
+    /// launcher. A toggle would be the wrong answer: the second start
+    /// would hide a window the first one put up.
+    #[test]
+    fn the_second_launchers_message_shows_the_window() {
+        let _screen = Screen::take();
+        let mut window = Window::new("rgxy-test").expect("the window was made");
+        let hwnd = window.hwnd();
+        assert!(!window.is_visible(), "the window starts hidden");
+
+        // The message the second launcher posts, and the window's own
+        // dispatch answering it the way the pump does. The queue may hold
+        // other messages first — a window that was created and never
+        // shown still gets the platform's own — so the pump reads until
+        // the message it is looking for has been read.
+        fn pump_until(window: &mut Window, want: Event) -> bool {
+            for _ in 0..20 {
+                let mut msg = MSG {
+                    hwnd: core::ptr::null_mut(),
+                    message: 0,
+                    wParam: 0,
+                    lParam: 0,
+                    time: 0,
+                    pt: POINT { x: 0, y: 0 },
+                };
+                let got = unsafe { GetMessageW(&mut msg, core::ptr::null_mut(), 0, 0) };
+                assert!(got > 0, "the message arrived: got {got}");
+                let mut asked = None;
+                // The host's own answer: a showing control carrying the
+                // frame the window would be given. The test's frame is
+                // the default one — the picture is not what this test is
+                // about, the message and the showing are.
+                let control = window.dispatch(&msg, &mut |event| {
+                    asked = Some(event.clone());
+                    match event {
+                        Event::Show | Event::Toggle => Control::Show(View::default(), 600, 89),
+                        _ => Control::None,
+                    }
+                });
+                assert!(window.apply(control), "the window is not done");
+                if asked.as_ref() == Some(&want) {
+                    return true;
+                }
+            }
+            false
+        }
+
+        unsafe {
+            PostMessageW(hwnd, WM_SHOW, 0, 0);
+        }
+        assert!(
+            pump_until(&mut window, Event::Show),
+            "the message asks for a showing"
+        );
+        assert!(window.is_visible(), "the window is on the screen");
+
+        // And again: the window is up, and the showing leaves it up.
+        unsafe {
+            PostMessageW(hwnd, WM_SHOW, 0, 0);
+        }
+        assert!(
+            pump_until(&mut window, Event::Show),
+            "the second message asks for a showing too"
+        );
+        assert!(window.is_visible(), "a showing leaves a shown window up");
+
+        window.hide();
+    }
+
+    /// The window is shown with the keyboard.
+    ///
+    /// The platform refuses `SetForegroundWindow` to a process that is not
+    /// the foreground one and did not receive the last input event, and the
+    /// launcher is that process: the window is shown without activating the
+    /// desktop under it, and the user's last keystroke went to the editor
+    /// behind. Without the join the window comes up with the other
+    /// application still holding the keyboard, and the user types into the
+    /// editor.
+    ///
+    /// The unit can prove the intent — the window shown last has the
+    /// keyboard — and the cross-process half is the live measurement on
+    /// `take_the_keyboard`: with Notepad focused, the double-Control hotkey
+    /// answered the window to `GetForegroundWindow`.
+    #[test]
+    fn the_window_takes_the_keyboard() {
+        let _screen = Screen::take();
+        // The window that had the keyboard is given it back at the end:
+        // the suite runs on the machine the user is working on, and a
+        // test that leaves the keyboard on a hidden window is a test the
+        // user has to find their way out of.
+        let before = unsafe { GetForegroundWindow() };
+        let mut first = Window::new("rgxy-test").expect("the window was made");
+        let mut second = Window::new("rgxy-test").expect("the second window was made");
+
+        first.show();
+        assert_eq!(
+            unsafe { GetForegroundWindow() },
+            first.hwnd(),
+            "the window that is shown has the keyboard"
+        );
+
+        // A second showing takes the keyboard from the first: a launcher
+        // that comes up under the keyboard is a search box the user
+        // cannot type into, and the text lands in the window behind it.
+        second.show();
+        assert_eq!(
+            unsafe { GetForegroundWindow() },
+            second.hwnd(),
+            "the window shown last has the keyboard"
+        );
+
+        first.hide();
+        second.hide();
+        if unsafe { GetForegroundWindow() } == second.hwnd() {
+            unsafe {
+                SetForegroundWindow(before);
+            }
+        }
+    }
+
     /// The user going somewhere else is the window's own news.
     ///
     /// The platform **sends** `WM_ACTIVATEAPP` to every top-level window
@@ -2868,6 +3165,7 @@ mod tests {
     /// away from a menu, and the launcher opened itself.
     #[test]
     fn a_focus_loss_under_a_hidden_window_opens_nothing() {
+        let _screen = Screen::take();
         let mut window = Window::new("rgxy-test").expect("the window was made");
         let hwnd = window.hwnd();
         window.hide();
@@ -2942,6 +3240,10 @@ mod tests {
             "the window is not done"
         );
         assert_eq!(asked, 1, "the host was asked once: {asked}");
+        // The window the test put on the screen goes away with the test:
+        // a suite that leaves a window up is a suite that leaves the
+        // keyboard on a window nobody is looking at.
+        window.hide();
     }
 
     /// The window speaks English until it is told otherwise.

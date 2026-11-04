@@ -83,9 +83,21 @@ impl Answer {
 pub trait Source {
     /// The answer to `query`, at most `limit` results.
     ///
-    /// An empty query is not a special case here: it means "everything",
-    /// and the two implementations answer it the two ways they can — the
-    /// daemon ranks the whole index, the local one walks it.
+    /// An **empty query is not a question**: it answers nothing. The rule
+    /// is the window's — an empty field is not a question — and it is the
+    /// product's, because an answer to the empty box is an answer nobody
+    /// asked for: every keystroke that emptied the field would pay for it,
+    /// and the daemon would rank an index to build an answer the user
+    /// never asked for. The terminal draws the empty box as an empty box,
+    /// and the daemon's answer to it is explicitly empty (`hits: []`,
+    /// `complete: true`).
+    ///
+    /// A caller that owns an index in its own process may still list what
+    /// it already holds for an empty box — the terminal search UI's browse
+    /// view over a local index — because that sends nothing anywhere and
+    /// the entries are already read. The launcher over the daemon has no
+    /// such list, and it does not want one: the daemon does not walk the
+    /// tree for an empty query.
     fn search(&mut self, query: &str, limit: usize) -> Answer;
 
     /// How many entries the source holds, when it can say.

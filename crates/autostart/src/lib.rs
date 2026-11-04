@@ -64,7 +64,9 @@ pub mod macos;
 #[cfg(feature = "std")]
 pub mod windows;
 
-pub use plan::{Mechanism, Platform, choose_mechanism, default_name, detect_platform};
+pub use plan::{
+    Mechanism, Platform, choose_mechanism, default_name, detect_platform, launcher_entry_supported,
+};
 
 /// The daemon's file name on this platform.
 ///
@@ -102,6 +104,17 @@ pub fn launcher_default_name(platform: Platform) -> &'static str {
 /// the launcher built one. So it needs its own login entry, under its
 /// own name, and the release ships it next to the daemon.
 pub const LAUNCHER_NAME: &str = if cfg!(windows) { "rgxy.exe" } else { "rgxy" };
+
+/// Why the launcher has no login entry on the platforms where it has none.
+///
+/// The launcher is a floating window on Windows and the terminal interface
+/// everywhere else, and a login entry has no terminal. Measured on the
+/// CachyOS box: a unit whose `ExecStart` is `rgxy --endpoint …` runs, finds
+/// no terminal, prints nothing and exits 0 — registered, enabled, and doing
+/// nothing. `install --launcher` says this sentence there instead of
+/// writing that unit, and the sentence is written once so the tool, the
+/// installers and the tests cannot say three things.
+pub const LAUNCHER_HAS_NO_LOGIN_ENTRY: &str = "the floating window is Windows-only today, and the terminal interface needs a terminal — which a login entry has not; run `rgxy` in a terminal instead";
 
 /// The entries an uninstall takes out.
 ///

@@ -21,8 +21,8 @@ use alloc::vec::Vec;
 
 use rgy_launcher::latency::Latency;
 use rgy_launcher::layout::{
-    SCALE_PERCENT, SIDE_BAR_ENTRY_HEIGHT, SIDE_BAR_MINIMUM_ENTRY_HEIGHT, SIDE_BAR_WIDTH,
-    device_pixels,
+    PANEL_INSET, SCALE_PERCENT, SIDE_BAR_ENTRY_HEIGHT, SIDE_BAR_MINIMUM_ENTRY_HEIGHT,
+    SIDE_BAR_WIDTH, device_pixels,
 };
 use rgy_launcher::results::IconKind;
 use rgy_launcher::text::{Lang, Text};
@@ -562,6 +562,46 @@ fn draw_icon(hdc: HDC, icon: HICON, x: i32, y: i32, size: i32) {
     }
 }
 
+/// The geometry of a picture, measured from the view it draws.
+///
+/// One place answers "how big is this picture", for the picture and for
+/// the surface it is drawn on: the two disagreed once — the settings
+/// panel was a list of its own, and a picture measured only from the rows
+/// gave the panel no area, so the window grew and the panel was drawn
+/// nowhere while the arrows adjusted it.
+///
+/// The host sizes the window with the model's own [`Layout`], and the
+/// numbers here are the same ones: a preview is as tall as its lines, a
+/// settings panel is as tall as its rows, and the column of actions is
+/// inside the room the results leave.
+fn model_of(view: &View) -> Layout {
+    let mut model = Layout::with_rows(view.rows.len() as u32);
+    // The preview panel is a layer over the results, and it is as tall as
+    // it needs to be: the host sized the window with the same geometry,
+    // and the two have to agree or the panel would be cut off.
+    if let Some(preview) = &view.preview {
+        model.preview = preview.lines.len() as u32 + 1;
+    }
+    // The settings panel is a list of its own, and it brings its own
+    // room: a command line has no results, and a picture measured from
+    // the rows would have no area to draw the panel in.
+    if view.mode == Mode::Settings {
+        model.panel = view.settings.len() as u32;
+    }
+    // The actions are a column on the right of the window: the results
+    // give up the room of it and the window does not grow — a window
+    // that grows when the actions open is a window that moves under the
+    // user's hands.
+    //
+    // The room is the geometry's rule and not the picture's: the model
+    // asked the same question when it sized the window, and the two have
+    // to answer it the same way or the column is drawn over the names.
+    if model.column_fits(view.menu.len() as u32) {
+        model = model.with_side_bar(SIDE_BAR_WIDTH);
+    }
+    model
+}
+
 /// Draw the window.
 ///
 /// The device context is a raw pointer: the caller has to have one, and
@@ -600,25 +640,8 @@ pub unsafe fn paint(
     scale: u32,
     lang: Lang,
 ) {
-    let mut model = Layout::with_rows(view.rows.len() as u32);
-    // The preview panel is a layer over the results, and it is as tall as
-    // it needs to be: the host sized the window with the same geometry,
-    // and the two have to agree or the panel would be cut off.
-    if let Some(preview) = &view.preview {
-        model.preview = preview.lines.len() as u32 + 1;
-    }
-    // The actions are a column on the right of the window: the results
-    // give up the room of it and the window does not grow — a window
-    // that grows when the actions open is a window that moves under the
-    // user's hands.
-    //
-    // The room is the geometry's rule and not the picture's: the model
-    // asked the same question when it sized the window, and the two have
-    // to answer it the same way or the column is drawn over the names.
-    let column = model.column_fits(view.menu.len() as u32);
-    if column {
-        model = model.with_side_bar(SIDE_BAR_WIDTH);
-    }
+    let model = model_of(view);
+    let column = model.side_bar != 0;
     // The picture is the window's own size: the window's size is the
     // model's size at this screen's scale, and the two have to be the
     // same number of pixels or the picture does not fill the window.
@@ -959,7 +982,7 @@ fn draw_settings(
     let row = layout.row_height as i32;
     let inner = (width - px(scale, 12) * 2).max(0);
     for (i, (label, value)) in view.settings.iter().enumerate() {
-        let y = top + px(scale, 6) + i as i32 * row;
+        let y = top + px(scale, PANEL_INSET as i32) + i as i32 * row;
         if y + row > top + height {
             // The panel ran out of room: the rows it could not show are
             // the arrows' to reach, and a panel that drew half a row
@@ -1453,9 +1476,11 @@ mod tests {
     /// Draw a view and hand back the surface it was drawn on.
     ///
     /// The picture is of the window the view describes: the same geometry
-    /// the window's procedure would have used.
+    /// the window's procedure would have used — and the geometry is the
+    /// paint's own (`model_of`), so a test cannot size the surface with a
+    /// rule the picture does not follow.
     fn draw(view: &View) -> (Canvas, i32, i32) {
-        let model = Layout::with_rows(view.rows.len() as u32);
+        let model = model_of(view);
         let width = device_pixels(model.width, SCALE_PERCENT) as i32;
         let height = device_pixels(model.height(), SCALE_PERCENT) as i32;
         let Some(canvas) = Canvas::new(width, height) else {
@@ -1577,6 +1602,41 @@ mod tests {
         assert!(
             bright(&panelled) < bright(&plain),
             "the panel covers the names that were under it"
+        );
+    }
+
+    /// The settings panel makes its own room in a picture with no rows.
+    ///
+    /// The live defect this pins, measured on 2026-11-04: `>settings` is a
+    /// command and a command has no results, so the picture's geometry
+    /// gave the panel a list area of zero — the window grew to the
+    /// panel's height and the panel was drawn nowhere, while the arrows
+    /// adjusted settings the user could not see. The panel is a list of
+    /// its own, like the preview, and the picture says so.
+    #[test]
+    fn the_settings_panel_makes_its_own_room_in_a_picture_with_no_rows() {
+        let mut view = View::default();
+        view.query = ">settings".to_string();
+        view.mode = Mode::Settings;
+        view.settings = (0..12)
+            .map(|i| (alloc::format!("row{i}"), "value".to_string()))
+            .collect();
+        view.settings_selected = 0;
+        let (canvas, width, height) = draw(&view);
+        // The window is the field, the line under it, and twelve rows of
+        // the panel: the row worth of room is what the panel brings.
+        let one_row = Layout::default().row_height;
+        let field = Layout::default().input_height + Layout::default().padding * 2;
+        assert!(
+            height >= (field + 12 * one_row) as i32,
+            "the picture is {height} pixels tall for a twelve-row panel"
+        );
+        // And the panel's selected row is really on it: the band the menu
+        // uses, in the panel's own area.
+        let band = (0x2E, 0x28, 0x26);
+        assert!(
+            count(&canvas, width, height, band) > 0,
+            "the panel's selected row carries its band"
         );
     }
 

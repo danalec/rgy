@@ -163,9 +163,38 @@ pub fn listen_arg(transport: Transport, endpoint: &str) -> String {
     }
 }
 
+/// Whether a login entry is a thing the launcher can have on this platform.
+///
+/// The launcher has two faces and only one of them can be started by a
+/// login entry. The floating window is Windows' — `run_window` is
+/// `#[cfg(windows)]` in `bins/rgxy/src/main.rs` — and it is resident: it
+/// waits for the double-Control hotkey, which is the reason it is there at
+/// login. The other face is the terminal interface, and a login entry has
+/// no terminal: measured on the CachyOS box, a unit whose `ExecStart` is
+/// `rgxy --endpoint …` runs, finds no terminal, prints nothing and exits 0
+/// — registered, enabled, and doing nothing. An entry that promises a
+/// launcher that never appears is worse than no entry at all.
+///
+/// So the launcher's entry is Windows' alone; on the other platforms the
+/// launcher is the command the user runs in a terminal.
+pub fn launcher_entry_supported(platform: Platform) -> bool {
+    matches!(platform, Platform::Windows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A login entry that starts the terminal interface starts nothing: it
+    /// has no terminal, so it prints nothing and exits 0. The launcher
+    /// gets an entry on Windows and is a command elsewhere.
+    #[test]
+    fn the_launchers_login_entry_is_windows_alone() {
+        assert!(launcher_entry_supported(Platform::Windows));
+        assert!(!launcher_entry_supported(Platform::Linux));
+        assert!(!launcher_entry_supported(Platform::MacOs));
+        assert!(!launcher_entry_supported(Platform::Unsupported));
+    }
 
     #[test]
     fn linux_gets_a_systemd_user_unit() {

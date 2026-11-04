@@ -123,6 +123,16 @@ impl Palette {
 /// Matches kept for ranking. Beyond this the list is already far longer than a
 /// screen, and the true total is reported separately.
 const MAX_RESULTS: usize = 20_000;
+/// How many screens one question asks the source for.
+///
+/// The list is a **screen**: the arrows page through the answer it was
+/// given, so a question asks for the screens they can reach — not for
+/// every path the source holds. The daemon pays for the answer on the
+/// wire and the terminal pays for it on the thread that draws. Measured
+/// against the daemon on a 971,675-entry index on the CachyOS box: asking
+/// for twenty thousand hits cost **1,255 ms of one keystroke**; asking for
+/// a window of pages costs milliseconds, and `PgDn` still walks it.
+const PAGE_WINDOW: usize = 8;
 /// Keystrokes remembered for the footer sparkline and percentiles.
 /// Mirrors `LatencyMeter`'s window; used by the cap test.
 #[cfg_attr(not(test), allow(dead_code))]
@@ -291,10 +301,16 @@ struct Notice {
 
 impl Notice {
     /// Nothing to act on: the command had no result to work on.
-    fn nothing() -> Notice {
+    ///
+    /// The words are the vocabulary's: the terminal says every sentence the
+    /// window says in the language the launcher read once at start-up, and
+    /// a panel written in English inside a Portuguese launcher is a panel
+    /// the user has to read twice.
+    fn nothing(lang: Lang) -> Notice {
+        let text = Text::for_lang(lang);
         Notice {
-            title: "nothing to act on".to_string(),
-            lines: vec!["there is no result selected".to_string()],
+            title: text.notice_nothing.to_string(),
+            lines: vec![text.no_result_selected.to_string()],
         }
     }
 
@@ -302,13 +318,11 @@ impl Notice {
     ///
     /// The window opens it; the terminal has no file manager to open it
     /// with, so it says which folder that is and leaves it there.
-    fn folder(path: &str) -> Notice {
+    fn folder(path: &str, lang: Lang) -> Notice {
+        let text = Text::for_lang(lang);
         Notice {
-            title: "folder".to_string(),
-            lines: vec![
-                "the terminal cannot open a folder — this is the one that holds it:".to_string(),
-                parent_of(path).to_string(),
-            ],
+            title: text.notice_folder_title.to_string(),
+            lines: vec![text.notice_folder.to_string(), parent_of(path).to_string()],
         }
     }
 
@@ -316,22 +330,20 @@ impl Notice {
     ///
     /// The window puts it on the clipboard; the terminal owns no
     /// clipboard, so it prints the path and says that is what it did.
-    fn copy(path: &str) -> Notice {
+    fn copy(path: &str, lang: Lang) -> Notice {
+        let text = Text::for_lang(lang);
         Notice {
-            title: "copy".to_string(),
-            lines: vec![
-                "the terminal has no clipboard — copy the path from here:".to_string(),
-                path.to_string(),
-            ],
+            title: text.notice_copy_title.to_string(),
+            lines: vec![text.notice_copy.to_string(), path.to_string()],
         }
     }
 
     /// The beginning of the selected file.
-    fn preview(path: &str) -> Notice {
-        let preview = preview::of(path);
+    fn preview(path: &str, lang: Lang) -> Notice {
+        let preview = preview::of(path, lang);
         let title = preview.title;
         Notice {
-            title: format!("preview — {title}"),
+            title: rgy_launcher::text::fill(Text::for_lang(lang).notice_preview_title, &[&title]),
             lines: preview.lines,
         }
     }
@@ -348,7 +360,12 @@ impl Notice {
             .map(|command| {
                 let name = format!(">{}", command.name);
                 let key = shortcut(command.action);
-                format!("{name:<9}{key:<11}{}", describe(command.action, text))
+                // The two columns are the longest command and the longest
+                // key plus the space between them: `>settings` is nine
+                // cells in both columns, and a nine-cell name column put
+                // the two together -- the row read `>settings>settings`,
+                // which is a command nobody can type.
+                format!("{name:<10}{key:<12}{}", describe(command.action, text))
             })
             .collect();
         Notice {
@@ -405,10 +422,19 @@ fn describe(action: LauncherAction, text: &Text) -> &'static str {
 /// The launcher's menu says `Ctrl+C` for the copy; in a terminal that
 /// key quits, and a menu that sends the user to the wrong key is a menu
 /// that lies. The copy is the `>copy` command there.
+///
+/// The folder is the same kind of lie for a different reason. `Ctrl+Enter`
+/// is not a key a terminal sends: in the raw mode a terminal puts the
+/// keyboard in, Control+Enter arrives as the same carriage return as Enter
+/// (some terminals offer a quoted form, and this backend does not decode
+/// one), so a menu that advertised it would send the user to a key that
+/// cannot arrive. The `>folder` command is how the terminal opens the
+/// folder — and the handler for the modifier sequence stays, because a
+/// backend that decoded one would not need the menu to change.
 fn shortcut(action: LauncherAction) -> &'static str {
     match action {
         LauncherAction::Open => "Enter",
-        LauncherAction::OpenFolder => "Ctrl+Enter",
+        LauncherAction::OpenFolder => ">folder",
         LauncherAction::CopyPath => ">copy",
         LauncherAction::Preview => "Ctrl+P",
         LauncherAction::Menu => "Ctrl+K",
@@ -505,9 +531,14 @@ impl App {
         self.filtered = !self.input.trim().is_empty();
 
         // A source answers the whole question: the paths, and the span
-        // that earned each one.
+        // that earned each one. The question asks for the screens the
+        // arrows can page through and not for the source's whole index:
+        // the answer travels the wire and the terminal waits for it on the
+        // thread that draws.
+        let limit = self.request_limit();
+        let question = self.input.clone();
         if let Some(source) = self.source.as_mut() {
-            let answer = source.search(&self.input, MAX_RESULTS);
+            let answer = source.search(&question, limit);
             self.results = answer.paths;
             self.matched = answer.spans;
             self.total = self.results.len();
@@ -597,6 +628,24 @@ impl App {
         self.top = 0;
 
         self.meter.record(started.elapsed().as_micros());
+    }
+
+    /// How many results one question asks the source for.
+    ///
+    /// The terminal draws a page of rows and the arrows walk the answer it
+    /// was given, so a question asks for the pages they can reach. It is a
+    /// limit and not a page: `PgDn` walks the answer, and the next
+    /// keystroke asks again.
+    ///
+    /// The bound is the screen's: before the first frame the page is one
+    /// row, and the launcher's first question is the empty one — the
+    /// first frame then says how tall the list is, and every question the
+    /// user types after it is asked at that height.
+    fn request_limit(&self) -> usize {
+        self.page
+            .max(1)
+            .saturating_mul(PAGE_WINDOW)
+            .min(MAX_RESULTS)
     }
 
     fn input_len(&self) -> usize {
@@ -711,28 +760,41 @@ impl App {
             });
             return false;
         }
+        // The menu is not an action **on** a row: it is the list of the
+        // actions and the keys that do them, and it is the launcher's only
+        // legend. Asked for a row it does not need, it answered "nothing
+        // to act on" -- which is the one thing it can never be, and said it
+        // exactly where the user goes to learn the keys: the empty box the
+        // launcher opens with.
+        if action == LauncherAction::Menu {
+            self.notice = Some(Notice::menu(self.lang));
+            return false;
+        }
         let Some(path) = self.selected_path() else {
             // Nothing to act on is something to say: a command that does
             // nothing and says nothing is a launcher the user cannot
             // tell from a frozen one.
-            self.notice = Some(Notice::nothing());
+            self.notice = Some(Notice::nothing(self.lang));
             return false;
         };
         match action {
             LauncherAction::Open => true,
             LauncherAction::OpenFolder => {
-                self.notice = Some(Notice::folder(&path));
+                self.notice = Some(Notice::folder(&path, self.lang));
                 false
             }
             LauncherAction::CopyPath => {
-                self.notice = Some(Notice::copy(&path));
+                self.notice = Some(Notice::copy(&path, self.lang));
                 false
             }
             LauncherAction::Preview => {
-                self.notice = Some(Notice::preview(&path));
+                self.notice = Some(Notice::preview(&path, self.lang));
                 false
             }
             LauncherAction::Menu => {
+                // Taken above, before the row is asked for: the menu is a
+                // legend and not an action on a row. The arm is here
+                // because the match is on the whole action.
                 self.notice = Some(Notice::menu(self.lang));
                 false
             }
@@ -841,13 +903,24 @@ impl App {
         // two-space gap, with no column rule between them. Every row of the
         // list is present even when empty: a shrinking list would otherwise
         // leave the previous frame's entries on screen below the last match.
+        //
+        // What the empty list says depends on why it is empty. An empty box
+        // is not a question — the window's rule, and the product's — so
+        // "no matches" there is the answer to a question nobody asked; the
+        // row says that there is nothing to type. A question that was asked
+        // and found nothing says "no result".
         for offset in 0..list_height {
             let row = first + offset;
             rows.push(match &notice {
                 Some(panel) => panel.get(offset).cloned().unwrap_or_default(),
                 None => {
                     if self.results.is_empty() && offset == 0 {
-                        "  no matches".with(self.palette.dim).to_string()
+                        let said = if self.input.trim().is_empty() && !self.is_command() {
+                            text.terminal_type_to_search
+                        } else {
+                            text.no_result
+                        };
+                        format!("  {said}").with(self.palette.dim).to_string()
                     } else if row < last {
                         self.result_cell(row, width)
                     } else {
@@ -1008,7 +1081,19 @@ impl App {
         // and the terminal says them the way the window says them: one
         // table, one meter, two faces.
         let text = Text::for_lang(self.lang);
-        let prose = text.terminal_prose_search;
+        // A source that cannot say how big its index is has not answered
+        // yet, and the first thing the footer has to say is that there is
+        // no daemon answering: a screen that says "no result" over a daemon
+        // that is not there is the one lie the launcher cannot afford,
+        // because the sentence the window shows under the field is this
+        // one. The daemon's own words — the endpoint, and what the content
+        // layer can do without it — would need a `warnings` accessor on the
+        // `Source` trait, which is not this file.
+        let prose = if self.source.is_some() && self.indexed.is_none() {
+            text.no_daemon
+        } else {
+            text.terminal_prose_search
+        };
         let stats = self.meter.stats(text).unwrap_or_default();
 
         let label_width = prose.chars().count();
@@ -1412,7 +1497,12 @@ fn shorten_home(path: &str) -> String {
 /// [`shorten_home`] against a known home prefix. Split out so the boundary
 /// rules are testable without touching the environment.
 fn shorten_home_within(path: &str, home: &str) -> String {
-    let home = home.trim_end_matches('\\');
+    // The home is a path on the platform the launcher runs on: a Windows
+    // home ends in a backslash and a unix one in a slash. The terminal is
+    // the unix face, and a shortening that only knows `\` shortens nothing
+    // there -- the header then shows `/home/who` where the launcher's own
+    // recording shows `~`.
+    let home = home.trim_end_matches(['\\', '/']);
     if home.is_empty() {
         return path.to_string();
     }
@@ -1420,9 +1510,9 @@ fn shorten_home_within(path: &str, home: &str) -> String {
         return "~".to_string();
     }
     // Strip only at a separator boundary, so `C:\Users\me` never eats into
-    // `C:\Users\meta`.
+    // `C:\Users\meta` -- and `/home/me` never eats into `/home/meta`.
     match path.strip_prefix(home) {
-        Some(rest) if rest.starts_with('\\') => format!("~{rest}"),
+        Some(rest) if rest.starts_with('\\') || rest.starts_with('/') => format!("~{rest}"),
         _ => path.to_string(),
     }
 }
@@ -1433,7 +1523,7 @@ fn home_dir() -> Option<String> {
     // instead. Both are absolute paths without a trailing separator.
     for key in ["USERPROFILE", "HOME"] {
         if let Ok(value) = std::env::var(key) {
-            let trimmed = value.trim_end_matches('\\');
+            let trimmed = value.trim_end_matches(['\\', '/']);
             if trimmed.len() > 2 {
                 return Some(trimmed.to_string());
             }
@@ -2173,6 +2263,51 @@ mod tests {
         );
     }
 
+    /// A keystroke asks for the screens the arrows can page through, not
+    /// for every path the source holds.
+    ///
+    /// The number is the launcher's half of the cost of a keystroke: the
+    /// daemon pays for the answer on the wire, the terminal pays for it on
+    /// the thread that draws, and both are measured on the page the user
+    /// can see. Measured against the daemon on a 971,675-entry index on the
+    /// CachyOS box: twenty thousand hits took 1,255 ms of one keystroke.
+    #[test]
+    fn a_keystroke_asks_for_the_screens_the_arrows_can_page() {
+        let recorder = Recorder::default();
+        let mut app = App::with_source(Box::new(recorder.clone()), "/tmp".to_string());
+        // The first frame is drawn before the user types, and it is what
+        // says how tall the list is.
+        let _ = frame(&mut app, 100, 30);
+        let page = app.page;
+        assert!(page > 1, "the frame has a page of rows");
+        for ch in "invoice".chars() {
+            app.insert(ch);
+        }
+        app.search();
+
+        let limits = recorder.limits();
+        let asked = *limits.last().expect("the source was asked");
+        assert_eq!(asked, page * PAGE_WINDOW, "the paging window");
+        assert!(
+            asked < MAX_RESULTS,
+            "the answer is a window and not the world: {asked}"
+        );
+        // Before the first frame there is one row, so the launcher's own
+        // first question — the empty one — asks for a window of eight.
+        assert_eq!(limits[0], PAGE_WINDOW, "the first question: {limits:?}");
+    }
+
+    /// The rows on the screen are drawn from the answer it was given, and
+    /// the answer is a window: the extra pages are still scrollable, which
+    /// is what `PgDn` walks.
+    #[test]
+    fn the_answer_is_more_than_one_page_and_still_finite() {
+        let mut app = app_new();
+        let _ = frame(&mut app, 100, 30);
+        assert_eq!(app.page, 26);
+        assert_eq!(app.request_limit(), 26 * PAGE_WINDOW);
+    }
+
     /// The footer figures are window percentiles, not a sum. The cold `first`
     /// is reported apart on purpose: it must never sit inside p50/p90.
     #[test]
@@ -2291,6 +2426,30 @@ mod tests {
             shorten_home_within("C:\\Windows\\System32", home),
             "C:\\Windows\\System32"
         );
+    }
+
+    /// The terminal is the unix face, and the home there ends in `/`: a
+    /// shortening that only knew a backslash shortened nothing on the
+    /// machine the terminal interface is for.
+    #[test]
+    fn home_collapses_to_a_tilde_on_unix_too() {
+        let home = "/home/dana";
+        assert_eq!(shorten_home_within(home, home), "~");
+        assert_eq!(
+            shorten_home_within("/home/dana/Documents/notes.txt", home),
+            "~/Documents/notes.txt"
+        );
+        // The same boundary rule, on the separator the unix paths carry.
+        assert_eq!(
+            shorten_home_within("/home/dana2/Notes", home),
+            "/home/dana2/Notes"
+        );
+        assert_eq!(
+            shorten_home_within("/var/log/syslog", home),
+            "/var/log/syslog"
+        );
+        // A home spelled with its trailing separator is the same home.
+        assert_eq!(shorten_home_within("/home/dana/x", "/home/dana/"), "~/x");
     }
 
     #[test]
@@ -2512,10 +2671,64 @@ mod tests {
     fn an_index_with_no_hits_says_so_instead_of_going_blank() {
         let mut app = app_with("zzzz");
         let rows = frame(&mut app, 60, 10);
-        assert!(rows[3].1.contains("no matches"), "{}", rows[3].1);
+        assert!(rows[3].1.contains("no result"), "{}", rows[3].1);
         // The footer carries the prose, the chart, and `p50 N ms` — no
         // count. The "0 matches" assertion was a holdover from the count
         // line that used to sit on the right.
+    }
+
+    /// An empty box is not a question, so the empty list is not "no
+    /// matches": it says there is nothing typed yet. The words are the
+    /// vocabulary's, and the two languages say them.
+    #[test]
+    fn an_empty_box_says_there_is_nothing_typed_yet() {
+        for (lang, said) in [
+            (Lang::English, "type to search"),
+            (Lang::Portuguese, "escreva para procurar"),
+        ] {
+            // The launcher's face is the daemon's: a source whose index is
+            // not in this process answers the empty query with nothing, and
+            // the empty box says there is nothing typed yet. (The terminal
+            // search UI with an index of its own lists what it already
+            // holds, and the row is one of those entries.)
+            let mut app = App::with_source(Box::new(Recorder::default()), "/tmp".to_string());
+            app.lang = lang;
+            let rows = frame(&mut app, 60, 10);
+            assert!(
+                rows[3].1.contains(said),
+                "{lang:?}: the empty box says {:?}",
+                rows[3].1
+            );
+            assert!(
+                !rows[3].1.contains("no result"),
+                "{lang:?}: an empty box is not an empty answer: {:?}",
+                rows[3].1
+            );
+        }
+    }
+
+    /// The footer says the daemon is not answering, in the language of the
+    /// launcher: the same sentence the window shows under the field.
+    #[test]
+    fn a_source_that_cannot_say_its_count_says_the_daemon_is_not_there() {
+        for (lang, said) in [
+            (Lang::English, "no connection to the daemon"),
+            (Lang::Portuguese, "sem ligação ao daemon"),
+        ] {
+            let recorder = Recorder::default();
+            let mut app = App::with_source(Box::new(recorder), "/tmp".to_string());
+            app.lang = lang;
+            let footer = strip_ansi(&app.footer_line(100));
+            assert!(footer.contains(said), "{lang:?}: {footer}");
+
+            // A source that says how big its index is has answered, and
+            // the footer says the launcher's own sentence again.
+            let recorder = Recorder::with_count(7);
+            let mut app = App::with_source(Box::new(recorder), "/tmp".to_string());
+            app.lang = lang;
+            let footer = strip_ansi(&app.footer_line(100));
+            assert!(!footer.contains(said), "{lang:?}: {footer}");
+        }
     }
 
     #[test]
@@ -2574,6 +2787,12 @@ mod tests {
     #[derive(Clone, Default)]
     struct Recorder {
         queries: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+        /// How many results each question asked for.
+        ///
+        /// The number is the launcher's half of the cost of a keystroke:
+        /// the daemon pays for it on the wire and the terminal pays for it
+        /// on the thread that draws.
+        limits: std::rc::Rc<std::cell::RefCell<Vec<usize>>>,
         /// What the source says about the size of its index.
         ///
         /// `None` is the default: a source that cannot say does not have
@@ -2589,6 +2808,11 @@ mod tests {
             self.queries.borrow().clone()
         }
 
+        /// The limit each question asked for, in order.
+        fn limits(&self) -> Vec<usize> {
+            self.limits.borrow().clone()
+        }
+
         /// A source that says how many entries its index holds.
         fn with_count(count: usize) -> Self {
             Recorder {
@@ -2599,8 +2823,9 @@ mod tests {
     }
 
     impl rgy_launcher::Source for Recorder {
-        fn search(&mut self, query: &str, _limit: usize) -> rgy_launcher::Answer {
+        fn search(&mut self, query: &str, limit: usize) -> rgy_launcher::Answer {
             self.queries.borrow_mut().push(query.to_string());
+            self.limits.borrow_mut().push(limit);
             rgy_launcher::Answer::empty()
         }
 
@@ -2866,6 +3091,20 @@ mod tests {
         assert!(text.contains("clipboard"), "{text}");
     }
 
+    /// The terminal's menu does not send the user to a key the terminal
+    /// cannot send: in the raw mode a terminal puts the keyboard in,
+    /// Control+Enter arrives as the same carriage return as Enter, so the
+    /// folder is the `>folder` command there.
+    #[test]
+    fn the_terminal_menu_does_not_advertise_control_enter() {
+        let mut app = app_new();
+        assert!(!app.run_action(LauncherAction::Menu));
+        let notice = app.notice.as_ref().expect("the notice is there");
+        let text = notice.lines.join("\n");
+        assert!(!text.contains("Ctrl+Enter"), "{text}");
+        assert!(text.contains(">folder"), "{text}");
+    }
+
     /// A command with nothing to act on says so: it does not do nothing,
     /// and it does not search for the literal text of the line.
     #[test]
@@ -2882,6 +3121,55 @@ mod tests {
         );
     }
 
+    /// The notices are the vocabulary's, like every other sentence: a
+    /// Portuguese launcher says its panels in Portuguese.
+    #[test]
+    fn the_notices_speak_the_launchers_language() {
+        let mut app = app_with("main");
+        app.lang = Lang::Portuguese;
+
+        assert!(!app.run_action(LauncherAction::CopyPath));
+        let notice = app.notice.as_ref().expect("the notice is there");
+        assert_eq!(notice.title, "copiar", "{}", notice.title);
+        assert!(
+            notice.lines.join("\n").contains("área de transferência"),
+            "{:?}",
+            notice.lines
+        );
+
+        assert!(!app.run_action(LauncherAction::OpenFolder));
+        let notice = app.notice.as_ref().expect("the notice is there");
+        assert_eq!(notice.title, "pasta", "{}", notice.title);
+        assert!(
+            notice.lines.join("\n").contains("não abre uma pasta"),
+            "{:?}",
+            notice.lines
+        );
+
+        assert!(!app.run_action(LauncherAction::Preview));
+        let notice = app.notice.as_ref().expect("the notice is there");
+        assert!(
+            notice.title.starts_with("pré-visualização — "),
+            "{}",
+            notice.title
+        );
+
+        // And the rowless notice: the words are the table's.
+        let mut app = app_with("zzzz");
+        app.lang = Lang::Portuguese;
+        assert!(!app.run_action(LauncherAction::CopyPath));
+        let notice = app.notice.as_ref().expect("the notice is there");
+        assert_eq!(notice.title, "nada sobre o que agir", "{}", notice.title);
+        assert!(
+            notice
+                .lines
+                .join("\n")
+                .contains("nenhum resultado selecionado"),
+            "{:?}",
+            notice.lines
+        );
+    }
+
     #[test]
     fn the_menu_command_lists_the_actions_with_their_keys() {
         let mut app = app_new();
@@ -2893,6 +3181,60 @@ mod tests {
             assert!(text.contains(&format!(">{}", command.name)), "{text}");
         }
         assert!(text.contains("Ctrl+P"), "{text}");
+    }
+
+    /// The menu's two columns are a table: the command, a space, the key,
+    /// and then what it does.
+    ///
+    /// `>settings` is the longest command and it used to eat the space
+    /// between the columns: the row read `>settings>settings`, a command
+    /// nobody can type, beside the key that does not do it.
+    #[test]
+    fn the_menu_rows_have_a_space_between_the_command_and_its_key() {
+        let mut app = app_new();
+        assert!(!app.run_action(LauncherAction::Menu));
+
+        let notice = app.notice.as_ref().expect("the notice is there");
+        assert_eq!(notice.lines.len(), rgy_launcher::COMMANDS.len());
+        for (line, command) in notice.lines.iter().zip(rgy_launcher::COMMANDS.iter()) {
+            let name = format!(">{}", command.name);
+            assert!(line.starts_with(&name), "{line}");
+            let rest = &line[name.len()..];
+            assert!(
+                rest.starts_with(' '),
+                "the command and its key ran together: {line:?}"
+            );
+            let key = shortcut(command.action);
+            assert!(
+                rest.trim_start().starts_with(key),
+                "the key column does not carry {key}: {line:?}"
+            );
+        }
+    }
+
+    /// The menu is the launcher's legend, and it opens where the legend is
+    /// wanted: the empty box the launcher starts with, before there is any
+    /// row to act on. It acts on no row, so "nothing to act on" is the one
+    /// answer it cannot give.
+    #[test]
+    fn the_menu_opens_with_no_result_selected() {
+        let mut app = app_with("zzzz");
+        assert!(app.results.is_empty());
+        assert!(!app.run_action(LauncherAction::Menu));
+        let notice = app.notice.as_ref().expect("the menu is there");
+        assert_eq!(notice.title, Text::for_lang(Lang::English).notice_actions);
+        assert!(notice.lines.join("\n").contains(">copy"));
+
+        // And the title is the language's, like every other word the two
+        // faces say.
+        let mut app = app_with("zzzz");
+        app.lang = Lang::Portuguese;
+        assert!(!app.run_action(LauncherAction::Menu));
+        let notice = app.notice.as_ref().expect("the menu is there");
+        assert_eq!(
+            notice.title,
+            Text::for_lang(Lang::Portuguese).notice_actions
+        );
     }
 
     #[test]

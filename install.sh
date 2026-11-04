@@ -9,7 +9,11 @@
 #
 # Downloads the rgy release tarball, verifies its SHA256, unpacks the four
 # binaries into the install directory, prepends it to the user's PATH and
-# registers the daemon -- and the launcher -- to start at login.
+# registers the daemon to start at login -- and the launcher too on
+# Windows, where it is a resident floating window. On Linux, macOS and
+# FreeBSD the launcher is the terminal interface: it needs a terminal, a
+# login entry has none, and `rgy-autostart` says so instead of writing a
+# unit that starts and exits 0 without drawing anything.
 #
 # The digest is PINNED HERE, exactly as install.ps1 pins the Windows zip.
 # That is the whole point of a pin: the installer carries the digest of the
@@ -455,9 +459,13 @@ fi
 # indexes. The entry goes into the user's own session: no root, no prompt,
 # no dialog.
 #
-# The launcher is registered with it, under its own name: the window is
-# there in a few milliseconds because the *daemon* has the index warm, not
-# because the launcher built one.
+# The launcher is asked for too, under its own name, and the autostart tool
+# decides whether the platform has that entry. On Windows it does: the
+# launcher is a resident floating window, and the window is there in a few
+# milliseconds because the *daemon* has the index warm. On Linux, macOS and
+# FreeBSD the launcher is the terminal interface, a login entry has no
+# terminal, and the tool says so -- a unit that is registered, enabled and
+# exits 0 without drawing anything promises a launcher that never appears.
 #
 # This step is a convenience, and a failure here is not a reason to tell
 # the user the install failed: by the time it runs, the daemon, the
@@ -466,9 +474,10 @@ fi
 # installer that aborted here would leave a half-installed tool behind
 # and a non-zero exit on top of it.
 if [ "$no_autostart" -eq 0 ]; then
-    # The launcher is registered with the daemon, under its own name, and
-    # only when it is actually on the machine: an entry that points at a
-    # binary that is not there is an entry that fails at every login.
+    # The launcher is asked for only when it is actually on the machine: an
+    # entry that points at a binary that is not there is an entry that
+    # fails at every login. The tool ignores the request on the platforms
+    # where the launcher has no login entry, and says why on the console.
     args="install"
     if [ "$no_launcher" -eq 0 ] && [ -x "$install_dir/rgxy" ]; then
         args="$args --launcher"
@@ -477,9 +486,6 @@ if [ "$no_autostart" -eq 0 ]; then
     code=$?
     if [ "$code" -eq 0 ]; then
         echo "The daemon starts at login. To take it out: rgy-autostart uninstall"
-        case "$args" in
-            *--launcher*) echo "The launcher starts at login too: Control twice opens the window." ;;
-        esac
     elif [ "$code" -eq 2 ]; then
         echo "The entries were written but the platform could not arm them (see above)." >&2
     else

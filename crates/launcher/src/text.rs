@@ -237,6 +237,24 @@ vocabulary! {
     terminal_settings_file => "the settings live in {}", "as configurações vivem em {}";
     notice_actions => "actions", "ações";
     notice_unknown_command => "unknown command", "comando desconhecido";
+
+    // The terminal's notices: what a command did, and what it could not
+    // do. They are the product's words like every other sentence — a
+    // terminal that says its chrome in Portuguese and its panels in
+    // English is a launcher that speaks two languages at once.
+    notice_nothing => "nothing to act on", "nada sobre o que agir";
+    notice_folder_title => "folder", "pasta";
+    notice_folder => "the terminal cannot open a folder — this is the one that holds it:",
+        "o terminal não abre uma pasta — esta é a que a contém:";
+    notice_copy_title => "copy", "copiar";
+    notice_copy => "the terminal has no clipboard — copy the path from here:",
+        "o terminal não tem área de transferência — copie o caminho daqui:";
+    notice_preview_title => "preview — {}", "pré-visualização — {}";
+
+    // The box is empty: there is no question yet, and "no matches" is the
+    // answer to a question nobody asked.
+    terminal_type_to_search => "type to search", "escreva para procurar";
+
     terminal_prose_search => "every keystroke is a whole-disk search",
         "cada tecla é uma busca a todo o disco";
 

@@ -108,6 +108,8 @@ fn usage() -> String {
            --args \"<args>\"    arguments handed to the daemon (default: --root <your home> --listen <transport>)\n  \
            --name <name>     the name of the entry (default: {default})\n  \
            --launcher        on install: register the launcher (rgxy) too, under its own name\n\
+                            (Windows only: elsewhere the launcher is the terminal interface,\n\
+                            and a login entry has no terminal to draw it in)\n\
                             on uninstall: take the launcher's entry out alone\n\
            -h, --help        this text\n  \
            -V, --version     the version\n\
@@ -313,7 +315,20 @@ fn install(options: &Options) -> Result<ExitCode, String> {
     // session that installed it.
     let mut armed = report.armed;
     let mut launcher = rgy_autostart::Launcher::Missing;
-    if options.launcher {
+    if options.launcher && !rgy_autostart::launcher_entry_supported(platform) {
+        // The daemon is registered, and the launcher has nothing to be
+        // registered as here: the floating window is Windows-only, and the
+        // terminal interface needs a terminal that a login entry has not.
+        // The line is said out loud — a `--launcher` that did nothing
+        // without saying so is a `--launcher` that lied — and the exit
+        // status stays the daemon's, because the daemon was done.
+        println!();
+        println!("the launcher:");
+        println!(
+            "  not registered: {}",
+            rgy_autostart::LAUNCHER_HAS_NO_LOGIN_ENTRY
+        );
+    } else if options.launcher {
         match find_launcher() {
             Ok(launcher_binary) => {
                 let launcher_name = launcher_default_name(platform);

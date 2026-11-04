@@ -34,6 +34,7 @@ pub mod combo;
 pub mod hook;
 pub mod paint;
 pub mod session;
+pub mod sole;
 
 pub mod window;
 
@@ -45,6 +46,7 @@ mod tray;
 
 mod win;
 
+pub use sole::{Sole, Taken};
 pub use window::{Awareness, Compositor, Event, Key, View, Window};
 
 /// Whether this session has a desktop to draw on.

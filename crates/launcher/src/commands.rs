@@ -83,9 +83,30 @@ impl Command {
 ///
 /// The text has to start with the prefix and name a command: `>folder`
 /// is the command, `>folders` is not, and `folder` is a search.
+///
+/// The command is the line's **first word**, and the rest of the line is
+/// not read. That is what makes the commands reachable from the field:
+/// the rows of a search stay on the screen while the line is a command,
+/// and the command acts on the selected row — so the search you typed can
+/// be turned into a command by typing `>copy` at its start, and the space
+/// after the word is what tells the two apart (`>copy` in the field is
+/// the command with the search still in it). Measured on 2026-11-04:
+/// before this, `>copy` in a window with a selected row was a word the
+/// line could not hold — clearing the field for the command cleared the
+/// rows with it, so every command that acts on a result said there was
+/// nothing to act on.
 pub fn command_for(text: &str) -> Option<&'static Command> {
-    let name = text.trim().strip_prefix(COMMAND_PREFIX)?.trim();
+    let name = command_word(text)?;
     COMMANDS.iter().find(|c| c.name == name)
+}
+
+/// The first word of a command line, without the prefix.
+fn command_word(text: &str) -> Option<&str> {
+    text.trim()
+        .strip_prefix(COMMAND_PREFIX)?
+        .trim_start()
+        .split_whitespace()
+        .next()
 }
 
 /// Whether the text is a command line at all.
@@ -106,7 +127,10 @@ pub fn unknown(text: &str, lang: Lang) -> alloc::string::String {
         .trim()
         .strip_prefix(COMMAND_PREFIX)
         .unwrap_or("")
-        .trim();
+        .trim_start()
+        .split_whitespace()
+        .next()
+        .unwrap_or("");
     let words = Text::for_lang(lang);
     if name.is_empty() {
         alloc::string::String::from(words.write_a_command)
@@ -169,6 +193,36 @@ mod tests {
     fn a_command_that_does_not_exist_is_not_a_command() {
         assert!(command_for(">folders").is_none());
         assert!(command_for(">").is_none());
+    }
+
+    /// The command is the line's first word.
+    ///
+    /// The rows of a search stay on the screen while the line is a
+    /// command, and this is what makes the command reachable from the
+    /// field: `>copy` typed at the start of the search the user already
+    /// typed is the copy of the selected row, with the space telling the
+    /// word from what follows.
+    #[test]
+    fn the_command_is_the_lines_first_word() {
+        assert_eq!(
+            command_for(">copy invoice-4").map(|c| c.action),
+            Some(Action::CopyPath)
+        );
+        assert_eq!(
+            command_for(">copy  invoice-4  ").map(|c| c.action),
+            Some(Action::CopyPath)
+        );
+        assert_eq!(
+            command_for(">open invoice-4").map(|c| c.action),
+            Some(Action::Open)
+        );
+        // A word that merely starts with a command's name is not it.
+        assert!(command_for(">copying invoice-4").is_none());
+        // And the sentence for a line nobody knows names the word the
+        // user meant, not the whole line.
+        let wrong = unknown(">nope invoice-4", Lang::English);
+        assert!(wrong.contains("nope"), "{wrong}");
+        assert!(!wrong.contains("invoice-4"), "{wrong}");
     }
 
     #[test]

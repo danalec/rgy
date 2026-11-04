@@ -55,6 +55,15 @@ pub const SIDE_BAR_ENTRY_HEIGHT: u32 = 30;
 /// shorter than that would cut the label in half.
 pub const SIDE_BAR_MINIMUM_ENTRY_HEIGHT: u32 = 24;
 
+/// The inset above and below the settings panel's rows, in the model's units.
+///
+/// The picture draws the first row this far under the panel's top and
+/// leaves the same room under the last one. It is the geometry's number as
+/// well as the picture's: a window measured without it is a window whose
+/// last row the picture has no room to draw, and the row the arrows can
+/// still reach is a row the user cannot see.
+pub const PANEL_INSET: u32 = 6;
+
 /// One model unit, in the device pixels of a screen at this scale.
 ///
 /// The scale is in per cent (see [`SCALE_PERCENT`]). The answer is a
@@ -134,6 +143,14 @@ pub struct Layout {
     /// A field and not a constant: the gap is part of the picture, and a
     /// picture is drawn at the screen's scale.
     pub side_bar_gap: u32,
+    /// How many rows the settings panel draws, in the model's units.
+    ///
+    /// Zero when no panel is open. The panel is a layer **over** the
+    /// results, like the preview, so it only makes the window taller
+    /// when it is taller than the list it covers — and a command line
+    /// has no results at all, which is why the panel has to bring its
+    /// own room.
+    pub panel: u32,
 }
 
 impl Default for Layout {
@@ -152,6 +169,7 @@ impl Default for Layout {
             preview_line_height: 18,
             side_bar: 0,
             side_bar_gap: SIDE_BAR_GAP,
+            panel: 0,
         }
     }
 }
@@ -195,6 +213,7 @@ impl Layout {
             preview_line_height: device_pixels(self.preview_line_height, scale),
             side_bar: device_pixels(self.side_bar, scale),
             side_bar_gap: device_pixels(self.side_bar_gap, scale),
+            panel: self.panel,
         }
     }
 
@@ -215,11 +234,28 @@ impl Layout {
 
     /// The height the list has, in the model's units.
     ///
-    /// The list is as tall as the taller of the results and the preview
-    /// panel, and the column of actions lives in it: the column takes
-    /// the room the results give up and the window does not grow.
+    /// The list is as tall as the taller of the results, the preview
+    /// panel and the settings panel, and the column of actions lives in
+    /// it: the column takes the room the results give up and the window
+    /// does not grow.
     pub fn list_height(&self) -> u32 {
-        (self.rows * self.row_height).max(self.preview_height())
+        (self.rows * self.row_height)
+            .max(self.preview_height())
+            .max(self.panel_height())
+    }
+
+    /// The height the settings panel needs, in the model's units.
+    ///
+    /// The panel is a list of rows with an inset above and below them,
+    /// and it is measured the way the picture draws it: one row per
+    /// setting, the first one an inset under the panel's top, and the
+    /// last one an inset above the panel's bottom. Zero when no panel is
+    /// open, so a window with no panel is the results' size.
+    pub fn panel_height(&self) -> u32 {
+        if self.panel == 0 {
+            return 0;
+        }
+        self.panel * self.row_height + PANEL_INSET * 2
     }
 
     /// Whether the column of actions has room in this window.

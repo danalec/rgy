@@ -51,11 +51,57 @@ pub fn open(path: &str, lang: Lang) -> Result<(), String> {
 
 /// Open the folder that holds a path, with the file selected in it.
 ///
-/// The `explore` verb is what selects the file; a launcher that opened
-/// the folder without the file would make the user hunt for the one they
-/// picked.
+/// The call is Explorer's own: `explorer.exe /select,<path>` is the one
+/// that opens the folder **and** selects the file in it.
+///
+/// The `explore` verb was the first attempt, and it is not a verb a file
+/// has: measured on 2026-11-04, `ShellExecuteW(.., "explore", <file>)`
+/// answered `SE_ERR_NOASSOC` (31), the launcher said so on the line under
+/// the field, and the folder never opened. A function that reports it
+/// cannot work instead of working is a function that does not do its job.
+///
+/// The path the tree carries is the tree's spelling — `/` separators —
+/// and `/select` is the one place that does not read it: given the mixed
+/// spelling, Explorer opened the **Desktop** instead of the folder.
+/// Measured, with the same fixture. So the path is spelled the way the
+/// platform spells a path here, at the boundary, and nowhere else.
 pub fn reveal(path: &str, lang: Lang) -> Result<(), String> {
-    shell(path, "explore", lang)
+    unsafe {
+        let file: Vec<u16> = "explorer.exe"
+            .encode_utf16()
+            .chain(core::iter::once(0))
+            .collect();
+        let argument = select_argument(path);
+        let arguments: Vec<u16> = argument.encode_utf16().chain(core::iter::once(0)).collect();
+        let r = ShellExecuteW(
+            core::ptr::null_mut(),
+            core::ptr::null(),
+            file.as_ptr(),
+            arguments.as_ptr(),
+            core::ptr::null(),
+            SW_SHOWNORMAL,
+        );
+        // `ShellExecuteW` returns a value above 32 on success; anything
+        // at or below it is an error code.
+        if r as isize <= 32 {
+            return Err(could_not_open(path, r as isize, lang));
+        }
+    }
+    Ok(())
+}
+
+/// The argument Explorer's `/select` wants for a path.
+///
+/// The quotes are the argument's own: a path with a space in it is two
+/// arguments without them, and `/select` would be pointed at the first
+/// half of a path. The separators are the platform's: the tree's `/` is
+/// not what `/select` reads.
+fn select_argument(path: &str) -> String {
+    let spelled: String = path
+        .chars()
+        .map(|c| if c == '/' { '\\' } else { c })
+        .collect();
+    format!("/select,\"{spelled}\"")
 }
 
 /// One shell call.
@@ -263,5 +309,31 @@ mod tests {
 
         let reason = could_not_open("C:/a.txt", 2, Lang::Portuguese);
         assert_eq!(reason, "C:/a.txt não pôde ser aberto (2)", "{reason}");
+    }
+
+    /// Explorer's `/select` gets the path in the platform's spelling, and
+    /// quoted as one argument.
+    ///
+    /// Two measured failures are pinned here, on 2026-11-04: the verb
+    /// `explore` is not a verb a file has, and `/select` given the tree's
+    /// `/` separators opened the Desktop instead of the folder.
+    #[test]
+    fn the_select_argument_is_the_platform_s_spelling() {
+        // The tree's spelling, as the daemon hands a path over.
+        assert_eq!(
+            select_argument("C:/a/docs/report.txt"),
+            "/select,\"C:\\a\\docs\\report.txt\""
+        );
+        // A path with a space is one argument, and the quotes are what
+        // keep it one: without them `/select` points at the first half.
+        assert_eq!(
+            select_argument("C:/a/My Documents/report.txt"),
+            "/select,\"C:\\a\\My Documents\\report.txt\""
+        );
+        // Backslashes already the platform's are left alone.
+        assert_eq!(
+            select_argument("C:\\a\\report.txt"),
+            "/select,\"C:\\a\\report.txt\""
+        );
     }
 }

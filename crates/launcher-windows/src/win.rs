@@ -274,6 +274,12 @@ pub const CS_HREDRAW: u32 = 0x0002;
 /// It is not a failure of the class: the class is there, and whoever
 /// asked for it has what it asked for.
 pub const ERROR_CLASS_ALREADY_EXISTS: u32 = 1410;
+
+/// The error Windows gives when a named object exists already.
+///
+/// It is the platform's answer to "is this launcher the only one": the
+/// object was there, so another process has it.
+pub const ERROR_ALREADY_EXISTS: DWORD = 183;
 pub const CS_DROPSHADOW: u32 = 0x0002_0000;
 
 pub const SW_HIDE: i32 = 0;
@@ -525,6 +531,38 @@ unsafe extern "system" {
     pub fn SetForegroundWindow(hWnd: HWND) -> BOOL;
 
     pub fn SetFocus(hWnd: HWND) -> HWND;
+
+    /// The window the user's keyboard is going to.
+    ///
+    /// The answer is what the platform's foreground lock is about: a
+    /// process that is not behind this window is refused
+    /// `SetForegroundWindow`, and the launcher that does not know the
+    /// answer is a launcher whose window opens without the keyboard.
+    pub fn GetForegroundWindow() -> HWND;
+
+    /// The thread that owns a window, and optionally its process.
+    ///
+    /// The thread is what `AttachThreadInput` joins to, so the answer is
+    /// the key to the foreground lock. The process id may be null: the
+    /// caller that only wants the thread does not read it.
+    pub fn GetWindowThreadProcessId(hWnd: HWND, lpdwProcessId: *mut DWORD) -> DWORD;
+
+    /// Join two input queues, so that one thread may act for the other's
+    /// window for the length of a call.
+    ///
+    /// The join has to be undone by the same thread that made it, and the
+    /// pair is written in the order `(idAttach, idAttachTo)`.
+    pub fn AttachThreadInput(idAttach: DWORD, idAttachTo: DWORD, fAttach: BOOL) -> BOOL;
+
+    /// Raise a window to the top of its z-order without activating it.
+    pub fn BringWindowToTop(hWnd: HWND) -> BOOL;
+
+    /// The window of a class, by name.
+    ///
+    /// The class name is the launcher's own, registered by this crate: a
+    /// second launcher finds the first one's window with this, because
+    /// the class is the only name two processes of one launcher share.
+    pub fn FindWindowW(lpClassName: *const u16, lpWindowName: *const u16) -> HWND;
 
     pub fn SetWindowPos(
         hWnd: HWND,
@@ -820,6 +858,13 @@ unsafe extern "system" {
     pub fn GetModuleHandleW(lpModuleName: *const u16) -> HINSTANCE;
     pub fn GetProcAddress(hModule: HINSTANCE, lpProcName: *const u8) -> *mut c_void;
     pub fn GetTickCount64() -> u64;
+
+    /// Wait without taking the CPU.
+    ///
+    /// The launcher waits for another launcher's window to exist, and a
+    /// wait that spins is a wait that takes the CPU from the process it
+    /// is waiting for.
+    pub fn Sleep(dwMilliseconds: u32);
     /// The last error, and the way to clear it.
     ///
     /// A call that fails says so in the last error, and a call that
@@ -923,6 +968,24 @@ unsafe extern "system" {
 // platform's calls are written by hand.
 #[link(name = "kernel32")]
 unsafe extern "system" {
+    /// A kernel object that exists once, by name, for the session.
+    ///
+    /// The answer is the object's handle — and the last error says
+    /// whether the object was already there, which is the whole question
+    /// a launcher asks: another launcher's mutex means another launcher.
+    pub fn CreateMutexW(
+        lpMutexAttributes: *const c_void,
+        bInitialOwner: BOOL,
+        lpName: *const u16,
+    ) -> HANDLE;
+
+    /// The thread the call is made on.
+    ///
+    /// It is what `AttachThreadInput` attaches, and the answer is this
+    /// thread's own id: a thread that attached to another input queue is a
+    /// thread that must detach from it with the same number.
+    pub fn GetCurrentThreadId() -> DWORD;
+
     /// The window of the console the process is attached to.
     ///
     /// The answer is null when there is no console — a launch that was

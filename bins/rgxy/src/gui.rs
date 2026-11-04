@@ -188,6 +188,23 @@ trait Worker {
     /// The answer to the question. `None` when the question needs no
     /// answer.
     fn answer(&mut self, request: Request) -> Option<Reply>;
+
+    /// The window to wake when the answer is in the channel.
+    ///
+    /// The answer is applied on the window's thread, and that thread is
+    /// asleep in the message loop until something happens: a timer, a
+    /// key, the platform. The worker that put the answer in the channel
+    /// is the one that knows it is there, so it is the one that wakes
+    /// the loop — a launcher that waits for the next tick to look at an
+    /// answer that has already arrived is a launcher that shows it up to
+    /// a clock later than it could.
+    ///
+    /// The default is a worker that has no window to wake: the tests'
+    /// workers answer questions, and the window's own answers to the
+    /// questions that matter.
+    fn wake(&self) -> Option<usize> {
+        None
+    }
 }
 
 /// The worker that asks the daemon.
@@ -197,6 +214,11 @@ trait Worker {
 struct DaemonWorker {
     /// The source that answers.
     source: DaemonSource,
+    /// The window to wake when an answer is on the channel.
+    ///
+    /// The handle is carried as a number: a window handle is the
+    /// platform's own, and the thread that asks holds no window.
+    wake: Option<usize>,
 }
 
 impl Worker for DaemonWorker {
@@ -220,6 +242,10 @@ impl Worker for DaemonWorker {
                 None
             }
         }
+    }
+
+    fn wake(&self) -> Option<usize> {
+        self.wake
     }
 }
 
@@ -248,6 +274,13 @@ where
                     // answer.
                     break;
                 }
+                // The answer is in the channel, and the window's thread
+                // is asleep in its message loop: the worker is the one
+                // that knows the answer is there, so it is the one that
+                // wakes the loop for it.
+                if let Some(hwnd) = worker.wake() {
+                    rgy_launcher_windows::window::wake(hwnd);
+                }
             }
         })
         .expect("the daemon's thread starts");
@@ -271,6 +304,15 @@ struct Daemon {
 impl Daemon {
     /// The daemon, asked on a worker thread.
     fn new(source: DaemonSource) -> Daemon {
+        Daemon::in_window(source, None)
+    }
+
+    /// The daemon, asked on a worker thread that wakes the window.
+    ///
+    /// The handle is the window's own: when an answer lands in the
+    /// channel the worker wakes the loop with it, so the answer is
+    /// applied when it arrives and not at the next tick of the clock.
+    fn in_window(source: DaemonSource, wake: Option<usize>) -> Daemon {
         // The source that answers is the worker's: the window's thread
         // must not hold the connection, because the connection is what
         // waits.
@@ -280,6 +322,7 @@ impl Daemon {
         let lang = source.lang();
         let (outbox, inbox) = spawn_worker(move || DaemonWorker {
             source: DaemonSource::with_window(endpoint, rgx, window, lang),
+            wake,
         });
         Daemon { outbox, inbox }
     }
@@ -642,14 +685,20 @@ pub fn run(
 
     let (note_tx, notes): (Sender<String>, Receiver<String>) = channel();
     let (preview_tx, previews): (Sender<PreviewReply>, Receiver<PreviewReply>) = channel();
+    // The settings panel draws the rows the launcher has, and the window
+    // is sized for them while the panel is open: the count is the host's
+    // (`SETTINGS`), and a panel whose count the geometry did not know was
+    // a list of settings drawn nowhere.
+    let mut app = App::new();
+    app.set_settings_rows(SETTINGS.len());
     let mut state = State {
-        app: App::new(),
+        app,
         settings: settings.clone(),
         arm,
         hwnd: window.hwnd(),
         rows_fit: rgy_launcher::app::rows_that_fit(window.work_area_height()),
         settings_path: crate::settings_store::store_path(),
-        source: Box::new(Daemon::new(source)),
+        source: Box::new(Daemon::in_window(source, Some(window.hwnd() as usize))),
         clipboard: Box::new(actions::paste_text),
         // The seams answer in the user's language: the machine's own
         // refusal is said in the language the user reads.
@@ -800,6 +849,16 @@ fn handle(state: &mut State, event: Event) -> Control {
         }
         Event::Key(key) => on_key(state, key),
         Event::Tick => tick(state),
+        Event::Wake => {
+            // The answer is in the channel, and the top of this
+            // function has already applied it. A question typed while it
+            // was on its way is asked **now** — the tick is the
+            // launcher's patience, not its speed.
+            if state.waiting != Waiting::Idle && !state.in_flight {
+                return tick(state);
+            }
+            Control::None
+        }
         Event::Resize => paint(state),
         Event::Quit => Control::Quit,
     };
@@ -1788,17 +1847,28 @@ fn status_line(state: &State) -> String {
     // `rgx` fallback answers while the daemon is away, and a line that
     // hides the answer because the daemon is not there hides the one
     // thing the user asked for.
-    let mut count = words.results.replace("{}", &status.matches.to_string());
-    if let Some(query) = &state.rows_query
-        && query != state.app.query().text()
-        && !state.app.results().is_empty()
-    {
-        // The rows on the screen answer another question, and the line
-        // says which one: a list of results under a field that says
-        // something else is a list of results for another question.
-        count = format!("{count} {}", words.of_query.replace("{query}", query));
+    //
+    // But an answer is a thing that exists: a window that has just opened
+    // has been asked nothing, and "0 results" over a field nobody has
+    // typed in is the launcher claiming to have searched. Measured on
+    // 2026-11-04, on the first open: the line under the field said "0
+    // results" over the placeholder. So the count is shown when there is
+    // an answer on the screen (`rows_query` is the question it answers),
+    // and a question that was asked and answered with nothing says
+    // "0 results" — which is then the truth.
+    if state.rows_query.is_some() {
+        let mut count = words.results.replace("{}", &status.matches.to_string());
+        if let Some(query) = &state.rows_query
+            && query != state.app.query().text()
+            && !state.app.results().is_empty()
+        {
+            // The rows on the screen answer another question, and the line
+            // says which one: a list of results under a field that says
+            // something else is a list of results for another question.
+            count = format!("{count} {}", words.of_query.replace("{query}", query));
+        }
+        parts.push(count);
     }
-    parts.push(count);
     match status.layer {
         None => {}
         Some(Layer::Names) => parts.push(words.layer_names.to_string()),
@@ -2171,6 +2241,33 @@ mod tests {
         let state = empty();
         let line = status_line(&state);
         assert!(line.contains("no connection"), "{line}");
+    }
+
+    /// A window nobody has asked anything says nothing about results.
+    ///
+    /// The first open showed "0 results" over the placeholder: the
+    /// launcher claiming to have searched, on a field nobody had typed
+    /// in. The count belongs to an answer, and there is none until a
+    /// question has been answered.
+    #[test]
+    fn the_line_of_a_window_that_was_asked_nothing_says_nothing_about_results() {
+        let mut state = empty();
+        state.status.asked = false;
+        state.status.connected = true;
+        let line = status_line(&state);
+        assert!(
+            !line.contains("results"),
+            "no question has been asked: {line:?}"
+        );
+        assert!(!line.contains("names"), "no layer has answered: {line:?}");
+
+        // A question that was answered with nothing says "0 results":
+        // that is the truth about a question that was asked.
+        state.rows_query = Some("zebra".to_string());
+        state.status.matches = 0;
+        state.status.layer = Some(Layer::Names);
+        let line = status_line(&state);
+        assert!(line.contains("0 results"), "{line}");
     }
 
     /// The line under the field says the answer is not whole.
@@ -2676,14 +2773,20 @@ mod tests {
         let (mut state, _) = recording();
         {
             let st = &mut state.status;
+            st.asked = true;
             st.connected = false;
             st.matches = 3;
             st.layer = Some(Layer::Content);
             st.backend = "rgx".to_string();
             st.took_us = 1500;
         }
+        // The answer is on the screen: the count belongs to it, and the
+        // daemon not being there does not take the answer away.
+        apply(&mut state, answer_with("C:/a.txt"));
+        state.status.matches = 3;
         let line = status_line(&state);
         assert!(line.contains("3 results"), "{line}");
+        assert!(line.contains("no connection"), "the daemon is gone: {line}");
         assert!(line.contains("content"), "{line}");
         assert!(line.contains("rgx"), "{line}");
         // The time is not in the line: it is the meter's, and the meter
@@ -2696,7 +2799,7 @@ mod tests {
     ///
     /// The field is emptied: the list goes with it, and so does the line.
     /// A line that says "37 resultados" over an empty list is a line about
-    /// another answer.
+    /// another answer — and "0 results" is no better: nobody asked.
     #[test]
     fn the_line_does_not_describe_an_answer_that_is_gone() {
         let (mut state, _) = recording();
@@ -2709,7 +2812,10 @@ mod tests {
         }
         cleared(&mut state);
         let line = status_line(&state);
-        assert!(line.contains("0 results"), "{line}");
+        assert!(
+            !line.contains("results"),
+            "the answer is gone and so is the count: {line}"
+        );
         assert!(!line.contains("37"), "{line}");
         assert!(!line.contains("content"), "{line}");
         assert!(!line.contains("rgx"), "{line}");

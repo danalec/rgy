@@ -42,9 +42,9 @@ contain the word "tesla"*.
 The first part is answered from an index of names, which is why it is fast.
 The second part reads the file, which is why it is the slow half.
 
-rgy runs on Windows, Linux and macOS. The parts that differ per operating
-system are compiled in and chosen at build time, so one package carries
-everything with it.
+rgy runs on Windows, Linux, macOS and FreeBSD. The parts that differ per
+operating system are compiled in and chosen at build time, so one package
+carries everything with it.
 
 ## 2. Install it
 
@@ -79,7 +79,7 @@ cargo install rgy-zen --version 0.1.9           # the zen CLI: zen-rs (Windows)
 The archive carries the four binaries, the `rgy` alias and the documents, and
 it needs neither Rust nor a compiler. The `rgy` alias is `searchctl` under
 the project's name: a copy of the binary on Windows — a link there needs an
-administrator — and a symlink on Linux and macOS:
+administrator — and a symlink on Linux, macOS and FreeBSD:
 
 | platform | archive |
 |---|---|
@@ -100,14 +100,19 @@ x86_64 binary.
 # Windows
 irm https://raw.githubusercontent.com/danalec/rgy/main/install.ps1 | iex
 
-# Linux and macOS
+# Linux, macOS and FreeBSD
 curl -fsSL https://raw.githubusercontent.com/danalec/rgy/main/install.sh | bash
 ```
 
 The installer downloads the release archive, checks its digest, puts the four
-binaries in `~/.local/bin` (Linux and macOS) or
+binaries in `~/.local/bin` (Linux, macOS and FreeBSD) or
 `%LOCALAPPDATA%\Programs\rgy` (Windows), adds that directory to your PATH,
-and registers the daemon — and the launcher — to start at login. The digest
+and registers the daemon to start at login on Windows, Linux and macOS
+(FreeBSD has no login item yet). The **launcher** gets a login entry on
+Windows alone, where it is a resident floating window; on the other systems
+the launcher is the terminal interface, a login entry has no terminal, and
+there is no unit to write — `rgy-autostart install --launcher` says so. The
+digest
 is **pinned in the installer**: the installer carries the digest of the one
 artifact it is allowed to install, so a substituted download is refused
 before anything is unpacked. The pins are release data — the release flow
@@ -163,7 +168,7 @@ are this project's own library:
 | `rgy-discovery-dispatch` | the per-platform walk selector |
 | `rgy-discovery-linux` | the Linux backend: `getdents64` and inotify |
 | `rgy-discovery-macos` | the macOS backend: `getattrlistbulk` and FSEvents |
-| `rgy-discovery-freebsd` | the FreeBSD backend |
+| `rgy-discovery-freebsd` | the FreeBSD backend: `getdirentries` (the walk; no live feed yet) |
 | `rgy-discovery-windows` | the Windows backend: the MFT walk and the USN journal |
 | `rgy-engine` | the orchestration: the keep-warm index, the console |
 | `rgy-proto` | the wire: the request and response types, the client |
@@ -228,9 +233,10 @@ The daemon's own default reads its requests from standard input, and a
 login entry has no standard input: the daemon would start, walk the tree,
 and exit — registered, and gone. So the registered daemon listens on a
 socket (`$XDG_CACHE_HOME/rgy/searchd.sock`, or `~/.cache/rgy/searchd.sock`
-on Linux; `~/Library/Caches/rgy/searchd.sock` on macOS) or on a named pipe
-(`\\.\pipe\rgy-searchd-<you>` on Windows). `doctor` prints the line, so a
-client knows where to reach the daemon:
+on Linux and FreeBSD; `~/Library/Caches/rgy/searchd.sock` on macOS) or on a
+named pipe (`\\.\pipe\rgy-searchd-<you>` on Windows). FreeBSD has no login
+item yet, so this section is the login entry on Windows, Linux and macOS.
+`doctor` prints the line, so a client knows where to reach the daemon:
 
 ```
 platform:   linux
@@ -271,8 +277,8 @@ cargo build --release -p rgy-vendored-core --bin rgx-tv --features tv-runtime
 ```
 
 The release scripts build the shippable archives: `scripts/build-release.sh`
-on Linux and macOS, `scripts/build-release.ps1` on Windows. They gate on
-clippy and on the test suite, smoke the binaries against the repository's
+on Linux, macOS and FreeBSD, `scripts/build-release.ps1` on Windows. They gate
+on clippy and on the test suite, smoke the binaries against the repository's
 own sources, and write the archive — and its digest — into `.dist/`.
 
 ## 4. Your first queries
@@ -871,6 +877,9 @@ and, where the platform has no feed at all:
 searchd: no live feed for this tree: the index is a snapshot until the next rebuild
 ```
 
+FreeBSD is in the last group: the `getdirentries` walk is its native backend,
+and kqueue is not wired, so its index is a snapshot until the next rebuild.
+
 On Windows the two fast paths — the USN journal and the MFT walk — need a
 volume handle, and a volume handle needs the rights an elevated process
 has. A daemon that is not elevated is refused the journal, and the feed
@@ -890,25 +899,31 @@ The `status` answer's `feed` field says the same thing on the wire:
 It can also listen on a socket instead of stdin:
 
 ```sh
-searchd --root ~ --listen uds:/tmp/rgy.sock    # Linux and macOS
+searchd --root ~ --listen uds:"$HOME/.cache/rgy/searchd.sock"   # Linux, macOS and FreeBSD
 searchd --root ~ --listen pipe:rgy-search      # Windows
 ```
+
+The socket is created `0600`, the user's alone: a socket another local user
+can connect to is a daemon that answers somebody else's questions, so the
+path should be one only you can reach. `$HOME/.cache/rgy` is that place;
+`/tmp` is not, and a socket there is narrowed to `0600` but still in a
+directory anyone can write to.
 
 `--serve` is a compatibility front for [rgx](https://github.com/danalec/rgx):
 one JSON argv-array per line in, `rg --json` match lines out, framed by
 `{"rgx":"begin"}` and `{"rgx":"end"}`.
 
-## 8. The window
+## 8. The launcher, and its window
 
 `rgxy` is the daemon's **client**. The index lives in `searchd`, and a
-keystroke is a question sent down a pipe — which is why the window is
+keystroke is a question sent down a pipe — which is why the launcher is
 there in a few milliseconds: it is not building an index, it is asking
 one that is already built.
 
 ```sh
-rgxy                  # the resident launcher; Control twice opens the window
+rgxy                  # the launcher: resident window on Windows (Control twice); TUI elsewhere
 rgxy --query invoice  # one search, printed, and out
-rgxy --tui            # the terminal interface, for a machine with no desktop
+rgxy --tui            # the terminal interface (the launcher on Linux, macOS and FreeBSD)
 ```
 
 | flag | what it does |
@@ -926,7 +941,7 @@ rgxy --tui            # the terminal interface, for a machine with no desktop
 | `-V, --version` | the version — it prints it and stops |
 
 Without `--endpoint` the launcher asks the daemon this machine has
-registered: the socket on Linux and macOS, the named pipe on Windows.
+registered: the socket on Linux, macOS and FreeBSD, the named pipe on Windows.
 
 ### The settings
 
@@ -981,9 +996,15 @@ under the field — the launcher still comes up.
 ### The two faces
 
 The launcher has two faces, and the binary is the same on every platform: a
-floating graphical window where there is a desktop (Windows), and the
-terminal interface where there is not (Linux and macOS). Both carry the
-name `rgxy` — the window in its title, the terminal in its header.
+floating graphical window on Windows — resident, where two taps of Control
+open it — and the terminal interface on Linux, macOS and FreeBSD, where it is
+the command you run in a terminal. **The window is Windows-only today, on
+every desktop**: there is no Linux or macOS window yet, and a Linux machine
+with a desktop gets the terminal interface like every other one. Both faces
+carry the name `rgxy` — the window in its title, the terminal in its header.
+
+The terminal interface is the launcher, so it is also the fallback the window
+uses when a Windows session has no desktop to put a window on.
 
 The header says how many entries the index holds, and the number is the
 daemon's own: the client does not walk the tree and cannot know the size of
@@ -1171,6 +1192,14 @@ Some things are not searches. A line that starts with `>` is a command:
 | `>copy` | puts the path on the clipboard |
 | `>preview` | shows the beginning of the file |
 | `>menu` | the actions of the selected result |
+
+The command is the line's **first word**: everything after it is not
+read. That is what makes the commands reachable — the rows a search
+found stay on the screen while the line is a command, so the search you
+already typed becomes a command by putting `>copy` in front of it:
+`>copy invoice` is the copy of the selected row of the search for
+`invoice`. A command typed into an **empty** field has no row to act on,
+and the line under it says so instead of failing in silence.
 
 ### The side bar
 

@@ -31,14 +31,18 @@ The release is **0.1.9.1**. It is on [GitHub](https://github.com/danalec/rgy/rel
 # Windows
 irm https://raw.githubusercontent.com/danalec/rgy/main/install.ps1 | iex
 
-# Linux and macOS
+# Linux, macOS and FreeBSD
 curl -fsSL https://raw.githubusercontent.com/danalec/rgy/main/install.sh | bash
 ```
 
 The installer picks the archive that matches the machine, **checks its
-SHA256**, unpacks the binaries into `~/.local/bin` (Linux and FreeBSD) or
-`%LOCALAPPDATA%\Programs\rgy` (Windows), adds that directory to your PATH,
-and registers the daemon — and the launcher — to start at login. The digest
+SHA256**, unpacks the binaries into `~/.local/bin` (Linux, macOS and FreeBSD)
+or `%LOCALAPPDATA%\Programs\rgy` (Windows), adds that directory to your PATH,
+and registers the daemon to start at login on Windows, Linux and macOS
+(FreeBSD has no login item yet). The launcher gets a login entry on Windows
+alone, where it is a resident floating window; on the other systems it is the
+terminal interface, a login entry has no terminal, and there is nothing to
+register. The digest
 is pinned inside the installer, so a substituted download is refused before
 anything is unpacked — and an archive the release does not carry is refused
 too. **This release carries every archive the CI builds** — portable, AVX2
@@ -82,8 +86,8 @@ aarch64 Linux and both macOS arches are on it too.
 
 Nothing else: no runtime, no service, nothing to configure. The parts that
 differ per operating system (the Windows MFT walk, the Linux change feed, the
-macOS FSEvents feed) are compiled in and chosen by `cfg` at build time, so one
-package carries everything it needs.
+macOS FSEvents feed, the FreeBSD `getdirentries` walk) are compiled in and
+chosen by `cfg` at build time, so one package carries everything it needs.
 
 ## Your first five minutes
 
@@ -172,7 +176,7 @@ failed.
 |---|---|
 | `searchctl` | the command-line tool — the one you type |
 | `searchd` | the daemon: it holds the index warm between queries |
-| `rgxy` | the window: a floating launcher over the daemon |
+| `rgxy` | the launcher: a floating window on Windows, the terminal interface on Linux, macOS and FreeBSD |
 | `rgy-autostart` | puts the daemon in place at login, and takes it out again |
 
 `rgy` is another name for `searchctl` — the same binary. The release
@@ -196,11 +200,14 @@ rgy-autostart doctor       # what is registered, whether it is up, and what to d
 rgy-autostart uninstall    # take it out
 ```
 
-The installers register the launcher with the daemon, so the window is
-there after the next login. When you install by hand, ask for it:
+The installers register the launcher with the daemon on Windows, so the
+window is there after the next login. On Linux, macOS and FreeBSD the
+launcher is the terminal interface and has no login entry: the window is
+Windows-only today, and a terminal interface needs a terminal. When you
+install by hand on Windows, ask for it:
 
 ```sh
-rgy-autostart install --launcher   # the daemon and the window, at login
+rgy-autostart install --launcher   # the daemon and the window, at login (Windows)
 ```
 
 `install` needs nothing: the daemon is the `searchd` beside the tool, and
@@ -213,29 +220,33 @@ inherited that would walk the wrong tree. To index another tree:
 Nothing is registered in the administrator's account: it goes into your own
 session — a Task Scheduler task or an `HKCU` run value on Windows, a systemd
 **user** unit on Linux, a launchd agent on macOS. Running the command *is*
-the consent; no dialog, no elevation.
+the consent; no dialog, no elevation. FreeBSD has no login item yet:
+`rgy-autostart install` says so and writes nothing.
 
-The entry names where the daemon listens: a socket on Linux and macOS, a
-named pipe on Windows. The daemon reads requests from standard input by
-default, and a login entry has no standard input — a daemon registered
-that way would start, walk the tree, and exit. `doctor` prints the line.
+The entry names where the daemon listens: a socket on Linux, macOS and
+FreeBSD, a named pipe on Windows. The daemon reads requests from standard
+input by default, and a login entry has no standard input — a daemon
+registered that way would start, walk the tree, and exit. `doctor` prints the
+line.
 
 ### The clients
 
 `rgxy` is the daemon's **client**: the index lives in `searchd`, and a
-keystroke is a question sent down a pipe. That is why the window is there
+keystroke is a question sent down a pipe. That is why the launcher is there
 in a few milliseconds — it is not building an index, it is asking one that
 is already built.
 
 It has two faces, and the binary is the same on every platform: a floating
-graphical window where there is a desktop (Windows), and the terminal
-interface where there is not (Linux and macOS). The two pictures at the top
-are the two faces.
+graphical window on Windows — resident, where two taps of Control open it —
+and the terminal interface on Linux, macOS and FreeBSD, where it is the
+command you run in a terminal. **The window is Windows-only today, on every
+desktop**: a Linux machine with a desktop gets the terminal interface like
+every other one. The two pictures at the top are the two faces.
 
 ```sh
-rgxy                  # the resident launcher: Control twice opens the window
+rgxy                  # the launcher: resident window on Windows (Control twice); TUI elsewhere
 rgxy --query invoice  # one search, printed, and out — the scriptable face
-rgxy --tui            # the terminal interface, for a machine with no desktop
+rgxy --tui            # the terminal interface (the launcher on Linux, macOS and FreeBSD)
 rgxy --pick --query invoice   # hand the results to your own fzf
 ```
 
@@ -366,7 +377,8 @@ cargo run --release -p rgy-search -- --root crates "walk ext:rs grep:Listing"
 echo '{"op":"grep","q":"regex:fn.list"}' | cargo run --release -p rgy-searchd -- --root crates
 # rgx --serve compat: one JSON argv-array per line, begin/end framing
 echo '["-e","Listing"]' | cargo run --release -p rgy-searchd -- --root crates --serve
-# transports: --listen uds:/tmp/rgy.sock (unix) or pipe:rgy-search (windows)
+# transports: --listen uds:$HOME/.cache/rgy/searchd.sock (unix, created 0600)
+#             or pipe:rgy-search (windows)
 ```
 
 `type:` names kinds (`file`/`dir`/`link`, media kinds like `image`); a bare
@@ -401,10 +413,10 @@ still rgy.
 The merge is landed end to end: name search,
 content search, one daemon/CLI, and the polish layer — and now the
 window over the daemon, `rgxy`. What is left is
-verification on machines this host does not have — macOS above all: the CI
-builds and smokes it on a Mac, but the live feed — the FSEvents watcher
-that keeps the index current — has never run on one, and that is why the
-release carries no macOS archive.
+verification on machines this host does not have — the live feeds above
+all: the release builds and smokes every archive, but the FSEvents watcher
+has never run on a Mac and there is no wired feed on FreeBSD, so what keeps
+the index current there is the next rebuild, not a live one.
 
 The perf gate fails a PR on a >20% regression against the gated
 [`benchmark/baseline-names.md`](benchmark/baseline-names.md) rows. A row whose

@@ -28,27 +28,27 @@ pub fn text(lang: Lang) -> String {
 /// The help, in English.
 fn english() -> String {
     format!(
-        "rgxy {version} — the search window of the rgy daemon.\n\
+        "rgxy {version} — the launcher of the rgy daemon: a floating window on Windows, a terminal interface elsewhere.\n\
          \n\
          usage:\n  \
-           rgxy                    # the resident launcher: Control twice opens the window\n  \
+           rgxy                    # the resident launcher: the window on Windows; the terminal interface on Linux, macOS and FreeBSD\n  \
            rgxy [--tui] [--query <text>] [--limit <n>] [--endpoint <e>] [--no-hook] [--show]\n  \
                 [--pick] [--fzf-binary <p>] [--fzf-arg <arg>]\n\
          \n\
          options:\n  \
-           --tui              the terminal interface, instead of the window\n  \
+           --tui              the terminal interface (the launcher on Linux, macOS and FreeBSD)\n  \
            --query <text>     one search: prints the paths and leaves\n  \
            --limit <n>        how many results (default: 50)\n  \
            --endpoint <e>     pipe:<name> | uds:<path> | stdio\n  \
-           --no-hook          does not install the global shortcut\n  \
-           --show             opens the window right away\n  \
+           --no-hook          does not install the global shortcut (Windows)\n  \
+           --show             opens the window right away (Windows)\n  \
            --pick             hands the results to a picker and prints the choice\n  \
            --fzf-binary <p>   the picker to run (default: fzf or sk on the PATH)\n  \
            --fzf-arg <arg>    one argument for the picker, repeatable\n  \
            -h, --help         this text\n  \
            -V, --version      the version\n\
          \n\
-         The window is a client: the index is in the daemon (searchd), and a\n\
+         The launcher is a client: the index is in the daemon (searchd), and a\n\
          keystroke is a question sent down a pipe.\n\
          \n\
          With --pick, the results go to a picker and the choice comes out on\n\
@@ -74,27 +74,27 @@ fn english() -> String {
 /// The help, in Portuguese.
 fn portuguese() -> String {
     format!(
-        "rgxy {version} — a janela de procura do daemon rgy.\n\
+        "rgxy {version} — o lançador do daemon rgy: uma janela flutuante no Windows, uma interface de terminal nas outras plataformas.\n\
          \n\
          usage:\n  \
-           rgxy                    # o lançador residente: Control duas vezes abre a janela\n  \
+           rgxy                    # o lançador residente: a janela no Windows; a interface de terminal no Linux, macOS e FreeBSD\n  \
            rgxy [--tui] [--query <texto>] [--limit <n>] [--endpoint <e>] [--no-hook] [--show]\n  \
                 [--pick] [--fzf-binary <p>] [--fzf-arg <arg>]\n\
          \n\
          options:\n  \
-           --tui              a interface de terminal, em vez da janela\n  \
+           --tui              a interface de terminal (o lançador no Linux, macOS e FreeBSD)\n  \
            --query <texto>    uma busca só: imprime os caminhos e sai\n  \
            --limit <n>        quantos resultados (default: 50)\n  \
            --endpoint <e>     pipe:<nome> | uds:<caminho> | stdio\n  \
-           --no-hook          não instala o atalho global\n  \
-           --show             abre a janela logo de início\n  \
+           --no-hook          não instala o atalho global (Windows)\n  \
+           --show             abre a janela logo de início (Windows)\n  \
            --pick             entrega os resultados a um picker e imprime a escolha\n  \
            --fzf-binary <p>   o picker a rodar (default: fzf ou sk no PATH)\n  \
            --fzf-arg <arg>    um argumento para o picker, repetível\n  \
            -h, --help         este texto\n  \
            -V, --version      a versão\n\
          \n\
-         A janela é um cliente: o índice está no daemon (searchd), e uma\n\
+         O lançador é um cliente: o índice está no daemon (searchd), e uma\n\
          tecla é uma pergunta enviada por um pipe.\n\
          \n\
          Com --pick, os resultados vão para um picker e a escolha sai na\n\

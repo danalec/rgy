@@ -283,6 +283,13 @@ pub struct App {
     menu_index: usize,
     /// Which row of the settings panel is selected.
     settings_index: usize,
+    /// How many rows the settings panel draws while it has the keyboard.
+    ///
+    /// The panel is the **host's** list — the settings are the host's, and
+    /// it is the host that knows how many rows it has to draw — and the
+    /// room for them is the geometry's. Zero when no panel is open, which
+    /// is what makes the window's height the results'.
+    settings_rows: usize,
     /// How wide the window is, in model units.
     ///
     /// The width is the user's dimension: the height is the rows', and
@@ -316,6 +323,7 @@ impl App {
             preview: None,
             menu_index: 0,
             settings_index: 0,
+            settings_rows: 0,
             width: Layout::default().width,
         }
     }
@@ -540,6 +548,12 @@ impl App {
         if layout.column_fits(entries) {
             layout = layout.with_side_bar(SIDE_BAR_WIDTH);
         }
+        // The settings panel is its own list: the results give up the
+        // room to it, and a command line has no results at all — so the
+        // room is made from the panel's rows and not from the list's.
+        if self.mode == Mode::Settings {
+            layout.panel = self.settings_rows as u32;
+        }
         layout
     }
 
@@ -641,9 +655,27 @@ impl App {
     /// adjusts them — and the model owns the part that is a decision
     /// about the keyboard: which row is selected, and that the panel
     /// has the keyboard while it is open.
+    ///
+    /// A panel over **no** results has no room, and a list of settings
+    /// that is drawn nowhere is a panel the user adjusts blind. So the
+    /// host says how many rows the panel draws (see
+    /// [`App::set_settings_rows`]) and the geometry makes room for them:
+    /// the panel is a list, like the results, and the window is as tall
+    /// as the taller of the two.
     pub fn open_settings(&mut self) {
         self.mode = Mode::Settings;
         self.settings_index = 0;
+    }
+
+    /// How many rows the settings panel draws.
+    ///
+    /// The host owns the list and the model owns the room: the host says
+    /// the count once, and the geometry uses it while the panel is open.
+    /// A panel whose count the geometry did not know was a panel the
+    /// window had no room for — the settings were adjusted by keys on a
+    /// list that was drawn nowhere.
+    pub fn set_settings_rows(&mut self, rows: usize) {
+        self.settings_rows = rows;
     }
 
     /// Close the settings panel, back to the field.
@@ -1362,5 +1394,44 @@ mod tests {
             Mode::Typing,
             "the panel does not survive its own window"
         );
+    }
+
+    /// The settings panel makes its own room.
+    ///
+    /// The panel is a list the host draws, and a command line has **no
+    /// results** — so a window sized from the results had no room for the
+    /// panel at all, and the settings were adjusted by keys on a list that
+    /// was drawn nowhere. The host says how many rows the panel draws and
+    /// the geometry makes room for them, which is the same rule the
+    /// preview follows.
+    #[test]
+    fn the_settings_panel_makes_its_own_room() {
+        let mut app = App::new();
+        app.show();
+        // The field a command is typed into: the rows are empty, and the
+        // window is as short as the field and the line under it.
+        app.set_results(Vec::new());
+        let empty = app.layout();
+        assert_eq!(empty.list_height(), 0, "no results, no list");
+
+        app.set_settings_rows(12);
+        app.open_settings();
+        let panel = app.layout();
+        assert_eq!(panel.panel, 12, "the geometry knows the panel's rows");
+        assert_eq!(
+            panel.list_height(),
+            12 * panel.row_height + crate::layout::PANEL_INSET * 2,
+            "the panel brings the room it draws in"
+        );
+        assert!(
+            panel.height() > empty.height(),
+            "the window grows for the panel: {} against {}",
+            panel.height(),
+            empty.height()
+        );
+
+        // The panel closed is the results' size again.
+        app.settings_closed();
+        assert_eq!(app.layout().list_height(), 0, "the room goes with it");
     }
 }

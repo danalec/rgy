@@ -774,8 +774,11 @@ jobs:
       # The archive this row built, kept for the release. The release carries
       # every row's archive now, and the release is published from one
       # machine, so the runner that built an archive is where the release's
-      # copy comes from: scripts/collect-ci-assets brings a run's artifacts
-      # into .dist/ before the publish step runs.
+      # copy comes from: scripts/fetch-ci-assets.sh (scripts/fetch-ci-assets.ps1
+      # on Windows) brings a run's artifacts into .dist/ before the publish
+      # step runs. It is not a job in this workflow: the release is cut by hand
+      # from the run that built it, and the collector is the step between the
+      # two.
       - name: the archive is kept for the release
         uses: actions/upload-artifact@v4
         with:
@@ -846,7 +849,12 @@ jobs:
           # is the page of the release.
           sed "s|^<!-- assets: .* -->$|<!-- assets: $name SHA256SUMS -->|" "$page" > "$page.tmp"
           mv "$page.tmp" "$page"
-          bash scripts/publish-release.sh --manifests-only --skip-tests --target ${{ matrix.target }} --variant ${{ matrix.variant }}
+          # The build is not run again: the step above built the archive and
+          # this one reads what it left in .dist/. Without --skip-build the
+          # publish script builds the target a second time, which the FreeBSD
+          # row cannot do on this runner at all -- a FreeBSD binary needs a
+          # FreeBSD linker and libc, and the runner links with its own.
+          bash scripts/publish-release.sh --manifests-only --skip-tests --skip-build --target ${{ matrix.target }} --variant ${{ matrix.variant }}
       - name: the manifests, rewritten (nothing published)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -886,7 +894,12 @@ jobs:
           $markerLine = "<!-- assets: $name SHA256SUMS -->"
           $new = [regex]::Replace($text, '(?m)^<!-- assets: .* -->(\r?)$', ($markerLine + "`$1"))
           [IO.File]::WriteAllText($page, $new, [Text.UTF8Encoding]::new($false))
-          ./scripts/publish-release.ps1 -ManifestsOnly -SkipTests -Target ${{ matrix.target }} -Variant ${{ matrix.variant }}
+          # The build is not run again: the step above built the archive and
+          # this one reads what it left in .dist/. Without -SkipBuild the
+          # publish script builds the target a second time, which the FreeBSD
+          # row cannot do on this runner at all -- a FreeBSD binary needs a
+          # FreeBSD linker and libc, and the runner links with its own.
+          ./scripts/publish-release.ps1 -ManifestsOnly -SkipTests -SkipBuild -Target ${{ matrix.target }} -Variant ${{ matrix.variant }}
       # A script that ignores an option it does not understand does the real
       # thing when the caller asked for a dry run, and in this directory the
       # real thing is a release: a tag, an archive, a release page on two
