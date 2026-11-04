@@ -28,6 +28,13 @@ include = [
     "/NOTICE",
 ]
 
+# The package carries the rgy's own name on the registry, and the upstream's
+# name in the code: the crate a dependant sees is the crate the upstream
+# wrote, under the name its own code says (`rgx_adapters_pdf::`). The sources are
+# the upstream's byte for byte, and the name in the code is part of that.
+[lib]
+name = "rgx_adapters_pdf"
+
 [features]
 # One feature per adapter, and this crate holds exactly one adapter:
 # `Pdf`. Everything the reader needs -- the classic xref reader, the
@@ -42,4 +49,4 @@ default = ["pdf"]
 pdf = []
 
 [dependencies]
-rgx-core = { path = "../rgx-core", version = "0.1.9", default-features = false, features = ["std", "sha256-hw"] }
+rgx-core = { path = "../rgx-core", version = "0.1.9", default-features = false, features = ["std", "sha256-hw"], package = "rgy-vendored-core" }
