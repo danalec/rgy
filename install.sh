@@ -5,7 +5,7 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/danalec/rgy/main/install.sh | bash
 #   bash install.sh --install-dir /usr/local/bin
-#   bash install.sh --version rgy-v0.1.8
+#   bash install.sh --version rgy-v0.1.9.0
 #
 # Downloads the rgy release tarball, verifies its SHA256, unpacks the four
 # binaries into the install directory, prepends it to the user's PATH and
@@ -42,7 +42,7 @@
 # here when they are not.
 set -u
 
-version="rgy-v0.1.8"
+version="rgy-v0.1.9.0"
 install_dir="$HOME/.local/bin"
 base_url="https://github.com/danalec/rgy/releases/download"
 skip_checksum=0

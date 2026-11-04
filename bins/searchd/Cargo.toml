@@ -1,6 +1,6 @@
 [package]
 name = "rgy-searchd"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2024"
 rust-version = "1.89"
 authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
@@ -19,21 +19,21 @@ name = "searchd"
 path = "src/main.rs"
 
 [dependencies]
-rgy-discovery = { path = "../../crates/discovery", version = "0.1.8" }
+rgy-discovery = { path = "../../crates/discovery", version = "0.1.9" }
 # The platform walk selector.
-rgy-discovery-dispatch = { path = "../../crates/discovery-dispatch", version = "0.1.8" }
-rgy-engine = { path = "../../crates/engine", version = "0.1.8" }
-rgy-name-core = { path = "../../crates/name-core", version = "0.1.8" }
+rgy-discovery-dispatch = { path = "../../crates/discovery-dispatch", version = "0.1.9" }
+rgy-engine = { path = "../../crates/engine", version = "0.1.9" }
+rgy-name-core = { path = "../../crates/name-core", version = "0.1.9" }
 # The parallelism's width: the user picks it, the environment can override
 # it, and every parallel path in the daemon agrees on it.
-rgy-par = { path = "../../crates/par", version = "0.1.8" }
-rgy-proto = { path = "../../crates/proto", version = "0.1.8" }
+rgy-par = { path = "../../crates/par", version = "0.1.9" }
+rgy-proto = { path = "../../crates/proto", version = "0.1.9" }
 # rgx --serve front reads argv arrays with rgx's own JSON parser.
-rgx-core = { path = "../../crates/rgx-core", version = "0.1.8", package = "rgy-vendored-core" }
+rgx-core = { path = "../../crates/rgx-core", version = "0.1.9", package = "rgy-vendored-core" }
 # The adapter registry: the formats a search can read *into* — a PDF, a
 # .docx, a zip, a mail file. This is the second layer of the launcher, and
 # the reason the vendored adapters are here.
-rgy-adapters = { path = "../../crates/adapters", version = "0.1.8" }
+rgy-adapters = { path = "../../crates/adapters", version = "0.1.9" }
 # One allocator story (plan 4.4): mimalloc for the general heap —
 # MSVCRT's HeapAlloc serialises the parallel content readers on Windows.
 mimalloc = { version = "0.1", default-features = false }

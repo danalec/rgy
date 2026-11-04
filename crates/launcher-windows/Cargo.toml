@@ -1,6 +1,6 @@
 [package]
 name = "rgy-launcher-windows"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2024"
 rust-version = "1.89"
 authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
@@ -16,4 +16,4 @@ readme = "../../README.md"
 
 [dependencies]
 # The launcher's model: the query, the rows, the geometry.
-rgy-launcher = { path = "../launcher", version = "0.1.8" }
+rgy-launcher = { path = "../launcher", version = "0.1.9" }

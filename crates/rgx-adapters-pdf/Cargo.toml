@@ -1,5 +1,5 @@
 [package]
-name = "rgx-adapters-pdf"
+name = "rgy-vendored-adapters-pdf"
 version = "0.1.9"
 edition = "2021"
 authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
@@ -8,7 +8,7 @@ license = "Apache-2.0"
 readme = "README.md"
 keywords = ["pdf", "text-extraction", "document"]
 categories = ["parser-implementations", "text-processing"]
-repository = "https://github.com/danalec/rgx"
+repository = "https://github.com/danalec/rgy"
 # What the published crate carries. The test corpus is the repository's:
 # the fixtures under `testdata/` are what this crate's own tests read, and
 # a user of the crate has no use for them. The examples are one-off

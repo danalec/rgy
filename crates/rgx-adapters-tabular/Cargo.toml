@@ -1,5 +1,5 @@
 [package]
-name = "rgx-adapters-tabular"
+name = "rgy-vendored-adapters-tabular"
 version = "0.1.9"
 edition = "2021"
 authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
@@ -8,7 +8,7 @@ license = "Apache-2.0"
 readme = "README.md"
 keywords = ["sqlite", "netcdf", "hdf5", "dbf", "parquet"]
 categories = ["parser-implementations", "database-implementations"]
-repository = "https://github.com/danalec/rgx"
+repository = "https://github.com/danalec/rgy"
 # What the published crate carries. The test corpus is the repository's:
 # the fixtures under `testdata/` are what this crate's own tests read, and
 # a user of the crate has no use for them. The examples are one-off
@@ -32,7 +32,7 @@ include = [
 # One feature per format, in the order `adapters()` lists them, so a
 # binary can name the formats it reads and leave the rest out.
 #
-# The SQLite adapter drives rusqlite (which is std-only) and the DuckDB
+# The SQLite adapter reads the file format itself -- bytes in, bytes out# -- so it needs no filesystem and no standard library: it stays no_std +# alloc, like the hand-rolled readers for the other formats. The DuckDB
 # and Zarr readers write into a `Vec<u8>` or walk the filesystem, so
 # those three need `std`. The hand-rolled readers for the other formats
 # are pure byte slicing and stay no_std + alloc.

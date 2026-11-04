@@ -1,6 +1,6 @@
 [package]
 name = "rgy-discovery-dispatch"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2024"
 rust-version = "1.89"
 authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
@@ -22,7 +22,7 @@ default = ["std"]
 std = ["rgy-discovery/std", "rgy-discovery-macos/std"]
 
 [dependencies]
-rgy-discovery = { path = "../discovery", version = "0.1.8", default-features = false }
+rgy-discovery = { path = "../discovery", version = "0.1.9", default-features = false }
 # The catch-up rule answers with the wire value the status response carries
 # (`replayed` / `relisted`), so the rule and the spelling cannot drift.
 #
@@ -31,7 +31,7 @@ rgy-discovery = { path = "../discovery", version = "0.1.8", default-features = f
 # `std` half is the sockets and the environment — the machine. A crate
 # that is in the bare-metal gate cannot pull the machine in through a
 # side door, and this dependency is that side door.
-rgy-proto = { path = "../proto", version = "0.1.8", default-features = false }
+rgy-proto = { path = "../proto", version = "0.1.9", default-features = false }
 
 # The platform walks, pulled in per-target so `source_for` can build the
 # native one on its own OS. Every crate is empty off-target.

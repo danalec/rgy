@@ -1,5 +1,5 @@
 [package]
-name = "rgx-core"
+name = "rgy-vendored-core"
 version = "0.1.9"
 edition = "2021"
 authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
@@ -11,7 +11,7 @@ license = "Apache-2.0"
 readme = "README.md"
 keywords = ["search", "regex", "engine", "ripgrep"]
 categories = ["text-processing", "command-line-utilities"]
-repository = "https://github.com/danalec/rgx"
+repository = "https://github.com/danalec/rgy"
 # What the published crate carries. The test corpus is the repository's:
 # the fixtures under `testdata/` are what this crate's own tests read, and
 # a user of the crate has no use for them. The examples are one-off
@@ -45,7 +45,7 @@ include = [
 # flag, a core atomic, stays; and the JSON float parser becomes this crate's
 # own, since `f64::from_str` is std-only.
 default = ["std", "sha256-hw", "gzip", "zlib", "deflate", "bzip2", "lzma", "xz", "zstd", "snappy", "lz4", "blosc", "zip"]
-std = ["dep:libc", "memchr/std"]
+std = []
 # The Tesla Valve pack store's codec, query vocabulary and planner. The
 # algorithmic half of `crates/rgx-tv`, held here so it can be `no_std` and so
 # `rgx` can take it without taking the thread pool with it. `rgx-tv` turns
@@ -92,7 +92,7 @@ tv = []
 # that does not read a pack store should not link its format tables. The
 # engine alone, with no pack store, is `--no-default-features --features std`
 # (AVX2/SWAR + regex core).
-tv-runtime = ["tv", "std", "dep:ignore"]
+tv-runtime = ["tv", "std"]
 # SHA-256 hardware acceleration. It is in `default` above, and the path it
 # turns on replaces the scalar one rather than answering differently. One
 # backend is wired: SHA-NI on x86_64, detected at runtime by this crate's own
@@ -142,7 +142,7 @@ memchr = { version = "2", default-features = false }
 # `tv-runtime` feature because the builder is the only consumer and
 # the builder is std-bound. `default-features = false` keeps the
 # rest of the crate no_std when tv-runtime is off.
-ignore = { version = "0.4", default-features = false, optional = true }
+
 
 [dev-dependencies]
 # The oracle for the syntax and replacement tests, for the same reason and

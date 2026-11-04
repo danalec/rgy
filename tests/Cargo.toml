@@ -45,12 +45,12 @@ path = "autostart.rs"
 # the caller asked for does not fit the platform's `sun_path`: the fake
 # daemon in `cli.rs` has to bind the socket the client will look for, and
 # that is the product's rule and not the test's.
-rgy-proto = { path = "../crates/proto", version = "0.1.8" }
+rgy-proto = { path = "../crates/proto", version = "0.1.9" }
 # The pack store, for the test that proves the third backend of the
 # content layer: the daemon started with `--tv-dir` answers from a packed
 # corpus instead of reading the files. The builder is upstream's, and it
 # is behind the `tv-runtime` feature because it is the only consumer.
-rgx-core = { path = "../crates/rgx-core", version = "0.1.8", default-features = false, package = "rgy-vendored-core", features = [
+rgx-core = { path = "../crates/rgx-core", version = "0.1.9", default-features = false, package = "rgy-vendored-core", features = [
     "std",
     "tv-runtime",
 ] }

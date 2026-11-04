@@ -1,6 +1,6 @@
 [package]
 name = "rgy-discovery"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2024"
 rust-version = "1.89"
 authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
@@ -29,7 +29,7 @@ std = ["rgy-par/std"]
 # stays as the correctness oracle the differential test compares against.
 # The pool is `rgy-par`'s: no `rayon`, no dependency, and a width the
 # caller names.
-rgy-par = { path = "../par", version = "0.1.8", default-features = false }
+rgy-par = { path = "../par", version = "0.1.9", default-features = false }
 
 # The seam has no dependency of its own. The unix reader (`openat`,
 # `fdopendir`, `readdir`, `fstatat`) needs the `dirent` and `stat`
