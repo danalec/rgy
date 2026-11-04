@@ -1052,7 +1052,13 @@ function Set-InstallerPin([string]$file, [string]$version, [string]$sha, [string
     # followed by a digit is group 1 followed by that digit -- or, worse,
     # group 13.
     $text = [regex]::Replace($text, $pattern, '${1}' + $sha + '${2}')
-    $text = [regex]::Replace($text, 'rgy-v[0-9]+\.[0-9]+\.[0-9]+', $version)
+    # The tag is three or four numbers deep -- the release carries the fourth,
+    # the fix count of the line, and the registry takes three -- so the
+    # pattern reads every one of them. A pattern that stops at the third
+    # leaves the fourth on the end of the replacement: a second run of this
+    # step over `rgy-v0.1.9.0` writes `rgy-v0.1.9.0.0`, and the installer
+    # asks the forge for a tag nobody published.
+    $text = [regex]::Replace($text, 'rgy-v[0-9]+(?:\.[0-9]+){2,3}', $version)
     Set-Content $file $text -NoNewline
     $check = Get-Content $file -Raw
     if ($check -notmatch [regex]::Escape($sha)) {

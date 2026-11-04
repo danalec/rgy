@@ -845,7 +845,13 @@ set_pin() {
     # reads. `-i.bak` is the one spelling both of them take, and the
     # backup goes away with the file it belongs to.
     sed -i.bak -E "s#$pattern#\1$sha\2#" "$file" || { echo "the pin in $file could not be rewritten" >&2; exit 1; }
-    sed -i.bak -E "s#rgy-v[0-9]+\.[0-9]+\.[0-9]+#$tag#g" "$file" || exit 1
+    # The tag is three or four numbers deep -- the release carries the fourth,
+    # the fix count of the line, and the registry takes three -- so the
+    # pattern reads every one of them. A pattern that stops at the third
+    # leaves the fourth on the end of the replacement: a second run of this
+    # step over `rgy-v0.1.9.0` writes `rgy-v0.1.9.0.0`, and the installer
+    # asks the forge for a tag nobody published.
+    sed -i.bak -E "s#rgy-v[0-9]+(\.[0-9]+){2,3}#$tag#g" "$file" || exit 1
     rm -f "$file.bak"
     if ! grep -q "$sha" "$file"; then
         echo "the pin in $file does not carry the digest of the release ($sha)" >&2
