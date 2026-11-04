@@ -934,7 +934,18 @@ fn on_key(state: &mut State, key: Key) -> Control {
     // The keys that erase still work: the user typed something before the
     // launcher learned the daemon was gone, and a field that cannot be
     // emptied is a field the user is stuck with.
-    if state.status.asked && !state.status.connected && adds_to_the_query(key) {
+    //
+    // And the **command line** still types: a `>`-line is the launcher's
+    // own and not a question for the daemon, so `>settings` opens the
+    // panel exactly when the daemon is away and the user wants to look at
+    // the launcher's own settings. Measured on 2026-11-04: with the daemon
+    // down, the `>` was refused like any other character, and the panel —
+    // the one thing that needs no daemon — could not be reached.
+    if state.status.asked
+        && !state.status.connected
+        && adds_to_the_query(key)
+        && !the_line_is_a_command(state, key)
+    {
         return paint(state);
     }
 
@@ -1045,6 +1056,20 @@ fn on_key(state: &mut State, key: Key) -> Control {
 /// has a field the user has to be able to empty.
 fn adds_to_the_query(key: Key) -> bool {
     matches!(key, Key::Char(_) | Key::CtrlV)
+}
+
+/// Whether the key keeps the line a command line.
+///
+/// A `>`-line is the launcher's own and not a question for the daemon, so
+/// it types while the daemon is away — and the panel it opens is the one
+/// thing that needs no daemon at all. Two ways the line can be a command
+/// while the daemon is down: it already is one, or this key is the `>`
+/// that starts it at the head of the field.
+fn the_line_is_a_command(state: &State, key: Key) -> bool {
+    if state.app.is_command() {
+        return true;
+    }
+    matches!(key, Key::Char('>')) && state.app.query().caret() == 0
 }
 
 /// The query changed: the launcher asks its own question.
@@ -2451,6 +2476,40 @@ mod tests {
     /// The user typed something before the launcher learned the daemon was
     /// gone, and a field that cannot be emptied is a field the user is stuck
     /// with. The paste is a typing too, and it is refused the same way.
+    /// The command line still types while the daemon is away.
+    ///
+    /// The panel is the launcher's own and needs no daemon, and the moment
+    /// the user wants it is exactly when the daemon is not there. Measured
+    /// on 2026-11-04: with the daemon down, `>` was refused like any other
+    /// character and `>settings` could not be typed at all.
+    #[test]
+    fn the_command_line_types_while_the_daemon_is_away() {
+        let (mut state, _) = recording();
+        state.status.asked = true;
+        state.status.connected = false;
+
+        // A `>` at the head of the field starts a command line, and the
+        // rest of the word lands there too.
+        let _ = on_key(&mut state, Key::Char('>'));
+        assert_eq!(state.app.query().text(), ">", "the command prefix landed");
+        for c in "settings".chars() {
+            let _ = on_key(&mut state, Key::Char(c));
+        }
+        assert_eq!(state.app.query().text(), ">settings", "the word landed");
+
+        // A character that is not part of the command line is refused: a
+        // search is what the daemon is not there for.
+        let (mut state, _) = recording();
+        state.status.asked = true;
+        state.status.connected = false;
+        let _ = on_key(&mut state, Key::Char('x'));
+        assert_eq!(
+            state.app.query().text(),
+            "",
+            "a search is refused: the daemon is not there"
+        );
+    }
+
     #[test]
     fn the_field_can_still_be_emptied_while_the_daemon_is_not_there() {
         let (mut state, _) = recording_with("invoice");
