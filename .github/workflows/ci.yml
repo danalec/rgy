@@ -497,67 +497,69 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The `in_release` flag says whether the release carries this
-        # row's archive. The release publishes the two portable x86_64
-        # archives; the other nine are built here -- each on the runner
-        # that can build it -- and published nowhere. The flag is what
-        # the release page is held to, row by row, in the step below.
+        # Every row is in the release. The archive a row builds is kept as
+        # an artifact, collected into .dist/ before the release is
+        # published, and the release page is held to the whole list, row by
+        # row, in the step below -- a page that names an archive the
+        # release does not carry, or a row whose archive the page does not
+        # name, stops the run.
         include:
           # --- Windows ---
           - asset: x86_64-windows
             os: windows-2022
             target: x86_64-pc-windows-msvc
             variant: portable
-            in_release: true
           - asset: avx2-windows
             os: windows-2022
             target: x86_64-pc-windows-msvc
             variant: avx2
-            in_release: false
           - asset: znver4-windows
             os: windows-2022
             target: x86_64-pc-windows-msvc
             variant: znver4
-            in_release: false
           - asset: aarch64-windows
             os: windows-11-arm
             target: aarch64-pc-windows-msvc
             variant: portable
-            in_release: false
 
           # --- Linux ---
           - asset: x86_64-linux
             os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             variant: portable
-            in_release: true
           - asset: avx2-linux
             os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             variant: avx2
-            in_release: false
           - asset: znver4-linux
             os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             variant: znver4
-            in_release: false
           - asset: x86_64-linux-musl
             os: ubuntu-24.04
             target: x86_64-unknown-linux-musl
             variant: portable
-            in_release: false
           - asset: aarch64-linux
             os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             variant: portable
-            in_release: false
+
+          # --- FreeBSD ---
+          # The one target with no runner of its own: the build runs inside a
+          # FreeBSD VM on an ubuntu runner, the way the bar job's suite does.
+          # `vm` marks the row, and the build step that reads it is the one
+          # that runs inside the VM.
+          - asset: x86_64-freebsd
+            os: ubuntu-24.04
+            target: x86_64-unknown-freebsd
+            variant: portable
+            vm: freebsd
 
           # --- macOS ---
           - asset: aarch64-apple-darwin
             os: macos-15
             target: aarch64-apple-darwin
             variant: portable
-            in_release: false
           # The Intel Mac. The runner here is an arm64 Mac, so this
           # binary cannot start here, and the matrix has no Intel Mac to
           # start it on: GitHub has no x86_64 macOS runner left. The
@@ -568,7 +570,6 @@ jobs:
             os: macos-15
             target: x86_64-apple-darwin
             variant: portable
-            in_release: false
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -597,12 +598,32 @@ jobs:
       # are twins -- the same log, the same exit code, the same file list
       # inside -- and this job is where that is checked on three systems.
       - name: build the archive (unix)
-        if: runner.os != 'Windows'
+        if: runner.os != 'Windows' && matrix.vm == null
         run: bash scripts/build-release.sh --skip-tests --target ${{ matrix.target }} --variant ${{ matrix.variant }}
       - name: build the archive (windows)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && matrix.vm == null
         shell: pwsh
         run: ./scripts/build-release.ps1 -SkipTests -Target ${{ matrix.target }} -Variant ${{ matrix.variant }}
+      # The FreeBSD build, inside a FreeBSD VM on an ubuntu runner: there is no
+      # FreeBSD runner, and a cross-link to a libc the runner does not have is a
+      # binary nobody can vouch for. The VM is the one the bar job's suite runs
+      # (15.1), with the distribution's rust and the base system's cc.
+      #
+      # The build script packs the archive into .dist/ -- where the checks
+      # below read it -- and the target directory is dropped before the VM
+      # stops: the archive is what comes back through the workspace sync, and a
+      # target directory of gigabytes is not.
+      - name: build the archive (FreeBSD, in a FreeBSD VM)
+        if: matrix.vm == 'freebsd'
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          release: "15.1"
+          prepare: pkg install -y rust git
+          run: |
+            set -eu
+            bash scripts/build-release.sh --skip-tests
+            rm -rf target
       # The archive is a .tar.gz on the unix runners and a .zip on the
       # Windows one, and each platform reads its own with the tool it
       # has: tar reads the tarball, and the Windows side reads the zip
@@ -746,6 +767,20 @@ jobs:
               exit 1
             fi
           done
+      # The archive this row built, kept for the release. The release carries
+      # every row's archive now, and the release is published from one
+      # machine, so the runner that built an archive is where the release's
+      # copy comes from: scripts/collect-ci-assets brings a run's artifacts
+      # into .dist/ before the publish step runs.
+      - name: the archive is kept for the release
+        uses: actions/upload-artifact@v4
+        with:
+          name: rgy-${{ matrix.asset }}
+          path: |
+            .dist/rgy-v*
+            .dist/documents/rgy-v*
+          if-no-files-found: error
+          include-hidden-files: true
       # The publish scripts, exercised on every push: they rewrite the
       # manifests and the installer pins from the artifacts in .dist/ and
       # publish nothing. A script that breaks should break here, not on
@@ -757,38 +792,24 @@ jobs:
       # never calls the API -- it only rewrites the links -- so a
       # placeholder is enough, and the checkout that runs here is thrown
       # away.
-      # The manifests, rewritten (nothing published). The variant goes with
-      # the target: a tuned row publishes a tuned asset, and the build step
-      # above already asks for the same thing, so the archive in .dist/ and
-      # the manifest that names it are the same asset.
       #
       # The publish script compares the release page's assets marker with
-      # the files in .dist/, and the comparison is RELEASE-WIDE: the
-      # release carries the portable x86_64 archives, and the page names
-      # exactly those. A matrix row builds ONE archive, so the row's
-      # .dist/ is never the release's whole asset list, and the
-      # comparison refuses a tree that is perfectly right.
+      # the files in .dist/, and the comparison is RELEASE-WIDE: the page
+      # names every archive the release carries. A matrix row builds ONE
+      # archive, so the row's .dist/ is never the release's whole asset
+      # list, and the comparison refuses a tree that is perfectly right.
       #
-      # So the step asks two questions, one per row. The tree's own page
-      # is held to the asset this row built: the page names the archives
-      # the release carries, so it names this row's archive if and only if
-      # the release carries it -- and the eleven rows together hold the
-      # page to exactly the assets of the release. And the page the script
-      # reads is the page of this row: the assets marker names the
-      # archive this row built, and the script compares a page with the
-      # .dist/ that goes with it -- the comparison it makes on release
-      # day, with a pair that agrees. The checkout that runs here is
+      # So the step asks two questions, one per row. The tree's own page is
+      # held to the asset this row built -- every row is in the release, so
+      # the page must name it -- and the page the script reads is the page
+      # of this row: the marker is rewritten to name the archive this row
+      # built and the digests file beside it, and the script compares a page
+      # with the .dist/ that goes with it. The checkout that runs here is
       # thrown away when the job ends.
-      #
-      # The rows that build an archive the release does not publish are
-      # not asked to publish anything: the script is about the release,
-      # and a run that carries an archive the page does not name would
-      # pin an archive the release does not publish.
       - name: the manifests, rewritten (nothing published)
         if: runner.os != 'Windows'
         env:
           RGY_FORGEJO_URL: http://forgejo.invalid
-          RGY_IN_RELEASE: ${{ matrix.in_release }}
         run: |
           set -eu
           # The page of the release being cut: its name is the version's,
@@ -812,15 +833,9 @@ jobs:
           case " $marker " in
             *" $name "*) named=yes ;;
           esac
-          expected=no
-          if [ "$RGY_IN_RELEASE" = "true" ]; then expected=yes; fi
-          if [ "$named" != "$expected" ]; then
-            echo "the release page and the asset this row built do not agree: the page names $name: $named, and the release carries this row's asset: $expected"
+          if [ "$named" != "yes" ]; then
+            echo "the release page does not name the archive this row built ($name): the page names the assets the release carries, and every row's archive is one of them"
             exit 1
-          fi
-          if [ "$RGY_IN_RELEASE" != "true" ]; then
-            echo "the release does not carry this row's archive ($name): the publish step is for the rows that build one"
-            exit 0
           fi
           # The page of this row. The marker names the archive this row
           # built and the digests file beside it, and the rest of the page
@@ -833,7 +848,6 @@ jobs:
         shell: pwsh
         env:
           RGY_FORGEJO_URL: http://forgejo.invalid
-          RGY_IN_RELEASE: ${{ matrix.in_release }}
         run: |
           $ErrorActionPreference = 'Stop'
           # The page of the release being cut: its name is the version's,
@@ -858,15 +872,9 @@ jobs:
           $marker = $found.Groups[1].Value
           $named = 'no'
           if ($marker -split '\s+' -contains $name) { $named = 'yes' }
-          $expected = 'no'
-          if ($env:RGY_IN_RELEASE -eq 'true') { $expected = 'yes' }
-          if ($named -ne $expected) {
-            [Console]::Error.Write("the release page and the asset this row built do not agree: the page names ${name}: ${named}, and the release carries this row's asset: ${expected}`n")
+          if ($named -ne 'yes') {
+            [Console]::Error.Write("the release page does not name the archive this row built (${name}): the page names the assets the release carries, and every row's archive is one of them`n")
             exit 1
-          }
-          if ($env:RGY_IN_RELEASE -ne 'true') {
-            [Console]::Out.Write("the release does not carry this row's archive ($name): the publish step is for the rows that build one`n")
-            exit 0
           }
           # The page of this row. The marker names the archive this row
           # built and the digests file beside it, and the rest of the page

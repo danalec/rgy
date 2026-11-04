@@ -23,7 +23,7 @@ Two faces, one daemon. Click either one to watch it move.
 
 ## Install
 
-The release is **0.1.9.0**. It is on [GitHub](https://github.com/danalec/rgy/releases/tag/rgy-v0.1.9.0), and the crates are on crates.io at 0.1.9 — the release's number carries a fourth place, the fix count of the line, and the registry takes three.
+The release is **0.1.9.1**. It is on [GitHub](https://github.com/danalec/rgy/releases/tag/rgy-v0.1.9.1), and the crates are on crates.io at 0.1.9 — the release's number carries a fourth place, the fix count of the line, and the registry takes three.
 
 **One line**, and it installs the tool, the daemon and the launcher:
 
@@ -36,15 +36,15 @@ curl -fsSL https://raw.githubusercontent.com/danalec/rgy/main/install.sh | bash
 ```
 
 The installer picks the archive that matches the machine, **checks its
-SHA256**, unpacks the binaries into `~/.local/bin` (Linux) or
+SHA256**, unpacks the binaries into `~/.local/bin` (Linux and FreeBSD) or
 `%LOCALAPPDATA%\Programs\rgy` (Windows), adds that directory to your PATH,
 and registers the daemon — and the launcher — to start at login. The digest
 is pinned inside the installer, so a substituted download is refused before
 anything is unpacked — and an archive the release does not carry is refused
-too: **this release carries the two archives it was cut from** — Windows
-x86_64 and Linux x86_64. The CI builds the other nine on their own
-runners, the macOS ones on a Mac, and it publishes none of them, so on
-macOS and on aarch64 the installer says so and installs nothing.
+too. **This release carries every archive the CI builds** — portable, AVX2
+and Zen 4 Windows, aarch64 Windows, glibc, musl and Zen 4 Linux, aarch64
+Linux, FreeBSD and both macOS arches — and the CI builds each one on the
+runner that has the platform.
 
 **From crates.io:**
 
@@ -72,10 +72,13 @@ alias and the documents, and it needs neither Rust nor a compiler:
 
 | platform | archive |
 |---|---|
-| Windows x86_64 | `rgy-v0.1.9.0-x86_64-windows.zip` |
-| Linux x86_64 | `rgy-v0.1.9.0-x86_64-linux.tar.gz` |
+| Windows x86_64 | `rgy-v0.1.9.1-x86_64-windows.zip` |
+| Linux x86_64 | `rgy-v0.1.9.1-x86_64-linux.tar.gz` |
+| FreeBSD x86_64 | `rgy-v0.1.9.1-x86_64-freebsd.tar.gz` |
 
-The release page carries a `SHA256SUMS` beside the archives.
+The release page carries a `SHA256SUMS` beside the archives, and every arch
+the CI builds has one: aarch64 Windows, AVX2 and Zen 4 x86_64, static musl,
+aarch64 Linux and both macOS arches are on it too.
 
 Nothing else: no runtime, no service, nothing to configure. The parts that
 differ per operating system (the Windows MFT walk, the Linux change feed, the
@@ -372,12 +375,12 @@ stderr, zero matches, exit 1.
 
 ## Status
 
-The release is out: **0.1.9.0**, tagged `rgy-v0.1.9.0`, with the Windows and
-Linux archives beside a `SHA256SUMS`, and all thirty-two crates on crates.io
-at 0.1.9 — the release's number carries a fourth place now, the fix count of
-the line, and the registry takes three. The release page is the changelog —
-it is [`docs/release-0.1.9.0.md`](docs/release-0.1.9.0.md), the file the
-release publishes.
+The release is out: **0.1.9.1**, tagged `rgy-v0.1.9.1`, with every archive the
+CI builds beside a `SHA256SUMS`, and all thirty-two crates on crates.io at
+0.1.9 — the release's number carries a fourth place, the fix count of the
+line, and the registry takes three. The release page is the changelog — it is
+[`docs/release-0.1.9.1.md`](docs/release-0.1.9.1.md), the file the release
+publishes.
 
 ### The packages
 
@@ -466,7 +469,7 @@ breaks every published crate that names it: `cargo install rgy-search` asked
 for `rgx-adapters-archive ^0.1.1` and was told "version 0.1.1 is yanked". The
 0.1.6 artifacts ask for `^0.1.6` and resolve; the 0.1.3 artifacts ask for
 `^0.1.2` and still do; and the 0.1.2 artifacts resolve again now that 0.1.2 is
-there. The [release page](docs/release-0.1.9.0.md) says what the change costs
+there. The [release page](docs/release-0.1.9.1.md) says what the change costs
 and when it lands.
 
 The command-line tool's crate was published as `rgy-searchctl` first;

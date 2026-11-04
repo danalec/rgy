@@ -48,8 +48,8 @@ everything with it.
 
 ## 2. Install it
 
-The release is **0.1.9.0**. It is on
-[GitHub](https://github.com/danalec/rgy/releases/tag/rgy-v0.1.9.0), and the
+The release is **0.1.9.1**. It is on
+[GitHub](https://github.com/danalec/rgy/releases/tag/rgy-v0.1.9.1), and the
 crates are on crates.io at 0.1.9 — the release's number carries a fourth
 place, the fix count of the line, and the registry takes three.
 
@@ -83,10 +83,13 @@ administrator — and a symlink on Linux and macOS:
 
 | platform | archive |
 |---|---|
-| Windows x86_64 | `rgy-v0.1.9.0-x86_64-windows.zip` |
-| Linux x86_64 | `rgy-v0.1.9.0-x86_64-linux.tar.gz` |
+| Windows x86_64 | `rgy-v0.1.9.1-x86_64-windows.zip` |
+| Linux x86_64 | `rgy-v0.1.9.1-x86_64-linux.tar.gz` |
+| FreeBSD x86_64 | `rgy-v0.1.9.1-x86_64-freebsd.tar.gz` |
 
-The release page carries a `SHA256SUMS` beside the archives. The archive
+The release page carries a `SHA256SUMS` beside the archives, and every arch
+the CI builds has one: aarch64 Windows, AVX2 and Zen 4 x86_64, static musl,
+aarch64 Linux and both macOS arches are on it too. The archive
 that matches the machine is the one that gets installed: the operating
 system and the architecture decide it, and an aarch64 machine never gets the
 x86_64 binary.
@@ -111,10 +114,10 @@ before anything is unpacked. The pins are release data — the release flow
 rewrites them from the archive it has just built.
 
 An archive the release does not carry is refused too, and the installer says
-which one it wanted. **This release carries the two archives it was cut
-from** — Windows x86_64 and Linux x86_64. The CI builds the other nine on
-their own runners, the macOS ones on a Mac, and it publishes none of them, so
-on macOS and on aarch64 the installer says so and installs nothing.
+which one it wanted. **This release carries every archive the CI builds** —
+portable, AVX2 and Zen 4 Windows, aarch64 Windows, glibc, musl and Zen 4
+Linux, aarch64 Linux, FreeBSD and both macOS arches — and the CI builds each
+one on the runner that has the platform.
 
 ### The packages
 
@@ -1355,12 +1358,12 @@ being written. rgy skips it and lists it rather than failing the run.
 |---|---|
 | [README.md](README.md) | the map: what rgy is, how it compares to rgx |
 | [FORMATS.md](FORMATS.md) | what it reads inside a file, format by format |
-| [docs/release-0.1.9.0.md](docs/release-0.1.9.0.md) | the 0.1.9.0 release page, with the changelog in it |
+| [docs/release-0.1.9.1.md](docs/release-0.1.9.1.md) | the 0.1.9.1 release page, with the changelog in it |
 | [benchmark/](benchmark/) | the measured numbers |
 | [rgx](https://github.com/danalec/rgx) | the content-search specialist this workspace is built on |
 
 | link | what it is |
 |---|---|
-| [the 0.1.9.0 release](https://github.com/danalec/rgy/releases/tag/rgy-v0.1.9.0) | the archives, the `SHA256SUMS`, and the changelog |
+| [the 0.1.9.1 release](https://github.com/danalec/rgy/releases/tag/rgy-v0.1.9.1) | the archives, the `SHA256SUMS`, and the changelog |
 | [crates.io](https://crates.io/crates/rgy-search) | the thirty-two crates, all at 0.1.9 |
 | [docs.rs](https://docs.rs/rgy-name-core) | the API of each crate |
