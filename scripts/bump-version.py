@@ -55,8 +55,18 @@ packaged crates the publish step already built. They are not this tree,
 and rewriting their manifests would change bytes that belong to another
 tree.
 
+**The release number and the crate number.** The registry takes a version
+of three numbers and nothing else, and a release that will carry fixes for
+a while wants a fourth -- the fix count of the line. So the version this
+script takes may have three numbers or four: with four, the crates carry
+the first three and the release tag (the installers' `rgy-v<version>`)
+carries all four. `0.1.9.0` is a release whose crates are `0.1.9`, and the
+fixes that follow it are `0.1.9.1`, `0.1.9.2`, until the line turns and
+both numbers say `0.2.0`.
+
 **Usage:**
     python3 scripts/bump-version.py 0.1.2
+    python3 scripts/bump-version.py 0.1.9.0   # crates 0.1.9, tag rgy-v0.1.9.0
     python3 scripts/bump-version.py --check 0.1.2   # what would change
 """
 
@@ -105,11 +115,11 @@ ENTRY_PACKAGE = re.compile(r'\bpackage\s*=\s*"(?P<package>[^"]+)"')
 # one twice, once in the setting and once in the usage the file prints.
 INSTALLER_TAG = {
     "install.sh": [
-        re.compile(r'(?m)^(version=")rgy-v[0-9]+\.[0-9]+\.[0-9]+(")$'),
-        re.compile(r'(?m)^(#   bash install\.sh --version )rgy-v[0-9]+\.[0-9]+\.[0-9]+$'),
+        re.compile(r'(?m)^(version=")rgy-v[0-9]+(?:\.[0-9]+){2,3}(")$'),
+        re.compile(r'(?m)^(#   bash install\.sh --version )rgy-v[0-9]+(?:\.[0-9]+){2,3}$'),
     ],
     "install.ps1": [
-        re.compile(r"(?m)^(\$Version = ')rgy-v[0-9]+\.[0-9]+\.[0-9]+('$)", re.IGNORECASE),
+        re.compile(r"(?m)^(\$Version = ')rgy-v[0-9]+(?:\.[0-9]+){2,3}('$)", re.IGNORECASE),
     ],
 }
 
@@ -290,12 +300,18 @@ def main() -> int:
     args = ap.parse_args()
 
     version = args.version
-    if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+    if not re.fullmatch(r"\d+\.\d+\.\d+(?:\.\d+)?", version):
         print(
-            f"bump-version: {version} is not a version of three numbers",
+            f"bump-version: {version} is not a version of three or four numbers",
             file=sys.stderr,
         )
         return 2
+    # The release number is what the argument said. The crates' number is
+    # the first three of it: the registry takes three numbers and nothing
+    # else, and the fourth -- when there is one -- is the fix count of the
+    # line, which the release tag carries and no manifest does.
+    crate_version = ".".join(version.split(".")[:3])
+    tag_version = version
 
     root = repo_root()
     changed: list[str] = []
@@ -304,7 +320,7 @@ def main() -> int:
         published = is_published(manifest)
         with io.open(manifest, "r", encoding="utf-8", newline="") as handle:
             text = handle.read()
-        out, packages, dependencies = rewrite(text, version, packages=published)
+        out, packages, dependencies = rewrite(text, crate_version, packages=published)
         if out == text:
             continue
         rel = manifest.relative_to(root).as_posix()
@@ -318,10 +334,11 @@ def main() -> int:
         print(f"  changed {rel} ({packages} package, {dependencies} requirement)")
 
     # The installers name the release they install, and that name is the
-    # tree's version -- the same one the manifests carry.
+    # release's number -- all four of it when the line carries four, so a
+    # fix release moves the tag without moving the crates' number.
     for name in sorted(INSTALLER_TAG):
         installer = root / name
-        if rewrite_installer(installer, version, write=not args.check):
+        if rewrite_installer(installer, tag_version, write=not args.check):
             changed.append(name)
 
     if not changed:
@@ -345,7 +362,10 @@ def main() -> int:
             print("bump-version: the lockfile could not be refreshed", file=sys.stderr)
             print(lock.stderr.strip()[:800], file=sys.stderr)
             return 1
-    print(f"bump-version: {len(changed)} file(s) at {version}")
+    print(
+        f"bump-version: {len(changed)} file(s) at {tag_version}"
+        + (f" (crates at {crate_version})" if crate_version != tag_version else "")
+    )
     return 0
 
 
