@@ -79,6 +79,7 @@ if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction Sile
 # then publishes.
 . (Join-Path $PSScriptRoot "lib/options.ps1")
 . (Join-Path $PSScriptRoot "lib/digest.ps1")
+. (Join-Path $PSScriptRoot "lib/version.ps1")
 $Version = ""
 $SkipTests = $false
 $Target = ""
@@ -164,6 +165,16 @@ if (-not $Version) {
     [Console]::Error.Write("no version in bins/searchctl/Cargo.toml`n")
     exit 1
 }
+
+# The page the tree carries says which release of the line this is.
+#
+# The manifests hold three numbers; the release may carry a fourth, the fix
+# count of the line, and the fourth is in the page's name. Reading the manifest
+# alone picked the three-number page and the archive step stopped on a page the
+# tree does not carry -- on every row of the CI -- while the release's own page
+# was there under the name the tag has.
+$Version = Get-RgyReleaseVersion $root $Version
+if (-not $Version) { exit 1 }
 
 # The release's number and the crates' number. The registry takes a version
 # of three numbers and nothing else, and a release line that will carry

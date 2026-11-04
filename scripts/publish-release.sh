@@ -79,6 +79,7 @@ variant="portable"
 # thing", which in this directory means publishing a release.
 . "$here/lib/options.sh"
 . "$here/lib/digest.sh"
+. "$here/lib/version.sh"
 rgy_read_options "skiptests=skip_tests dryrun=dry_run private=private manifestsonly=manifests_only commit=commit withgithub=with_github skipbuild=skip_build" \
                  "version=version target=target variant=variant" "" "$@"
 
@@ -92,6 +93,12 @@ esac
 
 [ -n "$version" ] || version=$(sed -n 's/^version = "\(.*\)"/\1/p' bins/searchctl/Cargo.toml | head -1)
 [ -n "$version" ] || { echo "no version in bins/searchctl/Cargo.toml" >&2; exit 1; }
+
+# The page the tree carries says which release of the line this is: the
+# manifests hold three numbers and the release may carry a fourth, the fix
+# count of the line, and the fourth is in the page's name. The same rule the
+# build reads, out of the same file, so the two cannot name different releases.
+version=$(rgy_release_version "$repo" "$version") || exit 1
 
 tag="rgy-v$version"
 # The forgejo that hosts the release. Its address is not in this repository:

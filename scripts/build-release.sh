@@ -80,6 +80,7 @@ variant="portable"
 # then publishes.
 . "$here/lib/options.sh"
 . "$here/lib/digest.sh"
+. "$here/lib/version.sh"
 rgy_read_options "skiptests=skip_tests" \
                  "version=version target=target variant=variant" "" "$@"
 
@@ -140,6 +141,15 @@ if [ -z "$version" ]; then
     version=$(read_manifest_version bins/searchctl/Cargo.toml)
 fi
 [ -n "$version" ] || { echo "no version in bins/searchctl/Cargo.toml" >&2; exit 1; }
+
+# The page the tree carries says which release of the line this is.
+#
+# The manifests hold three numbers; the release may carry a fourth, the fix
+# count of the line, and the fourth is in the page's name. Reading the manifest
+# alone picked the three-number page and the archive step stopped on a page the
+# tree does not carry -- on every row of the CI -- while the release's own page
+# was there under the name the tag has.
+version=$(rgy_release_version "$repo" "$version") || exit 1
 
 # The release's number and the crates' number. The registry takes a version
 # of three numbers and nothing else, and a release line that will carry

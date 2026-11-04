@@ -65,6 +65,7 @@ if ($PSVersionTable.PSVersion.Major -lt 7) {
 # thing", which in this directory means publishing a release.
 . (Join-Path $PSScriptRoot "lib/options.ps1")
 . (Join-Path $PSScriptRoot "lib/digest.ps1")
+. (Join-Path $PSScriptRoot "lib/version.ps1")
 $Version = ""
 $SkipTests = $false
 $Commit = $false
@@ -135,6 +136,13 @@ if (-not $Version) {
     [Console]::Error.WriteLine("no version in bins/searchctl/Cargo.toml")
     exit 1
 }
+
+# The page the tree carries says which release of the line this is: the
+# manifests hold three numbers and the release may carry a fourth, the fix
+# count of the line, and the fourth is in the page's name. The same rule the
+# build reads, out of the same file, so the two cannot name different releases.
+$Version = Get-RgyReleaseVersion $root $Version
+if (-not $Version) { exit 1 }
 $tag = "rgy-v$Version"
 
 # The forgejo that hosts the release. Its address is not in this repository:
