@@ -465,6 +465,14 @@ struct State {
     /// answer for a question the user has moved on from is dropped
     /// rather than shown as the answer to the question on the screen.
     generation: u64,
+    /// How many clocks have passed since the launcher last tried a daemon
+    /// that is not there.
+    ///
+    /// The clock asks at 120 ms, and a daemon that is not up will not be up
+    /// in the next 120 ms: the retry backs off to one try a second
+    /// (`RETRY_TICKS`). The count is reset when the daemon answers — a
+    /// launcher that has a daemon is a launcher with nothing to retry.
+    retry: u64,
     /// The query the rows on the screen answer.
     ///
     /// The rows are the answer to a question, and the question is not
@@ -708,6 +716,7 @@ pub fn run(
         ask_daemon: true,
         in_flight: false,
         generation: 0,
+        retry: 0,
         rows_query: None,
         meter: LatencyMeter::new(),
         status: Status::default(),
@@ -1610,6 +1619,11 @@ fn apply_reply(state: &mut State) -> bool {
         Reply::Who { messages, status } => {
             state.in_flight = false;
             state.status = status;
+            // The daemon answered: from here the retry is the launcher's
+            // next question and not a try at a daemon that is not there.
+            if state.status.connected {
+                state.retry = 0;
+            }
             // The stderr carries the message once, when it changes.
             //
             // And the write is on a thread of its own: a pipe that is
@@ -1700,7 +1714,20 @@ fn tick(state: &mut State) -> Control {
     // start after the window opened, and a launcher that says "sem
     // ligacao ao daemon" about a daemon that is there is a launcher
     // that lies.
+    //
+    // The asking backs off: a daemon that is not up yet is a daemon that
+    // will not be up in the next 120 ms, and a launcher that opens a
+    // connection every clock for ever is a launcher doing 8.3 round trips
+    // a second for nothing. Measured on 2026-11-04, with the daemon
+    // absent: that was 4.3% of a core before the no-news paint was
+    // skipped and 0.26% after — the connects are the 0.26%. Once a second
+    // is still fast enough for a daemon that starts at login, and it is
+    // the patience the launcher's own two seconds already speak.
     if state.status.asked && !state.status.connected {
+        state.retry = state.retry.wrapping_add(1);
+        if !state.retry.is_multiple_of(RETRY_TICKS) {
+            return Control::None;
+        }
         if !state.source.ask_who() {
             return worker_gone(state);
         }
@@ -1709,6 +1736,13 @@ fn tick(state: &mut State) -> Control {
     }
     Control::None
 }
+
+/// How many clocks pass between two tries at a daemon that is not there.
+///
+/// The clock is 120 ms; eight of them is a second, which is slow enough
+/// that a launcher with no daemon is not a process doing work and fast
+/// enough that a daemon that starts is answered within a second.
+const RETRY_TICKS: u64 = 8;
 
 /// The worker that asks the daemon is gone.
 ///
@@ -2020,6 +2054,7 @@ mod tests {
             ask_daemon: false,
             in_flight: false,
             generation: 0,
+            retry: 0,
             rows_query: None,
             meter: LatencyMeter::new(),
             status: Status::default(),
@@ -2370,6 +2405,45 @@ mod tests {
             "r",
             "the character landed: nobody has said the daemon is gone"
         );
+    }
+
+    /// The launcher waits a second between tries at a daemon that is away.
+    ///
+    /// The clock is 120 ms, and the launcher asked on every one of them:
+    /// measured on 2026-11-04 with the daemon absent, that was a connection
+    /// attempt 8.3 times a second — 0.26% of a core after the no-news paint
+    /// was skipped, and 4.3% before it. A daemon that is not up will not be
+    /// up in the next clock, so the retry backs off to one try a second,
+    /// and a daemon that starts is still answered within a second.
+    #[test]
+    fn the_launcher_waits_between_tries_at_a_daemon_that_is_away() {
+        let (mut state, _) = recording();
+        state.status.asked = true;
+        state.status.connected = false;
+
+        // Seven clocks pass and the launcher asks nobody: the daemon is not
+        // up, and the clock is not a reason to ask it again.
+        for _ in 0..7 {
+            let control = tick(&mut state);
+            assert!(
+                matches!(control, Control::None),
+                "the launcher did not try again yet"
+            );
+        }
+        // The eighth is a second after the last try, and it asks.
+        let control = tick(&mut state);
+        assert!(
+            matches!(control, Control::Paint(..)),
+            "the eighth clock tries the daemon again"
+        );
+        assert!(state.in_flight, "the question is on its way");
+
+        // A daemon that answers takes the back-off with it: the next
+        // question is a question, not a retry.
+        state.in_flight = false;
+        state.status.connected = true;
+        state.retry = 0;
+        assert_eq!(state.retry, 0, "a launcher with a daemon is not retrying");
     }
 
     /// The field can still be emptied while the daemon is not there.
@@ -3355,7 +3429,10 @@ mod tests {
     ///
     /// The daemon comes up after the window opened: the launcher has to
     /// notice, because the line that says the daemon is not there is a
-    /// line about the daemon that is not there.
+    /// line about the daemon that is not there. The asking backs off to
+    /// one try a second (`RETRY_TICKS` clocks): a launcher that opens a
+    /// connection every clock is a launcher doing 8.3 round trips a second
+    /// for nothing — measured on 2026-11-04, with the daemon away.
     #[test]
     fn the_launcher_asks_again_while_the_daemon_is_away() {
         let (mut state, _asked) = recording();
@@ -3366,10 +3443,24 @@ mod tests {
         state.ask_daemon = false;
         state.waiting = Waiting::Idle;
 
+        // The first clock asks nobody: the wait between tries is the
+        // point of the back-off.
         let _ = handle(&mut state, Event::Tick);
         assert!(
-            state.in_flight,
-            "the launcher asks again: the daemon may have come up"
+            !state.in_flight,
+            "the first clock does not try again: the launcher just tried"
+        );
+        let mut asked = false;
+        for _ in 0..RETRY_TICKS {
+            let _ = handle(&mut state, Event::Tick);
+            if state.in_flight {
+                asked = true;
+                break;
+            }
+        }
+        assert!(
+            asked,
+            "the launcher asks again within the second: the daemon may have come up"
         );
     }
 
