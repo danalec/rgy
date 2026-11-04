@@ -1,0 +1,43 @@
+[package]
+name = "rgy-autostart"
+version = "0.1.9"
+edition = "2024"
+rust-version = "1.89"
+authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
+description = "Registering the rgy search daemon to start at login, per platform"
+license = "Apache-2.0"
+repository = "https://github.com/danalec/rgy"
+homepage = "https://github.com/danalec/rgy"
+documentation = "https://docs.rs/rgy-autostart"
+keywords = ["autostart", "login", "service"]
+categories = ["os::windows-apis", "os::unix-apis"]
+readme = "../../README.md"
+
+
+[features]
+default = ["std"]
+# The machine: the files written, the commands run, the paths resolved.
+# Without it the crate is `core` plus `alloc`, and what is left is the
+# decision -- which platform, which mechanism, which arguments.
+std = ["rgy-proto/std"]
+
+[[bin]]
+name = "rgy-autostart"
+path = "src/main.rs"
+# The binary is the product: it arms the daemon on the user's machine, so
+# it needs the `std` half of the library. Without the feature there is no
+# binary to build -- and the `no_std` build of the library is what the
+# bare-metal gate checks.
+required-features = ["std"]
+
+# No external dependencies on purpose. The platform calls are `schtasks` and `reg`
+# on Windows, `systemctl` and the filesystem on Linux, and a plist file on
+# macOS: every one of them is either a file this crate writes or a command
+# the platform already ships. A binding would add a dependency the tree
+# does not have today, and the owner decides that, not this crate.
+#
+# `rgy-proto` is one of this repository's own crates, and it is here for one
+# reason: the rule that says where the daemon listens has to be the same
+# rule for the registration and for the client that finds it.
+[dependencies]
+rgy-proto = { path = "../proto", version = "0.1.9", default-features = false }

@@ -1,0 +1,42 @@
+[package]
+name = "rgy-discovery"
+version = "0.1.9"
+edition = "2024"
+rust-version = "1.89"
+authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
+description = "Platform discovery seam (Source/Watch) and the shared change vocabulary"
+license = "Apache-2.0"
+repository = "https://github.com/danalec/rgy"
+homepage = "https://github.com/danalec/rgy"
+documentation = "https://docs.rs/rgy-discovery"
+keywords = ["filesystem", "search", "discovery", "index"]
+categories = ["filesystem", "command-line-utilities"]
+readme = "../../README.md"
+
+
+[features]
+default = ["std"]
+# The threads. The walk itself needs none: it reads the filesystem
+# through `crate::dir`, which asks the operating system directly, so the
+# block stream is the same with the feature on and off. What the feature
+# buys is that the fan-out runs the directory reads on several threads;
+# without it the same fan-out runs the same work in order, on the calling
+# thread, and the answer is the same.
+std = ["rgy-par/std"]
+
+[dependencies]
+# The portable walk fans directory reads across a pool; `scan_sequential`
+# stays as the correctness oracle the differential test compares against.
+# The pool is `rgy-par`'s: no `rayon`, no dependency, and a width the
+# caller names.
+rgy-par = { path = "../par", version = "0.1.9", default-features = false }
+
+# The seam has no dependency of its own. The unix reader (`openat`,
+# `fdopendir`, `readdir`, `fstatat`) needs the `dirent` and `stat`
+# layouts, and those are the platform's: glibc, musl, the BSDs and macOS
+# each lay them out differently. So they are declared by hand, one
+# platform at a time, in `src/dir.rs` -- the way `src/file.rs` declares
+# the file layer -- with the sizes and the offsets the reader reads at
+# asserted where the structs are. A struct the platform writes is the
+# platform's struct, whole: a field left out is not a shorter struct, it
+# is a buffer the platform writes past.

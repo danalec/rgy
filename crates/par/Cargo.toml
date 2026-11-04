@@ -1,0 +1,23 @@
+[package]
+name = "rgy-par"
+version = "0.1.9"
+edition = "2024"
+rust-version = "1.89"
+authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
+description = "The parallelism rgy carries: split the work, run the pieces, join them"
+license = "Apache-2.0"
+repository = "https://github.com/danalec/rgy"
+homepage = "https://github.com/danalec/rgy"
+documentation = "https://docs.rs/rgy-par"
+keywords = ["parallel", "concurrency", "no-std"]
+categories = ["concurrency", "no-std"]
+readme = "../../README.md"
+
+[features]
+default = ["std"]
+# The threads. Without it the pieces run in order, on the thread that
+# called: the same call site, the same result, no `std`.
+std = []
+
+# No dependencies, on purpose: this crate is the floor the rest of the
+# workspace stands on, and a floor that drags a dependency in is not a floor.

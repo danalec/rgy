@@ -1,0 +1,26 @@
+[package]
+name = "rgy-proto"
+version = "0.1.9"
+edition = "2024"
+rust-version = "1.89"
+authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
+description = "JSON-lines protocol types shared by daemon, stdio, and CLI (skeleton)"
+license = "Apache-2.0"
+repository = "https://github.com/danalec/rgy"
+homepage = "https://github.com/danalec/rgy"
+documentation = "https://docs.rs/rgy-proto"
+keywords = ["json", "protocol", "daemon"]
+categories = ["encoding", "command-line-utilities"]
+readme = "../../README.md"
+
+
+[features]
+default = ["std"]
+# The machine: the sockets, the files, the environment, the process. Without
+# it the crate is `core` plus `alloc`, and what is left is the protocol --
+# the types and the bytes on the wire. The bare-metal gate builds this crate
+# with the feature off, so the wire types stay linkable into an embedded
+# search box.
+std = []
+
+[dependencies]

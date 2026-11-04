@@ -1,0 +1,35 @@
+[package]
+name = "rgy-adapters"
+version = "0.1.9"
+edition = "2024"
+rust-version = "1.89"
+authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
+description = "The rgx adapter registry: the formats a search can read into"
+license = "Apache-2.0"
+repository = "https://github.com/danalec/rgy"
+homepage = "https://github.com/danalec/rgy"
+documentation = "https://docs.rs/rgy-adapters"
+keywords = ["search", "adapters", "pdf", "office", "archive"]
+categories = ["text-processing"]
+readme = "../../README.md"
+
+
+[dependencies]
+# The adapter trait, the registry and the pipeline that runs one.
+rgx-core = { path = "../rgx-core", version = "0.1.9", default-features = false, package = "rgy-vendored-core" }
+# The content engine's seam: the reader the adapters answer through, and
+# the document it hands back. It is `no_std` + `alloc` without its `std`
+# feature, and this crate needs the `std` half — the adapters read files.
+rgy-name-core = { path = "../name-core", version = "0.1.9" }
+# The ten adapter families, transported from upstream. Each one hands over
+# its adapters; the registry is what orders them.
+rgx-adapters-archive = { path = "../rgx-adapters-archive", version = "0.1.9", package = "rgy-vendored-adapters-archive" }
+rgx-adapters-docs = { path = "../rgx-adapters-docs", version = "0.1.9", package = "rgy-vendored-adapters-docs" }
+rgx-adapters-inspect = { path = "../rgx-adapters-inspect", version = "0.1.9", package = "rgy-vendored-adapters-inspect" }
+rgx-adapters-llm = { path = "../rgx-adapters-llm", version = "0.1.9", package = "rgy-vendored-adapters-llm" }
+rgx-adapters-mail = { path = "../rgx-adapters-mail", version = "0.1.9", package = "rgy-vendored-adapters-mail" }
+rgx-adapters-media = { path = "../rgx-adapters-media", version = "0.1.9", package = "rgy-vendored-adapters-media" }
+rgx-adapters-office = { path = "../rgx-adapters-office", version = "0.1.9", package = "rgy-vendored-adapters-office" }
+rgx-adapters-pdf = { path = "../rgx-adapters-pdf", version = "0.1.9", package = "rgy-vendored-adapters-pdf" }
+rgx-adapters-tabular = { path = "../rgx-adapters-tabular", version = "0.1.9", package = "rgy-vendored-adapters-tabular" }
+rgx-adapters-threed = { path = "../rgx-adapters-threed", version = "0.1.9", package = "rgy-vendored-adapters-threed" }

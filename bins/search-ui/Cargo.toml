@@ -1,0 +1,37 @@
+[package]
+name = "rgy-search-ui"
+version = "0.1.9"
+edition = "2024"
+rust-version = "1.89"
+authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
+description = "Terminal search UI (from zen-rs ui.rs; sparkline latency view)"
+license = "Apache-2.0"
+repository = "https://github.com/danalec/rgy"
+homepage = "https://github.com/danalec/rgy"
+documentation = "https://docs.rs/rgy-search-ui"
+keywords = ["search", "tui", "terminal"]
+categories = ["command-line-utilities"]
+readme = "../../README.md"
+
+
+[dependencies]
+rgy-name-core = { path = "../../crates/name-core", version = "0.1.9" }
+# The launcher's model: the query, the rows, and the shape of a source.
+rgy-launcher = { path = "../../crates/launcher", version = "0.1.9" }
+# The console's UTF-8 code page.
+rgy-engine = { path = "../../crates/engine", version = "0.1.9" }
+# The rule of the line format: a path that carries a line break is not
+# one line, and the ones left out are counted and said out loud.
+rgy-pick = { path = "../../crates/pick", version = "0.1.9" }
+# Where the per-user files live: the terminal has no settings panel, and
+# the notice that says where the settings are has to say the true path.
+rgy-proto = { path = "../../crates/proto", version = "0.1.9" }
+
+[dev-dependencies]
+# Test fixtures build `rgy_discovery::walk::Listing`s for `name_index::Index::build`.
+rgy-discovery = { path = "../../crates/discovery", version = "0.1.9" }
+# The oracle: the crate this tree wrote the terminal with, kept here so the
+# differential test has something to hold the in-house backend to. A
+# dev-dependency does not enter a binary, and the thing that replaces a crate
+# is held to it until the oracle is retired.
+crossterm = "0.28.1"

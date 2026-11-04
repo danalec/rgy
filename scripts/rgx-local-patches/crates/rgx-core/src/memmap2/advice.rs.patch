@@ -1,0 +1,114 @@
+--- a/crates/rgx-core/src/memmap2/advice.rs
++++ b/crates/rgx-core/src/memmap2/advice.rs
+@@ -6,10 +6,15 @@
+ 
+ #[cfg(unix)]
+ mod imp {
+-    // `libc` exposes these seven on Linux alone: MADV_REMOVE and the
+-    // fork/merge/hugepage calls are its own. Not "unix" -- Darwin has
+-    // MADV_FREE and not these, and the BSDs stop at MADV_PROTECT. So the
+-    // numbers come from Linux's `bits/mman-linux.h` everywhere else.
++    use core::ffi::c_int;
++
++    // The advices are numbers the kernel reads, and the numbers are the
++    // platform's. They are declared here, by hand: the tree carries no
++    // crate to ask for them, and a number the kernel does not know is not
++    // an error, it is an instruction: FreeBSD's MADV_PROTECT is 10 and
++    // Linux's MADV_DONTFORK is 10 too, so handing 10 to FreeBSD would
++    // change the protection of the mapping instead of refusing the
++    // advice.
+     //
+     // The enum keeps one shape on every platform so callers need no cfg of
+     // their own. What must vary is what happens when one of these is passed
+@@ -17,40 +22,51 @@
+     // than handing over a number the kernel would read as something else.
+     // The refusal is `platform::refuse_unavailable`, and the rule it
+     // applies is `is_available`, below.
+-    //
+-    // A number the kernel does not know is not an error, it is an
+-    // instruction: FreeBSD's MADV_PROTECT is 10 and Linux's MADV_DONTFORK
+-    // is 10 too, so handing 10 to FreeBSD would change the protection of
+-    // the mapping instead of refusing the advice.
++
++    /// The five advices every unix kernel has, with the numbers they have
++    /// on every one of them: `MADV_NORMAL` is 0 and `MADV_DONTNEED` is 4.
++    const MADV_NORMAL: c_int = 0;
++    const MADV_RANDOM: c_int = 1;
++    const MADV_SEQUENTIAL: c_int = 2;
++    const MADV_WILLNEED: c_int = 3;
++    const MADV_DONTNEED: c_int = 4;
++
++    /// `MADV_FREE` is the one of the six that is not the same number
++    /// everywhere: Linux's is 8, the BSDs' is 5 and NetBSD's is 6.
+     #[cfg(any(target_os = "linux", target_os = "android"))]
+-    use libc::{
+-        MADV_DOFORK, MADV_DONTFORK, MADV_HUGEPAGE, MADV_MERGEABLE, MADV_NOHUGEPAGE, MADV_REMOVE,
+-        MADV_UNMERGEABLE,
+-    };
+-    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+-    mod missing {
+-        pub const MADV_REMOVE: i32 = 9;
+-        pub const MADV_DONTFORK: i32 = 10;
+-        pub const MADV_DOFORK: i32 = 11;
+-        pub const MADV_MERGEABLE: i32 = 12;
+-        pub const MADV_UNMERGEABLE: i32 = 13;
+-        pub const MADV_HUGEPAGE: i32 = 14;
+-        pub const MADV_NOHUGEPAGE: i32 = 15;
+-    }
+-    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+-    use missing::{
+-        MADV_DOFORK, MADV_DONTFORK, MADV_HUGEPAGE, MADV_MERGEABLE, MADV_NOHUGEPAGE, MADV_REMOVE,
+-        MADV_UNMERGEABLE,
+-    };
++    const MADV_FREE: c_int = 8;
++    #[cfg(any(target_os = "netbsd", target_os = "openbsd"))]
++    const MADV_FREE: c_int = 6;
++    #[cfg(not(any(
++        target_os = "linux",
++        target_os = "android",
++        target_os = "netbsd",
++        target_os = "openbsd"
++    )))]
++    const MADV_FREE: c_int = 5;
++
++    /// The seven that only Linux has, by the numbers Linux gives them:
++    /// `MADV_REMOVE` is 9, and the six that follow it are 10 to 15.
++    ///
++    /// They are Linux's on every platform, and that is the point: Darwin
++    /// has MADV_FREE and not these, and the BSDs stop at MADV_PROTECT, so
++    /// the numbers come from Linux's `bits/mman-linux.h` everywhere else.
++    const MADV_REMOVE: c_int = 9;
++    const MADV_DONTFORK: c_int = 10;
++    const MADV_DOFORK: c_int = 11;
++    const MADV_MERGEABLE: c_int = 12;
++    const MADV_UNMERGEABLE: c_int = 13;
++    const MADV_HUGEPAGE: c_int = 14;
++    const MADV_NOHUGEPAGE: c_int = 15;
+ 
+     #[repr(i32)]
+     #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+     pub enum Advice {
+-        Normal = libc::MADV_NORMAL as i32,
+-        Random = libc::MADV_RANDOM as i32,
+-        Sequential = libc::MADV_SEQUENTIAL as i32,
+-        WillNeed = libc::MADV_WILLNEED as i32,
+-        DontNeed = libc::MADV_DONTNEED as i32,
++        Normal = MADV_NORMAL as i32,
++        Random = MADV_RANDOM as i32,
++        Sequential = MADV_SEQUENTIAL as i32,
++        WillNeed = MADV_WILLNEED as i32,
++        DontNeed = MADV_DONTNEED as i32,
+         HugePage = MADV_HUGEPAGE as i32,
+         NoHugePage = MADV_NOHUGEPAGE as i32,
+         DontFork = MADV_DONTFORK as i32,
+@@ -62,8 +78,8 @@
+     #[repr(i32)]
+     #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+     pub enum UncheckedAdvice {
+-        DontNeed = libc::MADV_DONTNEED as i32,
+-        Free = libc::MADV_FREE as i32,
++        DontNeed = MADV_DONTNEED as i32,
++        Free = MADV_FREE as i32,
+         Remove = MADV_REMOVE as i32,
+     }
+ 

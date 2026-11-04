@@ -1,0 +1,56 @@
+[package]
+name = "rgy-e2e-tests"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.89"
+authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
+publish = false
+license = "Apache-2.0"
+description = "End-to-end tests for the user-facing bins (searchctl, searchd). Fixtures are built in temp dirs at runtime."
+
+# Integration-test-only crate: each test target hangs off [[test]] so
+# `cargo test --workspace` runs them like any other workspace test.
+[[test]]
+name = "cli"
+path = "cli.rs"
+
+[[test]]
+name = "serve"
+path = "serve.rs"
+
+# The launcher, from the outside: the window is a client of the daemon,
+# and this asks it questions the way a user does.
+[[test]]
+name = "launcher"
+path = "launcher.rs"
+
+# Not a harness: the licensing invariant over the Apache-2.0-only trees.
+[[test]]
+name = "license"
+path = "license.rs"
+
+# What every shipped binary says when it is asked what it is.
+[[test]]
+name = "help"
+path = "help.rs"
+
+# The doctor, from the outside: it is the command a user runs when
+# something is not working.
+[[test]]
+name = "autostart"
+path = "autostart.rs"
+
+[dev-dependencies]
+# The protocol, for the rule that says where a unix socket is when the path
+# the caller asked for does not fit the platform's `sun_path`: the fake
+# daemon in `cli.rs` has to bind the socket the client will look for, and
+# that is the product's rule and not the test's.
+rgy-proto = { path = "../crates/proto", version = "0.1.9" }
+# The pack store, for the test that proves the third backend of the
+# content layer: the daemon started with `--tv-dir` answers from a packed
+# corpus instead of reading the files. The builder is upstream's, and it
+# is behind the `tv-runtime` feature because it is the only consumer.
+rgx-core = { path = "../crates/rgx-core", version = "0.1.9", default-features = false, package = "rgy-vendored-core", features = [
+    "std",
+    "tv-runtime",
+] }

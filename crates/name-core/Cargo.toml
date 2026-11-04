@@ -1,0 +1,56 @@
+[package]
+name = "rgy-name-core"
+version = "0.1.9"
+edition = "2024"
+rust-version = "1.89"
+authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
+description = "Name index, query filters, fuzzy ranking (fsearch engine + zen query vocabulary)"
+license = "Apache-2.0 AND MIT"
+repository = "https://github.com/danalec/rgy"
+homepage = "https://github.com/danalec/rgy"
+documentation = "https://docs.rs/rgy-name-core"
+keywords = ["search", "fuzzy", "filename", "index"]
+categories = ["text-processing", "filesystem"]
+readme = "../../README.md"
+
+
+[features]
+default = ["std"]
+# The filesystem, the threads, and the clock. Without it the crate is
+# `no_std`: the index and the query engine, over bytes the caller owns.
+# What goes away with it is the content grep (it reads files), the live
+# overlay, the persisted index, and the mmap of the name blob.
+std = ["rgy-par/std", "rgx-core/std", "rgy-discovery/std"]
+
+[dependencies]
+rgy-discovery = { path = "../discovery", version = "0.1.9", default-features = false }
+# The parallelism: split the work, run the pieces, join them. The width is
+# the user's (`RGY_NUM_THREADS`, or what the caller sets).
+rgy-par = { path = "../par", version = "0.1.9", default-features = false }
+# One regex engine: the vendored zen-rs copy is gone; `re:`
+# path patterns compile through rgx-core's syntax/nfa/vm, the same engine
+# the copy was taken from (Apache-2.0).
+rgx-core = { path = "../rgx-core", version = "0.1.9", default-features = false, package = "rgy-vendored-core" }
+# The content grep runs on rgx-core's engine too -- the same one the name
+# path uses. There is no second engine behind it: a pattern that engine
+# refuses is a pattern the search refuses, and the refusal is said.
+
+# No libc (and no new platform crates): the few Darwin/unix bits in
+# content.rs declare their own `extern "C"` and ABI constants inline —
+# the same pattern `without_materializing` already used for
+# getiopolicy_np. rgx-core stays `no_std`.
+
+[dev-dependencies]
+# The oracle the tree's own hash map is held to: the same operations, in the
+# same order, on the same inputs, with the same answers. A dev-dependency
+# does not enter a binary, so the library tree links no external crate.
+hashbrown = { version = "0.16", default-features = false, features = ["default-hasher", "inline-more"] }
+
+# The mmap-vs-read bench reads a file through rgx-core's mmap, and the mmap
+# is a `std` thing: without the feature there is no `rgx_core::memmap2`, and
+# the example does not compile in the build without `std` that the gate
+# makes. The example stands down with the thing it uses, and the build
+# without `std` does not carry it.
+[[example]]
+name = "mmap_vs_read"
+required-features = ["std"]

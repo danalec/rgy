@@ -1,0 +1,77 @@
+--- a/crates/rgx-core/src/tv/plan.rs
++++ b/crates/rgx-core/src/tv/plan.rs
+@@ -347,8 +347,25 @@
+         f
+     }
+ 
++    /// The lock the ablation switch's writers hold, taken by a test that
++    /// reads the switch's effect.
++    ///
++    /// The switch is process-global, so a reader that does not hold the
++    /// lock can see it flipped in the middle of its own test — the plan
++    /// comes out under the ablation's rules while the test means the
++    /// ordinary ones. The acquisition tolerates a poisoned lock: a panic
++    /// in one test must not cascade into every later holder of the same
++    /// lock, and what the lock guards is a `()`, so there is nothing a
++    /// poisoned lock could have left inconsistent.
++    fn ablate_guard() -> std::sync::MutexGuard<'static, ()> {
++        crate::ABLATE_EXTENTS_LOCK
++            .lock()
++            .unwrap_or_else(|e| e.into_inner())
++    }
++
+     #[test]
+     fn a_gap_at_the_threshold_ends_the_unit_and_one_under_it_does_not() {
++        let _guard = ablate_guard();
+         let at = u64::from(MAX_EXTENT_GAP);
+         let under = u64::from(MAX_EXTENT_GAP - 1);
+ 
+@@ -374,6 +391,7 @@
+ 
+     #[test]
+     fn a_chain_of_small_gaps_collapses_into_one_unit() {
++        let _guard = ablate_guard();
+         // f0 [0,100), f1 [110,210), f2 [220,320): two 10-byte holes.
+         let locs = vec![loc(0, 0, 100), loc(1, 110, 100), loc(2, 220, 100)];
+         let units = cut_units(&[0, 1, 2], &[0, 3], &locs);
+@@ -383,6 +401,7 @@
+ 
+     #[test]
+     fn every_file_sits_whole_inside_exactly_one_unit() {
++        let _guard = ablate_guard();
+         let locs = vec![
+             loc(0, 0, 100),
+             loc(1, 200, 50),
+@@ -418,6 +437,7 @@
+ 
+     #[test]
+     fn the_pre_plan_filter_leaves_holes_the_cut_never_reads() {
++        let _guard = ablate_guard();
+         let q = query_sig512("needle", false).expect("a literal query has a signature");
+         let a = with_sig(loc(0, 0, 100), b"needle at the start");
+         let b = with_sig(loc(1, 100, 70_000), b"nothing to see here at all");
+@@ -446,6 +466,7 @@
+ 
+     #[test]
+     fn a_small_hole_is_read_rather_than_issued_around() {
++        let _guard = ablate_guard();
+         let q = query_sig512("needle", false).expect("a literal query has a signature");
+         let a = with_sig(loc(0, 0, 100), b"needle at the start");
+         let b = with_sig(loc(1, 100, 1_000), b"nothing to see here at all");
+@@ -465,6 +486,7 @@
+ 
+     #[test]
+     fn a_rollup_under_a_foreign_fingerprint_is_never_rejected() {
++        let _guard = ablate_guard();
+         let q = query_sig512("needle", false).expect("a literal query has a signature");
+         let plain = with_sig(loc(0, 0, 100), b"nothing to see here at all");
+         let rollup = with_sig(
+@@ -490,7 +512,7 @@
+ 
+     #[test]
+     fn the_ablation_rejects_nothing() {
+-        let _guard = crate::ABLATE_EXTENTS_LOCK.lock().unwrap();
++        let _guard = ablate_guard();
+         let q = query_sig512("needle", false).expect("a literal query has a signature");
+         let a = with_sig(loc(0, 0, 100), b"nothing to see here at all");
+         let locs = vec![a];

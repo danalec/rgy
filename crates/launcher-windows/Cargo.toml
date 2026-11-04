@@ -1,0 +1,19 @@
+[package]
+name = "rgy-launcher-windows"
+version = "0.1.9"
+edition = "2024"
+rust-version = "1.89"
+authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
+description = "The launcher's window on Windows: a floating overlay, drawn with GDI"
+license = "Apache-2.0"
+repository = "https://github.com/danalec/rgy"
+homepage = "https://github.com/danalec/rgy"
+documentation = "https://docs.rs/rgy-launcher-windows"
+keywords = ["windows", "launcher", "gui", "search"]
+categories = ["gui", "os::windows-apis"]
+readme = "../../README.md"
+
+
+[dependencies]
+# The launcher's model: the query, the rows, the geometry.
+rgy-launcher = { path = "../launcher", version = "0.1.9" }

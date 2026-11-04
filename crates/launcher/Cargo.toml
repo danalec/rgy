@@ -1,0 +1,25 @@
+[package]
+name = "rgy-launcher"
+version = "0.1.9"
+edition = "2024"
+rust-version = "1.89"
+authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
+description = "The launcher's model: the query, the results, the actions, the hotkey"
+license = "Apache-2.0"
+repository = "https://github.com/danalec/rgy"
+homepage = "https://github.com/danalec/rgy"
+documentation = "https://docs.rs/rgy-launcher"
+keywords = ["search", "launcher", "tui"]
+categories = ["command-line-utilities"]
+readme = "../../README.md"
+
+
+[features]
+default = []
+# The crate has no `std` half on purpose: the launcher's model is the
+# decision — what the user typed, what the results are, which one is
+# selected, what the window's geometry is — and none of that touches the
+# machine. The window, the font and the daemon client are the machine, and
+# they live in the binary and in the platform crates.
+
+[dependencies]
