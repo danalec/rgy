@@ -683,7 +683,10 @@ fn print_selection<W: std::io::Write>(
     }
     out.flush()?;
     if dropped > 0 {
-        eprintln!("{}", uncarryable_paths(dropped));
+        // The wording has to name the separator the caller asked for: a
+        // NUL-separated run drops records that carry NUL, not records that
+        // carry a line break, and the line-wording function would lie.
+        eprintln!("{}", uncarryable(dropped, req.separator));
     }
     Ok(())
 }
@@ -1073,6 +1076,26 @@ mod tests {
         assert!(text.contains("a.txt"), "{text:?}");
         assert!(text.contains("d.txt"), "{text:?}");
         assert!(!text.contains("b"), "{text:?}");
+    }
+
+    /// The warning names the separator the caller asked for.
+    ///
+    /// A NUL-separated selection drops records that carry a NUL byte, not
+    /// records that carry a line break. Reporting the line rule for it is a
+    /// lie about the crate's own one-record-per-separator contract, and the
+    /// selection printer used to emit exactly that.
+    #[cfg(feature = "std")]
+    #[test]
+    fn the_warning_names_the_separator_the_caller_asked_for() {
+        let nul = uncarryable(1, Separator::Nul);
+        assert!(nul.contains("NUL byte"), "{nul}");
+        assert!(nul.contains("one record per NUL byte"), "{nul}");
+        assert!(!nul.contains("line break"), "{nul}");
+
+        let line = uncarryable(2, Separator::Line);
+        assert!(line.contains("a newline"), "{line}");
+        assert!(line.contains("one record per line"), "{line}");
+        assert!(!line.contains("NUL byte"), "{line}");
     }
 
     #[cfg(feature = "std")]

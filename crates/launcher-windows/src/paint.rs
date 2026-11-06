@@ -575,7 +575,23 @@ fn draw_icon(hdc: HDC, icon: HICON, x: i32, y: i32, size: i32) {
 /// settings panel is as tall as its rows, and the column of actions is
 /// inside the room the results leave.
 fn model_of(view: &View) -> Layout {
-    let mut model = Layout::with_rows(view.rows.len() as u32);
+    // The view carries the width the host sized the window with, and the
+    // picture is measured from it: the old code started from the
+    // geometry's default (600 units) and never applied it, so a window
+    // the host made wider or narrower was drawn 600 units wide — the
+    // query, the row bands and the actions column all positioned for a
+    // width that was not on the screen, and the unpainted strip turned
+    // into a solid bar once the compositor gave it full alpha.
+    //
+    // A view that has not been sized yet (the window's first, hidden
+    // frame and a test's default) keeps the geometry's own width, so the
+    // picture is never drawn zero units wide.
+    let width = if view.width == 0 {
+        Layout::default().width
+    } else {
+        view.width
+    };
+    let mut model = Layout::with_rows(view.rows.len() as u32).with_width(width);
     // The preview panel is a layer over the results, and it is as tall as
     // it needs to be: the host sized the window with the same geometry,
     // and the two have to agree or the panel would be cut off.
@@ -642,9 +658,11 @@ pub unsafe fn paint(
 ) {
     let model = model_of(view);
     let column = model.side_bar != 0;
-    // The picture is the window's own size: the window's size is the
-    // model's size at this screen's scale, and the two have to be the
-    // same number of pixels or the picture does not fill the window.
+    // The picture is the window's own size: `model_of` measured it from
+    // the view's width — the same number the host sized the window from —
+    // so at this screen's scale the two are the same number of pixels and
+    // the picture fills the window. A picture that did not fill it would
+    // leave a strip the compositor turns into a solid bar.
     let width = device_pixels(model.width, scale) as i32;
     let height = device_pixels(model.height(), scale) as i32;
     *painted = (width, height);
@@ -1550,6 +1568,91 @@ mod tests {
             }
         }
         found
+    }
+
+    /// A width the user chose reaches the picture, and not just the window.
+    ///
+    /// The host sizes the window from `App::layout().width`, and the view
+    /// carries that width. `model_of` used to start from the geometry's
+    /// default (600 units) and never applied it: a 760-unit window was
+    /// drawn 600 units wide, the query, row bands and actions column all
+    /// positioned for 600, and the unpainted right strip turned into a
+    /// solid black bar in `Layer::compose`.
+    #[test]
+    fn a_width_the_user_chose_reaches_the_picture() {
+        let width = 760;
+        let mut rows = Vec::new();
+        for i in 0..6 {
+            rows.push(Row::new(format!("file-{i}.txt"), 0));
+        }
+        let view = View {
+            width,
+            query: "rela".to_string(),
+            rows,
+            // Four actions make the column appear, so its position is a
+            // fact about the width and not only about the rows.
+            menu: alloc::vec![
+                Action::Open,
+                Action::OpenFolder,
+                Action::CopyPath,
+                Action::Preview,
+            ],
+            ..View::default()
+        };
+
+        let model = model_of(&view);
+        assert_eq!(model.width, width, "the model carries the view's width");
+        assert!(
+            model.side_bar != 0,
+            "the actions column has room and is drawn"
+        );
+        // The column and the content are positioned for the wider window,
+        // not for the default 600: their right edge moved with the width.
+        assert_eq!(
+            model.content_width(),
+            width - (model.border + model.padding) * 2,
+            "the content spans the wider window"
+        );
+        assert_eq!(
+            model.side_bar_right(),
+            width - (model.border + model.padding),
+            "the column sits at the right of the wider window"
+        );
+
+        // The window's own device size, at this screen's scale.
+        let surface = (
+            device_pixels(model.width, SCALE_PERCENT) as i32,
+            device_pixels(model.height(), SCALE_PERCENT) as i32,
+        );
+        let Some(canvas) = Canvas::new(surface.0, surface.1) else {
+            panic!("the platform gave no surface to draw on");
+        };
+        let fonts = Fonts::new(SCALE_PERCENT);
+        let mut icons = Icons::new();
+        let mut painted = (0, 0);
+        unsafe {
+            paint(
+                canvas.dc,
+                &view,
+                &mut painted,
+                false,
+                &mut icons,
+                &fonts,
+                &Colours::WARM,
+                SCALE_PERCENT,
+                Lang::English,
+            );
+        }
+        assert_eq!(painted, surface, "the picture is as wide as the window");
+
+        // The strip a 600-unit picture would have left is painted: an
+        // unpainted pixel is (0, 0, 0), and the compositor gives it full
+        // alpha — a solid black bar at the right of the window.
+        assert_eq!(
+            canvas.pixel(surface.0 - 16, 4),
+            in_pixels(Colours::WARM.backdrop),
+            "the right of the wider window is painted, not left bare"
+        );
     }
 
     /// The settings panel covers the rows and marks its selected row.

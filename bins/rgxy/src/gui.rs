@@ -1872,6 +1872,10 @@ fn view(state: &State) -> View {
             .theme(rgy_launcher::Theme::WARM),
         alpha: state.settings.overlay.alpha,
         anchor: (state.settings.overlay.x, state.settings.overlay.y),
+        // The host sizes the window from the model's layout, and the
+        // picture is drawn at that same width: the view carries it so the
+        // paint does not fall back to the geometry's default 600 units.
+        width: app.layout().width,
     }
 }
 

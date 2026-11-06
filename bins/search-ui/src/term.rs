@@ -754,10 +754,16 @@ mod imp {
     /// The terminal's own attributes.
     ///
     /// The platform's struct, whole: the fields are the platform's, in the
-    /// platform's order. Linux and the BSDs differ in one place — Linux
-    /// carries the line discipline's own byte and has more control
-    /// characters — and the difference is spelled here rather than guessed
-    /// at.
+    /// platform's order. There are three shapes, not one:
+    ///
+    /// * Linux: `tcflag_t` and `speed_t` are `u32`, plus the line
+    ///   discipline's own byte and 32 control characters (60 bytes).
+    /// * macOS: `tcflag_t` and `speed_t` are `c_ulong` — 8 bytes on the
+    ///   64-bit targets this tree ships — with 20 control characters
+    ///   (72 bytes). A 44-byte BSD struct here is 28 bytes short of what
+    ///   `tcgetattr` writes, so it is a stack overwrite, not a wrong flag.
+    /// * The other BSDs (FreeBSD carries this tree's CI): `u32` flags and
+    ///   speeds, 20 control characters (44 bytes).
     #[cfg(target_os = "linux")]
     #[repr(C)]
     #[derive(Clone, Copy)]
@@ -772,9 +778,20 @@ mod imp {
         c_ospeed: u32,
     }
 
-    /// The BSD shape of the same struct: no line byte, and twenty control
-    /// characters.
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct Termios {
+        c_iflag: u64,
+        c_oflag: u64,
+        c_cflag: u64,
+        c_lflag: u64,
+        c_cc: [u8; 20],
+        c_ispeed: u64,
+        c_ospeed: u64,
+    }
+
+    #[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
     #[repr(C)]
     #[derive(Clone, Copy)]
     struct Termios {
@@ -811,10 +828,14 @@ mod imp {
     }
 
     // The platform's structs are the platform's sizes: a struct that is
-    // short of them is a struct the platform writes past.
+    // short of them is a struct the platform writes past. macOS's 72 bytes
+    // are the reason there is a third shape — the BSD-u32 shape is correct
+    // for FreeBSD but 28 bytes short on Darwin.
     #[cfg(target_os = "linux")]
     const _: () = assert!(std::mem::size_of::<Termios>() == 60);
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    const _: () = assert!(std::mem::size_of::<Termios>() == 72);
+    #[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
     const _: () = assert!(std::mem::size_of::<Termios>() == 44);
     const _: () = assert!(std::mem::size_of::<PollFd>() == 8);
     const _: () = assert!(std::mem::size_of::<Winsize>() == 8);
@@ -831,30 +852,118 @@ mod imp {
     #[cfg(not(target_os = "linux"))]
     const VTIME: usize = 17;
 
-    // The input flags, in the platform's own spelling.
-    const IGNBRK: u32 = 0o000001;
-    const BRKINT: u32 = 0o000002;
-    const PARMRK: u32 = 0o000010;
-    const ISTRIP: u32 = 0o000040;
-    const INLCR: u32 = 0o000100;
-    const IGNCR: u32 = 0o000200;
-    const ICRNL: u32 = 0o000400;
-    const IXON: u32 = 0o002000;
+    /// The termios flags in the platform's own spelling.
+    ///
+    /// Linux and the BSDs do not agree on the numbers: Linux spells `ICANON`
+    /// as `0o2` and the BSDs as `0x100`, and macOS's flags are 8 bytes wide
+    /// while Linux's and FreeBSD's are 4. One set of Linux octal constants
+    /// silently cleared the wrong bits on every BSD, so raw mode was never
+    /// fully on there. The values below are the ones `libc` ships for each
+    /// family (`src/unix/linux_like` and `src/unix/bsd`).
+    #[cfg(target_os = "linux")]
+    mod flags {
+        pub type Flag = u32;
+        pub const IGNBRK: Flag = 0o000001;
+        pub const BRKINT: Flag = 0o000002;
+        pub const PARMRK: Flag = 0o000010;
+        pub const ISTRIP: Flag = 0o000040;
+        pub const INLCR: Flag = 0o000100;
+        pub const IGNCR: Flag = 0o000200;
+        pub const ICRNL: Flag = 0o000400;
+        pub const IXON: Flag = 0o002000;
+        pub const OPOST: Flag = 0o000001;
+        pub const ISIG: Flag = 0o000001;
+        pub const ICANON: Flag = 0o000002;
+        pub const ECHO: Flag = 0o000010;
+        pub const ECHONL: Flag = 0o000100;
+        pub const IEXTEN: Flag = 0o100000;
+        pub const CSIZE: Flag = 0o000060;
+        pub const PARENB: Flag = 0o000400;
+        pub const CS8: Flag = 0o000060;
+    }
 
-    /// The output flag: the terminal does not touch what is written.
-    const OPOST: u32 = 0o000001;
+    #[cfg(not(target_os = "linux"))]
+    mod flags {
+        /// `tcflag_t` is `c_ulong` on Darwin, `c_uint` on the other BSDs.
+        #[cfg(target_os = "macos")]
+        pub type Flag = u64;
+        #[cfg(not(target_os = "macos"))]
+        pub type Flag = u32;
 
-    // The local flags.
-    const ISIG: u32 = 0o000001;
-    const ICANON: u32 = 0o000002;
-    const ECHO: u32 = 0o000010;
-    const ECHONL: u32 = 0o000100;
-    const IEXTEN: u32 = 0o100000;
+        pub const IGNBRK: Flag = 0x00000001;
+        pub const BRKINT: Flag = 0x00000002;
+        pub const PARMRK: Flag = 0x00000008;
+        pub const ISTRIP: Flag = 0x00000020;
+        pub const INLCR: Flag = 0x00000040;
+        pub const IGNCR: Flag = 0x00000080;
+        pub const ICRNL: Flag = 0x00000100;
+        pub const IXON: Flag = 0x00000200;
+        pub const OPOST: Flag = 0x00000001;
+        pub const ISIG: Flag = 0x00000080;
+        pub const ICANON: Flag = 0x00000100;
+        pub const ECHO: Flag = 0x00000008;
+        pub const ECHONL: Flag = 0x00000010;
+        pub const IEXTEN: Flag = 0x00000400;
+        pub const CSIZE: Flag = 0x00000300;
+        pub const PARENB: Flag = 0x00001000;
+        pub const CS8: Flag = 0x00000300;
+    }
 
-    // The control flags.
-    const CSIZE: u32 = 0o000060;
-    const PARENB: u32 = 0o000400;
-    const CS8: u32 = 0o000060;
+    #[cfg(test)]
+    mod termios_tests {
+        use super::*;
+
+        /// The flag values are the platform's own. One set of Linux octal
+        /// constants silently cleared the wrong bits on every BSD, so raw
+        /// mode was never fully on there; pin the values the platform
+        /// headers (and `libc`) actually define.
+        #[test]
+        fn the_flags_are_the_platforms_own() {
+            #[cfg(target_os = "linux")]
+            {
+                assert_eq!(flags::ICANON, 0o000002);
+                assert_eq!(flags::ISIG, 0o000001);
+                assert_eq!(flags::IEXTEN, 0o100000);
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                assert_eq!(flags::ICANON, 0x00000100);
+                assert_eq!(flags::ISIG, 0x00000080);
+                assert_eq!(flags::IEXTEN, 0x00000400);
+            }
+        }
+
+        /// A struct shorter than the platform's is a buffer `tcgetattr`
+        /// writes past. Darwin's 72 bytes are the reason there are three
+        /// shapes rather than the old Linux/BSD pair.
+        #[test]
+        fn the_struct_is_the_platforms_size() {
+            #[cfg(target_os = "linux")]
+            assert_eq!(std::mem::size_of::<Termios>(), 60);
+            #[cfg(target_os = "macos")]
+            assert_eq!(std::mem::size_of::<Termios>(), 72);
+            #[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
+            assert_eq!(std::mem::size_of::<Termios>(), 44);
+        }
+
+        /// `raw()` clears the flags it names and arms the one-character read.
+        #[test]
+        fn raw_mode_clears_the_local_flags() {
+            let mut attributes = Termios::cleared();
+            attributes.c_lflag = !0;
+            attributes.c_iflag = !0;
+            attributes.c_oflag = !0;
+            raw(&mut attributes);
+            assert_eq!(
+                attributes.c_lflag
+                    & (flags::ECHO | flags::ECHONL | flags::ICANON | flags::ISIG | flags::IEXTEN),
+                0
+            );
+            assert_eq!(attributes.c_oflag & flags::OPOST, 0);
+            assert_eq!(attributes.c_cc[VMIN], 1);
+            assert_eq!(attributes.c_cc[VTIME], 0);
+        }
+    }
 
     /// The action that says "now".
     const TCSANOW: i32 = 0;
@@ -963,6 +1072,9 @@ mod imp {
 
     /// The attributes of a terminal that gives the program the keyboard.
     fn raw(attributes: &mut Termios) {
+        // Imported here, not at module scope: every constant is used in this
+        // function, so the import cannot be an unused one on any platform.
+        use self::flags::*;
         // The input flags: no break signalling, no parity, no stripping and
         // no translation — the bytes the user types arrive as they were
         // typed.
@@ -1101,6 +1213,7 @@ mod imp {
 #[cfg(windows)]
 mod imp {
     use std::io;
+    use std::sync::Mutex;
     use std::time::Duration;
 
     use super::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -1354,60 +1467,91 @@ mod imp {
         Ok(mode)
     }
 
-    /// Ask the console to read the escape sequences.
+    /// The console modes the program found before it touched them.
     ///
-    /// The console has to be told to interpret them: without the flag the
-    /// sequences are text. An output that is not a console at all is left
-    /// alone — the bytes go to a pipe or to a file, and what they mean
-    /// there is the reader's business. A console that refuses the flag is a
-    /// console that cannot run this interface, and that is an error.
-    fn enable_virtual_terminal_processing() -> io::Result<()> {
-        let handle = output_handle()?;
-        let mode = match console_mode(handle) {
-            Ok(mode) => mode,
-            Err(_) => return Ok(()),
-        };
-        if mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING == 0
-            && unsafe { SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) } == 0
-        {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
+    /// The doc says the program leaves the terminal the way it was found,
+    /// and an OR of three flags is not that: a console that had echo or
+    /// processed input off gets them forced on, and the output console stays
+    /// in VT-processing mode forever. Both handles' original modes are kept
+    /// and restored exactly.
+    static ORIGINAL_MODES: Mutex<Option<ConsoleModes>> = Mutex::new(None);
+
+    #[derive(Clone, Copy)]
+    struct ConsoleModes {
+        input: u32,
+        /// `None` when the output is a pipe or a file, which has no console
+        /// mode to save or restore.
+        output: Option<u32>,
     }
 
     pub fn enable_raw_mode() -> io::Result<()> {
-        // The escape sequences are the console's own language, and the
-        // console has to be told to read them.
-        enable_virtual_terminal_processing()?;
-        let handle = input_handle()?;
-        let mode = console_mode(handle)?;
+        let input = input_handle()?;
+        let output = output_handle()?;
+        let input_mode = console_mode(input)?;
+        // An output that is not a console has no mode: the bytes go to a
+        // pipe or a file, and what they mean there is the reader's business.
+        let output_mode = console_mode(output).ok();
+
+        let mut saved = ORIGINAL_MODES.lock().unwrap_or_else(|e| e.into_inner());
+        if saved.is_some() {
+            return Ok(());
+        }
+
+        // Ask the console to interpret escape sequences, but only set the
+        // flag when it was off; the saved mode is what disable puts back.
+        if let Some(mode) = output_mode
+            && mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING == 0
+            && unsafe { SetConsoleMode(output, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+
         // The keys come to the program one at a time, and the console does
         // not echo them.
         if unsafe {
             SetConsoleMode(
-                handle,
-                mode & !(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT),
+                input,
+                input_mode & !(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT),
             )
         } == 0
         {
-            return Err(io::Error::last_os_error());
+            let err = io::Error::last_os_error();
+            // A failed enable must not leave the output half-changed.
+            if let Some(mode) = output_mode {
+                let _ = unsafe { SetConsoleMode(output, mode) };
+            }
+            return Err(err);
         }
+
+        *saved = Some(ConsoleModes {
+            input: input_mode,
+            output: output_mode,
+        });
         Ok(())
     }
 
     pub fn disable_raw_mode() -> io::Result<()> {
-        let handle = input_handle()?;
-        let mode = console_mode(handle)?;
-        if unsafe {
-            SetConsoleMode(
-                handle,
-                mode | (ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT),
-            )
-        } == 0
-        {
-            return Err(io::Error::last_os_error());
+        let input = input_handle()?;
+        let output = output_handle()?;
+        let mut saved = ORIGINAL_MODES.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(modes) = saved.take() else {
+            return Ok(());
+        };
+
+        let mut first_error = None;
+        if unsafe { SetConsoleMode(input, modes.input) } == 0 {
+            first_error = Some(io::Error::last_os_error());
         }
-        Ok(())
+        if let Some(mode) = modes.output
+            && unsafe { SetConsoleMode(output, mode) } == 0
+            && first_error.is_none()
+        {
+            first_error = Some(io::Error::last_os_error());
+        }
+        match first_error {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
     }
 
     pub fn size() -> io::Result<(u16, u16)> {

@@ -20,8 +20,32 @@
 //! writers race.
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use rgy_launcher::settings::Settings;
+
+/// The number that tells the temporary files apart.
+///
+/// A settings key is saved on a new, unjoined thread of its own, so two
+/// saves overlap while an arrow key repeats. One temporary name for the
+/// whole process made both write the same file: one renamed it while the
+/// other was still writing it, and the loser reported a save that never
+/// landed. The process id says which process and the counter says which
+/// write of that process.
+static TEMP_ID: AtomicU64 = AtomicU64::new(0);
+
+/// The saves of this process, one at a time.
+///
+/// The panel holds the whole of the settings and writes them on every
+/// key. The unique temporary name keeps two writes from sharing a file;
+/// the lock keeps the read, the write and the rename one step, so an
+/// overlapping save cannot quarantine a file the other one just wrote.
+static SAVE_LOCK: Mutex<()> = Mutex::new(());
+
+/// The platform's own code for "the file is held by another process".
+#[cfg(windows)]
+const ERROR_SHARING_VIOLATION: i32 = 32;
 
 /// The file the settings live in.
 pub fn store_path() -> Option<PathBuf> {
@@ -60,15 +84,31 @@ pub fn load(path: &Path) -> Result<Settings, std::io::Error> {
 /// person who has to look at what happened can still read it under its
 /// new name.
 pub fn save(path: &Path, settings: &Settings) -> std::io::Result<()> {
+    // One save at a time in this process. A poisoned lock is recovered:
+    // a writer that panicked left the file in the state the next writer
+    // reads, and refusing every save after one panic is worse.
+    let _guard = SAVE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
     if path.exists()
         && let Err(cause) = load(path)
     {
+        // A file another process holds open for a moment is NOT a broken
+        // file. On Windows the refusal is ERROR_SHARING_VIOLATION, which
+        // the standard library does not name, and quarantine would rename
+        // the user's preferences for a lock that lasts a moment. Only a
+        // genuine parse, UTF-8 or version error is moved aside; a busy
+        // file is reported to the caller and left exactly where it is.
+        if busy(&cause) {
+            return Err(cause);
+        }
         quarantine(path, cause)?;
     }
-    let temp = temp_path(path);
+    let id = TEMP_ID.fetch_add(1, Ordering::Relaxed);
+    let temp = temp_path(path, id);
     if let Err(err) = std::fs::write(&temp, settings.render()) {
         let _ = std::fs::remove_file(&temp);
         return Err(err);
@@ -78,6 +118,23 @@ pub fn save(path: &Path, settings: &Settings) -> std::io::Result<()> {
         return Err(err);
     }
     Ok(())
+}
+
+/// Whether the error says the file is held for a moment by another process.
+///
+/// Windows says it with `ERROR_SHARING_VIOLATION`, which the standard
+/// library does not map to an `ErrorKind`: it is the raw code that says
+/// it. A momentary lock is not corruption, and the usage history's store
+/// already carries the same rule.
+#[cfg(windows)]
+fn busy(err: &std::io::Error) -> bool {
+    err.raw_os_error() == Some(ERROR_SHARING_VIOLATION)
+}
+
+/// Whether the error says the file is held for a moment by another process.
+#[cfg(not(windows))]
+fn busy(err: &std::io::Error) -> bool {
+    err.kind() == std::io::ErrorKind::WouldBlock
 }
 
 /// Move a settings file that could not be read aside.
@@ -117,8 +174,10 @@ fn replace(temp: &Path, store: &Path) -> std::io::Result<()> {
 ///
 /// Beside the file and not in the temporary folder of the machine: the
 /// move that replaces a file has to be a move **inside one volume**.
-fn temp_path(path: &Path) -> PathBuf {
-    sibling(path, &format!(".{}.tmp", std::process::id()))
+/// The name carries the process and the number of the write, so two
+/// overlapping saves never write or rename the same file.
+fn temp_path(path: &Path, id: u64) -> PathBuf {
+    sibling(path, &format!(".{}.{id}.tmp", std::process::id()))
 }
 
 /// The file a settings file that could not be read is moved to.
@@ -253,6 +312,117 @@ mod tests {
         assert!(load(&path).is_err(), "a directory is not settings");
         assert!(save(&path, &Settings::default()).is_err(), "not written");
         assert!(path.is_dir(), "the directory is still there");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// A momentary lock is not corruption.
+    ///
+    /// The busy guard is what keeps `save()` from renaming a perfectly
+    /// good settings file to `.settings.tsv.broken` when another process
+    /// holds it open for an instant.
+    #[test]
+    fn a_busy_error_is_not_a_broken_file() {
+        #[cfg(windows)]
+        let held = std::io::Error::from_raw_os_error(32);
+        #[cfg(not(windows))]
+        let held = std::io::Error::from(std::io::ErrorKind::WouldBlock);
+        assert!(busy(&held), "a momentary lock is busy");
+        let broken = std::io::Error::other("a version this launcher does not know");
+        assert!(!busy(&broken), "a parse error is not a momentary lock");
+    }
+
+    /// A settings file held by another process is not moved aside.
+    ///
+    /// The store is held here with no sharing at all, so the read is
+    /// refused the way the platform refuses it: with the sharing
+    /// violation, and not with the "this file is broken" that the
+    /// quarantine is for. The write fails, the caller is told, and the
+    /// user's preferences are where they were.
+    #[cfg(windows)]
+    #[test]
+    fn a_store_that_is_held_is_not_moved_aside() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let path = store("held");
+        let mut settings = Settings::default();
+        settings.overlay.width = 812;
+        save(&path, &settings).expect("the settings are written");
+        let before = std::fs::read(&path).expect("the file is there");
+
+        // The file, there and held: nobody can read it and nobody can
+        // move it, and the write has to say so.
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .expect("the settings file is held");
+
+        let mut other = Settings::default();
+        other.overlay.width = 999;
+        assert!(save(&path, &other).is_err(), "the file cannot be read");
+
+        drop(held);
+        assert_eq!(
+            std::fs::read(&path).expect("the file is there"),
+            before,
+            "the settings survived the failed write"
+        );
+        assert!(
+            !quarantine_path(&path).exists(),
+            "the settings were moved aside"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// Overlapping saves do not share a temporary file.
+    ///
+    /// The panel spawns a new, unjoined thread on every settings key, so
+    /// holding an arrow key overlaps many writes. One temporary name for
+    /// the whole process made one save rename the file another was still
+    /// writing: the loser failed with a spurious "settings not saved"
+    /// note, a change was lost, and the file could be half-interleaved.
+    /// Every save now has its own temporary name and the saves are one
+    /// at a time, so all of them land and the file stays whole.
+    #[test]
+    fn overlapping_saves_both_land_and_the_file_is_whole() {
+        let path = store("overlapping");
+        let mut first = Settings::default();
+        first.overlay.width = 711;
+        let mut second = Settings::default();
+        second.overlay.width = 933;
+        save(&path, &first).expect("the file starts out whole");
+
+        let mut writers = Vec::new();
+        for writer in 0..6 {
+            let path = path.clone();
+            let settings = if writer % 2 == 0 {
+                first.clone()
+            } else {
+                second.clone()
+            };
+            writers.push(std::thread::spawn(move || {
+                let mut outcomes = Vec::new();
+                for _ in 0..20 {
+                    outcomes.push(save(&path, &settings));
+                }
+                outcomes
+            }));
+        }
+        for writer in writers {
+            for outcome in writer.join().expect("the writer did not panic") {
+                assert!(outcome.is_ok(), "an overlapping save failed: {outcome:?}");
+            }
+        }
+        let back = load(&path).expect("the file is still whole");
+        assert!(
+            back == first || back == second,
+            "the file is one whole settings or the other: {back:?}"
+        );
+        // No piece of any write is left beside the file.
+        for entry in std::fs::read_dir(path.parent().unwrap()).unwrap() {
+            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+            assert_eq!(name, "settings.tsv", "no temporary file was left: {name}");
+        }
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }

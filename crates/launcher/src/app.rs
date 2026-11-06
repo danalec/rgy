@@ -49,12 +49,17 @@ use crate::results::{Results, Row};
 /// another number with [`App::set_visible_rows`].
 pub const DEFAULT_VISIBLE_ROWS: usize = 12;
 
-/// How many rows of the launcher's geometry fit on a screen.
+/// How many rows of the launcher's geometry fit in the height it is given.
 ///
 /// The window's chrome — the field, the padding and the border — is what
-/// is left over, and the rest is rows. The host knows the height of the
-/// screen and the model knows the height of a row, and this is where the
+/// is left over, and the rest is rows. The host knows the height the window
+/// can use and the model knows the height of a row, and this is where the
 /// two meet.
+///
+/// That height is not the whole of the work area: the host hands this the
+/// room the window can actually occupy (see [`room_below_anchor`]). The
+/// window does not start at the top of the area, and a clipped window
+/// cannot show rows the model counted for a taller one.
 ///
 /// A screen too short for the window still gets a row: a window that
 /// shows nothing cannot show the selection either.
@@ -66,6 +71,24 @@ pub fn rows_that_fit(screen_height: u32) -> usize {
     // with the arrow keys anyway. The screen decides how many rows there
     // is room for; it does not decide how many the launcher wants.
     (room / layout.row_height).clamp(1, DEFAULT_VISIBLE_ROWS as u32) as usize
+}
+
+/// The room a window has below its vertical anchor, in the model's units.
+///
+/// The window is placed `anchor_y` permille down the work area and is
+/// clipped to the room below that place (the platform's `spot_on`). So
+/// [`rows_that_fit`] must be given that room, not the whole area: counted
+/// from the whole area it would ask for rows a clipped window cannot draw,
+/// and the picture would silently cut off the bottom rows and the last
+/// entries of the actions column.
+///
+/// The offset is capped so that a window pinned to the very bottom of the
+/// area still has a row of room: an anchor is a place, not a way of not
+/// being there.
+pub fn room_below_anchor(area_height: u32, anchor_y: u32) -> u32 {
+    let taken = area_height.saturating_mul(anchor_y.min(1000)) / 1000;
+    let offset = taken.min(area_height.saturating_sub(1));
+    area_height.saturating_sub(offset)
 }
 
 /// What the launcher is showing.
@@ -1162,6 +1185,36 @@ mod tests {
         assert_eq!(rows_that_fit(1080), DEFAULT_VISIBLE_ROWS);
         // And a screen too short for the window still gets a row.
         assert_eq!(rows_that_fit(10), 1);
+    }
+
+    /// A short work area with the window below its top leaves less room
+    /// than the whole area, and the rows have to be counted in that room.
+    ///
+    /// 1080 device pixels at 200% are 540 model units; an anchor 18% down
+    /// leaves 443 of them. Counted from the whole 540 the launcher asks
+    /// for twelve rows (497 units) into a window the platform clips to
+    /// 443, and the bottom rows are cut off.
+    #[test]
+    fn a_short_work_area_below_an_offset_keeps_the_rows_in_the_room() {
+        let area = 540u32;
+        let anchor_y = 180u32; // the default vertical anchor, in permille
+        let room = room_below_anchor(area, anchor_y);
+        assert!(room < area, "the anchor leaves less than the whole area");
+
+        let rows = rows_that_fit(room) as u32;
+        let height = Layout::with_rows(rows).height();
+        assert!(
+            height <= room,
+            "the rows fit in the room below the anchor: {height} <= {room}"
+        );
+
+        // Counted from the whole area (what the bug did), the same window
+        // asks for more rows than the clipped window can show.
+        let naive = Layout::with_rows(rows_that_fit(area) as u32).height();
+        assert!(
+            naive > room,
+            "the whole area asks for a window taller than the room: {naive} > {room}"
+        );
     }
 
     #[test]

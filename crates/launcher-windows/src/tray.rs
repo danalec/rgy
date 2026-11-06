@@ -32,7 +32,13 @@ use crate::win::*;
 /// The shell does not send a message of its own for the notification area:
 /// the window declares the number, and the shell sends it back with the
 /// mouse's message in `lParam` and the pointer's place in `wParam`.
-pub const WM_TRAY: UINT = WM_APP + 2;
+///
+/// This is the window's fourth private message: `WM_TOGGLE`, `WM_SHOW`
+/// and `WM_WAKE` are `WM_APP+1..+3` in `window.rs`, so the tray takes the
+/// next free number, `WM_APP+4`. A shared id would let a posted showing
+/// be answered as a tray click, or a tray callback as a showing — the
+/// right-click menu would never open.
+pub const WM_TRAY: UINT = WM_APP + 4;
 
 /// The mouse's own message, out of the word the shell sent.
 ///
@@ -469,6 +475,20 @@ fn write_tip(tip: &mut [u16; 128], text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tray's callback has a number of its own.
+    ///
+    /// It used to be `WM_APP+2`, the same id the window gives `WM_SHOW`:
+    /// a second launcher posts that id, and the shell sends this one, so
+    /// one message could be answered as the other. The next free number
+    /// is `WM_APP+4`, and none of the window's own messages use it.
+    #[test]
+    fn the_tray_callback_has_its_own_message() {
+        assert_eq!(WM_TRAY, WM_APP + 4);
+        assert_ne!(WM_TRAY, crate::window::WM_TOGGLE);
+        assert_ne!(WM_TRAY, crate::window::WM_SHOW);
+        assert_ne!(WM_TRAY, crate::window::WM_WAKE);
+    }
 
     /// What the platform drew.
     ///

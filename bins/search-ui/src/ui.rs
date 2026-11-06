@@ -193,6 +193,12 @@ impl TerminalGuard {
     /// terminal's own is.
     fn enter(out: &mut impl Write, bg: Color) -> Result<Self, String> {
         term::enable_raw_mode().map_err(|e| format!("cannot enter raw mode: {e}"))?;
+        // The guard exists from here on. If any screen write below fails, the
+        // `?` drops it on the way out, so the terminal is restored even on an
+        // early return — the case the guard exists for. Creating it only at
+        // the end left the console in raw mode and the alternate screen when
+        // a write to a broken stdout failed.
+        let guard = TerminalGuard;
         let mut screen = term::Screen::new(&mut *out);
         screen
             .enter_alternate_screen()
@@ -201,7 +207,7 @@ impl TerminalGuard {
             .and_then(|()| screen.clear_all())
             .and_then(|()| screen.flush())
             .map_err(|e| format!("cannot set up the screen: {e}"))?;
-        Ok(TerminalGuard)
+        Ok(guard)
     }
 }
 

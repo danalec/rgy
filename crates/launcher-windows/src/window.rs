@@ -85,6 +85,22 @@ pub const WM_SHOW: UINT = WM_APP + 2;
 /// (120 ms) and the median a paint later than it had to be.
 pub const WM_WAKE: UINT = WM_APP + 3;
 
+// Four private messages, four distinct numbers. The tray's callback is a
+// message the shell sends to the window procedure, and WM_SHOW is a message
+// a second launcher posts to the pump: if they shared an id, a posted
+// callback would be answered as a showing (the tray's menu would never
+// open) and a posted showing that reached the procedure would fabricate a
+// tray click. WM_APP+4 is the next free number, and the assertion makes a
+// future collision a compile error rather than a click that does nothing.
+const _: () = {
+    assert!(WM_TOGGLE != WM_SHOW);
+    assert!(WM_TOGGLE != WM_WAKE);
+    assert!(WM_TOGGLE != crate::tray::WM_TRAY);
+    assert!(WM_SHOW != WM_WAKE);
+    assert!(WM_SHOW != crate::tray::WM_TRAY);
+    assert!(WM_WAKE != crate::tray::WM_TRAY);
+};
+
 /// The timer the debounce rides on.
 const TIMER_TICK: usize = 1;
 
@@ -226,6 +242,15 @@ pub struct View {
     pub alpha: u32,
     /// Where the window sits on the work area, in thousandths.
     pub anchor: (u32, u32),
+    /// How wide the window is, in the model's units.
+    ///
+    /// The host sizes the window from `App::layout().width`, and the
+    /// picture has to be drawn at that same width. The view carries it
+    /// so the painting can measure itself from it: a picture measured
+    /// only from the rows would keep the geometry's default 600 units,
+    /// and the strip it left at the right of a wider window would be a
+    /// solid bar once the compositor gave those pixels full alpha.
+    pub width: u32,
 }
 
 /// What the host says the window should do about the event it was given.
@@ -596,6 +621,17 @@ impl Layer {
             // The panel's own colour is what the desktop shows through.
             paint::paint(
                 self.dc, view, painted, false, icons, fonts, colours, scale, lang,
+            );
+            // The picture has to cover the whole layer: the window sized
+            // the layer from the host's layout, and the paint measures
+            // itself from the view, which carries that same width. A
+            // picture narrower or shorter leaves an unpainted strip, and
+            // compose gives an unpainted pixel full alpha -- a solid black
+            // bar. Clipping can only make the layer smaller than the
+            // model, so the picture covering it is the invariant to hold.
+            debug_assert!(
+                painted.0 >= self.width && painted.1 >= self.height,
+                "the picture does not cover the layer"
             );
             // The alpha is worked out after the drawing: GDI writes the
             // colour of a pixel and never its alpha.
@@ -1056,17 +1092,24 @@ impl Window {
     /// rows are counted in them, and a screen that is twice as big in
     /// device pixels is not twice as many rows.
     ///
-    /// The answer is never zero: a host that read zero would show a
-    /// single row.
+    /// The answer is the room the window has below its anchor, and not the
+    /// whole of the work area: `spot_on` puts the window `anchor.1`
+    /// permille down and clips it to what is left. `rows_that_fit` has to
+    /// count rows in that same room, or the model asks for rows a clipped
+    /// window cannot draw.
+    ///
+    /// `rows_that_fit` itself clamps to at least one row, so even a work
+    /// area with no room left shows a single row.
     pub fn work_area_height(&self) -> u32 {
         let work = self.target_work_area();
-        let height = work.bottom - work.top;
-        if height > 0 {
-            return model_pixels(height as u32, self.scale);
-        }
-        // The platform would not say, and the screen is the answer that
-        // is always there.
-        unsafe { model_pixels(GetSystemMetrics(SM_CYSCREEN).max(0) as u32, self.scale) }
+        let area_device = if work.bottom > work.top {
+            (work.bottom - work.top) as u32
+        } else {
+            // The platform would not say, and the screen is the answer
+            // that is always there.
+            unsafe { GetSystemMetrics(SM_CYSCREEN).max(0) as u32 }
+        };
+        rows_height(area_device, self.scale, self.anchor.1)
     }
 
     /// What the window draws.
@@ -1976,6 +2019,18 @@ struct Spot {
     height: i32,
 }
 
+/// The height the host hands `rows_that_fit`, in the model's units.
+///
+/// `spot_on` puts the window `anchor_y` permille down the area and clips
+/// it to the room below that place, in device pixels. The rows have to be
+/// counted in that same room — converted to the model's units — and not
+/// in the whole area: a row count from the whole area asks for a window
+/// taller than the clipped one, and the picture draws rows the smaller
+/// DIB cuts off. The model and the picture answer the same question here.
+fn rows_height(area_device: u32, scale: u32, anchor_y: u32) -> u32 {
+    rgy_launcher::app::room_below_anchor(model_pixels(area_device, scale), anchor_y)
+}
+
 /// Where the window goes on a work area.
 ///
 /// The anchor says where, in permille of the area: `x` across the room
@@ -2663,6 +2718,83 @@ mod tests {
             work.bottom - work.top,
             "and is cut to the height of the area"
         );
+    }
+
+    /// A short work area with a non-zero anchor leaves less room than the
+    /// whole area, and the model and the picture agree on that room.
+    ///
+    /// `spot_on` clips the window to the room below the anchor in device
+    /// pixels; `work_area_height` hands `rows_that_fit` the same room in
+    /// model units. Counted from the whole area the model would ask for
+    /// rows a clipped window cannot draw.
+    #[test]
+    fn a_short_work_area_below_an_offset_keeps_the_rows_in_the_room() {
+        // 1080 device pixels at 200% are 540 model units: a short area,
+        // a non-zero vertical anchor of 180 permille.
+        let work = RECT {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+        let anchor = (500, DEFAULT_ANCHOR.1);
+        let scale = 200;
+
+        // The picture: `spot_on` clips a tall window to the room below
+        // the anchor, in device pixels.
+        let spot = spot_on(work, 640, 1000, anchor);
+        let offset = (1080 * anchor.1 / 1000) as i32;
+        assert_eq!(spot.y, offset, "the window starts at the anchor");
+        assert_eq!(
+            spot.height,
+            1080 - offset,
+            "and is clipped to the room below it"
+        );
+
+        // The model: the same room, converted to the model's units, and
+        // the rows counted in it.
+        let room = rows_height(1080, scale, anchor.1);
+        assert_eq!(
+            room,
+            model_pixels(spot.height as u32, scale),
+            "model and picture answer the same room"
+        );
+        let rows = rgy_launcher::app::rows_that_fit(room) as u32;
+        let height = Layout::with_rows(rows).height();
+        assert!(
+            height <= room,
+            "the rows fit in the room: {height} <= {room}"
+        );
+
+        // The whole area would have asked for a window taller than the
+        // clipped one can be.
+        let whole = model_pixels(1080, scale);
+        let naive_rows = rgy_launcher::app::rows_that_fit(whole);
+        let naive = Layout::with_rows(naive_rows as u32).height();
+        assert!(
+            naive > room,
+            "the whole area asks for a clipped window: {naive} > {room}"
+        );
+    }
+
+    /// The four private messages are four different numbers.
+    ///
+    /// The compile-time assertion at the top of the module guards the
+    /// same fact; this test names the pairs so a collision says which
+    /// two messages it was.
+    #[test]
+    fn the_private_messages_are_all_different() {
+        let ids = [
+            ("toggle", WM_TOGGLE),
+            ("show", WM_SHOW),
+            ("wake", WM_WAKE),
+            ("tray", crate::tray::WM_TRAY),
+        ];
+        for (i, (name, id)) in ids.iter().enumerate() {
+            for (other, other_id) in ids.iter().skip(i + 1) {
+                assert_ne!(*id, *other_id, "{name} and {other} share a message id");
+            }
+        }
     }
 
     #[test]

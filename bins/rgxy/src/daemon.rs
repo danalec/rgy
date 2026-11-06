@@ -380,22 +380,22 @@ impl DaemonSource {
     /// the content layer answers differently with one, and the user is
     /// told which.
     ///
-    /// The window is the **caller's**: a daemon that takes the connection
-    /// and then says nothing must not hold the window off the screen.
+    /// The window is the **caller's**: the connect is bounded by it, and
+    /// a daemon that takes the connection and then says nothing must not
+    /// hold the window off the screen. A bounded connect also makes a busy
+    /// pipe a timeout: without a deadline the client retries a busy pipe
+    /// and comes back with the raw `ERROR_PIPE_BUSY`, which says nothing
+    /// about whether the daemon is there.
     ///
-    /// `false` when the daemon is not there at all — the connection
-    /// failed. A daemon that is there and slow is not a daemon that is
-    /// gone, and the answer says so.
+    /// `false` only when the daemon is not there at all. A daemon that is
+    /// there and slow, or that answered badly, is **there**: the returned
+    /// bool is about the daemon and not about the socket, and the warning
+    /// says which of the three it was.
     pub fn connect(&mut self) -> bool {
-        let client = match Client::connect(&self.endpoint) {
+        let deadline = Instant::now() + self.window;
+        let client = match Client::connect_within(&self.endpoint, Some(deadline)) {
             Ok(c) => c,
-            Err(e) => {
-                let mut st = self.status.borrow_mut();
-                st.asked = true;
-                st.connected = false;
-                st.warnings = vec![format!("{}: {e}", rgy_launcher::text::no_daemon(self.lang))];
-                return false;
-            }
+            Err(e) => return self.report_daemon_failure(&e),
         };
         self.client = Some(client);
         if let Some(client) = self.client.as_mut() {
@@ -456,26 +456,53 @@ impl DaemonSource {
                 // its way, and a late answer would be read as the answer
                 // to the next question.
                 self.client = None;
-                let mut st = self.status.borrow_mut();
-                st.asked = true;
-                // Three facts and not two. The daemon that took the
-                // connection and said nothing in the window is up and
-                // slow, and the daemon whose connection broke is gone: a
-                // launcher that says "up and slow" about a daemon that is
-                // not there hides the daemon the user has to start.
-                let presence = presence(&e);
-                st.connected = presence != Presence::Gone;
-                let text = Text::for_lang(self.lang);
-                st.warnings = vec![match presence {
-                    Presence::Gone => {
-                        format!("{}: {e}", rgy_launcher::text::no_daemon(self.lang))
-                    }
-                    Presence::Slow => text.daemon_slow.replace("{e}", &e.to_string()),
-                    Presence::Answered => text.daemon_bad.replace("{e}", &e.to_string()),
-                }];
+                // Three facts and not two: the status question failed the
+                // same way a connect can, and the daemon's presence is
+                // what the returned bool answers.
+                return self.report_daemon_failure(&e);
             }
         }
         true
+    }
+
+    /// A connect or a status question failed: say what it says about the
+    /// daemon, and answer whether the daemon is there.
+    ///
+    /// Three facts, not two. Only a daemon that could not be **reached**
+    /// is gone; a pipe that stayed busy until the window ran out is a
+    /// timeout, and a timeout is a daemon that is up and slow; anything
+    /// else is a daemon that is there and answered badly. The line that
+    /// says "no connection to the daemon" under the last two is a lie,
+    /// and the `connected` flag is what the window's keyboard reads:
+    /// clearing it refuses every character over a daemon that is up.
+    ///
+    /// The returned bool answers "is the daemon there", not "did the
+    /// socket open": the caller of `connect()` takes it as the word on
+    /// whether to say `no_daemon_message()`.
+    ///
+    /// The one exception to `presence()` is a transport this platform
+    /// cannot open (a unix socket on Windows, a named pipe on unix).
+    /// That is not a daemon that answered badly: there is no transport
+    /// to reach one over, so the launcher says where the daemon is
+    /// expected, exactly as the search path's connect failure does.
+    fn report_daemon_failure(&mut self, e: &std::io::Error) -> bool {
+        let presence = if e.kind() == std::io::ErrorKind::Unsupported {
+            Presence::Gone
+        } else {
+            presence(e)
+        };
+        let mut st = self.status.borrow_mut();
+        st.asked = true;
+        st.connected = presence != Presence::Gone;
+        let text = Text::for_lang(self.lang);
+        st.warnings = vec![match presence {
+            Presence::Gone => {
+                format!("{}: {e}", rgy_launcher::text::no_daemon(self.lang))
+            }
+            Presence::Slow => text.daemon_slow.replace("{e}", &e.to_string()),
+            Presence::Answered => text.daemon_bad.replace("{e}", &e.to_string()),
+        }];
+        presence != Presence::Gone
     }
 
     /// Ask the daemon who it is, and say what it said.
@@ -901,9 +928,11 @@ impl DaemonSource {
                 (false, warning)
             }
         };
+        // Nothing answered: the same empty-answer state every exit of the
+        // fallback starts from. The count, the layer, the backend and the
+        // time of the previous answer do not belong to this one.
+        self.reset_answer_status();
         let mut st = self.status.borrow_mut();
-        st.layer = Some(Layer::Content);
-        st.matches = 0;
         st.connected = connected;
         // The scope's warnings first: they say why the scope was empty,
         // and the reason below says what the content layer did about it.
@@ -1034,6 +1063,22 @@ impl DaemonSource {
         Ok(answer)
     }
 
+    /// The status of an answer that has not come back.
+    ///
+    /// Every field the status line prints belongs to the **last answer**:
+    /// the count, the layer, the backend and the time. An exit that leaves
+    /// one of them from the answer before it prints, say, "12 results"
+    /// over an empty list. Every exit of the content path starts here, so
+    /// the line always says what the rows on the screen say.
+    fn reset_answer_status(&self) {
+        let mut st = self.status.borrow_mut();
+        st.warnings.clear();
+        st.took_us = 0;
+        st.layer = Some(Layer::Content);
+        st.backend.clear();
+        st.matches = 0;
+    }
+
     /// The content answer, from the `rgx` binary.
     ///
     /// The scope is the files the names chose — never the tree. The binary
@@ -1047,6 +1092,11 @@ impl DaemonSource {
         limit: usize,
         window: Duration,
     ) -> Answer {
+        // Both exits — the answer and the failure — start from the empty
+        // answer's status. The failure used to only set the warning, so a
+        // stale count, layer, backend and time from the previous answer
+        // stayed on the line over the empty list this one returned.
+        self.reset_answer_status();
         match crate::rgx::grep(binary, content, scope, window, self.lang) {
             Ok(files) => {
                 let mut paths = Vec::new();
@@ -1068,11 +1118,6 @@ impl DaemonSource {
                 let backend = backend_label(rgy_launcher::ContentBackend::Rgx, self.lang);
                 {
                     let mut st = self.status.borrow_mut();
-                    st.warnings = Vec::new();
-                    // The fallback does not say how long it took, and the
-                    // time of the last answer is not its time.
-                    st.took_us = 0;
-                    st.layer = Some(Layer::Content);
                     st.backend = backend;
                     st.matches = answer.len();
                 }
@@ -1752,6 +1797,16 @@ mod tests {
     /// The pipe instance the test's daemon waits on.
     #[cfg(windows)]
     fn create_pipe(name: &str) -> std::fs::File {
+        create_pipe_with_instances(name, 255)
+    }
+
+    /// A pipe instance with as many (or as few) instances as a test needs.
+    ///
+    /// One instance is what makes a pipe **busy**: a second client has no
+    /// instance left to take, and the platform refuses it with
+    /// `ERROR_PIPE_BUSY` for as long as the first holds it.
+    #[cfg(windows)]
+    fn create_pipe_with_instances(name: &str, max_instances: u32) -> std::fs::File {
         use std::os::windows::io::FromRawHandle;
         unsafe extern "system" {
             fn CreateNamedPipeW(
@@ -1767,7 +1822,6 @@ mod tests {
         }
         const PIPE_ACCESS_DUPLEX: u32 = 0x3;
         const PIPE_TYPE_BYTE: u32 = 0x0;
-        const PIPE_UNLIMITED_INSTANCES: u32 = 255;
         let path = format!(r"\\.\pipe\{name}");
         let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
         let handle = unsafe {
@@ -1775,7 +1829,7 @@ mod tests {
                 wide.as_ptr(),
                 PIPE_ACCESS_DUPLEX,
                 PIPE_TYPE_BYTE,
-                PIPE_UNLIMITED_INSTANCES,
+                max_instances,
                 64 * 1024,
                 64 * 1024,
                 0,
@@ -2016,5 +2070,245 @@ mod tests {
             message.contains("scope"),
             "the scope is what is missing: {message}"
         );
+    }
+
+    /// A connect failure is classified by the daemon's presence, not by
+    /// the socket.
+    ///
+    /// The old `connect()` answered `false` and cleared `connected` on
+    /// **any** error, so `ask_the_daemon()` said "no daemon" and the
+    /// window refused every character and paste over a daemon that was
+    /// up. All three states are pinned here, and the daemon that really
+    /// is not there is still reported as gone.
+    #[test]
+    fn a_connect_failure_keeps_a_daemon_that_is_there_up() {
+        #[cfg(windows)]
+        let endpoint = Endpoint::Pipe(unique());
+        #[cfg(not(windows))]
+        let endpoint = Endpoint::Socket(std::path::PathBuf::from(
+            "/tmp/rgy-rgxy-connect-failure.sock",
+        ));
+        let mut source = DaemonSource::new(endpoint, None, Lang::English);
+        let st = source.status();
+
+        // Slow: a busy pipe held until the window ran out.
+        assert!(source.report_daemon_failure(&std::io::Error::from(std::io::ErrorKind::TimedOut)));
+        assert!(st.borrow().connected, "a slow daemon is there");
+        assert!(
+            st.borrow()
+                .warnings
+                .iter()
+                .any(|w| w.contains("did not answer in time")),
+            "the slow daemon says so: {:?}",
+            st.borrow().warnings
+        );
+
+        // Answered: the daemon is there and said something wrong.
+        assert!(source.report_daemon_failure(&std::io::Error::other("a bad line")));
+        assert!(
+            st.borrow().connected,
+            "a daemon that answered badly is there"
+        );
+        assert!(
+            st.borrow()
+                .warnings
+                .iter()
+                .any(|w| w.contains("answered badly")),
+            "the bad answer says so: {:?}",
+            st.borrow().warnings
+        );
+
+        // Gone: the pipe is not there.
+        assert!(!source.report_daemon_failure(&std::io::Error::from(std::io::ErrorKind::NotFound)));
+        assert!(!st.borrow().connected, "a daemon that is not there is gone");
+        assert!(
+            st.borrow()
+                .warnings
+                .iter()
+                .any(|w| w.contains("no connection to the daemon")),
+            "the gone daemon says so: {:?}",
+            st.borrow().warnings
+        );
+
+        // A transport this platform cannot open is not a bad answer.
+        assert!(
+            !source.report_daemon_failure(&std::io::Error::from(std::io::ErrorKind::Unsupported))
+        );
+        assert!(
+            !st.borrow().connected,
+            "there is nothing to reach a daemon over"
+        );
+    }
+
+    /// A daemon that really is not there is still reported as gone.
+    ///
+    /// The three-state rule does not change the one case it was always
+    /// about: a pipe that is not there, or a socket that refuses the
+    /// connection, is a daemon the user has to start.
+    #[test]
+    fn a_daemon_that_is_not_there_is_still_gone() {
+        #[cfg(windows)]
+        let endpoint = Endpoint::Pipe(unique());
+        #[cfg(not(windows))]
+        let endpoint = Endpoint::Socket(std::path::PathBuf::from(format!(
+            "/tmp/rgy-rgxy-no-daemon-{}.sock",
+            unique()
+        )));
+        let mut source = DaemonSource::new(endpoint, None, Lang::English);
+        assert!(!source.connect(), "the daemon is not there");
+        let st = source.status();
+        assert!(st.borrow().asked, "the daemon was asked");
+        assert!(!st.borrow().connected, "the daemon is reported as gone");
+        let warnings = st.borrow().warnings.clone();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("no connection to the daemon")),
+            "the status says there is no daemon: {warnings:?}"
+        );
+    }
+
+    /// A busy daemon is there and slow, not gone.
+    ///
+    /// Every instance of the pipe is in use: the daemon is up and busy.
+    /// Without a deadline the client retries a busy pipe and comes back
+    /// with the raw `ERROR_PIPE_BUSY`, which `presence()` does not call
+    /// "gone" — and the old `connect()` cleared `connected` on ANY error,
+    /// so the window refused every character over a daemon that was up.
+    /// With a deadline the wait ends in a timeout, which is the "up and
+    /// slow" the rest of the module already knows.
+    #[cfg(windows)]
+    #[test]
+    fn a_busy_daemon_is_there_and_slow() {
+        use std::os::windows::io::AsRawHandle;
+
+        unsafe extern "system" {
+            fn ConnectNamedPipe(
+                pipe: *mut core::ffi::c_void,
+                overlapped: *mut core::ffi::c_void,
+            ) -> i32;
+        }
+
+        let name = unique();
+        let pipe = create_pipe_with_instances(&name, 1);
+        let path = format!(r"\\.\pipe\{name}");
+        let (done, wait) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            // The server holds the only instance until the test says it
+            // is over: a server that dropped its handle would destroy
+            // the pipe, and the busy answer with it.
+            unsafe { ConnectNamedPipe(pipe.as_raw_handle(), core::ptr::null_mut()) };
+            let _ = wait.recv();
+        });
+        // The one instance is taken by a client: the next CreateFile is
+        // refused with ERROR_PIPE_BUSY for as long as this handle lives.
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("the only pipe instance is taken by a client");
+
+        let mut source = DaemonSource::with_window(
+            Endpoint::Pipe(name),
+            None,
+            std::time::Duration::from_millis(200),
+            Lang::English,
+        );
+        let started = std::time::Instant::now();
+        assert!(
+            source.connect(),
+            "a busy daemon is not a daemon that is gone"
+        );
+        let waited = started.elapsed();
+        assert!(
+            waited >= std::time::Duration::from_millis(100),
+            "the connect did not wait out the busy pipe: {waited:?}"
+        );
+        assert!(
+            waited < std::time::Duration::from_secs(5),
+            "the connect waited longer than its window: {waited:?}"
+        );
+        let st = source.status();
+        assert!(st.borrow().connected, "the daemon is there and slow");
+        let warnings = st.borrow().warnings.clone();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("did not answer in time")),
+            "the status says the daemon is slow: {warnings:?}"
+        );
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.contains("no connection to the daemon")),
+            "the daemon is not gone: {warnings:?}"
+        );
+        drop(source);
+        drop(held);
+        done.send(()).unwrap();
+        server.join().unwrap();
+    }
+
+    /// A failed `rgx` fallback does not leave the last answer's status.
+    ///
+    /// The Err arm used to set only the warning, so the count, the layer,
+    /// the backend and the time of the **previous** answer stayed on the
+    /// line: `status_line` printed "12 results" over the empty list the
+    /// fallback returned. Every exit now starts from the empty answer.
+    #[test]
+    fn a_failed_fallback_does_not_leave_the_last_answers_status() {
+        let dir = std::env::temp_dir().join(format!("rgy-rgxy-fallback-{}", unique()));
+        std::fs::create_dir_all(&dir).expect("the test's folder is made");
+        let file = dir.join("notes.txt");
+        std::fs::write(&file, "total due\n").expect("the test's file is made");
+        // A binary that cannot be started: the fallback fails before it
+        // answers, which is the Err arm under test.
+        let binary = std::env::temp_dir()
+            .join(format!("rgy-no-such-rgx-{}", unique()))
+            .to_string_lossy()
+            .into_owned();
+        let mut source = DaemonSource::new(
+            Endpoint::Socket(std::path::PathBuf::from("/tmp/rgy-rgxy-unused.sock")),
+            Some(binary.clone()),
+            Lang::English,
+        );
+        // The status of an answer that came before this one.
+        {
+            let mut st = source.status.borrow_mut();
+            st.matches = 12;
+            st.layer = Some(Layer::Names);
+            st.backend = String::from("the daemon");
+            st.took_us = 4321;
+            st.warnings = vec![String::from("a warning from the last answer")];
+        }
+        let scope = vec![file.to_string_lossy().into_owned()];
+        let answer = source.rgx_content(
+            &binary,
+            "grep:total",
+            &scope,
+            10,
+            std::time::Duration::from_millis(500),
+        );
+        assert!(answer.is_empty(), "the fallback did not answer");
+        let status = source.status();
+        let st = status.borrow();
+        assert_eq!(
+            st.matches, 0,
+            "the last answer's count is still on the line"
+        );
+        assert_eq!(st.took_us, 0, "the last answer's time is still on the line");
+        assert!(
+            st.backend.is_empty(),
+            "the last answer's backend is still on the line: {}",
+            st.backend
+        );
+        assert_eq!(st.layer, Some(Layer::Content), "the layer is this answer's");
+        assert_eq!(st.warnings.len(), 1, "the failure is the only warning");
+        assert!(
+            !st.warnings[0].contains("a warning from the last answer"),
+            "the last answer's warning is still on the line: {:?}",
+            st.warnings
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

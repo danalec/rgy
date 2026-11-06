@@ -83,6 +83,27 @@ pub struct Sole {
     handle: HANDLE,
 }
 
+/// Clear the last error, take the named mutex and read the error the call
+/// left, all in one place.
+///
+/// Win32 does not promise that a successful call clears the last error: a
+/// stale `ERROR_ALREADY_EXISTS` (183) left on this thread by an earlier
+/// platform call would make the FIRST launcher read "the name was already
+/// there", return `Taken::Other`, ask a window that does not exist to show
+/// itself and never start. Clearing the error immediately before the call
+/// makes the value read afterwards belong to `create` alone — the same
+/// rule `SetWindowRgn` follows in `window.rs`.
+///
+/// `create` is the platform call, handed in as a closure so a test can
+/// say what a platform that leaves the last error alone would answer.
+fn claim(name: &[u16], create: impl Fn(&[u16]) -> HANDLE) -> (HANDLE, DWORD) {
+    unsafe {
+        SetLastError(ERROR_SUCCESS);
+        let handle = create(name);
+        (handle, GetLastError())
+    }
+}
+
 impl Sole {
     /// Ask for the session, and learn what this process is.
     pub fn take() -> Taken {
@@ -100,17 +121,17 @@ impl Sole {
         // SAFETY: the name is this module's own UTF-16 string, the
         // attributes are the platform's default ones, and the answer is
         // checked before it is used.
-        let handle = unsafe { CreateMutexW(core::ptr::null(), 1, name.as_ptr()) };
+        let (handle, code) = claim(&name, |n| unsafe {
+            CreateMutexW(core::ptr::null(), 1, n.as_ptr())
+        });
         if handle.is_null() {
-            let code = unsafe { GetLastError() };
             return Taken::Unknown(format!(
                 "the launcher's own name could not be taken ({code})"
             ));
         }
-        // The call's own answer to "was it there already" is the last
-        // error, and it is read here, where the call is: a code read
-        // after another call is a code about something else.
-        let code = unsafe { GetLastError() };
+        // The call's own answer to "was it there already" is `code`, read
+        // where the call is: a code read after another call is a code
+        // about something else.
         if code == ERROR_ALREADY_EXISTS {
             // The name is the other launcher's, and this handle does not
             // own it: it is closed, not released.
@@ -205,6 +226,57 @@ mod tests {
         assert!(
             matches!(third, Taken::First(_)),
             "a launcher that is gone is a launcher that can be started"
+        );
+    }
+
+    /// A stale "already exists" on this thread is not this launcher's
+    /// answer.
+    ///
+    /// Win32 leaves the last error alone on success, so an earlier
+    /// platform call that set ERROR_ALREADY_EXISTS used to make the first
+    /// launcher read it back from CreateMutexW, conclude it was the
+    /// second and never start. `take_named` clears the error before the
+    /// call, so a free name is First even on a thread that arrives with
+    /// that stale code.
+    #[test]
+    fn a_stale_already_exists_does_not_make_the_first_launcher_second() {
+        let name = "Local\\rgy-rgxy-launcher-sole-stale-error-test";
+        // SAFETY: the test only sets the thread's last error; no handle
+        // or state is taken from it.
+        unsafe {
+            SetLastError(ERROR_ALREADY_EXISTS);
+        }
+        let taken = Sole::take_named(name);
+        assert!(
+            matches!(taken, Taken::First(_)),
+            "the name is free: a stale last error is not a second launcher"
+        );
+    }
+
+    /// A platform that leaves the last error alone on success cannot make
+    /// the first launcher the second.
+    ///
+    /// Whether `CreateMutexW` itself clears the error on success varies by
+    /// host, so the end-to-end test above cannot prove the fix everywhere.
+    /// This one stands in for the platform call with a closure that leaves
+    /// the thread's last error exactly as it found it — which Win32 is
+    /// allowed to do — and checks that `claim` clears it first. Without
+    /// the clear, the stale `ERROR_ALREADY_EXISTS` would be read back.
+    #[test]
+    fn the_claim_clears_a_stale_last_error_before_the_call() {
+        // SAFETY: the test sets the thread's last error and reads it back;
+        // no handle or state is taken from it.
+        unsafe {
+            SetLastError(ERROR_ALREADY_EXISTS);
+        }
+        let (_, code) = claim(&[0], |_| {
+            // A stand-in for a platform call that succeeds and leaves the
+            // last error alone.
+            core::ptr::null_mut()
+        });
+        assert_eq!(
+            code, ERROR_SUCCESS,
+            "the stale error was cleared before the call"
         );
     }
 }
