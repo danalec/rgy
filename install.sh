@@ -322,7 +322,7 @@ done
 # in a subdirectory. An archive that carries the documents in a
 # subdirectory installs them too -- a README that never arrived is a README
 # the reader does not have.
-for doc in README.md MANUAL.md FORMATS.md COPYING NOTICE LICENSE-APACHE LICENSE-MIT LICENSE-MIT-FSEARCH; do
+for doc in README.md MANUAL.md FORMATS.md COPYING NOTICE LICENSE-APACHE LICENSE-MIT; do
     if [ -f "$stage_root/$doc" ]; then
         cp "$stage_root/$doc" "$install_dir"
     else

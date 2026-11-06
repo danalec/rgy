@@ -8,7 +8,7 @@
 //! `std` feature adds the effects: the spinner thread, the clock, the
 //! environment, the console handles and the pack store.
 //!
-//! The keep-warm spinner (fsearch `engine.rs`): a parked thread spins from
+//! The keep-warm spinner: a parked thread spins from
 //! `WARM_FROM` to `WARM_UNTIL` at user-interactive priority so the first
 //! query after idle still answers at typing latency; the search itself
 //! sets the window and the spin is cancelled when it closes.

@@ -468,7 +468,7 @@ ln -sf searchctl "$stage/rgy"
 # The documents the release carries, in ONE list: the build copies them into
 # the archive, and the build writes down their digests beside it. A list that
 # lives in two places is a list that drifts.
-documents="README.md MANUAL.md FORMATS.md COPYING NOTICE LICENSE-APACHE LICENSE-MIT LICENSE-MIT-FSEARCH"
+documents="README.md MANUAL.md FORMATS.md COPYING NOTICE LICENSE-APACHE LICENSE-MIT"
 for doc in $documents; do
     [ -f "$repo/$doc" ] && cp "$repo/$doc" "$stage/"
 done
@@ -606,7 +606,7 @@ done
 
 archive_name="rgy-v$version-$asset.tar.gz"
 archive="$out/$archive_name"
-files="searchctl searchd rgy-autostart rgxy rgy README.md MANUAL.md FORMATS.md COPYING NOTICE LICENSE-APACHE LICENSE-MIT LICENSE-MIT-FSEARCH"
+files="searchctl searchd rgy-autostart rgxy rgy README.md MANUAL.md FORMATS.md COPYING NOTICE LICENSE-APACHE LICENSE-MIT"
 files="$files $media"
 files="$files benchmark $release_page"
 

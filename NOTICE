@@ -6,9 +6,11 @@ Lineage
 rgy merges three prior projects into one workspace:
 
 - `fsearch` (Rust) — name indexing, fuzzy ranking, and the query engine in
-  `crates/name-core`. Three of its files (`name_index`, `name_query` and
-  `content`) keep fsearch's MIT terms, and the notice travels with them in
-  `LICENSE-MIT-FSEARCH`; the rest of the crate is Apache-2.0.
+  `crates/name-core`. All three of its transported files (the query engine,
+  the name index and the content search layer) were replaced by independent
+  Apache-2.0 implementations, and `LICENSE-MIT-FSEARCH` was removed with
+  the last of them. No `fsearch` source file remains. The v2 on-disk index
+  layout (`FSIDX015`) is kept as a data-format contract, not as code.
 - the `zen` project (this workspace's `zen-rs`, `search-ui`, and
   `discovery-windows`) - Windows NTFS discovery and the terminal UI.
   Apache-2.0 only here; see COPYING.

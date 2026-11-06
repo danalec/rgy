@@ -44,7 +44,7 @@ members = [
 #
 # The whole workspace is Apache-2.0. See COPYING — the licence a reader
 # gets is Apache-2.0, and the files carried from other projects keep their
-# own terms, with their notices in NOTICE and LICENSE-MIT-FSEARCH.
+# own terms, with their notices in NOTICE.
 [workspace.package]
 edition = "2021"
 license = "Apache-2.0"

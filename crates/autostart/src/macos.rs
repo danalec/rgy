@@ -8,8 +8,8 @@
 //! can read and edit — see [`crate::render::launchd_plist`].
 //!
 //! The macOS side was claimed to be native before it was: it was not.
-//! the launchd path came from `fsearch`, and nothing in this tree carried
-//! it. This module is that path, written here.
+//! The LaunchAgent path is written here, from Apple's published launchd
+//! contract; this module is that path.
 
 use alloc::format;
 use alloc::string::{String, ToString};

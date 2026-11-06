@@ -503,7 +503,7 @@ Copy-Item (Join-Path $exeDir "searchctl.exe") (Join-Path $stage "rgy.exe")
 # the archive, and the build writes down their digests beside it. A list that
 # lives in two places is a list that drifts.
 $documents = @("README.md", "MANUAL.md", "FORMATS.md", "COPYING", "NOTICE",
-    "LICENSE-APACHE", "LICENSE-MIT", "LICENSE-MIT-FSEARCH")
+    "LICENSE-APACHE", "LICENSE-MIT")
 foreach ($doc in $documents) {
     if (Test-Path (Join-Path $root $doc)) { Copy-Item (Join-Path $root $doc) $stage }
 }

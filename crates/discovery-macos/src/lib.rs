@@ -1,16 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! macOS discovery backend: fsearch's
-//! `getattrlistbulk` walk and FSEvents watch, transported verbatim.
+//! macOS discovery backend: a `getattrlistbulk(2)` walk and an FSEvents
+//! watch, written for this project from Apple's published APIs and headers.
 //!
 //! The whole backend is `cfg(target_os = "macos")`; on other hosts this
 //! crate compiles empty and `rgy_discovery::PortableSource` is the Source.
 //!
-//! **Type-checked, not run.** The code is fsearch's, which compiles on
-//! macOS; the only edits are import paths. `cargo check --target
-//! x86_64-apple-darwin` compiles it here — that target is installed — but
-//! a Mac is still what it takes to run it: the walk, the FSEvents stream
-//! and the flags they carry have never been exercised on a real kernel.
+//! **Type-checked, not run.** The code declares its Darwin calls and the
+//! structs they write by hand (there is no platform crate in this tree),
+//! so `cargo check --target x86_64-apple-darwin` compiles it here — that
+//! target is installed — but a Mac is still what it takes to run it: the
+//! walk, the FSEvents stream and the flags they carry have never been
+//! exercised on a real kernel. What is shared with the other backends is
+//! the design (DFS listing blocks and the change vocabulary in
+//! `rgy_discovery::walk`), not code from another project.
 //!
 //! The FSEvents watch is a callback feed and the daemon speaks a pull, so
 //! [`feed::FseventsWatch`] is the adapter between the two: it owns the

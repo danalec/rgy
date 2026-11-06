@@ -519,20 +519,17 @@ the tooling around it — the full map is in `COPYING`:
 - **Apache-2.0 only**: the index base (`crates/name-core`, `crates/discovery*`,
   `crates/engine`, `crates/proto`), the vendored rgx engine and adapters
   (`crates/rgx-*`, `crates/rar-codec`), the binaries (`bins/*`) and the e2e
-  harness (`tests/`). Every file carries its `SPDX-License-Identifier:` header,
-  and the manifests state the same terms — with one exception named here so
-  the claim is not read as a claim about something else: `crates/name-core`
-  states `Apache-2.0 AND MIT`, because three of its files arrived from
-  `fsearch` under MIT and keep its terms.
+  harness (`tests/`). Every file carries its `SPDX-License-Identifier:`
+  header, and the manifests state the same terms. The three files once
+  transported from `fsearch` under MIT were replaced by independent
+  Apache-2.0 implementations; no third-party source file remains.
 - **MIT OR Apache-2.0**: the tooling (`scripts/`, `tools/`, `benchmark/`).
   Commercial use is licensed under Apache-2.0; the MIT option remains for
   anyone who prefers its terms.
 
-Three files in `crates/name-core` are transported from `fsearch` (MIT) and keep
-its terms; the vendored trees are Apache-2.0, and the layouts they encode that
-were learned from other projects are recorded in `NOTICE`.
-Full texts: `LICENSE-APACHE`, `LICENSE-MIT`. Third-party notices: `NOTICE`
-and the notice of the one upstream whose code is carried here, in `LICENSE-MIT-FSEARCH`.
+The vendored trees are Apache-2.0 and the layouts they encode that were
+learned from other projects are recorded in `NOTICE`.
+Full texts: `LICENSE-APACHE`, `LICENSE-MIT`. Third-party notices: `NOTICE`.
 
 ## Star history
 

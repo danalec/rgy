@@ -24,7 +24,7 @@
 //! That is a different shape from a pool that hands out one item at a
 //! time, and it is the shape that has no `std` in it.
 //!
-//! The other shape is the one fsearch's `par_each` had: the workers take
+//! The other shape is the one a work-stealing helper had: the workers take
 //! the next index from a shared counter, one at a time, so a worker that
 //! draws a cheap index does not hold the others up. That is [`each_index`]
 //! and [`each_owned`].

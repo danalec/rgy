@@ -2,7 +2,7 @@
 
 //! searchctl — the merged name-search CLI.
 //!
-//! fsearch one-shot ergonomics + zen-rs's filter vocabulary (see
+//! name-search one-shot ergonomics + zen-rs's filter vocabulary (see
 //! `rgy_name_core::name_query`), over the v2 name index. It enumerates a
 //! directory tree (`--root`, portable walk / no privileges); the Windows
 //! MFT fast path (a `--root` that names the volume root, and a volume this
@@ -90,7 +90,7 @@ fn help() -> String {
          separated by NUL. A picker named with --fzf-binary that cannot read\n\
          one (peco, fz) gets the list one path per line.\n\
          \n\
-         query: fsearch tokens (bare=fuzzy, 'x exact, ^x prefix, x$ suffix,\n\
+         query: name tokens (bare=fuzzy, 'x exact, ^x prefix, x$ suffix,\n\
          !x negate) + zen-rs filters (ext: dir: type: size: re:),\n\
          | alternates, * and ? glob the whole path."
         .to_string()
@@ -1083,7 +1083,7 @@ fn run(opts: &Opts, query: &str) -> Result<(), String> {
             .filter(|c| !c.segs.is_empty())
     };
 
-    // `grep:`/`regex:`/`sym:` content search (fsearch model: the name
+    // `grep:`/`regex:`/`sym:` content search (the tree's model: the name
     // tokens and filters narrow WHICH files are read; the rgx engine
     // confirms each one). rg-style `path:line:text` output.
     if alts.alts.iter().any(|a| a.grep.is_some()) {

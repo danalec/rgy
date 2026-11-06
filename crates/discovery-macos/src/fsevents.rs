@@ -215,7 +215,7 @@ pub fn watch(since: u64, latency: f64, tx: Sender<Vec<Event>>, stream: u32) -> S
         // costs a relist of every folder changed since the last sync.
         let qos = QOS_CLASS_USER_INITIATED;
         let q = dispatch_queue_create(
-            c"fsearch.fsevents".as_ptr(),
+            c"rgy.discovery-macos.fsevents".as_ptr(),
             dispatch_queue_attr_make_with_qos_class(core::ptr::null(), qos, 0),
         );
         (a.set_queue)(s, q);

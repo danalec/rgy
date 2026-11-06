@@ -6,7 +6,7 @@
 //! One request per line in, one response per line out — identical over
 //! named pipe (Windows), UDS (Unix), and stdio. Hand-rolled encode/decode:
 //! the protocol is small enough that a dependency would be the bigger
-//! surface. Field names are the fsearch op model; rgx `--serve` translates
+//! surface. Field names follow the operation model; rgx `--serve` translates
 //! to the same engine calls behind a compatibility front.
 //!
 //! The crate is `no_std`: the protocol is bytes on a wire, and a type that

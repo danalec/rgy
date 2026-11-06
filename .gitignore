@@ -62,6 +62,7 @@ __pycache__/
 # Agent scratch: the decisions these record belong in the code they describe.
 /.remember/
 /.egm/
+/.dev/
 /docs/designs/
 /build/
 EGM.md

@@ -2,8 +2,8 @@
 
 //! `getdents64` bulk walk: one syscall returns a whole directory block with
 //! name and type already attached (DT_DIR/DT_REG/DT_LNK), so there is no
-//! per-entry directory open — the Linux half of fsearch's getattrlistbulk
-//! trick. The walk is sequential DFS with a single id counter (the
+//! per-entry directory open — the Linux counterpart of a bulk directory
+//! read. The walk is sequential DFS with a single id counter (the
 //! parallel fanout refactor keeps its own allocator; until then the
 //! portable `rgy_discovery::walk::scan` and this must agree on id semantics).
 //!

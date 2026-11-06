@@ -12,7 +12,7 @@
 //!   `{"rgx":"begin"/"end"}` framing and rg `--json` match messages out).
 //!
 //! The index stays warm in memory: every query opens a 250 ms keep-warm
-//! window (the fsearch spinner) so typing stays at latency. Content
+//! window (the keep-warm spinner) so typing stays at latency. Content
 //! `grep:` runs the trigram candidate scan + rgx-engine confirm; with
 //! `--tv-dir` it is answered by the TV pack store instead.
 //!
@@ -3934,14 +3934,16 @@ mod tests {
         );
     }
 
-    /// A content search answers the same with a content index as without it.
+    /// A content search answers the same before and after the daemon has
+    /// been asked for an index.
     ///
-    /// The index is the trigram postings: with it the search opens the
-    /// candidates, without it the search opens everything the name filters
-    /// name. The union is the scan's exact answer either way, and that is
-    /// the property that has to hold when the daemon reads its own index.
+    /// There is no persisted content index: the answer is the name-filtered
+    /// candidates confirmed against the bytes on disk, and asking the
+    /// daemon to want an index changes what it reads, not what it answers.
+    /// This is the property that has to hold, and it is the whole reason a
+    /// second index is not worth its sync cost.
     #[test]
-    fn a_content_search_answers_the_same_with_an_index() {
+    fn a_content_search_answers_the_same_after_the_index_is_wanted() {
         let dir = std::env::temp_dir().join("rgy-searchd-content-test");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -3984,8 +3986,10 @@ mod tests {
             "{before:?}"
         );
 
-        // Now the daemon has an index: build one over the same tree and
-        // answer again.
+        // Now the daemon has been asked for an index. `sync` writes
+        // nothing: the direct confirmation path is the only answer, and
+        // the content thread waits on the tree changing instead of
+        // building segments.
         let mut c = rgy_name_core::content::Content::open(dir.join("content"));
         let n = c.sync(
             &ctx.live.read().unwrap(),
@@ -3994,13 +3998,14 @@ mod tests {
             std::slice::from_ref(&root),
             &root,
         );
-        assert!(n > 0, "the index holds the file");
+        assert_eq!(n, 0, "no persisted content index is built");
+        assert!(c.segs.is_empty(), "the index holds no segments");
         *ctx.content.lock().unwrap() = Some(c);
 
         let after = names(grep("hello", 10, &ctx));
         assert_eq!(
             before, after,
-            "the index changes what is read, not what is answered"
+            "wanting an index changes what is read, not what is answered"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -6,7 +6,7 @@
 //! input and a 64 KiB output buffer, and tails journal deltas via overlapped
 //! reads -- the shape the Win32 USN journal interface documents.
 //!
-//! One on-disk index format: the name index blob (FSIDX014). A scan builds
+//! One on-disk index format: the name index blob (FSIDX015). A scan builds
 //! it from MFT rows; `save` persists it with the
 //! root stamp beside it; `load`, `ui`, `search` and `list` reopen it.
 

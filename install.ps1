@@ -265,7 +265,7 @@ foreach ($exe in @('searchctl.exe', 'searchd.exe', 'rgy-autostart.exe', 'rgxy.ex
     Copy-Item -Path $src -Destination $InstallDir -Force
 }
 foreach ($doc in @('README.md', 'MANUAL.md', 'FORMATS.md', 'COPYING', 'NOTICE',
-                   'LICENSE-APACHE', 'LICENSE-MIT', 'LICENSE-MIT-FSEARCH')) {
+                   'LICENSE-APACHE', 'LICENSE-MIT')) {
     $src = Join-Path $staging $doc
     if (-not (Test-Path $src)) {
         $found = Find-InStaging $doc

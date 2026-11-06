@@ -79,6 +79,9 @@ impl<K: Hash + Eq, V> Map<K, V> {
     }
 
     /// The entries in the map.
+    // Part of the map's contract even when a build needs no count of its own:
+    // the tests hold this in-house map against `hashbrown` with it.
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.len
     }

@@ -144,7 +144,7 @@ pub fn keep_warm(d: std::time::Duration) {
     spinner::warmer().unpark();
 }
 
-/// A search is answering: close the warm window (fsearch: `WARM_UNTIL = 0`).
+/// A search is answering: close the warm window (`until == 0`).
 #[cfg(feature = "std")]
 pub fn warm_stop() {
     spinner::WARM_UNTIL.store(0, Ordering::SeqCst);

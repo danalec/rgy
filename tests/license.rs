@@ -86,21 +86,16 @@ const RUST_TREES: &[&str] = &["crates/", "bins/"];
 
 const APACHE: &str = "// SPDX-License-Identifier: Apache-2.0";
 const MIT_OR_APACHE: &str = concat!("// SPDX-License-Identifier: MIT OR ", "Apache-2.0");
-const MIT: &str = "// SPDX-License-Identifier: MIT";
 
 /// Files inside an Apache-2.0 tree that carry a licence of their own.
 ///
-/// A file that arrives under one licence does not change licence because it
-/// moved: these three came from `fsearch`, which is MIT, and the MIT
-/// notice travels with them. The list is explicit rather than a pattern,
-/// so that a fourth file claiming MIT has to be added here on purpose, and
-/// so that a file that stops being MIT fails the audit instead of quietly
-/// keeping its exception.
-const PRODUCT_EXCEPTIONS: &[(&str, &str)] = &[
-    ("crates/name-core/src/content.rs", MIT),
-    ("crates/name-core/src/name_index.rs", MIT),
-    ("crates/name-core/src/name_query.rs", MIT),
-];
+/// Empty on purpose: the three files that arrived from `fsearch` (MIT) were
+/// each replaced by an independent Apache-2.0 implementation, and the
+/// notice that travelled with them is gone. The list stays explicit rather
+/// than a pattern, so a future file claiming another licence has to be
+/// added here on purpose and the audit says so instead of quietly allowing
+/// it.
+const PRODUCT_EXCEPTIONS: &[(&str, &str)] = &[];
 
 /// The licence expressions a vendored file may carry.
 ///

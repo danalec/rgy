@@ -242,7 +242,7 @@ struct App {
     /// palette this interface was drawn in, so the default is today's
     /// colours byte for byte.
     palette: Palette,
-    /// The fsearch name index + overlay, the same searcher `searchctl` uses.
+    /// The name index + live overlay, the same searcher `searchctl` uses.
     /// Volume root, shown in the header.
     root: String,
     /// How many entries the index holds, when the source can say.

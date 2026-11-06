@@ -2,10 +2,11 @@
 
 //! DFS directory-block vocabulary (the `rgy_discovery::Source` block type).
 //!
-//! Transported from fsearch `walk.rs`: the kinds/flags every backend lists
-//! and the [`Listing`] block the name index lays out in DFS order. The
-//! platform walks themselves stay in their crates (macOS `getattrlistbulk`,
-//! Windows MFT, Linux `getdents64`).
+//! This module is the tree's own contract: the kinds/flags every backend
+//! lists and the [`Listing`] block the name index lays out in DFS order.
+//! The vocabulary is shared by every backend, but the code is written here;
+//! the platform walks themselves stay in their crates (macOS
+//! `getattrlistbulk`, Windows MFT, Linux `getdents64`).
 //!
 //! The portable walk reads the filesystem through [`crate::dir`], which
 //! asks the operating system directly: the paths here are bytes, the

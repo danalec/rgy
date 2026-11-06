@@ -96,7 +96,7 @@ pub fn listings_from_rows(rows: &[NameRow], root_frn: u64) -> Vec<rgy_discovery:
             let r = &rows[ri as usize];
             let name_off = names.len() as u32;
             names.extend_from_slice(&r.name);
-            // fsearch's walk model: a symlink/reparse point is its own kind,
+            // The tree's walk model: a symlink/reparse point is its own kind,
             // not a file or dir. Zen's `type:link` rides on it.
             let kind = if r.link {
                 KIND_LINK
@@ -844,7 +844,7 @@ mod listings_tests {
 
     #[test]
     fn reparse_rows_are_link_kind_and_do_not_get_child_listings() {
-        // A junction: dir bit + reparse. fsearch's model calls it a link,
+        // A junction: dir bit + reparse. The walk model calls it a link,
         // and it does not own a children listing.
         let rows = vec![
             NameRow {

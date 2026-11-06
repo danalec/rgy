@@ -2,14 +2,14 @@
 
 //! Name index, query filters, and fuzzy ranking.
 //!
-//! fsearch's index/scoring engine with the zen-rs filter vocabulary merged
+//! The name index and scoring engine with the zen-rs filter vocabulary merged
 //! (`ext/dir/type/size`, globs, `|`, `re:`), plus the persistence glue that
 //! saves a built index across processes.
 //!
 //! The crate is Apache-2.0, like the rest of the product -- see COPYING.
-//! Three of its files (`name_index`, `name_query`, `content`) are transported
-//! from fsearch and keep fsearch's MIT terms; their headers say so, and the
-//! text is in `LICENSE-MIT-FSEARCH`. The other modules were written here,
+//! The three files once transported from fsearch (`name_query`, `name_index`
+//! and `content`) were each rewritten for this project and are Apache-2.0;
+//! no third-party source file remains. The other modules were written here,
 //! on the same design, and are Apache-2.0.
 //!
 //! # `no_std`
@@ -60,11 +60,11 @@ pub mod fuzzy;
 /// The tree's own hash map: the maps that really are maps, and the crate
 /// they replaced is the oracle they are held to.
 mod hmap;
-/// fsearch's live overlay (dead bits + overrides).
+/// The live overlay (dead bits + overrides).
 pub mod live;
-/// fsearch's name index v2 (interned names, DFS layout, class bitmaps).
+/// The name index v2 (interned names, DFS layout, class bitmaps).
 pub mod name_index;
-/// fsearch's query parser/scorer with the zen-rs filter vocabulary merged.
+/// The query parser and scorer with the zen-rs filter vocabulary merged.
 pub mod name_query;
 /// The ranking key: the priority ladder, the fixed-point score, and the one
 /// `u64` the final order compares.
@@ -94,10 +94,10 @@ pub mod readings;
 /// in kana, and what it is called in pinyin.
 mod readings_table;
 
-/// fsearch's content index (trigram postings + per-file 5/7-gram bloom).
-/// Kept inside name-core beside `live` for the same reason: it reads the
-/// name index's blob internals (`HDR`/`sec!`) and shares `Query`; a
-/// `content-core` crate splits out with the Phase 4 glue to rgx's engine.
+/// Content search: name-filtered candidates confirmed against the bytes on
+/// disk through the tree's own rgx engine. There is no second persisted
+/// index — the pack store (`rgx-core::tv_runtime`) is the accelerator for
+/// large trees, and this direct path is the correctness oracle.
 #[cfg(feature = "std")]
 pub mod content;
 
@@ -129,7 +129,7 @@ pub mod lookup;
 /// `scan_priority` -- which says so in its own comments.
 mod scan_priority;
 
-/// fsearch's `rgy_engine::no_materialize`: on macOS it marks files so a scan
+/// `rgy_engine::no_materialize`: on macOS it marks files so a scan
 /// does not materialize cloud placeholders. Portable no-op — the platform
 /// backends can set their own policy.
 pub fn no_materialize() {}
