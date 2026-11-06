@@ -345,19 +345,20 @@ pub struct NameCache {
     /// The last base-index answer, keyed by the whole query and the live
     /// revision. A session asks a narrowing question after every keystroke,
     /// and the launcher asks the same question again while it waits: neither
-    /// should walk the index twice for the same answer.
-    result: crate::sync::Mutex<Option<(String, Vec<Hit>)>>,
+    /// should walk the index twice for the same answer. The plan travels
+    /// with it so `--explain` still says which mechanism answered.
+    result: crate::sync::Mutex<Option<(String, Vec<Hit>, Plan)>>,
 }
 
 impl NameCache {
-    pub(crate) fn cached(&self, key: &str) -> Option<Vec<Hit>> {
+    pub(crate) fn cached(&self, key: &str) -> Option<(Vec<Hit>, Plan)> {
         let g = self.result.lock().expect("the result cache lock");
-        g.as_ref().filter(|(k, _)| k == key).map(|(_, h)| h.clone())
+        g.as_ref().filter(|(k, _, _)| k == key).map(|(_, h, p)| (h.clone(), *p))
     }
 
-    pub(crate) fn remember(&self, key: String, hits: &[Hit]) {
+    pub(crate) fn remember(&self, key: String, hits: &[Hit], plan: Plan) {
         let mut g = self.result.lock().expect("the result cache lock");
-        *g = Some((key, hits.to_vec()));
+        *g = Some((key, hits.to_vec(), plan));
     }
 }
 
@@ -2002,7 +2003,7 @@ impl Searcher<'_> {
         }
     }
 
-    fn plan_for(&self, q: &Query) -> Plan {
+    fn plan_for(&self, q: &Query, allowed: Option<&[u64]>) -> Plan {
         if q.never {
             return Plan::FailClosed;
         }
@@ -2023,7 +2024,7 @@ impl Searcher<'_> {
         let single = positives.len() == 1 && q.scope.is_none() && q.globs.is_empty() && q.path_re.is_none();
         if single {
             let base = &self.live.base;
-            let est = candidate_count(q, base);
+            let est = allowed.map(|bits| bits.iter().map(|w| w.count_ones() as usize).sum()).unwrap_or(base.u);
             return if (est as u64).saturating_mul(60) <= base.n as u64 { Plan::Selective } else { Plan::Full };
         }
         Plan::Full
@@ -2059,7 +2060,33 @@ impl Searcher<'_> {
     }
 
     fn search_base(&self, q: &Query, cap: Option<usize>) -> Vec<Hit> {
-        let plan = self.plan_for(q);
+        // The two gates that need no scan are cheap and are checked before
+        // everything else, cache included.
+        if q.never {
+            diag::note_plan(Plan::FailClosed);
+            return Vec::new();
+        }
+        if q.scope.is_some() && self.scope_range(q).is_none() {
+            diag::note_plan(Plan::Empty);
+            diag::note_attempt("the scope selects no entry");
+            return Vec::new();
+        }
+        // A cache hit must not pay for the plan: choosing a plan reads the
+        // class bitmaps, which on a five-million-name index costs more than
+        // the scan the cache was built to avoid.
+        let key = self.cache_key(q, cap);
+        if let Some(k) = key.as_deref()
+            && let Some((hits, plan)) = self.live.names_cache.cached(k)
+        {
+            diag::note_plan(plan);
+            return hits;
+        }
+        // On a miss the bitmaps are built ONCE and shared: the plan counts
+        // their bits and the scan uses them to reject entries early. The
+        // shape this replaces recomputed them in both places on every cold
+        // query -- twice the walk over every class bitmap.
+        let allowed = candidate_names(q, &self.live.base);
+        let plan = self.plan_for(q, allowed.as_deref());
         diag::note_plan(plan);
         if plan == Plan::Empty {
             diag::note_attempt("the scope selects no entry");
@@ -2068,33 +2095,31 @@ impl Searcher<'_> {
         if plan == Plan::FailClosed {
             return Vec::new();
         }
-        let key = self.cache_key(q, cap);
-        if let Some(k) = key.as_deref()
-            && let Some(hits) = self.live.names_cache.cached(k)
-        {
-            return hits;
-        }
-        let hits = self.scan(q, cap);
+        let hits = self.scan(q, allowed.as_deref(), cap);
         if let Some(k) = key {
-            self.live.names_cache.remember(k, &hits);
+            self.live.names_cache.remember(k, &hits, plan);
         }
         self.cache_result(q, plan);
         hits
     }
 
-    /// One pass over the base entries, narrowed by class bitmaps and zones.
-    /// When `cap` is set, each worker keeps only its best `cap` hits and the
-    /// merge keeps the best `cap` overall -- a query asking for 50 results
-    /// never has to materialise (or cache) the 200 000 that matched.
-    fn scan(&self, q: &Query, cap: Option<usize>) -> Vec<Hit> {
+    /// One parallel pass over the base entries, narrowed by class bitmaps
+    /// and zones. When `cap` is set, each worker keeps only its best `cap`
+    /// hits and the merge keeps the best `cap` overall.
+    ///
+    /// A postings walk over the admitted distinct names was measured here
+    /// and is deliberately NOT used: at 5M names it took 11 ms cold against
+    /// this pass's 3.8 ms. The class bitmaps admit too many names for the
+    /// extra `name_ents_of` allocations to beat a parallel per-entry
+    /// rejection whose bitmap check is the first thing it does.
+    fn scan(&self, q: &Query, allowed: Option<&[u64]>, cap: Option<usize>) -> Vec<Hit> {
         let base = &self.live.base;
         let (lo, hi) = self.scope_range(q).unwrap_or((1, base.n));
-        let allowed = candidate_names(q, base);
         let flags = zone_flags(q, base);
-        let n = hi.saturating_sub(lo);
-        if n == 0 {
+        if hi <= lo {
             return Vec::new();
         }
+        let n = hi.saturating_sub(lo);
         let nchunks = n.div_ceil(CHUNK);
         let groups: Vec<(usize, usize)> = each_index_prepared(
             nchunks,
@@ -2108,7 +2133,7 @@ impl Searcher<'_> {
         let parts: Vec<Vec<Hit>> = each_owned(groups, Scratch::default, |st, _, (a, b)| {
             let mut out = Vec::new();
             for i in a..b {
-                if let Some(h) = self.score_base_entry(q, st, i, allowed.as_deref(), &flags) {
+                if let Some(h) = self.score_base_entry(q, st, i, allowed, &flags) {
                     out.push(h);
                 }
             }
@@ -2335,14 +2360,6 @@ fn candidate_names(q: &Query, base: &Index) -> Option<Vec<u64>> {
     Some(out)
 }
 
-/// How many distinct names the class bitmaps admit (for plan selection).
-fn candidate_count(q: &Query, base: &Index) -> usize {
-    match candidate_names(q, base) {
-        None => base.u,
-        Some(bits) => bits.iter().map(|w| w.count_ones() as usize).sum(),
-    }
-}
-
 /// The small score adjustments that are not the name match itself.
 fn rank_tweaks(base: &Index, nid: usize, kind: u8, mtime: u32) -> i32 {
     let w = nid >> 6;
@@ -2529,6 +2546,76 @@ mod tests {
         assert_eq!(q.size, (0, u64::MAX));
         assert_eq!(q.mtime, (0, u32::MAX));
         assert_eq!(q.limit, 50);
+    }
+
+    /// The class bitmaps are a narrowing, never a decision: scoring every
+    /// entry without them must give exactly the hits scoring with them. If
+    /// this fails, a bitmap wrongly refused a name that really matches.
+    #[test]
+    fn the_class_bitmaps_never_exclude_a_match() {
+        let live = live_with(&[
+            ("report_00000.pdf", KIND_FILE),
+            ("Report_00001.PDF", KIND_FILE),
+            ("src_00002-module.rs", KIND_FILE),
+            ("file_00003.dat", KIND_FILE),
+            ("notes.txt", KIND_FILE),
+            ("日本語.txt", KIND_FILE),
+            ("Archive", KIND_DIR),
+            ("src", KIND_DIR),
+        ]);
+        let s = Searcher { live: &live };
+        let base = &live.base;
+        let identity = |hits: &[Hit]| {
+            let mut v: Vec<(u32, Option<Vec<u8>>, i32)> = hits.iter().map(|h| (h.idx, h.over.clone(), h.score())).collect();
+            v.sort();
+            v
+        };
+        for text in [
+            "'report_00000.pdf",
+            "'notes.txt",
+            "report",
+            "^src",
+            "dat$",
+            "f1",
+            "ext:pdf",
+            "type:d",
+            "!pdf",
+            "",
+            "*.pdf",
+            "mod",
+            "=report",
+            "size:>900",
+            "ext:pdf report",
+        ] {
+            let q = one(text);
+            let narrowed = candidate_names(&q, base);
+            let with = s.scan(&q, narrowed.as_deref(), None);
+            let without = s.scan(&q, None, None);
+            assert_eq!(identity(&with), identity(&without), "bitmap narrowing changed the answer for {text:?}");
+        }
+    }
+
+    /// The result cache carries the plan that answered, and a second
+    /// identical question must answer from it with the same hits. This is
+    /// the shape that lets a cache hit skip `plan_for` entirely.
+    #[test]
+    fn a_cached_answer_keeps_its_hits_and_plan() {
+        let live = live_with(&[
+            ("report_00000.pdf", KIND_FILE),
+            ("Report_00001.PDF", KIND_FILE),
+            ("src_00002-module.rs", KIND_FILE),
+            ("file_00003.dat", KIND_FILE),
+        ]);
+        let s = Searcher { live: &live };
+        let q = one("'report_00000.pdf");
+        let first = s.search(&q);
+        let key = s.cache_key(&q, Some(q.limit)).expect("an exact query has a cache key");
+        let (cached, plan) = live.names_cache.cached(&key).expect("the first search filled the cache");
+        assert_eq!(plan, s.plan_for(&q, candidate_names(&q, &live.base).as_deref()));
+        assert_eq!(cached.len(), first.len());
+        let second = s.search(&q);
+        assert_eq!(second.iter().map(|h| h.idx).collect::<Vec<_>>(), first.iter().map(|h| h.idx).collect::<Vec<_>>());
+        assert_eq!(second.len(), 1);
     }
 
     #[test]
