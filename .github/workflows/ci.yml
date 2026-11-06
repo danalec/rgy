@@ -171,6 +171,9 @@ jobs:
     # There is one checker, in Python, with thin .sh/.ps1 twins, so the
     # pair cannot disagree about what a valid contract is. --self-test
     # builds throwaway trees and proves every rule still fires.
+    # --generated-check additionally derives the structural skeleton of
+    # every contract from the tree and holds the tracked set to it, so a
+    # directory rename or a new crate cannot land without a contract.
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -193,6 +196,14 @@ jobs:
         run: |
           bash scripts/check-egm-contracts.sh
           bash scripts/check-egm-contracts.sh --self-test
+      - name: EGM generated structure (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/check-egm-contracts.ps1 --generated-check
+      - name: EGM generated structure (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: bash scripts/check-egm-contracts.sh --generated-check
 
   tv-runtime:
     name: the pack-store builder compiles

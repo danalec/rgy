@@ -1,10 +1,12 @@
 # scripts
 
 ## Overview
-Release, vendoring, benchmark and smoke automation for the workspace: 20 source
-files (14 `.sh` and 6 `.py`). The scripts publish to crates.io and Homebrew,
-build and pack the release archives, sync and check the vendored rgx trees,
-gate the name-search perf baseline, and compare the `.sh` / `.ps1` twin pairs.
+Release, vendoring, benchmark, contract-gate and smoke automation for the
+workspace: 22 source files (15 `.sh` and 7 `.py`). The scripts publish to
+crates.io and Homebrew, build and pack the release archives, sync and check
+the vendored rgx trees, gate the name-search perf baseline, validate the EGM
+contracts (`check-egm-contracts.py` and its twin wrappers), and compare the
+`.sh` / `.ps1` twin pairs.
 Each `.sh` here is documented as the twin of a `.ps1` beside it (the `.ps1`
 files are not source by this skill's extension list): the tree's rule is that
 the two produce the same text and the same exit code on the same input, and
@@ -17,6 +19,7 @@ the child `scripts/lib` and are sourced by nearly every script here.
 - Vendoring tooling: `[sync-rgx-upstream.sh:--upstream]`, `[sync-rgx-upstream.sh:--prune]`, `[apply-vendored-edits.sh:--upstream]`, `[derive-vendored-patches.py:--upstream]`, `[derive-vendored-patches.py:--check]`, `[check-drift.sh:--upstream]`, `[check-vendoring.sh:rgy_read_options]`.
 - Benchmark gates: `[bench-names.py:measure]`, `[bench-names.py:check]`, `[bench-names.py:render]`; `[rgy-name-protocol.sh:--scales]`, `[rgy-name-protocol.sh:--rounds]`, `[rgy-name-protocol.sh:--queries]`; `[mem-peak.py:--hold-seconds]`; `[publish-plan.py:--registry]`, `[publish-plan.py:wait_for]`; `[bump-version.py:--check]`.
 - Helpers and checks: `[check-twins.sh:PROBE]`, `[check-twins.sh:normalize()]`, `[smoke-serve.sh:json_str()]`, `[gen_xz_fixtures.py:PLAIN]`, `[gen_xz_fixtures.py:CHECK]`, `[test-publish-release.sh:fail()]`.
+- EGM contract gate: `[check-egm-contracts.py:validate()]`, `[check-egm-contracts.py:generated_problems()]`, `[check-egm-contracts.py:self_test()]`, with thin twins `[check-egm-contracts.sh]`, `[check-egm-contracts.ps1]`; driven by `[../.egmrc]`.
 - Locally defined functions: `[check-drift.sh:upstream_blob()]`, `[check-drift.sh:patch_verdict()]`, `[check-vendoring.sh:find_files()]`, `[build-release.sh:asset_of()]`, `[publish-release.sh:json_escape()]`, `[sync-rgx-upstream.sh:apply_local_patch()]`, `[rgy-name-protocol.sh:get_verdict()]`.
 
 ## Invariants

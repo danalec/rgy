@@ -29,7 +29,7 @@ their flags have never been exercised on a real kernel.
 - `[feed.rs:is_folder]` / `[feed.rs:records_for]` — the granularity and root decisions are plain functions over `[event.rs:Event]`, testable on every platform rather than only on a Mac.
 - `[feed.rs:KeepAlive]` — a handle the feed must keep alive; dropping the FSEvents stream stops the feed, so the adapter owns it.
 - `[fsevents.rs:CREATE_FLAG_NO_DEFER]` — the stream uses `kFSEventStreamCreateFlagNoDefer`, not `...FileEvents`, so it stays directory-granular (names the folder whose contents changed).
-- `[walk.rs:scan]` — children are opened with `[walk.rs:openat]` relative to the parent's fd, so paths are never rebuilt and PATH_MAX never bites; `[walk.rs:LISTED]` is the shared listing id counter.
+- `[walk.rs:scan]` — children are opened with `[walk.rs:openat]` relative to the parent's fd, so paths are never rebuilt and PATH_MAX never bites; `[walk.rs:LISTED]` counts the entries listed so far (the first scan's progress), while `[walk.rs:Ctx::next_id]` is the shared listing id counter.
 
 ## Side Effects
 - `[walk.rs:open]`, `[walk.rs:openat]`, `[walk.rs:close]`, `[walk.rs:getattrlistbulk]` — kernel calls declared by hand in `[walk.rs:unsafe extern "C"]`; `[walk.rs:scan]` fans directory reads across `rgy-par` threads when `std` is on.

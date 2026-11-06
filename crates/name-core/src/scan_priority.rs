@@ -20,9 +20,10 @@
 //!   so where the process inherited the default the value stays where it
 //!   is -- the affinity is the lever that applies everywhere.
 //!
-//! The syscalls are declared here rather than taken from `libc`, the same
-//! way `content.rs` declares the Darwin bits: name-core carries no libc
-//! dependency, on purpose.
+//! The syscalls are declared here rather than taken from `libc`: name-core
+//! carries no libc dependency, on purpose, and the platform calls it needs
+//! are declared by hand in the module that owns them (this one and
+//! `clock.rs`).
 
 use alloc::vec::Vec;
 

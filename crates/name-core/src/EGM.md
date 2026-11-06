@@ -44,7 +44,9 @@ doc comment says so.
 - `[readings.rs:Script]`, `[readings.rs:Shadow]` — transliteration vocabulary.
 - `[clock.rs:unix_millis]`, `[clock.rs:unix_secs]`, `[clock.rs:Timespec]` — the
   wall clock.
-- `[content.rs:Segment]`, `[content.rs:MAX_FILE]` — the content index (std).
+- `[content.rs:Segment]`, `[content.rs:MAX_FILE]` — the inert shell left by
+  the removed persisted trigram index; it keeps no on-disk index of its own
+  (std).
 - `[placeholder.rs:PLACEHOLDER_BITS]`, `[placeholder.rs:is_placeholder]`,
   `[placeholder.rs:skip_reason]`, `[placeholder.rs:is_placeholder_path]` —
   cloud-placeholder detection (std).
@@ -74,8 +76,9 @@ doc comment says so.
 - `[clock.rs:clock_gettime]` — a hand-declared `unsafe extern "C"`
   `clock_gettime` on unix; `[clock.rs:GetSystemTimeAsFileTime]` — a
   hand-declared `unsafe extern "system"` clock on Windows.
-- `[content.rs:unsafe extern "C"]` — the content grep's Darwin/unix bits
-  declare their own `extern "C"` calls and ABI constants inline.
+- `[content.rs:verify_paths_with]` — the content grep opens candidate files
+  on disk and reads their bytes through `std::fs` (std); it declares no
+  platform ABI.
 - `[scan_priority.rs:unsafe extern "C"]` — the platform's interactive-priority
   calls are declared by hand.
 - `[placeholder.rs:attributes]` — reads the OS file attributes for a path

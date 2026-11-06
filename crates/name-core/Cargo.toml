@@ -40,10 +40,12 @@ rgx-core = { path = "../rgx-core", version = "0.1.9", default-features = false, 
 # path uses. There is no second engine behind it: a pattern that engine
 # refuses is a pattern the search refuses, and the refusal is said.
 
-# No libc (and no new platform crates): the few Darwin/unix bits in
-# content.rs declare their own `extern "C"` and ABI constants inline —
-# the same pattern `without_materializing` already used for
-# getiopolicy_np. rgx-core stays `no_std`.
+# No libc (and no new platform crates): the platform calls the tree needs
+# are declared by hand in the module that owns them -- `clock.rs` declares
+# `clock_gettime`/`GetSystemTimeAsFileTime` and `scan_priority.rs` declares
+# `sched_setaffinity`/`setpriority`. `content.rs` is std-gated and reads
+# files through `std::fs` and rgx-core; it declares no platform ABI.
+# rgx-core stays `no_std`.
 
 [dev-dependencies]
 # The oracle the tree's own hash map is held to: the same operations, in the

@@ -45,8 +45,9 @@ implementations, and `LICENSE-MIT-FSEARCH` was removed with the last of them.
 ## Side Effects
 - `[clock.rs:clock_gettime]`, `[clock.rs:GetSystemTimeAsFileTime]` —
   hand-declared platform clocks (from `src`).
-- `[content.rs:unsafe extern "C"]`, `[scan_priority.rs:unsafe extern "C"]` —
-  hand-declared platform ABI calls (from `src`).
+- `[scan_priority.rs:unsafe extern "C"]` — hand-declared platform ABI calls
+  (from `src`). `content.rs` is std-gated and declares no platform ABI; the
+  hand-declared extern blocks live in `clock.rs` and `scan_priority.rs`.
 - `[placeholder.rs:attributes]`, `[live.rs:lstat]` — OS attribute/stat reads
   (from `src`).
 - `[mmap_vs_read.rs:main]` — temp corpus file I/O, `sync` spawn and stdout

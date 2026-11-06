@@ -84,3 +84,8 @@ LICENSE* text eol=lf
 # does not have: the patch would apply to nothing. The patches are LF and
 # have to stay LF.
 scripts/rgx-local-patches/** -text
+# The EGM contract index is generated with explicit LF and is compared byte
+# for byte across hosts. No extension means no *.md rule catches it, so a
+# Windows checkout with core.autocrlf would otherwise turn it into CRLF and
+# make a fresh --reindex disagree with the tracked file on that machine.
+.egm/CONTRACTS.index text eol=lf

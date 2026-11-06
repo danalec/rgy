@@ -363,3 +363,35 @@ fn copying_names_every_tree_the_audit_checks() {
         );
     }
 }
+
+/// `COPYING` and `NOTICE` say the fsearch notice was removed with the last
+/// MIT source file. The per-file SPDX audit reads `.rs` only, so a stray
+/// copy of the notice in a crate directory would contradict both documents
+/// and pass every other check. It did: `crates/name-core/` carried one
+/// until this guard was written.
+#[test]
+fn no_third_party_notice_file_is_tracked() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("the e2e harness sits in a workspace subdirectory");
+    let offenders: Vec<String> = tracked_files(root)
+        .into_iter()
+        .filter(|rel| {
+            rel.ends_with("LICENSE-MIT-FSEARCH")
+                // A tree with no git falls back to a directory walk, which
+                // sees build scratch that a checkout would never track.
+                && !rel.starts_with(".release-tree/")
+                && !rel.starts_with("target/")
+                // `git ls-files` reads the index, which still names a file
+                // deleted on disk but not yet staged. The claim is about a
+                // notice that is actually present, so require the bytes.
+                && root.join(rel).exists()
+        })
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "a third-party MIT notice is still tracked, but COPYING and NOTICE say \
+         it was removed with the last MIT source file:\n  {}",
+        offenders.join("\n  ")
+    );
+}

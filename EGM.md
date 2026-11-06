@@ -17,10 +17,13 @@ sets `opt-level = 3`, `lto = "fat"`, `codegen-units = 1`, `strip = true`.
 
 This bootstrap writes `EGM.md` contracts, not `README.md`: the repository's
 human-maintained `README.md` (the map), `MANUAL.md` and `FORMATS.md` are left
-untouched. `EGM.md` is gitignored at every depth (`[.gitignore:EGM.md]`, line
-67). The `benchmark/`, `docs/` and `tests/` trees were pruned from the
-bootstrap because they hold no source files by the skill's extension list or
-are test-only; `bins/` and `crates/` are the two blueprint subtrees.
+untouched. The 51 contracts in trees this repository owns are tracked, so a
+fresh CI checkout holds the same inputs as a working tree; `.gitignore`
+ignores only the out-of-scope copies inside the vendored upstream trees
+(`crates/rgx-*/**/EGM.md` and `crates/rar-codec/**/EGM.md`). The
+`benchmark/`, `docs/` and `tests/` trees were pruned from the bootstrap
+because they hold no source files by the skill's extension list or are
+test-only; `bins/` and `crates/` are the two blueprint subtrees.
 
 ## Local Interface & Invariants
 

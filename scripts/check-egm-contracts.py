@@ -26,10 +26,21 @@
 # deliberately separate: a machine can verify the first, only a human can
 # make the second.
 #
+# Phase 2 derives the structural skeleton of every contract from the tree:
+# generated_children() names the immediate subdirectories that owe a
+# contract, and generated_problems() holds each tracked contract's
+# `](./<child>/EGM.md)` links and its Verification Run line against that
+# skeleton, so a rename, a new crate, a deleted subcontract or a stale link
+# cannot land silently. It is folded into validate() -- there is one check
+# everywhere. --generate writes scratch skeletons under
+# <artifact_dir>/generated/ and --generated-check runs only the skeleton gate.
+#
 # Usage:
 #   python3 scripts/check-egm-contracts.py [--root DIR]
 #   python3 scripts/check-egm-contracts.py --self-test
 #   python3 scripts/check-egm-contracts.py --reindex
+#   python3 scripts/check-egm-contracts.py --generate
+#   python3 scripts/check-egm-contracts.py --generated-check
 #
 # Exit status: 0 all contracts valid, 1 one or more failures, 2 bad config.
 
@@ -357,7 +368,10 @@ def reindex(root, cfg):
     rows = contract_rows(root, cfg)
     lines = [CONTRACTS_INDEX_HEADER.rstrip("\n")]
     lines.extend(f"{rel}\t{digest}" for rel, digest in rows)
-    (art / CONTRACTS_INDEX).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # write_bytes, not write_text: on Windows write_text translates \n to
+    # \r\n, so the same tree would produce a different index on each host.
+    # The index is tracked, and the two hosts must be able to agree on it.
+    (art / CONTRACTS_INDEX).write_bytes(("\n".join(lines) + "\n").encode("utf-8"))
     return len(rows)
 
 
@@ -495,6 +509,146 @@ def check(path, root, cfg):
     return rel, problems
 
 
+# --- Phase 2: the structural skeleton, derived from the source tree ---------
+
+SECTION_HEADING = re.compile(r"^##[ \t]+(.+?)[ \t]*$", re.M)
+
+
+def _sections(text):
+    """Yield (title, body) for each level-2 `## ` heading, in order."""
+    heads = list(SECTION_HEADING.finditer(text))
+    for i, m in enumerate(heads):
+        start = m.end()
+        end = heads[i + 1].start() if i + 1 < len(heads) else len(text)
+        yield m.group(1), text[start:end]
+
+
+def section_body(text, name):
+    """Body of the first level-2 section whose title starts with `name`."""
+    for title, body in _sections(text):
+        if title == name or title.startswith(name):
+            return body
+    return None
+
+
+def _children_map(expected):
+    """Map each directory rel to the sorted names of its immediate children
+    that are themselves in `expected` (the expected_directories() set)."""
+    out = {}
+    for rel in expected:
+        if not rel:
+            continue
+        parent, _, name = rel.rpartition("/")
+        out.setdefault(parent, []).append(name)
+    return {k: sorted(v) for k, v in out.items()}
+
+
+def generated_children(root, cfg, rel, excludes):
+    """Sorted IMMEDIATE child directory names of `rel` that themselves owe a
+    contract (are in expected_directories). `rel` is "" for the root.
+
+    These are the `](./<child>/<target>)` links a contract for `rel` must
+    carry. The scope excludes are applied by expected_directories, so a child
+    inside a vendored/excluded tree is never derived and is never required.
+    """
+    expected = expected_directories(root, cfg["target_filename"], excludes)
+    return _children_map(expected).get(rel, [])
+
+
+def generated_problems(root, cfg):
+    """Hold every tracked contract against the tree-derived skeleton.
+
+    The set of `](./<child>/<target>)` links a contract declares is compared
+    with the immediate children that owe a contract. Such links conventionally
+    sit under `## Subdirectories & Boundaries`, but a Peanut may roll a child
+    up in `## Interface` (scripts/EGM.md does), so the whole contract is
+    scanned: any `./<child>/<target>` link is a declared child wherever it
+    appears. Exactly one path segment is an immediate child; a grandchild link
+    such as ./scripts/lib/EGM.md is ignored. Blueprints and leaf Peanuts with
+    no derived children need no links at all, so links are only required when
+    derived children exist. The Verification Run line is checked as a second,
+    structural gate, with a message distinct from check()'s "Run != ...".
+    """
+    excludes = scope_excludes(cfg)
+    filename = cfg["target_filename"]
+    cmap = _children_map(expected_directories(root, filename, excludes))
+    child_link = re.compile(
+        r"\]\(\./([^/)\s]+)/" + re.escape(filename) + r"(?:#[^)]*)?\)"
+    )
+    problems = []
+    for path in sorted(contracts(root, filename, excludes)):
+        file_rel = path.relative_to(root).as_posix()
+        dir_rel = path.parent.relative_to(root).as_posix()
+        if dir_rel == ".":
+            dir_rel = ""
+        text = path.read_text(encoding="utf-8")
+
+        derived = set(cmap.get(dir_rel, []))
+        linked = set(child_link.findall(text))
+        for child in sorted(derived - linked):
+            problems.append(
+                f"{file_rel}: missing child link ./{child}/{filename} "
+                f"(derived from the source tree)"
+            )
+        for child in sorted(linked - derived):
+            problems.append(
+                f"{file_rel}: stale child link ./{child}/{filename} "
+                f"(the directory owes no contract)"
+            )
+
+        verification = section_body(text, "Verification")
+        if verification is not None:
+            for command in RUN_LINE.findall(verification):
+                if command != cfg["verification"]:
+                    problems.append(
+                        f"{file_rel}: Verification Run line disagrees with "
+                        f".egmrc verification ({command})"
+                    )
+    return problems
+
+
+def skeleton(rel, cfg, children):
+    """A deterministic scratch contract: title, one derived child link per
+    child, and the exact Verification Run line from .egmrc."""
+    filename = cfg["target_filename"]
+    lines = [f"# {rel or 'ROOT'}", "", "## Subdirectories & Boundaries", ""]
+    for child in children:
+        lines.append(f"- {child}: [{child}](./{child}/{filename})")
+    lines += ["", "## Verification", "",
+              f"- Run: `{cfg['verification']}`", ""]
+    return "\n".join(lines)
+
+
+def generate(root, cfg):
+    """Write a skeleton for every directory that owes a contract into
+    <artifact_dir>/generated/. That scratch lives under a hidden, pruned,
+    gitignored directory, so contracts()/expected_directories() never see it.
+    The root (rel "") is placed in a ROOT/ subdirectory."""
+    excludes = scope_excludes(cfg)
+    filename = cfg["target_filename"]
+    gen = root / cfg["artifact_dir"].strip("/") / "generated"
+    expected = expected_directories(root, filename, excludes)
+    cmap = _children_map(expected)
+    for rel in expected:
+        dest = gen / (rel or "ROOT") / filename
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        # LF on every host: the generated set must be byte-comparable
+        # between Windows and Linux, not just semantically equivalent.
+        dest.write_bytes(skeleton(rel, cfg, cmap.get(rel, [])).encode("utf-8"))
+    return len(expected)
+
+
+def generated_check(root, cfg):
+    """Run only generated_problems; print the EGM GENERATED verdict."""
+    problems = generated_problems(root, cfg)
+    checked = sum(1 for _ in contracts(root, cfg["target_filename"],
+                                       scope_excludes(cfg)))
+    for problem in problems:
+        print(f"  FAIL generated: {problem}")
+    print(f"EGM GENERATED: checked={checked} failed={len(problems)}")
+    return 1 if problems else 0
+
+
 def validate(root, cfg):
     """Return (checked, problems); problems are fully formatted 'rel: issue'.
 
@@ -515,6 +669,7 @@ def validate(root, cfg):
     problems.extend(f"pairs: {p}" for p in pairs_problems(root, excludes))
     problems.extend(f"drift: {p}" for p in drift_problems(root, cfg))
     problems.extend(f"index: {p}" for p in index_problems(root, cfg))
+    problems.extend(f"generated: {p}" for p in generated_problems(root, cfg))
     return checked, problems
 
 
@@ -594,7 +749,7 @@ def self_test():
 
     results = []
 
-    def case(name, files, expected, config=CONFIG, index=True):
+    def case(name, files, expected, config=CONFIG, index=True, forbidden=()):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             (root / ".egmrc").write_text(config, encoding="utf-8")
@@ -611,7 +766,8 @@ def self_test():
                     reindex(root, cfg)
                 _, problems = validate(root, cfg)
                 blob = "\n".join(problems)
-            ok = all(e in blob for e in expected)
+            ok = (all(e in blob for e in expected)
+                  and not any(f in blob for f in forbidden))
             results.append((name, ok, blob))
 
     base = {
@@ -750,6 +906,30 @@ def self_test():
          dict(base, **{f".egm/{CONTRACTS_INDEX}": "# header\nnot-a-row\n"}),
          ["malformed row"])
 
+    # --- Phase 2: the tree-derived structural skeleton --------------------
+    # (a) a tracked contract missing a required child link.
+    NO_LINK_BLUEPRINT = BLUEPRINT.replace("[pkg](./pkg/EGM.md)", "pkg")
+    case("generated: missing required child link",
+         dict(base, **{"EGM.md": NO_LINK_BLUEPRINT}),
+         ["missing child link"])
+    # (b) a stale child link to a directory that owes no contract. ghost's
+    # EGM.md exists so the only new failure is the generated stale link.
+    case("generated: stale child link to a dir that owes no contract",
+         dict(base, **{
+             "EGM.md": BLUEPRINT + "- ghost: [ghost](./ghost/EGM.md)\n",
+             "ghost/EGM.md": peanut(),
+         }),
+         ["stale child link"])
+    # (c) a child inside a scope-excluded vendored tree is NOT required: it
+    # must not create a derived child (so no generated: problem at all).
+    case("generated: excluded vendored child is not required",
+         dict(base, **{"crates/rgx-core/pkg/lib.rs": "pub fn f() {}\n"}),
+         [], forbidden=["generated:", "missing contract"])
+    # (d) the Verification Run line is a distinct generated: gate.
+    case("generated: Verification Run line disagreement",
+         dict(base, **{"pkg/EGM.md": peanut(run="cargo test --workspace")}),
+         ["generated:", "Verification Run line disagrees"])
+
     failures = [name for name, ok, _ in results if not ok]
     for name, ok, blob in results:
         print(f"  {'PASS' if ok else 'FAIL'} {name}")
@@ -768,6 +948,11 @@ def main(argv=None):
     parser.add_argument("--reindex", action="store_true",
                         help="regenerate CONTRACTS.index from the tree; run this "
                              "after any contract edit or directory rename")
+    parser.add_argument("--generate", action="store_true",
+                         help="write deterministic skeleton contracts into "
+                              "<artifact_dir>/generated/ (gitignored scratch)")
+    parser.add_argument("--generated-check", action="store_true",
+                         help="run only the tree-derived skeleton check")
     args = parser.parse_args(argv)
 
     if args.self_test:
@@ -784,6 +969,15 @@ def main(argv=None):
         n = reindex(root, cfg)
         print(f"EGM CONTRACTS: reindexed {n} contracts into {cfg['artifact_dir']}/{CONTRACTS_INDEX}")
         return 0
+
+    if args.generate:
+        n = generate(root, cfg)
+        print(f"EGM CONTRACTS: generated {n} skeleton contracts into "
+              f"{cfg['artifact_dir']}/generated/")
+        return 0
+
+    if args.generated_check:
+        return generated_check(root, cfg)
 
     checked, problems = validate(root, cfg)
     for problem in problems:
