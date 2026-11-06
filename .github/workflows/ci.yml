@@ -159,6 +159,41 @@ jobs:
           persist-credentials: false
       - run: bash scripts/check-twins.sh
 
+  egm-contracts:
+    name: the EGM contracts describe the tree
+    # The same gate as the first job: the owner and the collaborators,
+    # and nobody else.
+    if: github.event_name != 'pull_request' || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
+    # The EGM.md contracts are tracked, so this is the same full check the
+    # local gate runs on the same inputs: sections, resolvable links,
+    # derived coverage, .egmrc against .gitignore and the CI test line,
+    # the tracked pair table, the drift status and the contract index.
+    # There is one checker, in Python, with thin .sh/.ps1 twins, so the
+    # pair cannot disagree about what a valid contract is. --self-test
+    # builds throwaway trees and proves every rule still fires.
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: EGM contracts (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File scripts/check-egm-contracts.ps1
+          pwsh -NoProfile -File scripts/check-egm-contracts.ps1 -SelfTest
+      - name: EGM contracts (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          bash scripts/check-egm-contracts.sh
+          bash scripts/check-egm-contracts.sh --self-test
+
   tv-runtime:
     name: the pack-store builder compiles
     # The same gate as the first job: the owner and the collaborators,

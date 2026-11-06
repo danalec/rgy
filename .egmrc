@@ -1,0 +1,11 @@
+# EGM bootstrap configuration for this repository.
+#
+# Read by /egm-bootstrap and by scripts/check-egm-contracts.{sh,ps1}.
+# The values here are the single source of truth: a bootstrap run must not
+# pick a different contract filename, and a contract must not name a
+# different test command. The root and crate README.md files are
+# hand-written, so the contracts are deliberately not called README.md.
+target_filename=EGM.md
+artifact_dir=.egm
+verification=cargo test --workspace --no-fail-fast --locked
+scope=exclude:crates/rgx-*,crates/rar-codec

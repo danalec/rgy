@@ -61,12 +61,24 @@ __pycache__/
 
 # Agent scratch: the decisions these record belong in the code they describe.
 /.remember/
-/.egm/
+/.egm/*
+!/.egm/*_DRIFT_REPORT.md
+!/.egm/DRIFT_STATUS.md
+!/.egm/CONTRACTS.index
+!/.egm/PAIRS.md
 /.dev/
 /docs/designs/
 /build/
-EGM.md
 /.worktrees/
+
+# The EGM.md contracts are tracked: a fresh CI checkout must hold the same
+# inputs as a working tree, and the contract gate reads them. Only the
+# contracts inside the vendored upstream trees stay out -- AGENTS.md §1
+# leaves those trees to the sync, and a tracked EGM.md there would be a
+# fork that the next sync deletes. The checker's config check fails if a
+# bare EGM.md rule comes back and empties CI again.
+crates/rgx-*/**/EGM.md
+crates/rar-codec/**/EGM.md
 
 # The working notes of this repository: the owner's and the agent's own file,
 # on the machine, out of the tree and out of every upload.

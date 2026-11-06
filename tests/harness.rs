@@ -168,6 +168,13 @@ fn newest_source(dir: &Path) -> Option<(std::time::SystemTime, PathBuf)> {
             }
             continue;
         }
+        // The EGM.md contracts are tracked working documents, not compiler
+        // inputs: cargo never rebuilds a binary because one changed. Leaving
+        // them in this count would make the guard fail for good after any
+        // contract edit, with no rebuild able to fix it.
+        if entry.file_name() == "EGM.md" {
+            continue;
+        }
         if let Ok(modified) = meta.modified() {
             if newest.as_ref().map(|n| modified > n.0).unwrap_or(true) {
                 newest = Some((modified, entry.path()));

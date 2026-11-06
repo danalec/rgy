@@ -14,6 +14,11 @@ categories = ["gui", "os::windows-apis"]
 readme = "../../README.md"
 
 
+# The EGM.md contracts are tracked working documents, not source. A
+# tracked file under this crate would otherwise be carried into the
+# published crate by cargo package (see tests/egm_packaging.rs).
+exclude = ["**/EGM.md"]
+
 [dependencies]
 # The launcher's model: the query, the rows, the geometry.
 rgy-launcher = { path = "../launcher", version = "0.1.9" }

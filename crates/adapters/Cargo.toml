@@ -14,6 +14,11 @@ categories = ["text-processing"]
 readme = "../../README.md"
 
 
+# The EGM.md contracts are tracked working documents, not source. A
+# tracked file under this crate would otherwise be carried into the
+# published crate by cargo package (see tests/egm_packaging.rs).
+exclude = ["**/EGM.md"]
+
 [dependencies]
 # The adapter trait, the registry and the pipeline that runs one.
 rgx-core = { path = "../rgx-core", version = "0.1.9", default-features = false, package = "rgy-vendored-core" }

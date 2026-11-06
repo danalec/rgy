@@ -19,6 +19,11 @@ readme = "../../README.md"
 # filesystem (the portable walk, the Ctrl-C handler) stays in the seam and in
 # the product, not here.
 
+# The EGM.md contracts are tracked working documents, not source. A
+# tracked file under this crate would otherwise be carried into the
+# published crate by cargo package (see tests/egm_packaging.rs).
+exclude = ["**/EGM.md"]
+
 [dependencies]
 # The seam, without its `std` feature. The backend only speaks the block
 # types and the change vocabulary, and neither needs a filesystem -- so the

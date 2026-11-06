@@ -19,6 +19,11 @@ readme = "../../README.md"
 # names (`rgx-*`), the backend is `rgy-*`, and what the user runs is `rgxy`.
 # The binary was always `rgxy`; the package now says it too, so the registry
 # and the program say one thing.
+# The EGM.md contracts are tracked working documents, not source. A
+# tracked file under this crate would otherwise be carried into the
+# published crate by cargo package (see tests/egm_packaging.rs).
+exclude = ["**/EGM.md"]
+
 [[bin]]
 name = "rgxy"
 path = "src/main.rs"

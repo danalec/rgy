@@ -40,6 +40,12 @@ path = "help.rs"
 name = "autostart"
 path = "autostart.rs"
 
+# The EGM.md contracts are tracked working documents. The registry is for
+# the code, so every published crate must exclude them.
+[[test]]
+name = "egm_packaging"
+path = "egm_packaging.rs"
+
 [dev-dependencies]
 # The protocol, for the rule that says where a unix socket is when the path
 # the caller asked for does not fit the platform's `sun_path`: the fake

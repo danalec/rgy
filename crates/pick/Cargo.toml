@@ -14,6 +14,11 @@ categories = ["command-line-utilities"]
 readme = "../../README.md"
 
 
+# The EGM.md contracts are tracked working documents, not source. A
+# tracked file under this crate would otherwise be carried into the
+# published crate by cargo package (see tests/egm_packaging.rs).
+exclude = ["**/EGM.md"]
+
 [features]
 default = ["std"]
 # The machine: the process, the PATH, the pipes. Without it the crate is
