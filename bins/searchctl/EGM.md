@@ -4,7 +4,7 @@
 
 Crate root of the merged name-search CLI. The directory has no source of its
 own: `[Cargo.toml:package.name]` is `rgy-search` at
-`[Cargo.toml:package.version]` 0.1.9, `[Cargo.toml:package.edition]` 2024 and
+`[Cargo.toml:package.version]` 0.1.10, `[Cargo.toml:package.edition]` 2024 and
 `[Cargo.toml:package.rust-version]` 1.89; `[Cargo.toml:package.description]`
 calls it "The merged name-search CLI (name tokens + zen-rs filters)".
 It declares one binary target, `[Cargo.toml:[[bin]].name]` = `searchctl` at
@@ -17,7 +17,7 @@ name while the package is `rgy-*`. All implementation is in the
 
 ## Interface
 - `[Cargo.toml:[[bin]].name]` — `searchctl`, built from `[Cargo.toml:[[bin]].path]` (`src/main.rs`).
-- `[Cargo.toml:package.name]` — `rgy-search`; `[Cargo.toml:package.version]` 0.1.9; `[Cargo.toml:package.edition]` 2024; `[Cargo.toml:package.rust-version]` 1.89.
+- `[Cargo.toml:package.name]` — `rgy-search`; `[Cargo.toml:package.version]` 0.1.10; `[Cargo.toml:package.edition]` 2024; `[Cargo.toml:package.rust-version]` 1.89.
 - `[Cargo.toml:dependencies.rgy-discovery]`, `[Cargo.toml:dependencies.rgy-adapters]`, `[Cargo.toml:dependencies.rgy-discovery-dispatch]`, `[Cargo.toml:dependencies.rgy-engine]`, `[Cargo.toml:dependencies.rgy-name-core]`, `[Cargo.toml:dependencies.rgy-par]`, `[Cargo.toml:dependencies.rgy-pick]`, `[Cargo.toml:dependencies.rgy-proto]`, `[Cargo.toml:dependencies.mimalloc]` — the nine dependency entries.
 - Rolled up from [src](./src/EGM.md): [main.rs:fn main], [main.rs:struct Opts], [main.rs:fn run], [main.rs:fn obtain_index], [main.rs:fn widths], [main.rs:fn run_pick], [main.rs:fn run_daemon], [main.rs:struct Printed], [main.rs:fn daemon_name_lines], [main.rs:fn daemon_content_lines].
 

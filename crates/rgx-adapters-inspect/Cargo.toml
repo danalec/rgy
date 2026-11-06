@@ -1,6 +1,6 @@
 [package]
 name = "rgy-vendored-adapters-inspect"
-version = "0.1.9"
+version = "0.1.10"
 edition = "2021"
 authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
 description = "rgx adapter: forensic binary inspection — magic identification, embedded-structure carving, strings, entropy"
@@ -36,7 +36,7 @@ include = [
 name = "rgx_adapters_inspect"
 
 [dependencies]
-rgx-core = { path = "../rgx-core", version = "0.1.9", default-features = false, features = ["std", "sha256-hw"], package = "rgy-vendored-core" }
+rgx-core = { path = "../rgx-core", version = "0.1.10", default-features = false, features = ["std", "sha256-hw"], package = "rgy-vendored-core" }
 [features]
 # One feature per adapter, in the order `adapters()` returns them. The default
 # is the whole crate, so the default binary is unchanged; a user who names the

@@ -1,12 +1,14 @@
 --- a/crates/rgx-adapters-mail/Cargo.toml
 +++ b/crates/rgx-adapters-mail/Cargo.toml
-@@ -1,5 +1,5 @@
+@@ -1,6 +1,6 @@
  [package]
 -name = "rgx-adapters-mail"
+-version = "0.1.9"
 +name = "rgy-vendored-adapters-mail"
- version = "0.1.9"
++version = "0.1.10"
  edition = "2021"
  authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
+ description = "rgx adapters for e-mail archives (mbox, eml) with MIME attachment recursion"
 @@ -8,7 +8,7 @@
  readme = "README.md"
  keywords = ["email", "mbox", "eml", "pst"]
@@ -35,4 +37,4 @@
  
  [dependencies]
 -rgx-core = { path = "../rgx-core", version = "0.1.9", default-features = false, features = ["std", "sha256-hw"] }
-+rgx-core = { path = "../rgx-core", version = "0.1.9", default-features = false, features = ["std", "sha256-hw"], package = "rgy-vendored-core" }
++rgx-core = { path = "../rgx-core", version = "0.1.10", default-features = false, features = ["std", "sha256-hw"], package = "rgy-vendored-core" }

@@ -124,6 +124,9 @@ if ($here -and (Test-Path -LiteralPath (Join-Path $here 'scripts/lib/digest.ps1'
 # exit code.
 $InstallDir = "$env:LOCALAPPDATA\Programs\rgy"
 $BaseUrl = 'https://github.com/danalec/rgy/releases/download'
+# The crates are 0.1.10, but this is the last release that shipped binary
+# archives with verified digests; a source-only release has no assets of its
+# own to install. (The same policy as the paired upstream 0.1.10.)
 $Version = 'rgy-v0.1.9.0'
 $SkipChecksum = $false
 $NoAutostart = $false

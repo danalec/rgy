@@ -5,11 +5,13 @@
 # cannot disagree about what a valid contract is.
 #
 # Usage:
-#   powershell -File scripts/check-egm-contracts.ps1 [-Root DIR] [-SelfTest]
+#   powershell -File scripts/check-egm-contracts.ps1 [-Root DIR] [-SelfTest] [-Reindex] [-Fix]
 #   powershell -File scripts/check-egm-contracts.ps1 --self-test
 param(
     [string]$Root,
     [switch]$SelfTest,
+    [switch]$Reindex,
+    [switch]$Fix,
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$Rest
 )
@@ -32,6 +34,8 @@ if (-not $python) {
 $argsList = @($script)
 if ($Root) { $argsList += @('--root', $Root) }
 if ($SelfTest) { $argsList += '--self-test' }
+if ($Reindex) { $argsList += '--reindex' }
+if ($Fix) { $argsList += '--fix' }
 if ($Rest) { $argsList += $Rest }
 & $python @argsList
 exit $LASTEXITCODE

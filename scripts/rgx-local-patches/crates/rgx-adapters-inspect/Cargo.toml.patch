@@ -1,12 +1,14 @@
 --- a/crates/rgx-adapters-inspect/Cargo.toml
 +++ b/crates/rgx-adapters-inspect/Cargo.toml
-@@ -1,5 +1,5 @@
+@@ -1,6 +1,6 @@
  [package]
 -name = "rgx-adapters-inspect"
+-version = "0.1.9"
 +name = "rgy-vendored-adapters-inspect"
- version = "0.1.9"
++version = "0.1.10"
  edition = "2021"
  authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
+ description = "rgx adapter: forensic binary inspection — magic identification, embedded-structure carving, strings, entropy"
 @@ -8,7 +8,7 @@
  readme = "README.md"
  keywords = ["forensics", "carving", "strings", "metadata"]
@@ -30,7 +32,7 @@
  [dependencies]
 -rgx-core = { path = "../rgx-core", version = "0.1.9", default-features = false, features = ["std", "sha256-hw"] }
 -
-+rgx-core = { path = "../rgx-core", version = "0.1.9", default-features = false, features = ["std", "sha256-hw"], package = "rgy-vendored-core" }
++rgx-core = { path = "../rgx-core", version = "0.1.10", default-features = false, features = ["std", "sha256-hw"], package = "rgy-vendored-core" }
  [features]
  # One feature per adapter, in the order `adapters()` returns them. The default
  # is the whole crate, so the default binary is unchanged; a user who names the

@@ -1,6 +1,6 @@
 [package]
 name = "rgy-vendored-adapters-threed"
-version = "0.1.9"
+version = "0.1.10"
 edition = "2021"
 authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
 description = "rgx adapters: 3D model formats (glb, stl, ply, fbx, pcd, las, vtk, obj)"
@@ -36,7 +36,7 @@ include = [
 name = "rgx_adapters_threed"
 
 [dependencies]
-rgx-core = { path = "../rgx-core", version = "0.1.9", default-features = false, features = ["std", "sha256-hw"], package = "rgy-vendored-core" }
+rgx-core = { path = "../rgx-core", version = "0.1.10", default-features = false, features = ["std", "sha256-hw"], package = "rgy-vendored-core" }
 [features]
 # One feature per adapter, in the order `adapters()` returns them. The
 # default is the whole crate: a binary that names the formats it needs

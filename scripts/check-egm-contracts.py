@@ -41,6 +41,7 @@
 #   python3 scripts/check-egm-contracts.py --reindex
 #   python3 scripts/check-egm-contracts.py --generate
 #   python3 scripts/check-egm-contracts.py --generated-check
+#   python3 scripts/check-egm-contracts.py --fix
 #
 # Exit status: 0 all contracts valid, 1 one or more failures, 2 bad config.
 
@@ -51,7 +52,7 @@ import os
 import re
 import subprocess
 import sys
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 # Directories that never hold a contract: VCS, build output, hidden agent
@@ -95,7 +96,8 @@ def read_config(path):
             continue
         key, value = line.split("=", 1)
         cfg[key.strip()] = value.strip()
-    for key in ("target_filename", "artifact_dir", "verification", "scope"):
+    for key in ("target_filename", "artifact_dir", "verification", "scope",
+                "source_extensions"):
         if not cfg.get(key):
             raise ValueError(f".egmrc is missing '{key}'")
     if cfg["target_filename"].lower() == "readme.md":
@@ -241,6 +243,18 @@ def config_problems(root, cfg):
             problems.append(
                 f"verification command is not the one CI runs ({cfg['verification']})"
             )
+    # The prune policy is declared in .egmrc and implemented as
+    # SOURCE_SUFFIXES. Assert they agree, so a change to the bootstrap's
+    # prune list cannot silently change the derived set without a review.
+    declared = {s.strip().lower() for s in cfg["source_extensions"].split(",")
+                if s.strip()}
+    if declared != SOURCE_SUFFIXES:
+        missing = sorted(SOURCE_SUFFIXES - declared)
+        extra = sorted(declared - SOURCE_SUFFIXES)
+        problems.append(
+            f".egmrc source_extensions does not match the checker's prune "
+            f"policy (missing {missing}, extra {extra})"
+        )
     return problems
 
 
@@ -350,6 +364,20 @@ def contract_digest(path):
     return hashlib.sha256(raw).hexdigest()
 
 
+def within(base, rel):
+    """True when rel resolves to a path inside base (no .. or absolute escape).
+
+    Both the status manifest and the index name paths that the checker reads
+    back. Resolve them first so a hand-edited row cannot reach outside the
+    tree, including through a symlink.
+    """
+    try:
+        (base / rel).resolve().relative_to(base.resolve())
+    except (ValueError, OSError):
+        return False
+    return True
+
+
 def contract_rows(root, cfg):
     """The derived facts: which directories owe a contract, and their hashes."""
     filename = cfg["target_filename"]
@@ -391,7 +419,12 @@ def index_problems(root, cfg):
         parts = line.split("\t")
         if len(parts) != 2 or not re.fullmatch(r"[0-9a-f]{64}", parts[1]):
             return [f"{label} has a malformed row ({line})"]
-        indexed[parts[0]] = parts[1]
+        rel = parts[0]
+        if not within(root, rel):
+            return [f"{label} has a row whose path escapes the repository ({rel})"]
+        if rel in indexed:
+            return [f"{label} has a duplicate row for {rel}"]
+        indexed[rel] = parts[1]
 
     filename = cfg["target_filename"]
     expected = {rel or "." for rel in expected_directories(root, filename, scope_excludes(cfg))}
@@ -405,7 +438,7 @@ def index_problems(root, cfg):
         if not contract.is_file():
             problems.append(f"{label}: {rel} has no {filename} on disk")
         elif contract_digest(contract) != indexed[rel]:
-            problems.append(f"{label}: {rel} hash mismatch (edited without --reindex)")
+            problems.append(f"{label}: {rel} hash mismatch (contract edited; run --reindex)")
     return problems
 
 
@@ -431,14 +464,50 @@ def drift_problems(root, cfg):
     if not stamp:
         return [f"{label} has no ISO 'date: YYYY-MM-DD' line"]
     try:
-        date(int(stamp.group(1)), int(stamp.group(2)), int(stamp.group(3)))
+        stamped_date = date(int(stamp.group(1)), int(stamp.group(2)),
+                            int(stamp.group(3)))
     except ValueError:
         return [f"{label} has an invalid date"]
     stamped = stamp.group(0).split(":", 1)[1].strip()
+    # A date decades out cannot describe a review that happened. Tolerate a
+    # month of clock skew rather than depending on an exact wall clock; this
+    # is a sanity bound, not a security control -- intent is still reviewed.
+    if stamped_date > date.today() + timedelta(days=30):
+        return [f"{label} is dated implausibly far in the future ({stamped})"]
+
+    count = re.search(r"^unresolved:\s*(\d+)\s*$", text, re.M)
+    if not count:
+        return [f"{label} has no 'unresolved: N' line"]
+    unresolved = int(count.group(1))
+
+    # The decision names the durable note where the finding was resolved.
+    # Machinery cannot verify intent, but it can require that the named
+    # place exists, stays inside the repository, and that a clean status is
+    # not left as "pending".
+    decision = re.search(r"^decision:\s*(\S+)\s*$", text, re.M)
+    if not decision:
+        return [f"{label} has no 'decision: <path>' line"]
+    d = decision.group(1)
+    if unresolved == 0:
+        if d == "pending":
+            return [f"{label} has no recorded decision (unresolved is 0)"]
+        if not within(root, d):
+            return [f"{label} names a decision whose path escapes the repository ({d})"]
+        if not (root / d).is_file():
+            return [f"{label} names a decision file that does not exist ({d})"]
 
     report = re.search(r"^report:\s*(\S+)\s*$", text, re.M)
     if report:
         rel = report.group(1)
+        # `report:` is root-relative (it already names .egm/), so resolve it
+        # from root and require it to stay inside the repository and inside
+        # the artifact directory.
+        if not within(root, rel):
+            return [f"{label} names a report whose path escapes the repository ({rel})"]
+        try:
+            (root / rel).resolve().relative_to(art.resolve())
+        except (ValueError, OSError):
+            return [f"{label} names a report outside {art.name}/ ({rel})"]
         if not (root / rel).is_file():
             return [f"{label} names a missing report ({rel})"]
         named = re.search(r"(\d{4}-\d{2}-\d{2})_DRIFT_REPORT\.md$", rel)
@@ -451,10 +520,6 @@ def drift_problems(root, cfg):
             return [f"{label} names {rel}, but the newest dated report is "
                     f"{newest[-1].name}"]
 
-    count = re.search(r"^unresolved:\s*(\d+)\s*$", text, re.M)
-    if not count:
-        return [f"{label} has no 'unresolved: N' line"]
-    unresolved = int(count.group(1))
     if unresolved:
         return [f"{label} reports {unresolved} unresolved drift findings"]
     return []
@@ -712,10 +777,12 @@ A package.
     return text + body
 
 
+PRUNE_VALUE = ",".join(sorted(SOURCE_SUFFIXES))
 CONFIG = ("target_filename=EGM.md\n"
           "artifact_dir=.egm\n"
           "verification=cargo test --workspace --no-fail-fast --locked\n"
-          "scope=exclude:crates/rgx-*,crates/rar-codec\n")
+          "scope=exclude:crates/rgx-*,crates/rar-codec\n"
+          f"source_extensions={PRUNE_VALUE}\n")
 PAIR_TABLE = """# notes
 
 ## The platform pairs
@@ -734,7 +801,8 @@ Tracked pair table. No pairs are listed in this test tree.
 DRIFT_STATUS_CLEAN = ("# EGM drift status\n\n"
                       "date: 2026-01-02\n"
                       "report: .egm/2026-01-02_DRIFT_REPORT.md\n"
-                      "unresolved: 0\n")
+                      "unresolved: 0\n"
+                      "decision: .egm/PAIRS.md\n")
 DRIFT_REPORT_CLEAN = "# report\n\nNo drift detected\n"
 GITIGNORE_GOOD = ("# scratch\n/.egm/*\n"
                   "!/.egm/*_DRIFT_REPORT.md\n"
@@ -801,6 +869,9 @@ def self_test():
         line for line in VALID_INDEX.splitlines() if not line.startswith("pkg\t")
     ) + "\n"
     EXTRA_ROW_INDEX = VALID_INDEX + "ghost\t" + "0" * 64 + "\n"
+    FIRST_ROW = next(line for line in VALID_INDEX.splitlines() if "\t" in line)
+    DUPLICATE_INDEX = VALID_INDEX + FIRST_ROW + "\n"
+    ESCAPING_INDEX = VALID_INDEX + "../evil\t" + "0" * 64 + "\n"
 
     case("valid tree", base, [])
     case("missing section", dict(base, **{"pkg/EGM.md": peanut().replace("## Side Effects\n\n- None.\n\n", "")}),
@@ -833,18 +904,22 @@ def self_test():
     case("README.md as target", base, ["config error", "must not be README.md"],
          config="target_filename=README.md\nartifact_dir=.egm\n"
                 "verification=cargo test --workspace --no-fail-fast --locked\n"
-                "scope=exclude:crates/rgx-*,crates/rar-codec\n")
+                "scope=exclude:crates/rgx-*,crates/rar-codec\n"
+                f"source_extensions={PRUNE_VALUE}\n")
     case("missing artifact_dir", base, ["config error", "artifact_dir"],
          config="target_filename=EGM.md\n"
                 "verification=cargo test --workspace --no-fail-fast --locked\n"
-                "scope=exclude:crates/rgx-*,crates/rar-codec\n")
+                "scope=exclude:crates/rgx-*,crates/rar-codec\n"
+                f"source_extensions={PRUNE_VALUE}\n")
     case("missing scope", base, ["config error", "scope"],
          config="target_filename=EGM.md\nartifact_dir=.egm\n"
-                "verification=cargo test --workspace --no-fail-fast --locked\n")
+                "verification=cargo test --workspace --no-fail-fast --locked\n"
+                f"source_extensions={PRUNE_VALUE}\n")
     case("malformed scope", base, ["config error", "scope must be"],
          config="target_filename=EGM.md\nartifact_dir=.egm\n"
                 "verification=cargo test --workspace --no-fail-fast --locked\n"
-                "scope=nonsense\n")
+                "scope=nonsense\n"
+                f"source_extensions={PRUNE_VALUE}\n")
     case("config drift from CI", dict(base, **{".github/workflows/ci.yml": "run: cargo test --workspace\n"}),
          ["verification command is not the one CI runs"])
     case("README shaped like a contract", dict(base, **{"README.md": peanut()}),
@@ -930,6 +1005,97 @@ def self_test():
          dict(base, **{"pkg/EGM.md": peanut(run="cargo test --workspace")}),
          ["generated:", "Verification Run line disagrees"])
 
+    # --- Ported hardening: the audit gaps and the four boundaries ----------
+
+    case("hash mismatch names the --reindex fix",
+         dict(base, **{f".egm/{CONTRACTS_INDEX}": STALE_INDEX}),
+         ["hash mismatch", "run --reindex"])
+    case("index row path escapes the repository",
+         dict(base, **{f".egm/{CONTRACTS_INDEX}": ESCAPING_INDEX}),
+         ["escapes the repository"])
+    case("duplicate index row",
+         dict(base, **{f".egm/{CONTRACTS_INDEX}": DUPLICATE_INDEX}),
+         ["duplicate row"])
+    case("status names a report whose path escapes the repository",
+         dict(base, **{".egm/DRIFT_STATUS.md":
+                       DRIFT_STATUS_CLEAN.replace(".egm/2026-01-02_DRIFT_REPORT.md",
+                                                  "../2026-01-02_DRIFT_REPORT.md")}),
+         ["escapes the repository"])
+    case("status names a report outside the artifact directory",
+         dict(base, **{".egm/DRIFT_STATUS.md":
+                       DRIFT_STATUS_CLEAN.replace(".egm/2026-01-02_DRIFT_REPORT.md",
+                                                  "2026-01-02_DRIFT_REPORT.md")}),
+         ["outside .egm"])
+    case("prune policy declared in .egmrc disagrees with the checker",
+         base, ["does not match the checker's prune policy"],
+         config=CONFIG.replace(".zig", ""))
+    case("config is missing source_extensions",
+         base, ["config error", "source_extensions"],
+         config=("target_filename=EGM.md\n"
+                 "artifact_dir=.egm\n"
+                 "verification=cargo test --workspace --no-fail-fast --locked\n"
+                 "scope=exclude:crates/rgx-*,crates/rar-codec\n"))
+    case("status has no decision",
+         dict(base, **{".egm/DRIFT_STATUS.md":
+                       DRIFT_STATUS_CLEAN.replace("decision: .egm/PAIRS.md\n", "")}),
+         ["no 'decision"])
+    case("status names a decision file that does not exist",
+         dict(base, **{".egm/DRIFT_STATUS.md":
+                       DRIFT_STATUS_CLEAN.replace("decision: .egm/PAIRS.md",
+                                                  "decision: missing.md")}),
+         ["does not exist"])
+    case("status names a decision whose path escapes the repository",
+         dict(base, **{".egm/DRIFT_STATUS.md":
+                       DRIFT_STATUS_CLEAN.replace("decision: .egm/PAIRS.md",
+                                                  "decision: ../outside.md")}),
+         ["escapes the repository"])
+    case("clean status still says pending",
+         dict(base, **{".egm/DRIFT_STATUS.md":
+                       DRIFT_STATUS_CLEAN.replace("decision: .egm/PAIRS.md",
+                                                  "decision: pending")}),
+         ["no recorded decision"])
+    case("status dated implausibly far in the future",
+         dict(base, **{".egm/DRIFT_STATUS.md":
+                       DRIFT_STATUS_CLEAN.replace("date: 2026-01-02",
+                                                  "date: 2099-01-01")}),
+         ["implausibly far in the future"])
+
+    # --fix heals a stale index and the tree then validates, in one step.
+    import contextlib
+    import io
+    with tempfile.TemporaryDirectory() as td:
+        scratch = Path(td)
+        (scratch / ".egmrc").write_text(CONFIG, encoding="utf-8")
+        stale = dict(base, **{f".egm/{CONTRACTS_INDEX}": STALE_INDEX})
+        for rel, text in stale.items():
+            p = scratch / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(text, encoding="utf-8")
+        cfg = read_config(scratch / ".egmrc")
+        _, before = validate(scratch, cfg)
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = main(["--root", str(scratch), "--fix"])
+        _, after = validate(scratch, cfg)
+        results.append(("--fix regenerates a stale index and the tree validates",
+                        bool(before) and rc == 0 and not after,
+                        "\n".join(before + after)))
+
+    # A lockfile must be byte-stable: regenerating it twice changes nothing.
+    with tempfile.TemporaryDirectory() as td:
+        scratch = Path(td)
+        (scratch / ".egmrc").write_text(CONFIG, encoding="utf-8")
+        for rel, text in base.items():
+            p = scratch / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(text, encoding="utf-8")
+        cfg = read_config(scratch / ".egmrc")
+        reindex(scratch, cfg)
+        first = (scratch / ".egm" / CONTRACTS_INDEX).read_bytes()
+        reindex(scratch, cfg)
+        second = (scratch / ".egm" / CONTRACTS_INDEX).read_bytes()
+        results.append(("reindex is idempotent and byte-stable",
+                        first == second, ""))
+
     failures = [name for name, ok, _ in results if not ok]
     for name, ok, blob in results:
         print(f"  {'PASS' if ok else 'FAIL'} {name}")
@@ -953,6 +1119,10 @@ def main(argv=None):
                               "<artifact_dir>/generated/ (gitignored scratch)")
     parser.add_argument("--generated-check", action="store_true",
                          help="run only the tree-derived skeleton check")
+    parser.add_argument("--fix", action="store_true",
+                         help="regenerate CONTRACTS.index when it is stale or "
+                              "missing, then re-validate (explicit opt-in; "
+                              "CI never uses it)")
     args = parser.parse_args(argv)
 
     if args.self_test:
@@ -978,6 +1148,18 @@ def main(argv=None):
 
     if args.generated_check:
         return generated_check(root, cfg)
+
+    if args.fix:
+        art = root / cfg["artifact_dir"].strip("/")
+        index = art / CONTRACTS_INDEX
+        before = index.read_bytes() if index.is_file() else None
+        n = reindex(root, cfg)
+        after = index.read_bytes()
+        if before != after:
+            print(f"EGM CONTRACTS: --fix regenerated {n} contracts into "
+                  f"{cfg['artifact_dir']}/{CONTRACTS_INDEX}")
+        else:
+            print(f"EGM CONTRACTS: --fix found the index current ({n} contracts)")
 
     checked, problems = validate(root, cfg)
     for problem in problems:

@@ -4,8 +4,11 @@ Direction: doc-to-code. This is the definitive pass of the day and
 **supersedes the first one**, which was a targeted reconciliation after
 `3a0ddc2` / `7348e9a` and honestly recorded its own coverage gap: the
 interiors of contracts describing untouched modules had not been
-re-derived from their sources. This pass closes that gap. No finding is
-left unresolved, and `DRIFT_STATUS.md` names this report.
+re-derived from their sources. This pass closes that gap. It also carries
+the **0.1.10 pairing** with the upstream rgx (§9): rgy's crates move to
+0.1.10, the EGM checker adopts rgx's post-`5d4c301` hardening, and the
+vendored drift is recorded. No finding is left unresolved, and
+`DRIFT_STATUS.md` names this report and its `decision`.
 
 ## 1. Scope and inputs
 
@@ -156,3 +159,115 @@ questions. `.egm/DRIFT_STATUS.md` is the machine-readable decision;
 `.egm/PAIRS.md` the tracked pair table; `.egm/CONTRACTS.index` the
 generated hashes. Phase 1 and Phase 2 are both implemented; there is no
 Phase 3 outstanding.
+
+## 9. Reply to the rgx 0.1.10 handoff
+
+Reply in English, as asked by
+`../rgx/.egm/RGY_HANDOFF_0.1.10.md` (2026-11-06). The handoff reports
+rgx `f327bf8` / tag `rgx-v0.1.10`, a source-only release whose binary
+assets stay at `rgx-v0.1.9.0`, and asks rgy to re-check its vendored copy,
+read sections 5–6 of rgx's proposal, decide which of seven items to adopt,
+run a drift pass with a `decision`, and keep the gate green.
+
+### 9.1 The seven items, and what rgy adopted
+
+| # | Item | rgy decision |
+|---|---|---|
+| 1 | `CONTRACTS.index` lockfile, CRLF→LF, `.gitattributes` LF pin | **Adopted.** Already implemented in the first pass of this date; Windows and Linux produce byte-identical bytes (SHA-256 verified on both hosts). |
+| 2 | `--reindex` / `--fix` (`-Reindex` / `-Fix`) | **Adopted.** `--reindex` already existed; `--fix` and `-Fix` are added in this pairing pass. CI never uses it, and no other mode writes a file. |
+| 3 | One identical check everywhere; 43-case self-test | **Adopted, with a higher count: 55/55.** rgy's self-test carries the common cases plus its Phase 2 generation cases and the newly ported rules (`--fix` recovery, duplicate rows, path escapes, `decision`, date bound, byte stability). One checker, one `validate()`. |
+| 4 | `.egmrc` enforced with four keys | **Adopted, with two adaptations.** rgy keeps a fifth key, `scope=exclude:crates/rgx-*,crates/rar-codec`, and a different `verification` (`cargo test --workspace --no-fail-fast --locked`, not `--release`). `source_extensions` is asserted equal to rgy's own `SOURCE_SUFFIXES`. |
+| 5 | `DRIFT_STATUS.md` with `date`, `report`, `unresolved`, `decision` | **Adopted.** `decision` names this tracked report. A clean status left `pending` is refused. |
+| 6 | Path safety for `report:` and index rows | **Adopted.** Paths resolve inside the repository; reports additionally inside `.egm/`. |
+| 7 | Version bump via `scripts/bump-version.py` | **Adopted.** Crates, requirement lines and `Cargo.lock` move to `0.1.10` together; the 12 vendored manifest patches are re-derived. Installers stay at `rgy-v0.1.9.0`, the last tag with binary assets — the same policy rgx states. |
+
+### 9.2 Corrections to the handoff's assumptions
+
+- **rgy tracks 51 contracts, not 95.** 95 was the initial bootstrap's
+  generated set before the 44 contracts inside the vendored upstream trees
+  were excluded by `scope` and deleted as ignored scratch. The handoff's
+  "your contract set is 95 directories" describes that earlier state.
+- rgy's `.egmrc` has the `scope` key and the verification line above; rgx's
+  four-key config is neither sufficient nor correct here.
+- **rgy has a Phase 2 that rgx does not**: `--generate` writes deterministic
+  structural skeletons and `--generated-check` derives each contract's
+  required child links and `Run:` line from the tree. It does **not**
+  regenerate prose. This is compatible with the "derived facts generated /
+  authored decisions human" split in rgx §5: the derived half is the shape,
+  the authored half is the meaning, and the meaning is still reviewed by
+  dated drift passes. rgy keeps it because its own history is the evidence
+  the split answers — one rewrite left 95 stale contracts behind.
+
+### 9.3 Vendored drift, recorded (handoff item 1)
+
+`scripts/check-drift.ps1 -Upstream ../rgx` against `f327bf8`: **12 of 12
+vendored trees have moved since pin `8c32dc09`, 49/49 rows checked, 0
+unpinned.** The changed upstream paths in that range are the vendored
+`Cargo.toml` files (version 0.1.9 → 0.1.10) and newly tracked `EGM.md`
+contracts. **No `.rs` source changed.** `scripts/check-vendoring.ps1`
+passes (12 vendored trees, 37 patches, pinned to `8c32dc09`); after the
+bump, `scripts/derive-vendored-patches.py --upstream ../rgx` re-derived the
+12 manifest patches and its `--check` is clean.
+
+**Decision: do not re-pin in this commit.** A sync to `f327bf8` would copy
+61 `EGM.md` files back into the vendored trees — the ignored scratch this
+repository deliberately removed — and would force a patch re-derivation
+against a new pin for zero source-code delta. The version difference is
+carried by rgy's own patches, which is exactly what those patches are for.
+`check-drift` is a local informational report here, not a CI gate (CI runs
+`check-vendoring`, which is green). Re-pin when upstream next changes
+vendored *code*.
+
+### 9.4 The four questions, from rgy's measured state
+
+1. **Status manifest or generated index?** Both, split by kind: the status
+   carries the authored decision, the index carries the derived hashes. A
+   checksum cannot say `unresolved: 0`; a manifest cannot detect a silent
+   contract edit. Adopted from rgx §5.
+2. **Generated or hand-maintained contracts?** Generate **structure**, not
+   prose. rgy's `--generate` is a skeleton writer and `--generated-check` a
+   structural verifier; semantic meaning stays authored. This is the one
+   deliberate divergence from rgx §5, for the reason in §9.2.
+3. **Remaining failure modes?** Monorepo growth, renames and partial
+   checkouts are closed by the derived expected-directory set plus the
+   index. An `unresolved` cleared without a decision is now closed by the
+   required `decision` field, the same-commit dated report, the 30-day date
+   bound and the newest-report rule. Manifest/report disagreement is closed
+   by the date↔filename agreement and the report-inside-`.egm/` check.
+4. **One check everywhere, plus byte-identical regeneration?** Yes to the
+   first: one checker, one `validate()`, identical full check and self-test
+   on all three operating systems. No to regenerating prose byte-for-byte —
+   infeasible and undesirable, as rgx §5 concludes. rgy derives structural
+   facts instead and runs `--generated-check` on all three OSes.
+
+### 9.5 Trade-offs and reasoning
+
+- Keeping `scope` costs one extra config key and a divergence from rgx's
+  four-key `.egmrc`; it buys correctness, because 44 vendored contracts
+  must stay out of the gate.
+- Keeping the generator costs a determinism obligation (`write_bytes` LF on
+  every host, `.gitattributes` LF pin, byte-stability self-test); it buys
+  shape-drift detection.
+- Deferring the re-pin costs a standing `check-drift` report; it buys no
+  churn in the vendored trees and no invented code delta.
+
+### 9.6 Verification
+
+The pairing pass is committed together with this report and the updated
+`DRIFT_STATUS.md` (including `decision`).
+
+Windows, on the paired tree: `cargo fmt --all -- --check` 0;
+`cargo clippy --workspace --all-targets -- -D warnings` 0;
+`cargo build --workspace` 0; `cargo test --workspace --no-fail-fast`
+**82 targets, 0 failed** (the new `winget_manifest` target included);
+checker `51/0`, `--generated-check` `51/0`, `--self-test` `55/55`,
+`--fix` `51/0`; `--reindex` twice is byte-identical and LF-only;
+`scripts/check-vendoring.ps1` passes (12 trees, 37 patches, pinned to
+`8c32dc09`); the bare-metal `x86_64-unknown-none` build and
+`bench-names.py check --runs 7` pass.
+
+The same suite, `bash scripts/check-twins.sh` (13 agreeing pairs) and the
+`.sh` checker twins are re-run on the CachyOS box after the mirror is
+reset to the commit by an offline `git bundle`. The Windows and Linux
+`CONTRACTS.index` SHA-256 values are compared byte-for-byte before the
+commit; both are `c83e205cb3548843fe33472980edfd34ee193a10e17bd4b5ff27c925ebdd002c`.

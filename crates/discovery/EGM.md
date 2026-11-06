@@ -2,7 +2,7 @@
 
 ## Overview
 The portable discovery seam crate (`[Cargo.toml:package.name]` is
-`rgy-discovery`, edition 2024, version 0.1.9). Its root holds only the
+`rgy-discovery`, edition 2024, version 0.1.10). Its root holds only the
 manifest; the library lives in [src](./src/EGM.md) and a throughput benchmark
 in [examples](./examples/EGM.md). `[Cargo.toml:feature.std]` is
 `std = ["rgy-par/std"]`: the walk asks the operating system directly through

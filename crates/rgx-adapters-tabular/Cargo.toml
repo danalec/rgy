@@ -1,6 +1,6 @@
 [package]
 name = "rgy-vendored-adapters-tabular"
-version = "0.1.9"
+version = "0.1.10"
 edition = "2021"
 authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
 description = "rgx adapters for tabular & geospatial data (SQLite, DBF, Shapefile)"
@@ -96,7 +96,7 @@ redis-aof = ["redis-rdb"]
 leveldb = ["rgx-core/snappy"]
 zarr = ["std", "rgx-core/blosc", "rgx-core/bzip2", "rgx-core/gzip", "rgx-core/zlib", "rgx-core/zstd"]
 [dependencies]
-rgx-core = { path = "../rgx-core", version = "0.1.9", default-features = false, features = ["std", "sha256-hw"], package = "rgy-vendored-core" }
+rgx-core = { path = "../rgx-core", version = "0.1.10", default-features = false, features = ["std", "sha256-hw"], package = "rgy-vendored-core" }
 [dev-dependencies]
 # SQLite itself, as the oracle the in-house reader is held to: the
 # differential test reads a corpus of real databases through both and

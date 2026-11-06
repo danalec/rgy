@@ -1,6 +1,6 @@
 [package]
 name = "rgy-search-ui"
-version = "0.1.9"
+version = "0.1.10"
 edition = "2024"
 rust-version = "1.89"
 authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
@@ -20,21 +20,21 @@ readme = "../../README.md"
 exclude = ["**/EGM.md"]
 
 [dependencies]
-rgy-name-core = { path = "../../crates/name-core", version = "0.1.9" }
+rgy-name-core = { path = "../../crates/name-core", version = "0.1.10" }
 # The launcher's model: the query, the rows, and the shape of a source.
-rgy-launcher = { path = "../../crates/launcher", version = "0.1.9" }
+rgy-launcher = { path = "../../crates/launcher", version = "0.1.10" }
 # The console's UTF-8 code page.
-rgy-engine = { path = "../../crates/engine", version = "0.1.9" }
+rgy-engine = { path = "../../crates/engine", version = "0.1.10" }
 # The rule of the line format: a path that carries a line break is not
 # one line, and the ones left out are counted and said out loud.
-rgy-pick = { path = "../../crates/pick", version = "0.1.9" }
+rgy-pick = { path = "../../crates/pick", version = "0.1.10" }
 # Where the per-user files live: the terminal has no settings panel, and
 # the notice that says where the settings are has to say the true path.
-rgy-proto = { path = "../../crates/proto", version = "0.1.9" }
+rgy-proto = { path = "../../crates/proto", version = "0.1.10" }
 
 [dev-dependencies]
 # Test fixtures build `rgy_discovery::walk::Listing`s for `name_index::Index::build`.
-rgy-discovery = { path = "../../crates/discovery", version = "0.1.9" }
+rgy-discovery = { path = "../../crates/discovery", version = "0.1.10" }
 # The oracle: the crate this tree wrote the terminal with, kept here so the
 # differential test has something to hold the in-house backend to. A
 # dev-dependency does not enter a binary, and the thing that replaces a crate

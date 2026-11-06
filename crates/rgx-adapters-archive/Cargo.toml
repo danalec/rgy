@@ -1,6 +1,6 @@
 [package]
 name = "rgy-vendored-adapters-archive"
-version = "0.1.9"
+version = "0.1.10"
 edition = "2021"
 authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
 description = "rgx adapters: zip, tar, cpio, 7z, single-file decompressors"
@@ -113,8 +113,8 @@ wim = ["std"]
 erofs = ["std"]
 squashfs = ["std", "rgx-core/lzma", "rgx-core/deflate", "rgx-core/xz", "rgx-core/zstd"]
 [dependencies]
-rgx-core = { path = "../rgx-core", version = "0.1.9", default-features = false, features = ["std", "sha256-hw"], package = "rgy-vendored-core" }
-rar-codec = { path = "../rar-codec", version = "0.1.9", optional = true, package = "rgy-vendored-rar-codec" }
+rgx-core = { path = "../rgx-core", version = "0.1.10", default-features = false, features = ["std", "sha256-hw"], package = "rgy-vendored-core" }
+rar-codec = { path = "../rar-codec", version = "0.1.10", optional = true, package = "rgy-vendored-rar-codec" }
 # The benches are not declared here: they are rgx's own measurement tools,
 # and the copy does not carry them (scripts/sync-rgx-upstream.sh, EXCLUDE).
 # The manifest that declares them is upstream's; the patch beside this

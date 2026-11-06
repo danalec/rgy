@@ -4,7 +4,7 @@
 
 Crate root of the merged search daemon. The directory has no source of its
 own: `[Cargo.toml:package.name]` is `rgy-searchd` at
-`[Cargo.toml:package.version]` 0.1.9, `[Cargo.toml:package.edition]` 2024 and
+`[Cargo.toml:package.version]` 0.1.10, `[Cargo.toml:package.edition]` 2024 and
 `[Cargo.toml:package.rust-version]` 1.89; `[Cargo.toml:package.description]`
 calls it "The merged search daemon: JSON-lines over stdio/pipe/UDS, plus the
 rgx --serve front". It declares one binary target,
@@ -17,7 +17,7 @@ rgx --serve front". It declares one binary target,
 
 ## Interface
 - `[Cargo.toml:[[bin]].name]` — `searchd`, built from `[Cargo.toml:[[bin]].path]` (`src/main.rs`).
-- `[Cargo.toml:package.name]` — `rgy-searchd`; `[Cargo.toml:package.version]` 0.1.9; `[Cargo.toml:package.edition]` 2024; `[Cargo.toml:package.rust-version]` 1.89.
+- `[Cargo.toml:package.name]` — `rgy-searchd`; `[Cargo.toml:package.version]` 0.1.10; `[Cargo.toml:package.edition]` 2024; `[Cargo.toml:package.rust-version]` 1.89.
 - `[Cargo.toml:dependencies.rgy-discovery]`, `[Cargo.toml:dependencies.rgy-discovery-dispatch]`, `[Cargo.toml:dependencies.rgy-engine]`, `[Cargo.toml:dependencies.rgy-name-core]`, `[Cargo.toml:dependencies.rgy-par]`, `[Cargo.toml:dependencies.rgy-proto]`, `[Cargo.toml:dependencies.rgx-core]` (`package = "rgy-vendored-core"`), `[Cargo.toml:dependencies.rgy-adapters]`, `[Cargo.toml:dependencies.mimalloc]` — the nine dependency entries.
 - `[Cargo.toml:target.'cfg(windows)'.dependencies.rgy-discovery-windows]`, `[Cargo.toml:target.'cfg(target_os = "linux")'.dependencies.rgy-discovery-linux]`, `[Cargo.toml:target.'cfg(target_os = "macos")'.dependencies.rgy-discovery-macos]` — per-platform live-change feed implementations for `open_watch`.
 - Rolled up from [src](./src/EGM.md): [main.rs:fn main], [main.rs:struct Ctx], [main.rs:fn handle], [main.rs:fn run_stream], [main.rs:fn serve_stream], [main.rs:fn open_index], [main.rs:fn startup_plan], [main.rs:fn scoped_content], [main.rs:fn open_watch], [main.rs:fn serve_uds], [main.rs:fn serve_pipe].

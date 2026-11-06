@@ -4,7 +4,7 @@
 
 Crate root of the terminal search UI library. The directory has no source of
 its own: `[Cargo.toml:package.name]` is `rgy-search-ui` at
-`[Cargo.toml:package.version]` 0.1.9, `[Cargo.toml:package.edition]` 2024 and
+`[Cargo.toml:package.version]` 0.1.10, `[Cargo.toml:package.edition]` 2024 and
 `[Cargo.toml:package.rust-version]` 1.89. The manifest declares no `[[bin]]`
 or `[lib]` table; the library root is the [src](./src/EGM.md) child's
 `lib.rs` ([lib.rs:pub mod term], [lib.rs:pub use ui::*]). Its workspace
@@ -21,7 +21,7 @@ oracle that does not ship in a binary. All implementation is in the
 - [src](./src/EGM.md) — the library: `lib.rs`, the interactive `ui.rs`, the hand-declared terminal seam `term.rs` and the head-of-file `preview.rs`.
 
 ## Interface
-- `[Cargo.toml:package.name]` — `rgy-search-ui`; `[Cargo.toml:package.version]` 0.1.9; `[Cargo.toml:package.edition]` 2024; `[Cargo.toml:package.rust-version]` 1.89.
+- `[Cargo.toml:package.name]` — `rgy-search-ui`; `[Cargo.toml:package.version]` 0.1.10; `[Cargo.toml:package.edition]` 2024; `[Cargo.toml:package.rust-version]` 1.89.
 - `[Cargo.toml:dependencies.rgy-name-core]`, `[Cargo.toml:dependencies.rgy-launcher]`, `[Cargo.toml:dependencies.rgy-engine]`, `[Cargo.toml:dependencies.rgy-pick]`, `[Cargo.toml:dependencies.rgy-proto]` — the workspace dependencies; `[Cargo.toml:dev-dependencies.crossterm]` (0.28.1) and `[Cargo.toml:dev-dependencies.rgy-discovery]` are dev-only.
 - Rolled up from [src](./src/EGM.md): [lib.rs:pub mod term], [lib.rs:pub use ui::*], [ui.rs:pub fn run], [ui.rs:pub fn run_with_source], [ui.rs:pub fn run_with_source_lang_and_theme], [term.rs:pub struct Screen], [term.rs:pub trait Paint], [term.rs:pub fn enable_raw_mode], [term.rs:pub fn decode], [preview.rs:pub fn of].
 

@@ -60,13 +60,20 @@ of three numbers and nothing else, and a release that will carry fixes for
 a while wants a fourth -- the fix count of the line. So the version this
 script takes may have three numbers or four: with four, the crates carry
 the first three and the release tag (the installers' `rgy-v<version>`)
-carries all four. `0.1.9.0` is a release whose crates are `0.1.9`, and the
-fixes that follow it are `0.1.9.1`, `0.1.9.2`, until the line turns and
-both numbers say `0.2.0`.
+carries all four. `0.1.10.0` is a release whose crates are `0.1.10`, and
+the fixes that follow it are `0.1.10.1`, `0.1.10.2`, until the line turns
+and both numbers say `0.2.0`.
+
+**The source-only release.** A bump of the crates does not itself build the
+multi-platform archives. When the new number is a source-only release, the
+installers keep pinning the last tag that shipped archives with verified
+digests (`rgy-v0.1.9.0` today); `--check` will offer to move that pin, and
+the answer is no until a release with assets exists. This is the paired
+upstream's 0.1.10 policy too.
 
 **Usage:**
     python3 scripts/bump-version.py 0.1.2
-    python3 scripts/bump-version.py 0.1.9.0   # crates 0.1.9, tag rgy-v0.1.9.0
+    python3 scripts/bump-version.py 0.1.10.0  # crates 0.1.10, tag rgy-v0.1.10.0
     python3 scripts/bump-version.py --check 0.1.2   # what would change
 """
 

@@ -1,6 +1,6 @@
 [package]
 name = "rgy-discovery-macos"
-version = "0.1.9"
+version = "0.1.10"
 edition = "2024"
 rust-version = "1.89"
 authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
@@ -27,12 +27,12 @@ default = ["std"]
 std = ["rgy-par/std"]
 
 [dependencies]
-rgy-discovery = { path = "../discovery", version = "0.1.9", default-features = false }
-rgy-par = { path = "../par", version = "0.1.9", default-features = false }
+rgy-discovery = { path = "../discovery", version = "0.1.10", default-features = false }
+rgy-par = { path = "../par", version = "0.1.10", default-features = false }
 
 [dev-dependencies]
 # The tests build a name index and apply the feed's records to it: the
 # live overlay is the thing under test.
-rgy-name-core = { path = "../name-core", version = "0.1.9" }
+rgy-name-core = { path = "../name-core", version = "0.1.10" }
 # The portable walk, which the tests use to index a fixture tree.
-rgy-discovery = { path = "../discovery", version = "0.1.9", features = ["std"] }
+rgy-discovery = { path = "../discovery", version = "0.1.10", features = ["std"] }

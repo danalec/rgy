@@ -46,17 +46,23 @@ path = "autostart.rs"
 name = "egm_packaging"
 path = "egm_packaging.rs"
 
+# The winget manifests are release data: every field that names a release
+# has to name the same one, and the nested files have to name the product.
+[[test]]
+name = "winget_manifest"
+path = "winget_manifest.rs"
+
 [dev-dependencies]
 # The protocol, for the rule that says where a unix socket is when the path
 # the caller asked for does not fit the platform's `sun_path`: the fake
 # daemon in `cli.rs` has to bind the socket the client will look for, and
 # that is the product's rule and not the test's.
-rgy-proto = { path = "../crates/proto", version = "0.1.9" }
+rgy-proto = { path = "../crates/proto", version = "0.1.10" }
 # The pack store, for the test that proves the third backend of the
 # content layer: the daemon started with `--tv-dir` answers from a packed
 # corpus instead of reading the files. The builder is upstream's, and it
 # is behind the `tv-runtime` feature because it is the only consumer.
-rgx-core = { path = "../crates/rgx-core", version = "0.1.9", default-features = false, package = "rgy-vendored-core", features = [
+rgx-core = { path = "../crates/rgx-core", version = "0.1.10", default-features = false, package = "rgy-vendored-core", features = [
     "std",
     "tv-runtime",
 ] }

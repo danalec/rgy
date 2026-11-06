@@ -471,6 +471,14 @@ project's copy; one that asks for `rgx-core ^0.1.9` gets the upstream's.
 Before this release the two could not both be had — they wanted the same name
 at the same version, and the registry gives that to one of them.
 
+The two trees are paired again at **0.1.10**: the manifests, the requirement
+lines and `Cargo.lock` of this tree carry that number, and the upstream's
+0.1.10 is a source-only release whose binary assets stay at `rgx-v0.1.9.0`.
+For the same reason this tree's installers still pin `rgy-v0.1.9.0` — a
+source release has no archives of its own to install. The pairing decisions
+and the vendored-drift record are in
+[`.egm/2026-11-06_DRIFT_REPORT.md`](.egm/2026-11-06_DRIFT_REPORT.md#9-reply-to-the-rgx-0110-handoff).
+
 The versions this project published under the upstream's names — 0.1.2, 0.1.4
 and 0.1.6 — stay where they are, and they are not yanked: they are the
 artifacts of older builds, and the registry keeps what it keeps. The upstream's

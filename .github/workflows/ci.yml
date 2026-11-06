@@ -174,6 +174,9 @@ jobs:
     # --generated-check additionally derives the structural skeleton of
     # every contract from the tree and holds the tracked set to it, so a
     # directory rename or a new crate cannot land without a contract.
+    # --fix / -Fix is an explicit, developer-only opt-in that regenerates
+    # CONTRACTS.index and re-validates; the gate never uses it, so CI never
+    # modifies a file. A stale index is a red gate, not one CI repairs.
     timeout-minutes: 10
     strategy:
       fail-fast: false

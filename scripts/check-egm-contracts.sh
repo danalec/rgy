@@ -6,7 +6,7 @@
 # cannot disagree about what a valid contract is.
 #
 # Usage:
-#   bash scripts/check-egm-contracts.sh [--root DIR]
+#   bash scripts/check-egm-contracts.sh [--root DIR] [--self-test] [--reindex] [--fix] [--generate] [--generated-check]
 set -u
 
 here=$(cd "$(dirname "$0")" && pwd)

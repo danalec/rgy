@@ -46,6 +46,12 @@
 # here when they are not.
 set -u
 
+# The crates are 0.1.10, but this is the last release that shipped binary
+# archives with verified digests. A release that carries the source tree and
+# the EGM contracts without rebuilding the multi-platform archives has no
+# assets of its own to install, so the installer keeps pointing at the one
+# that does -- a tag that names a release with no archive is an installer
+# that downloads nothing. (The same policy as the paired upstream 0.1.10.)
 version="rgy-v0.1.9.0"
 install_dir="$HOME/.local/bin"
 base_url="https://github.com/danalec/rgy/releases/download"
@@ -163,10 +169,15 @@ else
     rgy_sha256() {
         if command -v sha256sum > /dev/null 2>&1; then
             sha256sum "$1" | cut -d' ' -f1
+        elif command -v sha256 > /dev/null 2>&1; then
+            # FreeBSD's base tool: -q prints the hex and nothing else. The
+            # helper in scripts/lib/digest.sh asks for it the same way, so the
+            # URL-piped run and the checkout run answer alike on FreeBSD.
+            sha256 -q "$1" | cut -d' ' -f1
         elif command -v shasum > /dev/null 2>&1; then
             shasum -a 256 "$1" | cut -d' ' -f1
         else
-            echo "no sha256 tool on this machine: neither sha256sum nor shasum" >&2
+            echo "no sha256 tool on this machine: neither sha256sum, sha256 nor shasum" >&2
             return 1
         fi
     }
