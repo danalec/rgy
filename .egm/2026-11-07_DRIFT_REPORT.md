@@ -46,17 +46,64 @@ fallback selection and the state reset. `bins/search-ui/src/EGM.md` was
 rewritten: the old "Windows console input is a platform limit" invariant
 now describes the VT byte path, the fallback and the verification limit.
 
-**Verification limit, stated honestly.** Verified here: compilation and
-linking on Windows MSVC (including that a bare `extern "system" ReadFile`
-resolves without an explicit `#[link]`), clippy `-D warnings`, the Linux
-cross-target check, rustfmt, and unit tests with simulated VT bytes. **Not
-verified here: a live conhost / Windows Terminal paste session.** Whether a
-given conhost accepts the flag, whether `ReadFile` emits the paste markers
-for a real paste, and the live resize/key interaction on the byte path need
-a session with a real console. The fallback for a console that refuses the
-flag remains the documented limit. This report does not claim a live-console
-proof; it claims the read loop now consumes VT bytes when the console
-supplies them.
+**Verified live on 2026-11-07, and the live test changed the design.** A
+throwaway probe drove the same seam the TUI drives (raw mode, bracketed
+paste, `poll`, `read`) inside a real console window, with a two-line block
+on the clipboard and the paste chord sent through `keybd_event`:
+
+- **Windows Terminal (the pseudoconsole path).** `SetConsoleMode` accepted
+  `ENABLE_VIRTUAL_TERMINAL_INPUT` (input mode `0x01f7` -> `0x03f8`), a real
+  `Ctrl+V` paste arrived as a bracketed burst, and the whole block reached
+  the field as characters — including `Char('\r')` for the line break —
+  within two milliseconds of the paste. `disable_raw_mode` restored
+  `0x01f7` exactly.
+- **Legacy conhost.** It accepts the flag too, which is why the flag alone
+  was the wrong test. Measured with the flag on: `Ctrl+V` arrived as the
+  key rather than pasting, and `Shift+Insert` delivered nothing. Measured in
+  the console's own mode: the paste worked on both chords and its line break
+  arrived as **Enter** — conhost implements no bracketed paste, so there is
+  no burst marker for the byte path to consume. The byte path therefore buys
+  nothing on conhost and costs it its paste shortcuts, so `term.rs` now asks
+  for the flag **only when the console's window class is the pseudoconsole's**
+  (`PseudoConsoleWindow`, measured; `ConsoleWindowClass` is conhost). A
+  console it cannot classify keeps the key-record path — the behaviour it
+  had before the byte path existed.
+
+**What the live test could not settle, stated honestly.** The conhost paste
+could not be driven reliably with synthetic keys: the control modifier did
+not always register in the console's key records, so the flag-off conhost
+paste was measured in the console's default mode rather than under raw mode.
+The conhost half of the limit therefore rests on the console's documented
+lack of bracketed paste — and on the measured loss of its paste shortcuts —
+rather than on a measured raw-mode paste. A hand test at a real conhost
+keyboard is still the way to close that sentence.
+
+## 1a. The live test found a real defect: `poll` could not see decoded keys
+
+The manual test was not a formality. The first live run delivered **only the
+first character** of the pasted block and held the remaining twelve until
+the next keypress. The cause was not the console: `read()` decodes a whole
+chunk of bytes but returns one event, and the events it had already produced
+from the rest of the chunk were kept in the program's own pending buffer.
+`poll()` asked the *platform* whether more input was waiting, and the
+platform truthfully said no. The terminal UI's drain loop polls before every
+read (`bins/search-ui/src/ui.rs`), so it took the first key of a paste and
+went back to waiting.
+
+Both platforms had it, not just Windows: a unix read of a 64-byte chunk can
+hold several keys the same way. The fix is a queue of already-decoded events
+in `term.rs`: both read loops drain their pending bytes into it with one
+shared rule (`drain_ready`), `poll` answers from it before it asks the
+platform, and `disable_raw_mode` clears it. Five tests state the rule: keys
+in one run come out in order, a bracketed burst keeps its `\r` as a
+character, a cut sequence waits while more may come and is dropped when none
+will, and the queue is what `poll` reads.
+
+Verified by the same live probe, before and after: before, one event at the
+paste and twelve at the next keypress; after, thirteen events within two
+milliseconds. The Windows-only simulated-byte tests now call the production
+rule (`decode_vt` was folded into `drain_ready`, so there is one
+implementation and the tests exercise it).
 
 ## 2. Per-operation write threads
 

@@ -33,7 +33,149 @@
 //! own words, and the interface above them does not know which one it is
 //! talking to.
 
+use std::collections::VecDeque;
 use std::io::Write;
+use std::sync::Mutex;
+
+/// The keys the decoder has already produced from bytes it was given.
+///
+/// A read hands over a run of bytes that may hold several keys, and the
+/// decoder produces one token at a time. Keeping the untokenised bytes in
+/// a buffer of its own left the decoded ones invisible to [`poll`]: the
+/// buffer is this program's, so the platform answers "nothing waiting",
+/// and a caller that polls before it reads — the terminal UI's drain loop
+/// does exactly that — took the first key of a paste and held the rest
+/// until the next keypress. This queue is the answer to the question
+/// `poll` is really asked: *is a key available now?*
+static READY: Mutex<VecDeque<KeyEvent>> = Mutex::new(VecDeque::new());
+
+/// Take the next key that has already been decoded, if there is one.
+fn take_ready() -> Option<KeyEvent> {
+    let mut ready = READY.lock().unwrap_or_else(|e| e.into_inner());
+    ready.pop_front()
+}
+
+/// Whether a key has already been decoded and is waiting to be taken.
+fn has_ready() -> bool {
+    !READY.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
+}
+
+/// Forget every decoded key, for a raw-mode session that is ending.
+fn clear_ready() {
+    READY.lock().unwrap_or_else(|e| e.into_inner()).clear();
+}
+
+/// Turn every complete key in `pending` into an entry of `ready`, leaving
+/// only a token that is still cut short.
+///
+/// This is the whole of the "several keys in one read" rule: the tokens
+/// are produced here, in order, and the queue is what [`poll`] reads. An
+/// unknown sequence is dropped, a cut sequence stays in `pending` for the
+/// next read to finish, and a cut sequence with no more bytes coming is
+/// dropped rather than waited on for ever.
+fn drain_ready(
+    pending: &mut Vec<u8>,
+    decoder: &mut Decoder,
+    more_may_come: bool,
+    ready: &mut VecDeque<KeyEvent>,
+) {
+    while !pending.is_empty() {
+        match decoder.decode(pending, more_may_come) {
+            Decoded::Key(key, len) => {
+                pending.drain(..len);
+                ready.push_back(key);
+            }
+            Decoded::Unknown(len) => {
+                pending.drain(..len);
+            }
+            Decoded::Incomplete => break,
+        }
+    }
+}
+
+#[cfg(test)]
+mod ready_tests {
+    use super::{Decoder, KeyCode, READY, drain_ready, has_ready, take_ready};
+
+    /// A run of bytes with several keys in it is several keys, in order.
+    ///
+    /// This is the rule the manual console test found broken: the terminal
+    /// hands over a chunk that holds more than one key, and a caller that
+    /// polls before it reads must see the second key without waiting for
+    /// the next keystroke.
+    #[test]
+    fn every_key_in_one_run_is_produced_in_order() {
+        let mut pending = b"abc".to_vec();
+        let mut decoder = Decoder::new();
+        let mut queue = std::collections::VecDeque::new();
+        drain_ready(&mut pending, &mut decoder, true, &mut queue);
+        assert!(pending.is_empty(), "the run was consumed");
+        let codes: Vec<KeyCode> = queue.iter().map(|key| key.code).collect();
+        assert_eq!(
+            codes,
+            vec![KeyCode::Char('a'), KeyCode::Char('b'), KeyCode::Char('c')]
+        );
+    }
+
+    /// A paste in one run is text, and its `\r` is a character.
+    #[test]
+    fn a_bracketed_paste_run_keeps_its_carriage_return() {
+        let mut pending = b"\x1b[200~a\rb\x1b[201~".to_vec();
+        let mut decoder = Decoder::new();
+        let mut queue = std::collections::VecDeque::new();
+        drain_ready(&mut pending, &mut decoder, true, &mut queue);
+        assert!(pending.is_empty(), "the burst was consumed");
+        let codes: Vec<KeyCode> = queue.iter().map(|key| key.code).collect();
+        assert_eq!(
+            codes,
+            vec![KeyCode::Char('a'), KeyCode::Char('\r'), KeyCode::Char('b')],
+            "no Enter, and the markers carry no key of their own"
+        );
+        assert!(!codes.contains(&KeyCode::Enter), "the paste did not submit");
+    }
+
+    /// A sequence cut in two waits for the rest while more may come.
+    #[test]
+    fn a_cut_sequence_waits_while_more_may_come() {
+        let mut pending = b"\xc3".to_vec();
+        let mut decoder = Decoder::new();
+        let mut queue = std::collections::VecDeque::new();
+        drain_ready(&mut pending, &mut decoder, true, &mut queue);
+        assert!(queue.is_empty(), "half a character is not a key");
+        assert_eq!(pending, b"\xc3", "and the half is kept for the next read");
+    }
+
+    /// A sequence cut with nothing following is dropped, not waited on.
+    #[test]
+    fn a_cut_sequence_with_nothing_more_is_dropped() {
+        let mut pending = b"\xc3".to_vec();
+        let mut decoder = Decoder::new();
+        let mut queue = std::collections::VecDeque::new();
+        drain_ready(&mut pending, &mut decoder, false, &mut queue);
+        assert!(queue.is_empty(), "no key was invented");
+        assert!(pending.is_empty(), "and nothing waits for ever");
+    }
+
+    /// The queue is the answer `poll` reads.
+    #[test]
+    fn the_ready_queue_is_what_poll_reads() {
+        // This is the only test that touches the shared queue, so it is
+        // deterministic: nothing else in the binary ever fills it.
+        READY.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        assert!(!has_ready(), "the queue starts empty");
+        assert!(take_ready().is_none(), "and hands back nothing");
+        READY
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push_back(super::KeyEvent::new(
+                KeyCode::Char('x'),
+                super::KeyModifiers::NONE,
+            ));
+        assert!(has_ready(), "a decoded key is a key waiting");
+        assert_eq!(take_ready().map(|key| key.code), Some(KeyCode::Char('x')));
+        assert!(!has_ready(), "and it is taken once");
+    }
+}
 
 // --- the colours ------------------------------------------------------------
 
@@ -867,7 +1009,7 @@ mod imp {
     use std::sync::{Mutex, OnceLock};
     use std::time::Duration;
 
-    use super::{Decoded, Decoder, Event};
+    use super::{Decoder, Event, READY, clear_ready, drain_ready, has_ready, take_ready};
 
     /// The terminal's own attributes.
     ///
@@ -1246,6 +1388,8 @@ mod imp {
         if unsafe { tcsetattr(fd, TCSANOW, &attributes) } != 0 {
             return Err(io::Error::last_os_error());
         }
+        // A key of this session is not a key of the next one.
+        clear_ready();
         Ok(())
     }
 
@@ -1278,6 +1422,11 @@ mod imp {
     }
 
     pub fn poll(timeout: Duration) -> io::Result<bool> {
+        // A key the decoder produced but nobody took yet is a key waiting,
+        // even though the platform has nothing left to hand over.
+        if has_ready() {
+            return Ok(true);
+        }
         let fd = tty()?.fd();
         let mut fds = PollFd {
             fd,
@@ -1301,21 +1450,20 @@ mod imp {
         let mut decoder = DECODER.lock().unwrap_or_else(|e| e.into_inner());
         let mut chunk = [0u8; 64];
         loop {
-            // A key already in the buffer is a key the last read brought.
+            // A key the decoder has already produced is a key this read
+            // owes the caller before it waits for anything.
+            if let Some(key) = take_ready() {
+                return Ok(Event::Key(key));
+            }
+            // A run of bytes that arrived whole can hold several keys; they
+            // are all turned into events here, so `poll` can see them.
             if !pending.is_empty() {
-                match decoder.decode(&pending, ready(fd)?) {
-                    Decoded::Key(event, len) => {
-                        pending.drain(..len);
-                        return Ok(Event::Key(event));
-                    }
-                    Decoded::Unknown(len) => {
-                        // A sequence this program does not know: it is
-                        // dropped, and the next key is read — which may
-                        // already be in the buffer.
-                        pending.drain(..len);
-                        continue;
-                    }
-                    Decoded::Incomplete => {}
+                let more = ready(fd)?;
+                let mut queue = READY.lock().unwrap_or_else(|e| e.into_inner());
+                drain_ready(&mut pending, &mut decoder, more, &mut queue);
+                drop(queue);
+                if let Some(key) = take_ready() {
+                    return Ok(Event::Key(key));
                 }
             }
             // Wait a bounded tick for the next bytes. A tick that expires
@@ -1355,7 +1503,11 @@ mod imp {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
-    use super::{Decoded, Decoder, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+    use super::{Decoder, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+    // The decodable token is named by the tests only: production drains
+    // through the parent module's rule and never matches on it here.
+    #[cfg(test)]
+    use super::Decoded;
 
     /// A handle the platform gave.
     pub type Handle = *mut core::ffi::c_void;
@@ -1441,6 +1593,7 @@ mod imp {
             overlapped: *mut core::ffi::c_void,
         ) -> i32;
         fn WaitForSingleObject(handle: Handle, millis: u32) -> u32;
+        fn GetConsoleWindow() -> Handle;
     }
 
     /// A window, as the platform's handles are.
@@ -1459,6 +1612,7 @@ mod imp {
     #[link(name = "user32")]
     unsafe extern "system" {
         fn GetForegroundWindow() -> Window;
+        fn GetClassNameW(window: Window, buffer: *mut u16, max: i32) -> i32;
         fn GetWindowThreadProcessId(window: Window, process: *mut u32) -> u32;
         fn GetKeyboardLayout(thread: u32) -> Layout;
         fn ToUnicodeEx(
@@ -1693,6 +1847,62 @@ mod imp {
         }
     }
 
+    /// Whether the console is a pseudoconsole, where the VT byte path is
+    /// worth taking.
+    ///
+    /// The legality of the flag is not the question: a legacy conhost
+    /// accepts `ENABLE_VIRTUAL_TERMINAL_INPUT` as well, and it is the wrong
+    /// console to take it on. Measured on 2026-11-07, driving a real
+    /// console: in conhost's own mode the paste worked on `Ctrl+V` and on
+    /// `Shift+Insert`, and the pasted line break arrived as the enter key
+    /// (conhost implements no bracketed paste, so nothing marks the burst);
+    /// with the flag on, `Ctrl+V` arrived as the key instead of pasting and
+    /// `Shift+Insert` delivered nothing at all. The byte path therefore buys
+    /// nothing on conhost and costs it its own paste shortcuts. A terminal
+    /// that speaks through a pseudoconsole (Windows Terminal today) does
+    /// implement bracketed paste, and there the flag is what makes a pasted
+    /// `\r` a character instead of the enter key — measured the same day, on
+    /// the same probe: the flag is accepted, the burst is marked, and the
+    /// carriage return arrives as a character.
+    ///
+    /// The pseudoconsole's own window is what the console reports, and its
+    /// class is the platform's name for it. A console this cannot classify
+    /// keeps the key-record path, which is the behaviour it had before the
+    /// byte path existed.
+    fn pseudoconsole() -> bool {
+        let window = unsafe { GetConsoleWindow() };
+        if window.is_null() {
+            return false;
+        }
+        let mut buffer = [0u16; 64];
+        let count = unsafe { GetClassNameW(window, buffer.as_mut_ptr(), buffer.len() as i32) };
+        if count <= 0 {
+            return false;
+        }
+        let class = String::from_utf16_lossy(&buffer[..count as usize]);
+        is_pseudoconsole_class(&class)
+    }
+
+    /// The class of the window a pseudoconsole reports.
+    const PSEUDOCONSOLE_WINDOW_CLASS: &str = "PseudoConsoleWindow";
+
+    /// The class of a legacy conhost window, which the production code
+    /// does not need to name: it takes the byte path for one class and the
+    /// key-record path for every other. The tests name it so the rule they
+    /// state is the one this box measured.
+    #[cfg(test)]
+    const CONHOST_WINDOW_CLASS: &str = "ConsoleWindowClass";
+
+    /// Whether a console window's class names a pseudoconsole.
+    ///
+    /// A pure seam, so the classification is a rule the tests can state
+    /// without a live console. Measured on 2026-11-07: Windows Terminal's
+    /// console reports `PseudoConsoleWindow`, and a legacy conhost reports
+    /// `ConsoleWindowClass`.
+    fn is_pseudoconsole_class(class: &str) -> bool {
+        class == PSEUDOCONSOLE_WINDOW_CLASS
+    }
+
     pub fn enable_raw_mode() -> io::Result<()> {
         let input = input_handle()?;
         let output = output_handle()?;
@@ -1715,14 +1925,14 @@ mod imp {
             return Err(io::Error::last_os_error());
         }
 
-        // Try to put the console on the VT byte path. Only a console that
-        // accepts `ENABLE_VIRTUAL_TERMINAL_INPUT` turns key input into VT
-        // sequences retrievable through `ReadFile`; the legacy host refuses
-        // it and keeps delivering `ReadConsoleInputW` records. The original
-        // input mode is saved above and restored exactly by
-        // `disable_raw_mode`, so every bit changed here is put back on the
-        // way out.
-        let vt_accepted = unsafe { SetConsoleMode(input, raw_input_mode(input_mode, true)) } != 0;
+        // Try to put the console on the VT byte path, but only where the
+        // path buys something: a pseudoconsole implements bracketed paste,
+        // and a legacy conhost does not (and loses its own paste shortcuts
+        // when the flag is on). The original input mode is saved above and
+        // restored exactly by `disable_raw_mode`, so every bit changed here
+        // is put back on the way out.
+        let vt_accepted = pseudoconsole()
+            && unsafe { SetConsoleMode(input, raw_input_mode(input_mode, true)) } != 0;
         let raw_accepted = if vt_accepted {
             // The second attempt is not needed when the first succeeded.
             true
@@ -1799,6 +2009,11 @@ mod imp {
     }
 
     pub fn poll(timeout: Duration) -> io::Result<bool> {
+        // A key the decoder produced but nobody took yet is a key waiting,
+        // even though the console has nothing left to hand over.
+        if super::has_ready() {
+            return Ok(true);
+        }
         let handle = input_handle()?;
         let millis = timeout.as_millis().min(u32::MAX as u128) as u32;
         let waited = unsafe { WaitForSingleObject(handle, millis) };
@@ -1845,6 +2060,7 @@ mod imp {
         VT_INPUT.store(false, Ordering::Relaxed);
         PENDING.lock().unwrap_or_else(|e| e.into_inner()).clear();
         *DECODER.lock().unwrap_or_else(|e| e.into_inner()) = Decoder::new();
+        super::clear_ready();
     }
 
     /// Whether more input is waiting on the console right now.
@@ -1870,28 +2086,6 @@ mod imp {
     /// that is not whole yet, so the caller must read more bytes. The
     /// `Decoder` is passed in and kept across calls, which is what keeps a
     /// bracketed paste whole when it is split across reads.
-    fn decode_vt(
-        decoder: &mut Decoder,
-        pending: &mut Vec<u8>,
-        more_may_come: bool,
-    ) -> Option<Event> {
-        loop {
-            if pending.is_empty() {
-                return None;
-            }
-            match decoder.decode(pending, more_may_come) {
-                Decoded::Key(event, len) => {
-                    pending.drain(..len);
-                    return Some(Event::Key(event));
-                }
-                Decoded::Unknown(len) => {
-                    pending.drain(..len);
-                }
-                Decoded::Incomplete => return None,
-            }
-        }
-    }
-
     /// The next event on the VT byte path.
     ///
     /// Mirrors the unix read loop: decode what is already pending, wait a
@@ -1908,11 +2102,20 @@ mod imp {
         let mut decoder = DECODER.lock().unwrap_or_else(|e| e.into_inner());
         let mut chunk = [0u8; 64];
         loop {
-            // A key already in the buffer is a key the last read brought.
+            // A key the decoder has already produced is a key this read
+            // owes the caller before it waits for anything.
+            if let Some(key) = super::take_ready() {
+                return Ok(Event::Key(key));
+            }
+            // A read of VT bytes can hold several keys; they are all turned
+            // into events here, so `poll` can see them.
             if !pending.is_empty() {
                 let more = ready(handle)?;
-                if let Some(event) = decode_vt(&mut decoder, &mut pending, more) {
-                    return Ok(event);
+                let mut queue = super::READY.lock().unwrap_or_else(|e| e.into_inner());
+                super::drain_ready(&mut pending, &mut decoder, more, &mut queue);
+                drop(queue);
+                if let Some(key) = super::take_ready() {
+                    return Ok(Event::Key(key));
                 }
             }
             // Wait a bounded tick for the next bytes. A tick that expires
@@ -2171,7 +2374,7 @@ mod imp {
             DECODER, Decoded, Decoder, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT,
             ENABLE_PROCESSED_INPUT, ENABLE_VIRTUAL_TERMINAL_INPUT, ENABLE_WINDOW_INPUT, Event,
             InputPath, KeyChar, KeyCode, KeyEvent, KeyEventRecord, KeyModifiers, Ordering, PENDING,
-            VT_INPUT, decode_vt, input_path, raw_input_mode, reset_vt_state,
+            VT_INPUT, input_path, is_pseudoconsole_class, raw_input_mode, reset_vt_state,
         };
 
         /// The oracle's key, for the tree's key.
@@ -2414,10 +2617,11 @@ mod imp {
         // simulated VT bytes through `decode_vt`, the same pure seam
         // `read_vt_bytes()` calls, with no live console involved.
 
-        /// Feed a chunk of simulated VT bytes through `decode_vt`, the way
-        /// `read_vt_bytes()` drains its pending buffer, and collect the
-        /// events. One decoder is kept across calls so a burst split across
-        /// chunks still stays a burst.
+        /// Feed a chunk of simulated VT bytes through the rule
+        /// `read_vt_bytes()` drains its pending buffer with, and collect
+        /// the events. One decoder is kept across calls so a burst split
+        /// across chunks still stays a burst. There is one implementation
+        /// of the rule, in the parent module, and this is it.
         fn drain_vt(
             decoder: &mut Decoder,
             pending: &mut Vec<u8>,
@@ -2425,11 +2629,29 @@ mod imp {
             more_may_come: bool,
         ) -> Vec<Event> {
             pending.extend_from_slice(chunk);
-            let mut events = Vec::new();
-            while let Some(event) = decode_vt(decoder, pending, more_may_come) {
-                events.push(event);
-            }
-            events
+            let mut queue = std::collections::VecDeque::new();
+            super::super::drain_ready(pending, decoder, more_may_come, &mut queue);
+            queue.into_iter().map(Event::Key).collect()
+        }
+
+        /// The VT byte path is taken on a pseudoconsole and not on the
+        /// legacy host: conhost accepts the flag and implements no
+        /// bracketed paste, and taking the flag there costs it its own
+        /// paste shortcuts (measured on 2026-11-07).
+        #[test]
+        fn a_pseudoconsole_is_what_earns_the_byte_path() {
+            assert!(
+                is_pseudoconsole_class(super::PSEUDOCONSOLE_WINDOW_CLASS),
+                "the pseudoconsole's class is the one that takes the byte path"
+            );
+            assert!(
+                !is_pseudoconsole_class(super::CONHOST_WINDOW_CLASS),
+                "a legacy conhost keeps the key-record path"
+            );
+            assert!(
+                !is_pseudoconsole_class(""),
+                "a console this cannot classify keeps the old behaviour"
+            );
         }
 
         /// The code of a key event, for a run that must hold only keys.
