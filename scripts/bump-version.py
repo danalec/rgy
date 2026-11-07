@@ -67,9 +67,12 @@ and both numbers say `0.2.0`.
 **The source-only release.** A bump of the crates does not itself build the
 multi-platform archives. When the new number is a source-only release, the
 installers keep pinning the last tag that shipped archives with verified
-digests (`rgy-v0.1.9.0` today); `--check` will offer to move that pin, and
-the answer is no until a release with assets exists. This is the paired
-upstream's 0.1.10 policy too.
+digests; `--check` will offer to move that pin, and the answer is no until
+a release with assets exists. This was the paired upstream's 0.1.10 policy
+and this tree's while 0.1.10 was source-only. When archives are built, a
+four-number bump (0.1.10.0) moves the installers to the new tag without
+moving the crates, and their digests stay placeholders until the publish
+step rewrites them from the real SHA256SUMS.
 
 **Usage:**
     python3 scripts/bump-version.py 0.1.2
