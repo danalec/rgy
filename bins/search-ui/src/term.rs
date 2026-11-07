@@ -1352,9 +1352,10 @@ mod imp {
 mod imp {
     use std::io;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
-    use super::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+    use super::{Decoded, Decoder, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
     /// A handle the platform gave.
     pub type Handle = *mut core::ffi::c_void;
@@ -1379,6 +1380,11 @@ mod imp {
 
     /// The console mode bit that makes the console read escape sequences.
     const ENABLE_VIRTUAL_TERMINAL_PROCESSING: u32 = 0x0004;
+
+    /// The console mode bit that turns key input into VT byte sequences for
+    /// `ReadFile`. It does not affect `ReadConsoleInputW`, so the key-record
+    /// path stays as the fallback when a console refuses this flag.
+    const ENABLE_VIRTUAL_TERMINAL_INPUT: u32 = 0x0200;
 
     /// The control key state bits.
     const RIGHT_ALT_PRESSED: u32 = 0x0001;
@@ -1426,6 +1432,13 @@ mod imp {
             buffer: *mut InputRecord,
             length: u32,
             read: *mut u32,
+        ) -> i32;
+        fn ReadFile(
+            handle: Handle,
+            buffer: *mut u8,
+            count: u32,
+            read: *mut u32,
+            overlapped: *mut core::ffi::c_void,
         ) -> i32;
         fn WaitForSingleObject(handle: Handle, millis: u32) -> u32;
     }
@@ -1625,6 +1638,61 @@ mod imp {
         output: Option<u32>,
     }
 
+    /// Whether the console accepted `ENABLE_VIRTUAL_TERMINAL_INPUT`.
+    ///
+    /// `read()` uses this to choose between the VT byte path (`ReadFile` and
+    /// the shared `Decoder`) and the legacy `ReadConsoleInputW` key-record
+    /// path. It starts false — before raw mode is enabled no console has
+    /// been asked — and `disable_raw_mode` resets it, so a console that
+    /// refused the flag keeps delivering key records on the next session.
+    static VT_INPUT: AtomicBool = AtomicBool::new(false);
+
+    /// The input mode `enable_raw_mode` asks the console for.
+    ///
+    /// The three line-editing flags are always off: `ENABLE_LINE_INPUT`
+    /// must stay off so `ReadFile` returns as soon as bytes are available.
+    /// `ENABLE_WINDOW_INPUT` is kept for the key-record fallback, where a
+    /// resize arrives as an input record; the VT byte path ignores those
+    /// records (`ReadFile` filters them) and uses the bounded `size()` tick.
+    /// `vt` adds `ENABLE_VIRTUAL_TERMINAL_INPUT` for the first attempt.
+    fn raw_input_mode(input_mode: u32, vt: bool) -> u32 {
+        let mut mode = (input_mode
+            & !(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT))
+            | ENABLE_WINDOW_INPUT;
+        if vt {
+            mode |= ENABLE_VIRTUAL_TERMINAL_INPUT;
+        } else {
+            // The fallback is genuinely *without* the VT flag, even when the
+            // original mode happened to carry it: refusing the first attempt
+            // must put the console back on the key-record path.
+            mode &= !ENABLE_VIRTUAL_TERMINAL_INPUT;
+        }
+        mode
+    }
+
+    /// The read path `enable_raw_mode` chose.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum InputPath {
+        /// The console accepted the VT flag: `ReadFile` + `Decoder`.
+        VtBytes,
+        /// The console refused it: `ReadConsoleInputW` key records.
+        KeyRecords,
+    }
+
+    /// Choose the read path from the two `SetConsoleMode` attempts.
+    ///
+    /// A pure seam: `vt_accepted` is whether the console took the mode with
+    /// `ENABLE_VIRTUAL_TERMINAL_INPUT`, and `raw_accepted` whether it took
+    /// the mode without it. Refusing the VT flag degrades to key records
+    /// with no error; `None` means both were refused and is an error.
+    fn input_path(vt_accepted: bool, raw_accepted: bool) -> Option<InputPath> {
+        match (vt_accepted, raw_accepted) {
+            (true, _) => Some(InputPath::VtBytes),
+            (false, true) => Some(InputPath::KeyRecords),
+            (false, false) => None,
+        }
+    }
+
     pub fn enable_raw_mode() -> io::Result<()> {
         let input = input_handle()?;
         let output = output_handle()?;
@@ -1647,26 +1715,30 @@ mod imp {
             return Err(io::Error::last_os_error());
         }
 
-        // The keys come to the program one at a time, and the console does
-        // not echo them. `ENABLE_WINDOW_INPUT` makes it also report a resize
-        // as an input record; the original mode is saved above and restored
-        // exactly by `disable_raw_mode`, so this bit is put back on the way
-        // out with everything else.
-        if unsafe {
-            SetConsoleMode(
-                input,
-                (input_mode & !(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT))
-                    | ENABLE_WINDOW_INPUT,
-            )
-        } == 0
-        {
+        // Try to put the console on the VT byte path. Only a console that
+        // accepts `ENABLE_VIRTUAL_TERMINAL_INPUT` turns key input into VT
+        // sequences retrievable through `ReadFile`; the legacy host refuses
+        // it and keeps delivering `ReadConsoleInputW` records. The original
+        // input mode is saved above and restored exactly by
+        // `disable_raw_mode`, so every bit changed here is put back on the
+        // way out.
+        let vt_accepted = unsafe { SetConsoleMode(input, raw_input_mode(input_mode, true)) } != 0;
+        let raw_accepted = if vt_accepted {
+            // The second attempt is not needed when the first succeeded.
+            true
+        } else {
+            let fell_back = unsafe { SetConsoleMode(input, raw_input_mode(input_mode, false)) };
+            fell_back != 0
+        };
+        let Some(path) = input_path(vt_accepted, raw_accepted) else {
             let err = io::Error::last_os_error();
             // A failed enable must not leave the output half-changed.
             if let Some(mode) = output_mode {
                 let _ = unsafe { SetConsoleMode(output, mode) };
             }
             return Err(err);
-        }
+        };
+        VT_INPUT.store(path == InputPath::VtBytes, Ordering::Relaxed);
 
         *saved = Some(ConsoleModes {
             input: input_mode,
@@ -1676,6 +1748,9 @@ mod imp {
     }
 
     pub fn disable_raw_mode() -> io::Result<()> {
+        // The next session must not inherit this one's VT answer, a half-read
+        // sequence, or a decoder that is still inside a paste.
+        reset_vt_state();
         let input = input_handle()?;
         let output = output_handle()?;
         let mut saved = ORIGINAL_MODES.lock().unwrap_or_else(|e| e.into_inner());
@@ -1749,7 +1824,138 @@ mod imp {
         Ok(record)
     }
 
+    /// The bytes `ReadFile` returned and not yet turned into keys.
+    ///
+    /// A paste burst can be split across reads, and one read can hold
+    /// several keys; the bytes left over are kept here.
+    static PENDING: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+
+    /// The decoder that turns the pending VT bytes into keys. It is the
+    /// same `Decoder` across every read, so `ESC[200~` in one read and
+    /// `ESC[201~` in the next still deliver the `\r` between them as a
+    /// character and never as the enter key.
+    static DECODER: Mutex<Decoder> = Mutex::new(Decoder::new());
+
+    /// Put the VT byte path back to its initial state.
+    ///
+    /// `disable_raw_mode` calls this so a later session does not inherit a
+    /// "VT accepted" answer, a half-read sequence, or a decoder that is
+    /// still inside a paste.
+    fn reset_vt_state() {
+        VT_INPUT.store(false, Ordering::Relaxed);
+        PENDING.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        *DECODER.lock().unwrap_or_else(|e| e.into_inner()) = Decoder::new();
+    }
+
+    /// Whether more input is waiting on the console right now.
+    ///
+    /// A zero-length wait: the Windows answer to unix's `ready(fd)`. It
+    /// says whether a sequence cut at the end of a `ReadFile` chunk may be
+    /// completed by bytes the console already holds, so a lone `ESC` is
+    /// still the escape key when nothing follows it.
+    fn ready(handle: Handle) -> io::Result<bool> {
+        let waited = unsafe { WaitForSingleObject(handle, 0) };
+        match waited {
+            WAIT_OBJECT_0 => Ok(true),
+            WAIT_TIMEOUT => Ok(false),
+            _ => Err(io::Error::last_os_error()),
+        }
+    }
+
+    /// Decode the next key from `pending` and remove it from the buffer.
+    ///
+    /// The pure seam shared by `read_vt_bytes()` and its tests. Unknown
+    /// sequences are dropped on the way, exactly as the unix read loop
+    /// drops them. `None` means `pending` is empty or holds only a sequence
+    /// that is not whole yet, so the caller must read more bytes. The
+    /// `Decoder` is passed in and kept across calls, which is what keeps a
+    /// bracketed paste whole when it is split across reads.
+    fn decode_vt(
+        decoder: &mut Decoder,
+        pending: &mut Vec<u8>,
+        more_may_come: bool,
+    ) -> Option<Event> {
+        loop {
+            if pending.is_empty() {
+                return None;
+            }
+            match decoder.decode(pending, more_may_come) {
+                Decoded::Key(event, len) => {
+                    pending.drain(..len);
+                    return Some(Event::Key(event));
+                }
+                Decoded::Unknown(len) => {
+                    pending.drain(..len);
+                }
+                Decoded::Incomplete => return None,
+            }
+        }
+    }
+
+    /// The next event on the VT byte path.
+    ///
+    /// Mirrors the unix read loop: decode what is already pending, wait a
+    /// bounded tick (a timeout re-reads `size()` and can emit a resize),
+    /// then `ReadFile` a chunk of VT bytes and decode again. Resize comes
+    /// only from that bounded `size()` comparison — `ENABLE_WINDOW_INPUT`
+    /// records are filtered by `ReadFile`, so the byte path never sees one.
+    fn read_vt_bytes() -> io::Result<Event> {
+        let handle = input_handle()?;
+        // The size the frame was drawn at. A resize while idle is measured
+        // against it on each tick of the bounded wait below.
+        let drawn = size()?;
+        let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+        let mut decoder = DECODER.lock().unwrap_or_else(|e| e.into_inner());
+        let mut chunk = [0u8; 64];
+        loop {
+            // A key already in the buffer is a key the last read brought.
+            if !pending.is_empty() {
+                let more = ready(handle)?;
+                if let Some(event) = decode_vt(&mut decoder, &mut pending, more) {
+                    return Ok(event);
+                }
+            }
+            // Wait a bounded tick for the next bytes. A tick that expires
+            // with nothing to read is a chance to notice that the terminal
+            // changed size while idle, so a resize is not left until the
+            // next keystroke.
+            if !poll(super::RESIZE_TICK)? {
+                let now = size()?;
+                if let Some(event) = super::resize_event(drawn, now) {
+                    return Ok(event);
+                }
+                continue;
+            }
+            let mut count = 0u32;
+            if unsafe {
+                ReadFile(
+                    handle,
+                    chunk.as_mut_ptr(),
+                    chunk.len() as u32,
+                    &mut count,
+                    std::ptr::null_mut(),
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            if count == 0 {
+                // A window-input record is filtered out by ReadFile and
+                // leaves no bytes: re-check the size and wait for a key,
+                // rather than treating it as the terminal closing.
+                continue;
+            }
+            pending.extend_from_slice(&chunk[..count as usize]);
+        }
+    }
+
     pub fn read() -> io::Result<Event> {
+        // A console that accepted `ENABLE_VIRTUAL_TERMINAL_INPUT` delivers
+        // VT byte sequences — including bracketed-paste markers — through
+        // `ReadFile`; every other console keeps the key-record path below.
+        if VT_INPUT.load(Ordering::Relaxed) {
+            return read_vt_bytes();
+        }
         // The size the frame was drawn at. A resize while idle is measured
         // against it on each tick of the bounded wait below.
         let drawn = size()?;
@@ -1961,7 +2167,12 @@ mod imp {
             KeyEventKind as OracleKeyEventKind, KeyModifiers as OracleKeyModifiers,
         };
 
-        use super::{KeyChar, KeyEventRecord};
+        use super::{
+            DECODER, Decoded, Decoder, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT,
+            ENABLE_PROCESSED_INPUT, ENABLE_VIRTUAL_TERMINAL_INPUT, ENABLE_WINDOW_INPUT, Event,
+            InputPath, KeyChar, KeyCode, KeyEvent, KeyEventRecord, KeyModifiers, Ordering, PENDING,
+            VT_INPUT, decode_vt, input_path, raw_input_mode, reset_vt_state,
+        };
 
         /// The oracle's key, for the tree's key.
         fn oracle_key(
@@ -2194,6 +2405,210 @@ mod imp {
                     ),
                 }
             }
+        }
+
+        // -- the Windows VT byte path -------------------------------------
+        //
+        // This `mod tests` lives inside `#[cfg(windows)] mod imp`, so every
+        // test here is a Windows-only test of the VT byte reader. It is fed
+        // simulated VT bytes through `decode_vt`, the same pure seam
+        // `read_vt_bytes()` calls, with no live console involved.
+
+        /// Feed a chunk of simulated VT bytes through `decode_vt`, the way
+        /// `read_vt_bytes()` drains its pending buffer, and collect the
+        /// events. One decoder is kept across calls so a burst split across
+        /// chunks still stays a burst.
+        fn drain_vt(
+            decoder: &mut Decoder,
+            pending: &mut Vec<u8>,
+            chunk: &[u8],
+            more_may_come: bool,
+        ) -> Vec<Event> {
+            pending.extend_from_slice(chunk);
+            let mut events = Vec::new();
+            while let Some(event) = decode_vt(decoder, pending, more_may_come) {
+                events.push(event);
+            }
+            events
+        }
+
+        /// The code of a key event, for a run that must hold only keys.
+        fn key_codes(events: &[Event]) -> Vec<KeyCode> {
+            events
+                .iter()
+                .map(|event| match event {
+                    Event::Key(key) => key.code,
+                    Event::Resize(_, _) => panic!("a paste is not a resize"),
+                })
+                .collect()
+        }
+
+        /// A bracketed paste on the Windows VT byte path is literal text:
+        /// the `\r` inside the burst is a character, never the enter key
+        /// that would choose a path and end the session.
+        #[test]
+        fn a_vt_paste_burst_is_characters_not_enter() {
+            let mut decoder = Decoder::new();
+            let mut pending = Vec::new();
+            let events = drain_vt(&mut decoder, &mut pending, b"\x1b[200~a\rb\x1b[201~", false);
+            let codes = key_codes(&events);
+            assert_eq!(
+                codes,
+                vec![KeyCode::Char('a'), KeyCode::Char('\r'), KeyCode::Char('b')],
+                "a paste is literal text, not keys"
+            );
+            assert!(
+                !codes.contains(&KeyCode::Enter),
+                "a carriage return inside a paste must not be the enter key"
+            );
+            assert!(pending.is_empty(), "the whole burst was consumed");
+        }
+
+        /// A carriage return outside a paste is still the enter key, and the
+        /// paste state does not leak past the closing marker.
+        #[test]
+        fn a_carriage_return_outside_a_vt_paste_is_enter() {
+            let mut decoder = Decoder::new();
+            let mut pending = Vec::new();
+            let events = drain_vt(&mut decoder, &mut pending, b"\r", false);
+            assert_eq!(
+                events,
+                vec![Event::Key(KeyEvent::new(
+                    KeyCode::Enter,
+                    KeyModifiers::NONE
+                ))],
+                "a \\r outside a paste ends the session"
+            );
+
+            // A burst followed by a \r: the burst is text, the \r is Enter.
+            let events = drain_vt(&mut decoder, &mut pending, b"\x1b[200~a\x1b[201~\r", false);
+            assert_eq!(key_codes(&events)[0], KeyCode::Char('a'));
+            assert_eq!(
+                events.last().copied(),
+                Some(Event::Key(KeyEvent::new(
+                    KeyCode::Enter,
+                    KeyModifiers::NONE
+                ))),
+                "the \\r after the burst is the enter key"
+            );
+        }
+
+        /// A paste split across two reads still delivers its text: the same
+        /// `Decoder` is reused, so the `\r` between the markers is a
+        /// character even though the markers arrived in different chunks.
+        #[test]
+        fn a_vt_paste_split_across_reads_keeps_the_burst_whole() {
+            let mut decoder = Decoder::new();
+            let mut pending = Vec::new();
+            // The first chunk ends in the middle of the closing marker.
+            let first = drain_vt(&mut decoder, &mut pending, b"\x1b[200~a\rb\x1b[20", true);
+            assert_eq!(
+                key_codes(&first),
+                vec![KeyCode::Char('a'), KeyCode::Char('\r'), KeyCode::Char('b')]
+            );
+            assert_eq!(
+                pending.as_slice(),
+                &b"\x1b[20"[..],
+                "the unfinished marker waits for the next read"
+            );
+
+            // The second chunk closes the burst; it carries no key.
+            let second = drain_vt(&mut decoder, &mut pending, b"1~", false);
+            assert!(second.is_empty(), "the closing marker carries no key");
+            assert!(pending.is_empty(), "the whole marker was consumed");
+
+            // A \r after the burst is the enter key again.
+            let after = drain_vt(&mut decoder, &mut pending, b"\r", false);
+            assert_eq!(
+                after,
+                vec![Event::Key(KeyEvent::new(
+                    KeyCode::Enter,
+                    KeyModifiers::NONE
+                ))]
+            );
+        }
+
+        /// The raw input mode keeps `ENABLE_LINE_INPUT` off (so `ReadFile`
+        /// returns as soon as bytes are available) and adds only the VT flag
+        /// on the first attempt.
+        #[test]
+        fn the_raw_input_mode_keeps_line_input_off() {
+            // Every bit on except the VT flag: the fallback must leave a bit
+            // the caller did not have off, and the first attempt must add it.
+            let all = !ENABLE_VIRTUAL_TERMINAL_INPUT;
+            let raw = raw_input_mode(all, false);
+            assert_eq!(raw & ENABLE_LINE_INPUT, 0, "line input must stay off");
+            assert_eq!(raw & ENABLE_ECHO_INPUT, 0, "echo must stay off");
+            assert_eq!(
+                raw & ENABLE_PROCESSED_INPUT,
+                0,
+                "processed input must stay off"
+            );
+            assert_ne!(
+                raw & ENABLE_WINDOW_INPUT,
+                0,
+                "window input is kept for key records"
+            );
+            assert_eq!(
+                raw & ENABLE_VIRTUAL_TERMINAL_INPUT,
+                0,
+                "the fallback omits the VT flag"
+            );
+
+            let vt = raw_input_mode(all, true);
+            assert_eq!(vt, raw | 0x0200, "the first attempt adds the VT flag");
+            assert_eq!(ENABLE_VIRTUAL_TERMINAL_INPUT, 0x0200);
+
+            // A mode that already carried the VT flag is still put on the
+            // key-record path when the first attempt is refused.
+            assert_eq!(
+                raw_input_mode(u32::MAX, false) & ENABLE_VIRTUAL_TERMINAL_INPUT,
+                0,
+                "the fallback clears the VT flag too"
+            );
+        }
+
+        /// A console that refuses the VT flag still uses key records, and no
+        /// error is raised; only a refusal of the plain raw mode is an error.
+        #[test]
+        fn a_refused_vt_flag_falls_back_to_key_records() {
+            assert_eq!(input_path(true, true), Some(InputPath::VtBytes));
+            assert_eq!(input_path(false, true), Some(InputPath::KeyRecords));
+            assert_eq!(input_path(false, false), None);
+            // (true, false) cannot happen in the reader, and the VT path
+            // still wins when the first attempt succeeded.
+            assert_eq!(input_path(true, false), Some(InputPath::VtBytes));
+        }
+
+        /// The VT byte path starts off and is reset, so a stale "inside a
+        /// paste" decoder cannot leak into a new session.
+        #[test]
+        fn the_vt_path_is_reset_when_raw_mode_is_disabled() {
+            assert!(!VT_INPUT.load(Ordering::Relaxed), "VT input starts off");
+            // A session on the byte path leaves the flag set, a half-read
+            // marker pending, and the decoder inside a paste.
+            VT_INPUT.store(true, Ordering::Relaxed);
+            PENDING
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend_from_slice(b"\x1b[20");
+            let mut inside = Decoder::new();
+            assert_eq!(inside.decode(b"\x1b[200~", false), Decoded::Unknown(6));
+            *DECODER.lock().unwrap_or_else(|e| e.into_inner()) = inside;
+
+            reset_vt_state();
+
+            assert!(!VT_INPUT.load(Ordering::Relaxed), "disable resets the flag");
+            assert!(
+                PENDING.lock().unwrap_or_else(|e| e.into_inner()).is_empty(),
+                "disable drops the half-read marker"
+            );
+            let mut decoder = DECODER.lock().unwrap_or_else(|e| e.into_inner());
+            assert_eq!(
+                decoder.decode(b"\r", false),
+                Decoded::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), 1),
+                "a fresh decoder is not inside a paste"
+            );
         }
     }
 }

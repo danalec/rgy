@@ -87,6 +87,13 @@ impl BoundedPool {
         }
     }
 
+    /// How many workers the pool has started. Production reads it to
+    /// decide whether there is any worker to answer a queued job, and the
+    /// tests read it to hold the pool to its bound.
+    pub(crate) fn worker_count(&self) -> usize {
+        self.workers.load(Ordering::Acquire)
+    }
+
     /// Queue `job` for the next free worker.
     pub(crate) fn submit(&'static self, job: Job) {
         self.ensure_workers();
@@ -105,7 +112,7 @@ impl BoundedPool {
     fn ensure_workers(&'static self) {
         // The fast path reads the same count the test reads: a pool that
         // is already running has nothing left to start.
-        if self.workers.load(Ordering::Acquire) >= self.cap {
+        if self.worker_count() >= self.cap {
             return;
         }
         self.start.call_once(|| {

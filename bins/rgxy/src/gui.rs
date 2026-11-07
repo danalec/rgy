@@ -134,6 +134,19 @@ const PREVIEW_QUEUE: usize = 16;
 /// The bounded pool that reads previews off the window's thread.
 static PREVIEWS: rgx::BoundedPool = rgx::BoundedPool::new(PREVIEW_WORKERS, PREVIEW_QUEUE);
 
+/// How many workers write the usage history and the settings file.
+///
+/// One, on purpose: both writes carry the whole of their state, so the
+/// newest job is the only one that has to land. A single worker also keeps
+/// the writes in submission order, so an older job can never overwrite a
+/// newer one after it. A pool that dropped the oldest queued job would be
+/// safe for the same reason — that job's state is already stale.
+const WRITE_WORKERS: usize = 1;
+/// How many whole-state writes may wait for that one worker.
+const WRITE_QUEUE: usize = 16;
+/// The bounded pool that writes the stores off the window's thread.
+static WRITES: rgx::BoundedPool = rgx::BoundedPool::new(WRITE_WORKERS, WRITE_QUEUE);
+
 /// The armed hotkey: the shape the settings chose.
 ///
 /// The two shapes are two mechanisms — the double tap of a lone
@@ -676,17 +689,17 @@ impl State {
     fn record_use(&mut self, path: &str) {
         self.history.record(path, mru::now());
         let lang = self.lang;
-        // The write is on a thread of its own: the store is behind a
-        // lock, and the lock can be held for a couple of seconds. The
-        // launcher that opened the result is already gone by then, and
-        // the window that waits for a file lock is a window that does
-        // not move.
+        // The write goes to the bounded pool: the store is behind a lock,
+        // and the lock can be held for a couple of seconds, so the window
+        // must not wait for it. A thread per use would let a slow share
+        // grow the resident process without bound; one worker and a
+        // bounded queue keep both the thread count and the backlog fixed.
         let Some(file) = self.usage_path.clone() else {
             return;
         };
         let history = self.history.clone();
         let notes = self.note_tx.clone();
-        std::thread::spawn(move || {
+        WRITES.submit(Box::new(move || {
             // The write is tried and its answer is kept: a memory that
             // cannot be written is not a launcher that stops working — the
             // use is remembered for this session, and the write is tried
@@ -700,7 +713,7 @@ impl State {
                 eprintln!("rgxy: {message}");
                 let _ = notes.send(message);
             }
-        });
+        }));
     }
 }
 
@@ -1616,7 +1629,11 @@ fn save_settings(state: &State) {
     let settings = state.settings.clone();
     let lang = state.lang;
     let tx = state.note_tx.clone();
-    std::thread::spawn(move || {
+    // One worker, in submission order: every job carries the whole of the
+    // settings, so the last one the user chose is the last one written. A
+    // thread per keystroke would let an autorepeated setting grow the
+    // process without bound.
+    WRITES.submit(Box::new(move || {
         if let Err(reason) = crate::settings_store::save(&path, &settings) {
             let message = Text::for_lang(lang)
                 .settings_not_saved
@@ -1624,7 +1641,7 @@ fn save_settings(state: &State) {
             eprintln!("rgxy: {message}");
             let _ = tx.send(message);
         }
-    });
+    }));
 }
 
 /// Do what the user asked of the selected result.
@@ -3888,5 +3905,83 @@ mod tests {
             state.preview_pending.is_none(),
             "and no file was sent to be read"
         );
+    }
+
+    /// A burst of whole-state writes does not grow the process's threads.
+    ///
+    /// The usage history and the settings file are written off the window's
+    /// thread. One thread per write let a slow share grow the resident
+    /// process without bound; the pool starts its worker once and keeps a
+    /// bounded queue, dropping the stalest whole-state job when full.
+    #[test]
+    fn a_burst_of_writes_does_not_grow_the_worker_count() {
+        // Its own pool, so a parallel test writing real settings cannot be
+        // crowded out of the shared queue by this burst.
+        static BURST: rgx::BoundedPool = rgx::BoundedPool::new(WRITE_WORKERS, WRITE_QUEUE);
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        for _ in 0..100 {
+            let counter = done.clone();
+            BURST.submit(Box::new(move || {
+                counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }));
+        }
+        // The worker is asynchronous; wait for at least one job to land,
+        // then hold the pool to its bound no matter how many jobs were sent.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while done.load(std::sync::atomic::Ordering::Relaxed) == 0
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            done.load(std::sync::atomic::Ordering::Relaxed) > 0,
+            "the pool never ran a write"
+        );
+        assert_eq!(
+            BURST.worker_count(),
+            WRITE_WORKERS,
+            "the pool started more workers than its bound"
+        );
+    }
+
+    /// The newest whole-state settings write is the last one to land.
+    ///
+    /// A single worker keeps the writes in submission order, so a stale
+    /// setting cannot overwrite the one the user chose last.
+    #[test]
+    fn the_newest_settings_write_lands_last() {
+        let dir = scratch("writes");
+        std::fs::create_dir_all(&dir).expect("the test folder");
+        let path = dir.join("settings.tsv");
+        let mut state = empty();
+        state.settings_path = Some(path.clone());
+        // Fewer than the queue's capacity, so every job is executed and
+        // the assertion is about order, not about dropped jobs.
+        let mut last = 400;
+        for width in (400..=800).step_by(100) {
+            state.settings.overlay.width = width;
+            save_settings(&state);
+            last = width;
+        }
+        // The worker is asynchronous; the file must settle on the last
+        // value the user chose, not on an earlier job that ran later.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut seen = None;
+        while std::time::Instant::now() < deadline {
+            if let Ok(loaded) = crate::settings_store::load(&path) {
+                seen = Some(loaded.overlay.width);
+                if loaded.overlay.width == last {
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(seen, Some(last), "the newest settings did not win");
+        assert_eq!(
+            WRITES.worker_count(),
+            WRITE_WORKERS,
+            "the write pool started more workers than its bound"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
