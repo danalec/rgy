@@ -21,12 +21,12 @@ class RgySearch < Formula
 
   on_arm do
     url "https://github.com/danalec/rgy/releases/download/rgy-v0.1.10.0/rgy-v0.1.10.0-aarch64-apple-darwin.tar.gz"
-    sha256 "93e31af3e06c1da15937ebe9494fa0ef6b6ea89533f1b2d7cde086c3bf2f6612"
+    sha256 "bea07bfb5bd7136adec0e56001f750ffbcc32a5a785ad776dc7c3d1543198362"
   end
 
   on_intel do
     url "https://github.com/danalec/rgy/releases/download/rgy-v0.1.10.0/rgy-v0.1.10.0-x86_64-apple-darwin.tar.gz"
-    sha256 "cdd87fb38791a834156adf6b7140f80f1071d32c61e02d1321b9ff1517aa25a0"
+    sha256 "b1ddc0835784a43bd2678e91f33b98d2802c6f724527be7d3e027ee6787de368"
   end
 
   def install

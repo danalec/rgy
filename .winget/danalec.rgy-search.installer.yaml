@@ -33,6 +33,6 @@ ReleaseDate: 2026-11-07
 Installers:
   - Architecture: x64
     InstallerUrl: https://github.com/danalec/rgy/releases/download/rgy-v0.1.10.0/rgy-v0.1.10.0-x86_64-windows.zip
-    InstallerSha256: 10EE557BFDB32166BF62DF133AC7CB097750EA00E97402CB26B215603B09B1D0
+    InstallerSha256: DC5DD5ABF36C8614B1BCF5A4E2A24502B2E9AA0B9DDA0AB3D4B65ADFC0004656
 ManifestType: installer
 ManifestVersion: 1.9.0
