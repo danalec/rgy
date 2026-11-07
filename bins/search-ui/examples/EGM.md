@@ -80,8 +80,9 @@ half that exercises the shared `poll`/`read`/decoder rule end to end.
   place is the pre-fix behaviour. Measured on 2026-11-07 at a real keyboard:
   a pasted command line arrived as a bracketed burst with its tab as
   `Char('\t')` — outside a burst a tab byte is the Tab key — and a pasted
-  two-line block delivered `Char('\r')`, never `Enter`. On conhost no paste
-  arrives at all, so there is no line break to judge.
+  two-line block (`alpha`, line break, `beta`) delivered ten events in two
+  milliseconds with `Char('\r')` at the sixth and no `Enter` in the session.
+  On conhost no paste arrives at all, so there is no line break to judge.
 - The recipe that exercises the line break needs the clipboard prepared:
   `Set-Clipboard "alpha`nbeta"` before running the probe. A one-line
   clipboard proves the burst but never the `\r`.

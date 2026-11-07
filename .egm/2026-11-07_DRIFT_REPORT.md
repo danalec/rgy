@@ -57,6 +57,20 @@ on the clipboard and the paste chord sent through `keybd_event`:
   the field as characters — including `Char('\r')` for the line break —
   within two milliseconds of the paste. `disable_raw_mode` restored
   `0x01f7` exactly.
+
+  **Confirmed at a real keyboard, last, and this is the measurement the
+  whole pass was for.** The owner of the machine ran the installed probe in
+  Windows Terminal with `alpha` + line break + `beta` on the clipboard: ten
+  events in two milliseconds, `Char('\r')` at event six, and no `Enter`
+  anywhere in the session — so a pasted two-line block reaches the field as
+  text and the session is not submitted by a line break. `0x01f7` ->
+  `0x03f8` and back to `0x01f7` on the way out. Two earlier real-keyboard
+  runs from the same person carry the rest: a pasted command line arrived
+  with its tab as `Char('\t')` — outside a burst a tab byte is the Tab key,
+  so the burst was recognised — and its eighty-five events arrived within
+  seven milliseconds, which is the decoded-key queue rather than one key per
+  later keystroke. The defect this work started from and the defect the live
+  test found are both closed by that log.
 - **Legacy conhost.** It accepts the flag too, which is why the flag alone
   was the wrong test. Measured in the console's own mode: the paste worked
   on `Ctrl+V` and on `Shift+Insert`, and its line break arrived as **Enter**
