@@ -25,7 +25,9 @@ import time
 LOG = "/tmp/vtprobe-pty.log"
 BURST = b"\x1b[200~PASTE1\rPASTE2\x1b[201~"
 ESCAPE = b"\x1b"
-EXPECTED_PRESSES = 13
+# The burst is thirteen characters, and the Escape that ends the probe is a
+# press of its own: the count below is of every press in the log.
+EXPECTED_PRESSES = 14
 
 
 def drive(probe: str) -> int:
