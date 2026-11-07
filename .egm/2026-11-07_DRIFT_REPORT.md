@@ -58,16 +58,30 @@ on the clipboard and the paste chord sent through `keybd_event`:
   within two milliseconds of the paste. `disable_raw_mode` restored
   `0x01f7` exactly.
 - **Legacy conhost.** It accepts the flag too, which is why the flag alone
-  was the wrong test. Measured with the flag on: `Ctrl+V` arrived as the
-  key rather than pasting, and `Shift+Insert` delivered nothing. Measured in
-  the console's own mode: the paste worked on both chords and its line break
-  arrived as **Enter** — conhost implements no bracketed paste, so there is
-  no burst marker for the byte path to consume. The byte path therefore buys
-  nothing on conhost and costs it its paste shortcuts, so `term.rs` now asks
-  for the flag **only when the console's window class is the pseudoconsole's**
-  (`PseudoConsoleWindow`, measured; `ConsoleWindowClass` is conhost). A
+  was the wrong test. Measured in the console's own mode: the paste worked
+  on `Ctrl+V` and on `Shift+Insert`, and its line break arrived as **Enter**
+  — conhost implements no bracketed paste, so there is no burst marker for
+  the byte path to consume. `term.rs` therefore asks for the flag **only
+  when the console's window class is the pseudoconsole's**
+  (`PseudoConsoleWindow`, measured; `ConsoleWindowClass` is conhost), and a
   console it cannot classify keeps the key-record path — the behaviour it
   had before the byte path existed.
+
+  **A hand test at a real keyboard corrected the reason, and the correction
+  matters.** The first reading of these measurements blamed the flag: with
+  it on, `Ctrl+V` arrived as the key and `Shift+Insert` delivered nothing,
+  so the byte path was said to cost conhost its paste shortcuts. A later
+  run of the installed probe, at a real keyboard, with raw mode on and **no**
+  flag — the path taken now — delivered `Char('v')` and no paste at all.
+  The flag was never the cause: **raw mode** is, on either read path, and it
+  is right that it is, because conhost pastes through the line discipline a
+  raw-mode program turns off (`ENABLE_PROCESSED_INPUT` is one of the bits
+  cleared, and it is what makes the console process a chord rather than hand
+  the key over). The conclusion — take the byte path only on a pseudoconsole
+  — is unchanged and now rests on the real reason. The consequence for the
+  user is recorded rather than hidden: a raw-mode terminal UI cannot paste
+  in a legacy conhost at all, and no amount of VT-byte consumption would fix
+  that.
 
 **The instrument is in the tree now.** The probe that produced these
 measurements started as a throwaway and is tracked as
@@ -104,14 +118,20 @@ press events within one millisecond, `Char('\r')` for the line break, no
 to end, which is exactly where the defect the live test found lived — so the
 unix driver is a regression check for it, not just a demonstration.
 
-**What the live test could not settle, stated honestly.** The conhost paste
-could not be driven reliably with synthetic keys: the control modifier did
-not always register in the console's key records, so the flag-off conhost
-paste was measured in the console's default mode rather than under raw mode.
-The conhost half of the limit therefore rests on the console's documented
-lack of bracketed paste — and on the measured loss of its paste shortcuts —
-rather than on a measured raw-mode paste. A hand test at a real conhost
-keyboard is still the way to close that sentence.
+**What the live test could not settle, and how it was settled.** The conhost
+paste could not be driven with synthetic keys from the session that built
+the probe: the control modifier did not always register in the console's key
+records. That was resolved the way this kind of question should be — a hand
+test at a real keyboard, by the owner of the machine, with the installed
+probe. It answered more than the question asked: under Windows Terminal the
+flag is accepted (`0x01f7` -> `0x03f8`), a pasted command line arrived as a
+bracketed burst with its tab as `Char('\t')` (outside a burst a tab byte is
+the Tab key, so this is the burst being recognised), and the eighty-five
+events of that paste arrived within seven milliseconds — the decoded-key
+queue, not one key per later keystroke. Under a legacy conhost the byte path
+is not taken (`0x01f7` -> `0x01f8`, `vt_bit=false`), and `Ctrl+V` arrived as
+`Char('v')` with no paste. So the conhost limit is measured now, and it is
+"no paste in a raw-mode program" — see the correction in section 1.
 
 ## 1a. The live test found a real defect: `poll` could not see decoded keys
 

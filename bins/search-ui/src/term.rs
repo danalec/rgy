@@ -1880,18 +1880,35 @@ mod imp {
     ///
     /// The legality of the flag is not the question: a legacy conhost
     /// accepts `ENABLE_VIRTUAL_TERMINAL_INPUT` as well, and it is the wrong
-    /// console to take it on. Measured on 2026-11-07, driving a real
-    /// console: in conhost's own mode the paste worked on `Ctrl+V` and on
-    /// `Shift+Insert`, and the pasted line break arrived as the enter key
-    /// (conhost implements no bracketed paste, so nothing marks the burst);
-    /// with the flag on, `Ctrl+V` arrived as the key instead of pasting and
-    /// `Shift+Insert` delivered nothing at all. The byte path therefore buys
-    /// nothing on conhost and costs it its own paste shortcuts. A terminal
-    /// that speaks through a pseudoconsole (Windows Terminal today) does
-    /// implement bracketed paste, and there the flag is what makes a pasted
-    /// `\r` a character instead of the enter key — measured the same day, on
-    /// the same probe: the flag is accepted, the burst is marked, and the
-    /// carriage return arrives as a character.
+    /// console to take it on, because it implements no bracketed paste and
+    /// so nothing the byte path could consume.
+    ///
+    /// Measured on 2026-11-07, driving a real console with this probe, in
+    /// three states. In conhost's **own** mode the paste worked on `Ctrl+V`
+    /// and on `Shift+Insert`, and the pasted line break arrived as the
+    /// enter key — the defect this work started from. With **raw mode** on
+    /// and the VT flag accepted, `Ctrl+V` arrived as the key with the
+    /// control modifier and `Shift+Insert` delivered nothing. With **raw
+    /// mode** on and no VT flag — the path taken now — `Ctrl+V` arrived as
+    /// `Char('v')`, and no paste happened at all.
+    ///
+    /// So the earlier reading of these measurements was wrong, and the last
+    /// one corrects it: the flag was never what cost conhost its paste
+    /// shortcuts. **Raw mode** does, whichever read path is in use, because
+    /// conhost pastes through the line discipline that raw mode turns off
+    /// (`ENABLE_PROCESSED_INPUT` is one of the bits a raw-mode program
+    /// clears, and it is what makes the console process a control chord
+    /// instead of handing the key over). A terminal that speaks through a
+    /// pseudoconsole does its own paste and marks it with the bracketed
+    /// markers, which is why the byte path is worth taking only there:
+    /// measured the same day, on the same probe, the flag is accepted, the
+    /// burst is marked, and a pasted carriage return arrives as a character.
+    ///
+    /// The consequence for the user is recorded rather than hidden: a
+    /// raw-mode terminal UI cannot paste at all in a legacy conhost. That is
+    /// the console's design and not something consuming VT bytes could fix,
+    /// and it is why the limit to record is "no bracketed paste" rather than
+    /// "the pasted line break submits".
     ///
     /// The pseudoconsole's own window is what the console reports, and its
     /// class is the platform's name for it. A console this cannot classify

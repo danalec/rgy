@@ -59,12 +59,17 @@ half that exercises the shared `poll`/`read`/decoder rule end to end.
 - The console's class is the decision `enable_raw_mode` makes: a
   `PseudoConsoleWindow` is a terminal that implements bracketed paste
   (Windows Terminal today) and takes the VT byte path;
-  `ConsoleWindowClass` is the legacy host, which keeps the key-record path
-  and its own paste shortcuts. Measured on 2026-11-07: conhost accepts the
-  mode flag too, but with it on `Ctrl+V` arrives as the key and
-  `Shift+Insert` delivers nothing, and conhost has no bracketed paste for
-  the byte path to consume. The probe reports the class so the mode it
-  logs can be read against the console it belongs to.
+  `ConsoleWindowClass` is the legacy host, which keeps the key-record path.
+  Measured on 2026-11-07 in three states, which is why the reason is not
+  the flag: in conhost's own mode the paste worked on `Ctrl+V` and on
+  `Shift+Insert` and its line break arrived as `Enter`; with raw mode on
+  and the flag accepted, `Ctrl+V` arrived as the key with the control
+  modifier and `Shift+Insert` delivered nothing; with raw mode on and no
+  flag, `Ctrl+V` arrived as `Char('v')` and nothing pasted. Raw mode is
+  what costs conhost its paste, on either read path, because conhost is
+  right that paste belongs to the line discipline the program turned off.
+  The probe reports the class so the mode it logs can be read against the
+  console it belongs to.
 - The mode is logged before raw mode, after it, and after the console is
   given back: the first and last lines are the proof that
   `disable_raw_mode` restored exactly what it changed (`0x01f7` ->
@@ -72,8 +77,14 @@ half that exercises the shared `poll`/`read`/decoder rule end to end.
   `0x01f7` on conhost, measured on 2026-11-07).
 - A passing paste on the pseudoconsole shows `Char('...')` for every
   character and `Char('\r')` for a pasted line break; an `Enter` in that
-  place is the pre-fix behaviour. On conhost the line break is expected to
-  arrive as `Enter`, because the console marks nothing.
+  place is the pre-fix behaviour. Measured on 2026-11-07 at a real keyboard:
+  a pasted command line arrived as a bracketed burst with its tab as
+  `Char('\t')` — outside a burst a tab byte is the Tab key — and a pasted
+  two-line block delivered `Char('\r')`, never `Enter`. On conhost no paste
+  arrives at all, so there is no line break to judge.
+- The recipe that exercises the line break needs the clipboard prepared:
+  `Set-Clipboard "alpha`nbeta"` before running the probe. A one-line
+  clipboard proves the burst but never the `\r`.
 - On unix a passing run is the same shape, and it is the one the
   pseudo-terminal driver asserts: every character of the burst arriving
   together, `Char('\r')` for the line break, no `Enter`, and the exit code
