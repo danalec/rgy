@@ -13,22 +13,33 @@ writes what it saw to a log, so the answer is readable after the window is
 closed. It exists because a platform behaviour that no test can reach is a
 behaviour nobody has checked.
 
-It is Windows-only on purpose: there is no console mode to read anywhere
-else, so the non-Windows `main` says so and stops.
+It runs on both platforms, because only the *questions* differ. On Windows
+the console answers them with a class and a bit, and the probe reports
+both. On a unix terminal there is no console mode to read: the bytes are
+the terminal's, so the probe is driven by writing those bytes into a
+pseudo-terminal — `tools/vtprobe_pty.py` does exactly that, which makes the
+unix check fully automated: no clipboard, no keyboard, no window, and the
+same run on a box reached over ssh. That is the easier half, and it is the
+half that exercises the shared `poll`/`read`/decoder rule end to end.
 
 ## Interface
-- `[vtprobe.rs:main]` — the platform's entry point; on Windows it hands off
-  to the probe, elsewhere it prints that there is no console mode to read.
-- `[vtprobe.rs:probe::run]` — the probe: puts the console in raw mode,
+- `[vtprobe.rs:main]` — the entry point; it hands off to the probe on every
+  platform.
+- `[vtprobe.rs:probe::run]` — the probe: puts the terminal in raw mode,
   enables bracketed paste, then reports every event until `Escape` or the
-  timeout. First argument is the log path (default
-  `<temp>/vtprobe.log`), second the timeout in seconds (default 60).
-- `[vtprobe.rs:probe::console_class]` — the class of the window the console
-  reports.
-- `[vtprobe.rs:probe::input_mode]`, `[vtprobe.rs:probe::describe_mode]` —
-  the console's input mode and the words the decision is made in.
-- `[vtprobe.rs:probe::ENABLE_VIRTUAL_TERMINAL_INPUT]`,
-  `[vtprobe.rs:probe::ENABLE_WINDOW_INPUT]` — the two mode bits.
+  timeout. First argument is the log path (default `<temp>/vtprobe.log`),
+  second the timeout in seconds (default 60).
+- `[vtprobe.rs:probe::win::console_class]` — the class of the window the
+  console reports (Windows only).
+- `[vtprobe.rs:probe::win::input_mode]`, `[vtprobe.rs:probe::win::describe_mode]`
+  — the console's input mode and the words the decision is made in
+  (Windows only).
+- `[vtprobe.rs:probe::win::claim_foreground]` — the console window's
+  keyboard claim, so a backgrounded probe still receives the test's keys
+  (Windows only).
+- `[vtprobe.rs:probe::win::ENABLE_VIRTUAL_TERMINAL_INPUT]`,
+  `[vtprobe.rs:probe::win::ENABLE_WINDOW_INPUT]` — the two mode bits
+  (Windows only).
 
 ## Invariants
 - The probe is installed as a command, not built per test:
@@ -63,6 +74,12 @@ else, so the non-Windows `main` says so and stops.
   character and `Char('\r')` for a pasted line break; an `Enter` in that
   place is the pre-fix behaviour. On conhost the line break is expected to
   arrive as `Enter`, because the console marks nothing.
+- On unix a passing run is the same shape, and it is the one the
+  pseudo-terminal driver asserts: every character of the burst arriving
+  together, `Char('\r')` for the line break, no `Enter`, and the exit code
+  of `tools/vtprobe_pty.py` carrying the verdict. Measured on 2026-11-07 on
+  the Linux box: thirteen press events within one millisecond and
+  `carriage_return_as_char=True`, `saw_enter=False`.
 - Every key the probe sees is printed as the `Debug` of the shared
   `Event`, so the log is the same vocabulary the tests and the drain loop
   speak.
@@ -81,9 +98,11 @@ else, so the non-Windows `main` says so and stops.
 
 ## Verification
 - Run: `cargo test --workspace --no-fail-fast --locked`
-- The probe is the answer to a question no test can ask, so it is run by
-  hand. Install it once with
-  `cargo install --path bins/search-ui --example vtprobe --force`; then
-  `vtprobe <log> <seconds>` in a Windows Terminal tab, or
+- Install it once with
+  `cargo install --path bins/search-ui --example vtprobe --force`.
+- Windows, by hand: `vtprobe <log> <seconds>` in a Windows Terminal tab, or
   `conhost.exe cmd /c vtprobe <log> <seconds>` for the legacy host. Press
   `Ctrl+V`, then `Escape`, and read the log.
+- unix, automated: `python3 tools/vtprobe_pty.py target/debug/examples/vtprobe`
+  writes the burst into a pseudo-terminal and exits non-zero on a fail, so
+  the check needs no paste, no window and nobody watching.

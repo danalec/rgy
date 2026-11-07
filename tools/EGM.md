@@ -1,14 +1,15 @@
 # tools
 
 ## Overview
-Seven standalone Python probe / benchmark / smoke helpers. They are not a
+Eight standalone Python probe / benchmark / smoke helpers. They are not a
 library and share no package: each is a script run directly. The set covers
 Windows console Ctrl-C probing (`interrupt_probe.py`), FreeBSD VM serial
 console boot and command dispatch (`bootstrap_serial.py`, `console_cmd.py`),
 cold-vs-warm name-index benchmarks and calibration (`phase1_bench.py`,
-`calibrate_bench.py`), and smoke tests of the launcher and the daemon's second
-layer (`smoke_rgxy.py`, `smoke_second_layer.py`). They spawn binaries and VMs,
-open sockets and write temporary files; nothing here is imported by the
+`calibrate_bench.py`), smoke tests of the launcher and the daemon's second
+layer (`smoke_rgxy.py`, `smoke_second_layer.py`), and the pseudo-terminal
+driver for the terminal probe (`vtprobe_pty.py`). They spawn binaries and
+VMs, open sockets and write temporary files; nothing here is imported by the
 product.
 
 ## Interface
@@ -27,6 +28,8 @@ product.
   `[smoke_rgxy.py:ask()]`.
 - `smoke_second_layer.py`: `requests` (the `search` / `grep-scoped` JSON op
   list) and `payload` — `[smoke_second_layer.py:requests]`.
+- `vtprobe_pty.py`: `drive()`, `main()`, `LOG`, `BURST`, `ESCAPE`,
+  `EXPECTED_PRESSES` — `[vtprobe_pty.py:drive()]`, `[vtprobe_pty.py:BURST]`.
 
 ## Invariants
 - `interrupt_probe.py` treats exit code `2` as the clean cancel and
@@ -46,6 +49,12 @@ product.
   talk to the developer's own daemon — `[smoke_rgxy.py:pipe]`.
 - Each smoke test removes the temporary tree it created —
   `[smoke_second_layer.py:shutil.rmtree()]`.
+- `vtprobe_pty.py` writes the bracketed-paste burst into the master side of
+  a pseudo-terminal and reads the probe's log back: a pass is every
+  character of the burst arriving together with the line break as
+  `Char('\\r')` and no `Enter` at all, and the script's last line says
+  which happened and its exit code carries the answer —
+  `[vtprobe_pty.py:BURST]`, `[vtprobe_pty.py:EXPECTED_PRESSES]`.
 
 ## Side Effects
 - `interrupt_probe.py` spawns the binary under `CREATE_NEW_PROCESS_GROUP`,
@@ -65,6 +74,9 @@ product.
   terminates it and removes the tree — `[smoke_rgxy.py:server]`.
 - `smoke_second_layer.py` pipes JSON request lines into `searchd` and removes
   the tree — `[smoke_second_layer.py:payload]`.
+- `vtprobe_pty.py` opens a pseudo-terminal, spawns the probe on its slave
+  side, writes the burst into the master and waits for the probe to end —
+  `[vtprobe_pty.py:drive()]`.
 
 ## Verification
 - Run: `cargo test --workspace --no-fail-fast --locked`

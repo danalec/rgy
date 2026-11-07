@@ -92,6 +92,18 @@ delegation-key change the first measurement used is not needed for a
 reproduction, which is the better outcome: a test that edits `HKCU` is a
 test that can be left half-applied.
 
+**On unix the same question is asked without a hand, and that is the easier
+half.** There is no console mode to read there — the bytes are the
+terminal's — so the probe is driven by writing the burst into a
+pseudo-terminal: `tools/vtprobe_pty.py` opens a pty, spawns the probe on the
+slave side, writes `ESC[200~PASTE1\rPASTE2ESC[201~` into the master and
+reads the log back. No clipboard, no keyboard, no window, deterministic, and
+the same run on the Linux box over ssh. Measured on 2026-11-07: thirteen
+press events within one millisecond, `Char('\r')` for the line break, no
+`Enter`, exit 0. That is the shared `poll`/`read`/decoder rule exercised end
+to end, which is exactly where the defect the live test found lived — so the
+unix driver is a regression check for it, not just a demonstration.
+
 **What the live test could not settle, stated honestly.** The conhost paste
 could not be driven reliably with synthetic keys: the control modifier did
 not always register in the console's key records, so the flag-off conhost
