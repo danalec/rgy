@@ -54,7 +54,11 @@ product.
   character of the burst arriving together with the line break as
   `Char('\\r')` and no `Enter` at all, and the script's last line says
   which happened and its exit code carries the answer —
-  `[vtprobe_pty.py:BURST]`, `[vtprobe_pty.py:EXPECTED_PRESSES]`.
+  `[vtprobe_pty.py:BURST]`, `[vtprobe_pty.py:EXPECTED_PRESSES]`. The
+  `terminal-paste` job in `.github/workflows/ci.yml` runs this on
+  `ubuntu-24.04` and `macos-15`, so the check is a gate rather than a
+  procedure; the Windows halves of the same question need a real console
+  and a real paste, and stay recorded with their measurements.
 
 ## Side Effects
 - `interrupt_probe.py` spawns the binary under `CREATE_NEW_PROCESS_GROUP`,

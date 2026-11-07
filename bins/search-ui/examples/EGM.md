@@ -117,4 +117,9 @@ half that exercises the shared `poll`/`read`/decoder rule end to end.
   `Ctrl+V`, then `Escape`, and read the log.
 - unix, automated: `python3 tools/vtprobe_pty.py target/debug/examples/vtprobe`
   writes the burst into a pseudo-terminal and exits non-zero on a fail, so
-  the check needs no paste, no window and nobody watching.
+  the check needs no paste, no window and nobody watching. The `terminal-paste`
+  job in `.github/workflows/ci.yml` runs exactly this on `ubuntu-24.04` and
+  `macos-15`: the one paste check that is a gate rather than a procedure,
+  and the regression gate for the decoded-key queue. The Windows halves are
+  not there — they need a real console and a real paste, and are recorded
+  with their measurements in `.egm/2026-11-07_DRIFT_REPORT.md`.

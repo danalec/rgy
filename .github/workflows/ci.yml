@@ -486,6 +486,44 @@ jobs:
             rm -rf target
             exit "$status"
 
+  terminal-paste:
+    name: the terminal paste path on ${{ matrix.os }}
+    # The same gate as the first job: the owner and the collaborators,
+    # and nobody else.
+    if: github.event_name != 'pull_request' || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
+    # One of the paste checks can be a gate rather than a procedure: on a
+    # unix terminal the bytes are the terminal's, so a pseudo-terminal is
+    # the whole setup. `tools/vtprobe_pty.py` opens one, spawns the probe
+    # on its slave side, writes the bracketed burst into the master and
+    # reads the log back; its exit code is the verdict. No clipboard, no
+    # keyboard, no window, and nobody watching -- which is why the Windows
+    # halves of the same question are NOT here: they need a real console
+    # and a real paste, and are recorded with their measurements in
+    # .egm/2026-11-07_DRIFT_REPORT.md instead.
+    #
+    # The burst goes through `poll`, `read` and the shared decoder, so a
+    # poll that stopped seeing decoded keys would half-deliver it and the
+    # job would fail. That is the defect the live console test found, and
+    # this is its regression gate. macOS is in the matrix because it is a
+    # unix terminal too, and the runner has an SDK -- so unlike the
+    # cross-check this one actually links and runs there.
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+      - name: build the probe
+        run: cargo build --locked --example vtprobe -p rgy-search-ui
+      - name: a pasted line break is a character, not the enter key
+        run: python3 tools/vtprobe_pty.py target/debug/examples/vtprobe
+
   suite:
     name: suite on ${{ matrix.os }}
     # The same gate as the first job: the owner and the collaborators,
