@@ -69,6 +69,17 @@ on the clipboard and the paste chord sent through `keybd_event`:
   console it cannot classify keeps the key-record path — the behaviour it
   had before the byte path existed.
 
+**The instrument is in the tree now.** The probe that produced these
+measurements started as a throwaway and is tracked as
+`bins/search-ui/examples/vtprobe.rs`, with its own contract
+(`bins/search-ui/examples/EGM.md`, the 52nd). That is deliberate: the two
+questions it answers — whether the console accepts the flag, and what a real
+paste delivers — are platform answers no unit test can give, so the
+instrument that asks them has to outlive the session that built it. It
+claims the foreground so it can be started in the background, logs the
+console's class with every mode it reads, and needs nothing but a paste and
+an `Escape`.
+
 **What the live test could not settle, stated honestly.** The conhost paste
 could not be driven reliably with synthetic keys: the control modifier did
 not always register in the console's key records, so the flag-off conhost

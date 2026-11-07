@@ -15,10 +15,12 @@ dependencies are `[Cargo.toml:dependencies.rgy-name-core]`,
 `[Cargo.toml:dependencies.rgy-proto]`; the
 `[Cargo.toml:dev-dependencies.crossterm]` entry (0.28.1) is the differential
 oracle that does not ship in a binary. All implementation is in the
-[src](./src/EGM.md) child contract.
+[src](./src/EGM.md) child contract, and the console probe that answers the
+questions no test can is the [examples](./examples/EGM.md) child.
 
 ## Subdirectories & Boundaries
 - [src](./src/EGM.md) — the library: `lib.rs`, the interactive `ui.rs`, the hand-declared terminal seam `term.rs` and the head-of-file `preview.rs`.
+- [examples](./examples/EGM.md) — the console probe `vtprobe.rs`: an instrument, not a demonstration. It drives the [src](./src/EGM.md) seam in a real console window and reports what the console delivered, because the choice between the VT byte path and the key-record path is a platform answer no unit test can give.
 
 ## Interface
 - `[Cargo.toml:package.name]` — `rgy-search-ui`; `[Cargo.toml:package.version]` 0.1.10; `[Cargo.toml:package.edition]` 2024; `[Cargo.toml:package.rust-version]` 1.89.
