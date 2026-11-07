@@ -124,10 +124,11 @@ if ($here -and (Test-Path -LiteralPath (Join-Path $here 'scripts/lib/digest.ps1'
 # exit code.
 $InstallDir = "$env:LOCALAPPDATA\Programs\rgy"
 $BaseUrl = 'https://github.com/danalec/rgy/releases/download'
-# The crates are 0.1.10, but this is the last release that shipped binary
-# archives with verified digests; a source-only release has no assets of its
-# own to install. (The same policy as the paired upstream 0.1.10.)
-$Version = 'rgy-v0.1.9.0'
+# The tag of the release that ships the binary archives: the crates carry
+# three numbers (0.1.10) and the release carries a fourth (0.1.10.0), which
+# is the fix count of the line. An installer that names another tag downloads
+# another release's archives and refuses them on the digest pinned below.
+$Version = 'rgy-v0.1.10.0'
 $SkipChecksum = $false
 $NoAutostart = $false
 $NoLauncher = $false
@@ -140,15 +141,19 @@ Read-RgyOptions -Switches @{ "skipchecksum" = "SkipChecksum"; "noautostart" = "N
 # The digests of the archives this installer is allowed to install.
 #
 # The digest is uppercase hex, and it is rewritten in place by
-# scripts/publish-release.ps1 -- so the shape of these lines is part of the
-# contract, not a formatting choice.
+# scripts/publish-release.ps1 from the real SHA256SUMS on the day the
+# release is cut -- so the shape of these lines is part of the contract,
+# not a formatting choice. Until the 0.1.10.0 archives exist, every one
+# is the placeholder and the installer refuses it by name before it
+# downloads anything. A digest left over from an earlier tag would refuse
+# every download of the new one.
 #
 # There is one digest per architecture, because the architecture decides
 # the archive: an aarch64 machine does not run the x86_64 binary without
 # an emulator, and an installer that hands it one installs something that
 # will not start.
 $expected = @{
-    'x86_64-windows.zip' = '41FD5439E217B2C537C5B0DFCA721CE1D0DB18A2A36C322034E461B88EFC7944'
+    'x86_64-windows.zip' = '0000000000000000000000000000000000000000000000000000000000000000'
     'aarch64-windows.zip' = '0000000000000000000000000000000000000000000000000000000000000000'
 }
 

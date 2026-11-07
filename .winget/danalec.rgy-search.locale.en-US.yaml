@@ -1,12 +1,10 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.9.0.schema.json
 # SPDX-License-Identifier: Apache-2.0
-# STAGED: the release this manifest names exists -- on the GitHub mirror and
-# on the forgejo -- and the manifest is in a pull request on
-# microsoft/winget-pkgs, waiting for a moderator of the community to merge it.
-# scripts/publish-release.ps1 rewrites the version and the release-notes URL
-# when it publishes one.
+# STAGED: the 0.1.10.0 release ships the Windows archives; this manifest
+# names it and the notes URL that goes with it. `scripts/publish-release.ps1`
+# rewrites the version and the notes URL from the archive on publish day.
 PackageIdentifier: danalec.rgy-search
-PackageVersion: 0.1.9.0
+PackageVersion: 0.1.10.0
 PackageLocale: en-US
 Publisher: danalec
 PublisherUrl: https://github.com/danalec
@@ -36,6 +34,6 @@ Tags:
   - fuzzy
   - filesystem
   - mft
-ReleaseNotesUrl: https://github.com/danalec/rgy/releases/tag/rgy-v0.1.9.0
+ReleaseNotesUrl: https://github.com/danalec/rgy/releases/tag/rgy-v0.1.10.0
 ManifestType: defaultLocale
 ManifestVersion: 1.9.0

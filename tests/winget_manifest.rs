@@ -14,9 +14,11 @@
 //! The check is internal on purpose, the way the paired upstream's is. The
 //! manifests name the release they install, and that release is the one the
 //! last publish made. Comparing them with `Cargo.toml` would fail the gate
-//! of the release that is about to fix them -- here the crates are 0.1.10
-//! while the binary assets (and every release field here) stay on the
-//! 0.1.9.0 tag that carries them.
+//! of the release that is about to fix them: the crates are 0.1.10 (three
+//! numbers, the registry takes three) while the release and its binary
+//! assets carry 0.1.10.0 (four, the fix count of the line). So the test
+//! holds the manifests to one another and to their own tag, and leaves the
+//! crate version out of it.
 //!
 //! rgy differs from the paired upstream in one place: its nested installer
 //! files are flat names (`searchctl.exe`, ...) and carry no version, so

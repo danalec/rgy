@@ -48,15 +48,15 @@ carries everything with it.
 
 ## 2. Install it
 
-The release is **0.1.9.1**. It is on
-[GitHub](https://github.com/danalec/rgy/releases/tag/rgy-v0.1.9.1), and the
-crates are on crates.io at 0.1.9 — the release's number carries a fourth
+The release is **0.1.10.0**. It is on
+[GitHub](https://github.com/danalec/rgy/releases/tag/rgy-v0.1.10.0), and the
+crates are on crates.io at 0.1.10 — the release's number carries a fourth
 place, the fix count of the line, and the registry takes three.
 
 ### From crates.io
 
 ```sh
-cargo install rgy-search --version 0.1.9         # gives you `searchctl`
+cargo install rgy-search --version 0.1.10         # gives you `searchctl`
 ```
 
 That is the whole install for the tool you actually type. It needs **Rust
@@ -68,10 +68,10 @@ The other binaries are separate crates, because most people only want the
 first one:
 
 ```sh
-cargo install rgy-searchd --version 0.1.9       # the daemon: searchd
-cargo install rgy-autostart --version 0.1.9     # the login item: rgy-autostart
-cargo install rgxy --version 0.1.9            # the window: rgxy
-cargo install rgy-zen --version 0.1.9           # the zen CLI: zen-rs (Windows)
+cargo install rgy-searchd --version 0.1.10       # the daemon: searchd
+cargo install rgy-autostart --version 0.1.10     # the login item: rgy-autostart
+cargo install rgxy --version 0.1.10            # the window: rgxy
+cargo install rgy-zen --version 0.1.10           # the zen CLI: zen-rs (Windows)
 ```
 
 ### From the release
@@ -83,9 +83,9 @@ administrator — and a symlink on Linux, macOS and FreeBSD:
 
 | platform | archive |
 |---|---|
-| Windows x86_64 | `rgy-v0.1.9.1-x86_64-windows.zip` |
-| Linux x86_64 | `rgy-v0.1.9.1-x86_64-linux.tar.gz` |
-| FreeBSD x86_64 | `rgy-v0.1.9.1-x86_64-freebsd.tar.gz` |
+| Windows x86_64 | `rgy-v0.1.10.0-x86_64-windows.zip` |
+| Linux x86_64 | `rgy-v0.1.10.0-x86_64-linux.tar.gz` |
+| FreeBSD x86_64 | `rgy-v0.1.10.0-x86_64-freebsd.tar.gz` |
 
 The release page carries a `SHA256SUMS` beside the archives, and every arch
 the CI builds has one: aarch64 Windows, AVX2 and Zen 4 x86_64, static musl,
@@ -158,7 +158,7 @@ still rgy.
 
 ### The library
 
-The crates are on crates.io too, all thirty-two at 0.1.9, and fifteen of them
+The crates are on crates.io too, all thirty-two at 0.1.10, and fifteen of them
 are this project's own library:
 
 | crate | what it gives you |
@@ -1391,12 +1391,12 @@ being written. rgy skips it and lists it rather than failing the run.
 |---|---|
 | [README.md](README.md) | the map: what rgy is, how it compares to rgx |
 | [FORMATS.md](FORMATS.md) | what it reads inside a file, format by format |
-| [docs/release-0.1.9.1.md](docs/release-0.1.9.1.md) | the 0.1.9.1 release page, with the changelog in it |
+| [docs/release-0.1.10.0.md](docs/release-0.1.10.0.md) | the 0.1.10.0 release page, with the changelog in it |
 | [benchmark/](benchmark/) | the measured numbers |
 | [rgx](https://github.com/danalec/rgx) | the content-search specialist this workspace is built on |
 
 | link | what it is |
 |---|---|
-| [the 0.1.9.1 release](https://github.com/danalec/rgy/releases/tag/rgy-v0.1.9.1) | the archives, the `SHA256SUMS`, and the changelog |
-| [crates.io](https://crates.io/crates/rgy-search) | the thirty-two crates, all at 0.1.9 |
+| [the 0.1.10.0 release](https://github.com/danalec/rgy/releases/tag/rgy-v0.1.10.0) | the archives, the `SHA256SUMS`, and the changelog |
+| [crates.io](https://crates.io/crates/rgy-search) | the thirty-two crates, all at 0.1.10 |
 | [docs.rs](https://docs.rs/rgy-name-core) | the API of each crate |

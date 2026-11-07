@@ -5,7 +5,7 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/danalec/rgy/main/install.sh | bash
 #   bash install.sh --install-dir /usr/local/bin
-#   bash install.sh --version rgy-v0.1.9.0
+#   bash install.sh --version rgy-v0.1.10.0
 #
 # Downloads the rgy release tarball, verifies its SHA256, unpacks the four
 # binaries into the install directory, prepends it to the user's PATH and
@@ -30,12 +30,13 @@
 # emulator, and an installer that hands it one installs something that will
 # not start.
 #
-# The pins below are the digests of the archives this release carries: the
-# x86_64 Linux and the x86_64 Windows ones are the real digests of the
-# artifacts the release ships. The platforms this release does not carry
-# still hold the placeholder digest, and the installer refuses those by
-# name before it downloads anything -- an installer that hands out an
-# archive it cannot vouch for is worse than one that says there is none.
+# The pins below are the digests of the archives this release carries. Until
+# the 0.1.10.0 archives are built and published, every one of them is the
+# placeholder: the installer refuses a placeholder by name before it
+# downloads anything, so an installer that hands out an archive it cannot
+# vouch for is impossible. `scripts/publish-release.sh` rewrites these lines
+# in place from the real SHA256SUMS on the day the release is cut. A digest
+# left over from an earlier tag would refuse every download of the new one.
 #
 # The options, the digest and the refusal are the tree's own
 # (scripts/lib/options.sh and scripts/lib/digest.sh), so that this script
@@ -46,13 +47,11 @@
 # here when they are not.
 set -u
 
-# The crates are 0.1.10, but this is the last release that shipped binary
-# archives with verified digests. A release that carries the source tree and
-# the EGM contracts without rebuilding the multi-platform archives has no
-# assets of its own to install, so the installer keeps pointing at the one
-# that does -- a tag that names a release with no archive is an installer
-# that downloads nothing. (The same policy as the paired upstream 0.1.10.)
-version="rgy-v0.1.9.0"
+# The tag of the release that ships the binary archives: the crates carry
+# three numbers (0.1.10) and the release carries a fourth (0.1.10.0), which
+# is the fix count of the line. An installer that names another tag downloads
+# another release's archives and refuses them on the digest pinned below.
+version="rgy-v0.1.10.0"
 install_dir="$HOME/.local/bin"
 base_url="https://github.com/danalec/rgy/releases/download"
 skip_checksum=0
@@ -64,7 +63,7 @@ no_launcher=0
 # The digest is uppercase hex, and it is rewritten in place by
 # scripts/publish-release.sh -- so the shape of these lines is part of the
 # contract, not a formatting choice.
-expected_linux_x86_64="830D1A767C19CBF6EAB486B5B613229D215319BAB46FC67EA6B5860110161CA3"
+expected_linux_x86_64="0000000000000000000000000000000000000000000000000000000000000000"
 expected_linux_aarch64="0000000000000000000000000000000000000000000000000000000000000000"
 expected_macos_x86_64="0000000000000000000000000000000000000000000000000000000000000000"
 expected_macos_aarch64="0000000000000000000000000000000000000000000000000000000000000000"

@@ -23,7 +23,7 @@ Two faces, one daemon. Click either one to watch it move.
 
 ## Install
 
-The release is **0.1.9.1**. It is on [GitHub](https://github.com/danalec/rgy/releases/tag/rgy-v0.1.9.1), and the crates are on crates.io at 0.1.9 — the release's number carries a fourth place, the fix count of the line, and the registry takes three.
+The release is **0.1.10.0**. It is on [GitHub](https://github.com/danalec/rgy/releases/tag/rgy-v0.1.10.0), and the crates are on crates.io at 0.1.10 — the release's number carries a fourth place, the fix count of the line, and the registry takes three.
 
 **One line**, and it installs the tool, the daemon and the launcher:
 
@@ -53,7 +53,7 @@ runner that has the platform.
 **From crates.io:**
 
 ```sh
-cargo install rgy-search --version 0.1.9         # gives you `searchctl`
+cargo install rgy-search --version 0.1.10         # gives you `searchctl`
 ```
 
 That is the whole install for the tool you actually type, and it drops the
@@ -66,9 +66,9 @@ The other binaries are separate crates, because most people only want the
 first one:
 
 ```sh
-cargo install rgy-searchd --version 0.1.9       # the daemon: searchd
-cargo install rgy-autostart --version 0.1.9     # the login item: rgy-autostart
-cargo install rgxy --version 0.1.9            # the window: rgxy
+cargo install rgy-searchd --version 0.1.10       # the daemon: searchd
+cargo install rgy-autostart --version 0.1.10     # the login item: rgy-autostart
+cargo install rgxy --version 0.1.10            # the window: rgxy
 ```
 
 **From the release** — the archive carries the four binaries, the `rgy`
@@ -76,9 +76,9 @@ alias and the documents, and it needs neither Rust nor a compiler:
 
 | platform | archive |
 |---|---|
-| Windows x86_64 | `rgy-v0.1.9.1-x86_64-windows.zip` |
-| Linux x86_64 | `rgy-v0.1.9.1-x86_64-linux.tar.gz` |
-| FreeBSD x86_64 | `rgy-v0.1.9.1-x86_64-freebsd.tar.gz` |
+| Windows x86_64 | `rgy-v0.1.10.0-x86_64-windows.zip` |
+| Linux x86_64 | `rgy-v0.1.10.0-x86_64-linux.tar.gz` |
+| FreeBSD x86_64 | `rgy-v0.1.10.0-x86_64-freebsd.tar.gz` |
 
 The release page carries a `SHA256SUMS` beside the archives, and every arch
 the CI builds has one: aarch64 Windows, AVX2 and Zen 4 x86_64, static musl,
@@ -387,11 +387,11 @@ stderr, zero matches, exit 1.
 
 ## Status
 
-The release is out: **0.1.9.1**, tagged `rgy-v0.1.9.1`, with every archive the
+The release is out: **0.1.10.0**, tagged `rgy-v0.1.10.0`, with every archive the
 CI builds beside a `SHA256SUMS`, and all thirty-two crates on crates.io at
-0.1.9 — the release's number carries a fourth place, the fix count of the
+0.1.10 — the release's number carries a fourth place, the fix count of the
 line, and the registry takes three. The release page is the changelog — it is
-[`docs/release-0.1.9.1.md`](docs/release-0.1.9.1.md), the file the release
+[`docs/release-0.1.10.0.md`](docs/release-0.1.10.0.md), the file the release
 publishes.
 
 ### The packages
@@ -424,7 +424,7 @@ measurement does not reproduce on the host is measured and reported instead.
 
 ### The crates
 
-All thirty-two are on crates.io at 0.1.9. Five are the programs — `rgy-search`,
+All thirty-two are on crates.io at 0.1.10. Five are the programs — `rgy-search`,
 `rgy-searchd`, `rgy-autostart`, `rgxy` and `rgy-zen` — and twenty-seven are
 the libraries under them: `rgy-name-core`, `rgy-discovery`,
 `rgy-discovery-dispatch`, `rgy-discovery-linux`, `rgy-discovery-macos`,
@@ -474,10 +474,11 @@ at the same version, and the registry gives that to one of them.
 The two trees are paired again at **0.1.10**: the manifests, the requirement
 lines and `Cargo.lock` of this tree carry that number, and the upstream's
 0.1.10 is a source-only release whose binary assets stay at `rgx-v0.1.9.0`.
-For the same reason this tree's installers still pin `rgy-v0.1.9.0` — a
-source release has no archives of its own to install. The pairing decisions
-and the vendored-drift record are in
-[`.egm/2026-11-06_DRIFT_REPORT.md`](.egm/2026-11-06_DRIFT_REPORT.md#9-reply-to-the-rgx-0110-handoff).
+This tree's own release is **0.1.10.0** and does ship archives, so its
+installers name `rgy-v0.1.10.0`; the crates stay at 0.1.10 because the
+registry takes three numbers. The pairing decisions and the vendored-drift
+record are in
+[`.egm/2026-11-06_DRIFT_REPORT.md`](https://github.com/danalec/rgy/blob/main/.egm/2026-11-06_DRIFT_REPORT.md#9-reply-to-the-rgx-0110-handoff) in the repository.
 
 The versions this project published under the upstream's names — 0.1.2, 0.1.4
 and 0.1.6 — stay where they are, and they are not yanked: they are the
@@ -489,7 +490,7 @@ breaks every published crate that names it: `cargo install rgy-search` asked
 for `rgx-adapters-archive ^0.1.1` and was told "version 0.1.1 is yanked". The
 0.1.6 artifacts ask for `^0.1.6` and resolve; the 0.1.3 artifacts ask for
 `^0.1.2` and still do; and the 0.1.2 artifacts resolve again now that 0.1.2 is
-there. The [release page](docs/release-0.1.9.1.md) says what the change costs
+there. The [release page](docs/release-0.1.10.0.md) says what the change costs
 and when it lands.
 
 The command-line tool's crate was published as `rgy-searchctl` first;
@@ -509,9 +510,9 @@ PowerShell twin, `scripts/publish-crates.ps1`).
 The 0.1.1, 0.1.2, 0.1.3 and 0.1.4 numbers are taken as well, by earlier builds
 of this same project — the registry keeps what it keeps, and a version number
 is as permanent as a name. Those builds are not this tree: the protocol they
-shipped has neither the limits nor the count rules that 0.1.9 has, and a
+shipped has neither the limits nor the count rules that 0.1.10 has, and a
 program pinned to them does not build against it. The version names the
-bytes, and this release is **0.1.9** because these are the bytes.
+bytes, and these are the 0.1.10 bytes.
 
 ## Related projects
 

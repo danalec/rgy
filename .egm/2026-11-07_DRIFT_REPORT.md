@@ -1,14 +1,18 @@
-# EGM drift report — 2026-11-07 (the two residuals)
+# EGM drift report — 2026-11-07 (the residuals, and what the live test found)
 
 Direction: doc-to-code. The 2026-11-06 report is the definitive record of
-the EGM structural work, the 0.1.10 pairing and the UI review closure. **This
-report carries only the two items that the previous pass deliberately left
-open**: the legacy Windows console paste path and the two per-operation
-write threads in the resident launcher. Both are now closed in code, with
-regression tests. `DRIFT_STATUS.md` names this report; `unresolved: 0`
-means no drift finding is outstanding. The one remaining limit is a
-platform/verification limit, recorded below and in `bins/search-ui/src/EGM.md`,
-not an unaddressed finding.
+the EGM structural work, the 0.1.10 pairing and the UI review closure. This
+report began with the two items that pass deliberately left open — the
+legacy Windows console paste path and the two per-operation write threads
+in the resident launcher — and grew into the record of the live console
+test that followed: a real defect the test found in `poll`, a causal claim
+the owner's measurements corrected, the probe as an installed command and
+CI gate, and the final end-to-end measurement. All of it is closed now.
+`DRIFT_STATUS.md` names this report; `unresolved: 0` means no drift
+finding and no verification gap is outstanding. What remains in these
+sections is a **platform limit** — a legacy conhost in raw mode cannot
+paste at all — which is the console's design, measured and recorded, not
+an unaddressed finding.
 
 ## 1. Windows console paste (conhost)
 
@@ -214,7 +218,28 @@ on both hosts before the commit.
 
 ## 5. Status
 
-`unresolved: 0`. No drift finding is outstanding. The live-console paste
-session is a verification gap to close when a real Windows console is
-available, recorded in the contract so the next reader does not have to
-rediscover it.
+`unresolved: 0`. No drift finding is outstanding and no verification gap
+remains. The owner ran the installed probe at a real keyboard in Windows
+Terminal and in a legacy conhost, and the numbers are recorded in section 1
+and in `bins/search-ui/src/EGM.md`; the unix half is the `terminal-paste`
+CI gate. The one thing still true is a platform limit, not a gap: a
+raw-mode terminal UI cannot paste in a legacy conhost, because conhost
+pastes through the line discipline raw mode turns off. It is recorded in
+the contract so the next reader does not have to rediscover it.
+
+**Release note.** The tree is paired at 0.1.10 (three numbers, the registry
+takes three) and the release is **0.1.10.0** (four, the fix count of the
+line). `scripts/bump-version.py 0.1.10.0` moved the installers to
+`rgy-v0.1.10.0` and left the crate manifests untouched, as designed.
+`docs/release-0.1.10.0.md` is the release page, with the changelog and the
+assets marker for the twelve archives; `scripts/lib/version.sh` resolves it;
+`README.md` and `MANUAL.md` name this release. The package-manager manifests
+travel with it: the three `.winget/` files, `Formula/rgy-search.rb` and its
+contract, and the winget test's rationale all moved to 0.1.10.0, with Scoop
+and crates.io covered on the page. Every digest in the installers, the
+winget manifests and the Homebrew formula is a placeholder until the real
+archives are built and published — `scripts/publish-release.sh rewrites them
+from SHA256SUMS on publish day, and the `--manifests-only` smoke (portable
+variant) passes with 0. The upstream rgx's 0.1.10 stays source-only and its
+binary assets stay at `rgx-v0.1.9.0`; that is a decision about the upstream,
+not drift in this tree.
