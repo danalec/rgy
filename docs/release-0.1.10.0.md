@@ -131,7 +131,17 @@ for every platform the CI builds.
 The AVX2 and the Zen 4 builds are for the CPUs that can run them and nobody
 else: the Zen 4 one starts with an illegal instruction on a baseline x86_64
 CPU, and the AVX2 one on a CPU older than Haswell. The portable builds run
-anywhere, and they pick their kernels at run time.
+anywhere, and they pick their kernels at run time. The SIMD variants are
+`-C target-cpu=x86-64-v3` (AVX2) and `-C target-cpu=znver4` (Zen 4), applied
+only to the target's own artifacts so the build scripts still run on the
+building machine.
+
+The six x86_64 archives (Windows and Linux, portable/AVX2/Zen 4) are built
+and checksummed, and the installers pin their real digests. The remaining
+six — aarch64 Windows and Linux, musl, FreeBSD, and both macOS arches — are
+built by the CI matrix on the runners that have those platforms; their
+digests stay placeholders in the installers and the Homebrew formula until
+that run is collected, and the installer refuses a placeholder by name.
 
 Apache-2.0.
 

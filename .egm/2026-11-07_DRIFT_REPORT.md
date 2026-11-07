@@ -236,10 +236,35 @@ assets marker for the twelve archives; `scripts/lib/version.sh` resolves it;
 `README.md` and `MANUAL.md` name this release. The package-manager manifests
 travel with it: the three `.winget/` files, `Formula/rgy-search.rb` and its
 contract, and the winget test's rationale all moved to 0.1.10.0, with Scoop
-and crates.io covered on the page. Every digest in the installers, the
-winget manifests and the Homebrew formula is a placeholder until the real
-archives are built and published — `scripts/publish-release.sh rewrites them
-from SHA256SUMS on publish day, and the `--manifests-only` smoke (portable
-variant) passes with 0. The upstream rgx's 0.1.10 stays source-only and its
-binary assets stay at `rgx-v0.1.9.0`; that is a decision about the upstream,
-not drift in this tree.
+and crates.io covered on the page. The upstream rgx's 0.1.10 stays
+source-only and its binary assets stay at `rgx-v0.1.9.0`; that is a
+decision about the upstream, not drift in this tree.
+
+**The full release build (same day).** Six of the twelve archives were
+built, smoked and digested here — the three x86_64 Windows variants
+(portable, AVX2 `-C target-cpu=x86-64-v3`, Zen 4 `-C target-cpu=znver4`)
+and the same three for x86_64 Linux glibc. `scripts/build-release.ps1` and
+`build-release.sh` produced them into `.dist/` with their 17-file document
+digests, and a single canonical `SHA256SUMS` (six rows, LF only) now names
+all six; `sha256sum` of every archive matches its row on both hosts.
+`publish-release.ps1 -SkipBuild -ManifestsOnly` and
+`publish-release.sh --skip-build --manifests-only` both return 0 with that
+`.dist/` and agree on the rewrite: `install.ps1`'s x86_64-windows pin and
+`install.sh`'s x86_64-linux pin are now real uppercase-hex digests, the
+winget installer manifest carries the real Windows digest and the release
+date, and the other six pins stay placeholders with the publish step saying
+so by name. Those two real digests are committed; `.dist/` itself is
+gitignored and is not, by design.
+
+**What the CI run still owes.** The other six archives — aarch64 Windows,
+aarch64 Linux, x86_64 musl, FreeBSD (VM), and both macOS arches — need
+runners this desk does not have (no macOS SDK, no musl-gcc, no FreeBSD VM,
+no ARM machine that can start the binary). The `release` matrix in
+`.github/workflows/ci.yml` already names all twelve rows with their targets
+and variants; it runs on a push to `main` on the GitHub side, which this
+tree deliberately does not push to. Renaming the 0.1.9.1 archives that
+happen to sit in `.dist/` was refused: a tag must name the bytes it ships.
+To finish the release: start that matrix, collect its artifacts into one
+`.dist/` beside these six, regenerate the combined SHA256SUMS, and let the
+publish step fill the remaining pins and the Homebrew formula. Nothing in
+the tree pretends those six exist yet.

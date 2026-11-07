@@ -30,13 +30,14 @@
 # emulator, and an installer that hands it one installs something that will
 # not start.
 #
-# The pins below are the digests of the archives this release carries. Until
-# the 0.1.10.0 archives are built and published, every one of them is the
-# placeholder: the installer refuses a placeholder by name before it
-# downloads anything, so an installer that hands out an archive it cannot
-# vouch for is impossible. `scripts/publish-release.sh` rewrites these lines
-# in place from the real SHA256SUMS on the day the release is cut. A digest
-# left over from an earlier tag would refuse every download of the new one.
+# The pins below are the digests of the archives this release carries. The
+# x86_64 Linux one is real: that archive was built and smoked here and its
+# digest was written by `scripts/publish-release.sh` from SHA256SUMS. The
+# others are still placeholders — their archives belong to platforms this
+# desk does not have, and the CI release matrix builds them. The installer
+# refuses a placeholder by name before it downloads anything, so it never
+# hands out an archive it cannot vouch for. A digest left over from an
+# earlier tag would refuse every download of the new one.
 #
 # The options, the digest and the refusal are the tree's own
 # (scripts/lib/options.sh and scripts/lib/digest.sh), so that this script
@@ -63,7 +64,7 @@ no_launcher=0
 # The digest is uppercase hex, and it is rewritten in place by
 # scripts/publish-release.sh -- so the shape of these lines is part of the
 # contract, not a formatting choice.
-expected_linux_x86_64="0000000000000000000000000000000000000000000000000000000000000000"
+expected_linux_x86_64="F7B03964AA3BDB626789780A5FA8CC56DA11FD1966680BEFFF785FB271EA1DD0"
 expected_linux_aarch64="0000000000000000000000000000000000000000000000000000000000000000"
 expected_macos_x86_64="0000000000000000000000000000000000000000000000000000000000000000"
 expected_macos_aarch64="0000000000000000000000000000000000000000000000000000000000000000"

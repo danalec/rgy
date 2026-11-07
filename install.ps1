@@ -143,17 +143,18 @@ Read-RgyOptions -Switches @{ "skipchecksum" = "SkipChecksum"; "noautostart" = "N
 # The digest is uppercase hex, and it is rewritten in place by
 # scripts/publish-release.ps1 from the real SHA256SUMS on the day the
 # release is cut -- so the shape of these lines is part of the contract,
-# not a formatting choice. Until the 0.1.10.0 archives exist, every one
-# is the placeholder and the installer refuses it by name before it
-# downloads anything. A digest left over from an earlier tag would refuse
-# every download of the new one.
+# not a formatting choice. The x86_64 Windows one is real (built and
+# smoked here); the aarch64 one is a placeholder until the CI runner with
+# that platform builds its archive, and the installer refuses a
+# placeholder by name before it downloads anything. A digest left over
+# from an earlier tag would refuse every download of the new one.
 #
 # There is one digest per architecture, because the architecture decides
 # the archive: an aarch64 machine does not run the x86_64 binary without
 # an emulator, and an installer that hands it one installs something that
 # will not start.
 $expected = @{
-    'x86_64-windows.zip' = '0000000000000000000000000000000000000000000000000000000000000000'
+    'x86_64-windows.zip' = '738F87F9BBA83432BE70DF6EABE86B4022D98A318F7D9BFA85EBD95D3A60B42D'
     'aarch64-windows.zip' = '0000000000000000000000000000000000000000000000000000000000000000'
 }
 
