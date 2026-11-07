@@ -34,14 +34,133 @@
 //!   daemon folds a pattern that has no uppercase letter, and a fallback
 //!   that answered a different question would be a fallback that lies.
 
+use std::collections::VecDeque;
 use std::io::BufRead;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
+use std::sync::{Condvar, Mutex, Once};
 use std::time::{Duration, Instant};
 
 use rgy_launcher::layer::{ContentMode, content_mode, engine_pattern};
 use rgy_launcher::text::{Lang, Text};
 use rgy_proto::GrepFile;
+
+/// A job for one of the launcher's bounded worker pools.
+type Job = Box<dyn FnOnce() + Send + 'static>;
+
+/// A fixed set of worker threads fed by a bounded queue.
+///
+/// A thread per question is a resident process that slowly fills with
+/// threads: the stat of a path on a disconnected share cannot be
+/// cancelled, so a query that gives up at its deadline leaves its worker
+/// behind. The launcher is resident and a content search is a keystroke,
+/// so one blocked thread per query is a process that grows for ever.
+///
+/// The workers here are made **once**, at the first job, and no question
+/// starts a thread of its own. The queue holds at most `queue_cap` jobs;
+/// when it is full the oldest one -- the stalest question -- is replaced
+/// by the newest, and its answer channel dies with it. Every caller waits
+/// on a channel of its own, so a result computed for an older question
+/// can never be applied to a newer one.
+pub(crate) struct BoundedPool {
+    jobs: Mutex<VecDeque<Job>>,
+    ready: Condvar,
+    /// Starts the workers exactly once.
+    start: Once,
+    /// How many workers are alive. This is the bound, and the test's
+    /// seam: a query never raises it above `cap`.
+    workers: AtomicUsize,
+    cap: usize,
+    queue_cap: usize,
+}
+
+impl BoundedPool {
+    pub(crate) const fn new(cap: usize, queue_cap: usize) -> BoundedPool {
+        BoundedPool {
+            jobs: Mutex::new(VecDeque::new()),
+            ready: Condvar::new(),
+            start: Once::new(),
+            workers: AtomicUsize::new(0),
+            cap,
+            queue_cap,
+        }
+    }
+
+    /// Queue `job` for the next free worker.
+    pub(crate) fn submit(&'static self, job: Job) {
+        self.ensure_workers();
+        let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
+        if jobs.len() >= self.queue_cap {
+            // The oldest job answers the stalest question. Drop it: the
+            // sender it owns dies too, so that caller stops waiting
+            // instead of being answered by work nobody asked for.
+            let _ = jobs.pop_front();
+        }
+        jobs.push_back(job);
+        self.ready.notify_one();
+    }
+
+    /// Start the workers once, and only once.
+    fn ensure_workers(&'static self) {
+        // The fast path reads the same count the test reads: a pool that
+        // is already running has nothing left to start.
+        if self.workers.load(Ordering::Acquire) >= self.cap {
+            return;
+        }
+        self.start.call_once(|| {
+            for _ in 0..self.cap {
+                match std::thread::Builder::new()
+                    .name("rgxy-worker".to_string())
+                    .spawn(move || self.work())
+                {
+                    Ok(_) => {
+                        self.workers.fetch_add(1, Ordering::Release);
+                    }
+                    // A platform that will not give the launcher a
+                    // thread is survived, not panicked on: the jobs
+                    // already queued are answered by the workers that
+                    // did start, and no answer is invented.
+                    Err(_) => break,
+                }
+            }
+        });
+    }
+
+    /// One worker, for the life of the process.
+    fn work(&'static self) {
+        loop {
+            let job = {
+                let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
+                loop {
+                    if let Some(job) = jobs.pop_front() {
+                        break job;
+                    }
+                    jobs = self.ready.wait(jobs).unwrap_or_else(|e| e.into_inner());
+                }
+            };
+            job();
+        }
+    }
+}
+
+/// How many stat workers the pool keeps.
+///
+/// A blocked stat cannot be cancelled, so the bound is the most blocked
+/// stats the launcher will carry at once; a healthy scope still has a free
+/// worker while any other one is stuck on a share.
+const STAT_WORKERS: usize = 8;
+/// How many stat jobs may wait for a worker.
+const STAT_QUEUE: usize = 64;
+/// The pool that stats the scope of a content search.
+static STATS: BoundedPool = BoundedPool::new(STAT_WORKERS, STAT_QUEUE);
+
+/// How many workers keep the `rgx` child's output drained.
+const READER_WORKERS: usize = 4;
+/// How many reader jobs may wait for a worker.
+const READER_QUEUE: usize = 32;
+/// The pool that reads the `rgx` child's JSON stream.
+static READERS: BoundedPool = BoundedPool::new(READER_WORKERS, READER_QUEUE);
 
 /// The content answer, from `rgx` itself.
 ///
@@ -127,11 +246,13 @@ pub fn grep(
         .take()
         .ok_or_else(|| Text::for_lang(lang).rgx_no_output.to_string())?;
 
-    // The reading happens on its own thread so that the wait has a
+    // The reading happens off the caller's thread so that the wait has a
     // deadline: a launcher that is blocked on a process is a launcher that
-    // does not come back.
+    // does not come back. It goes to the bounded reader pool, not a thread
+    // of its own: a question that gives up at its window must not leave a
+    // reader behind.
     let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
+    READERS.submit(Box::new(move || {
         // The bytes are decoded with a replacement and not refused. A
         // line that is not UTF-8 used to end the answer there, and every
         // match after it was lost without a word; the stream is still an
@@ -143,7 +264,7 @@ pub fn grep(
                 .map(|line| String::from_utf8_lossy(&line).into_owned()),
         );
         let _ = tx.send(files);
-    });
+    }));
 
     // The process is read with what is left of the window: the scope
     // spent some of it, and the answer is the whole of it.
@@ -218,10 +339,12 @@ fn said(window: Duration) -> String {
 ///
 /// The stats are the fallback's own deadline: the stat of a path on a
 /// disconnected network drive blocks for the SMB timeout, and a fallback
-/// that waits for it is a fallback that answers late. So the stats run on
-/// their own thread — the caller waits for them within the window that is
-/// left, and a worker that is still blocked when the window is gone is
-/// left behind.
+/// that waits for it is a fallback that answers late. So the stats go to
+/// the one bounded pool of workers — the caller waits within the window
+/// that is left, and a worker still blocked on a share is one of a fixed
+/// few, not a thread a new query adds to. A job replaced in a full queue
+/// takes its answer channel with it, so its caller stops waiting instead
+/// of being answered by work nobody asked for.
 fn only_files(paths: &[String], deadline: Instant, lang: Lang) -> Result<Vec<String>, String> {
     if paths.is_empty() {
         return Ok(Vec::new());
@@ -235,9 +358,9 @@ fn only_files(paths: &[String], deadline: Instant, lang: Lang) -> Result<Vec<Str
     // were never looked at, and the caller is told so.
     //
     // It is also the race this used to lose on one platform and win on the
-    // others: the worker was spawned and then waited for with nothing left on
+    // others: the work was queued and then waited for with nothing left on
     // the clock, so whether the answer was the empty scope or the refusal
-    // depended on whether the thread reached its send before the caller
+    // depended on whether a worker reached its send before the caller
     // reached its zero-length receive. The check below takes the race out of
     // it.
     if started >= deadline {
@@ -248,15 +371,20 @@ fn only_files(paths: &[String], deadline: Instant, lang: Lang) -> Result<Vec<Str
     }
     let (tx, rx) = mpsc::channel();
     let scope: Vec<String> = paths.to_vec();
-    std::thread::spawn(move || {
+    // The stats are queued, not spawned: the pool's workers are long-lived
+    // and bounded, and a stat that blocks on a share holds one of them
+    // instead of adding a thread for every query that times out.
+    STATS.submit(Box::new(move || {
         let _ = tx.send(stat_files(&scope, deadline));
-    });
+    }));
     let left = deadline.saturating_duration_since(Instant::now());
     match rx.recv_timeout(left) {
         Ok(scope) => Ok(scope),
-        // The stats are still running and the window is gone: the
-        // fallback gives up instead of waiting for a stat that is not
-        // coming back.
+        // The stats are still running, or their job is waiting behind a
+        // blocked worker, and the window is gone: the fallback gives up
+        // instead of waiting for a stat that is not coming back. The
+        // give-up leaves no thread behind -- the worker is one of the
+        // pool's fixed few.
         Err(mpsc::RecvTimeoutError::Timeout) => Err(rgy_launcher::text::fill(
             Text::for_lang(lang).scope_not_ready_in,
             &[&said(deadline.saturating_duration_since(started))],
@@ -271,7 +399,9 @@ fn only_files(paths: &[String], deadline: Instant, lang: Lang) -> Result<Vec<Str
 ///
 /// The deadline is checked before every stat: a stat is a call to the
 /// filesystem that cannot be interrupted, and the next one does not start
-/// when the window is gone. The rest of the scope is dropped.
+/// when the window is gone. The rest of the scope is dropped. A job left
+/// in the pool after its caller gave up costs one check and no stat, so
+/// stale work does not hold a worker for long.
 fn stat_files(paths: &[String], deadline: Instant) -> Vec<String> {
     let mut scope = Vec::new();
     for path in paths {
@@ -722,5 +852,64 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Many overlapping scopes never grow the worker count.
+    ///
+    /// The launcher is resident: a content search against a stale scope
+    /// leaves the stat of a disconnected share blocking for the SMB
+    /// timeout, and a thread per query is a process that grows for ever.
+    /// The pool starts a fixed number of long-lived workers once, and no
+    /// query starts another. Each caller waits on a channel of its own,
+    /// so an answer for an older scope cannot land on a newer one.
+    #[test]
+    fn many_overlapping_scopes_do_not_grow_the_worker_count() {
+        let dir = TempTree::new("rgy-rgxy-bound");
+        let file = dir.join("notes.txt");
+        std::fs::write(&file, "zebra\n").unwrap();
+        let scope: Vec<String> = vec![file.to_string_lossy().into_owned()];
+
+        // Scopes that overlap: every caller asks for its own answer.
+        let callers: Vec<_> = (0..32)
+            .map(|_| {
+                let scope = scope.clone();
+                std::thread::spawn(move || {
+                    only_files(
+                        &scope,
+                        Instant::now() + Duration::from_secs(5),
+                        Lang::English,
+                    )
+                })
+            })
+            .collect();
+        for caller in callers {
+            let kept = caller
+                .join()
+                .expect("the caller did not panic")
+                .expect("a healthy scope is resolved");
+            assert_eq!(kept.len(), 1, "the file is in the scope: {kept:?}");
+        }
+
+        // And many more, one after the other, as the resident launcher
+        // asks them when the daemon is away.
+        for _ in 0..256 {
+            let kept = only_files(
+                &scope,
+                Instant::now() + Duration::from_secs(5),
+                Lang::English,
+            )
+            .expect("a healthy scope is resolved");
+            assert_eq!(kept.len(), 1, "the file is in the scope: {kept:?}");
+        }
+
+        let workers = STATS.workers.load(Ordering::Acquire);
+        assert_eq!(
+            workers, STAT_WORKERS,
+            "the pool started exactly its bound of workers"
+        );
+        assert!(
+            workers <= STAT_WORKERS,
+            "no query grows the thread count beyond the bound: {workers}"
+        );
     }
 }

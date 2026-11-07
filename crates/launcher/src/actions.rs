@@ -9,13 +9,15 @@
 //!
 //! The list **follows the row**: an action that cannot work for the result
 //! that is selected is not offered. The preview reads the head of a file as
-//! text, and for a folder, an image, a video, a sound or a program that
-//! head is noise — a menu that offers the preview and then fails is a menu
-//! that lies.
+//! text, and for a folder, an image, a video, a sound or a binary document
+//! that head is noise — a menu that offers the preview and then fails is a
+//! menu that lies. A plain-text script is a program to the icon table but
+//! a text file to the preview, so the decision is about the extension and
+//! not about the icon (see [`crate::results::IconInfo`]).
 
 use alloc::string::String;
 
-use crate::results::IconKind;
+use crate::results::IconInfo;
 use crate::text::{self, Lang, Text};
 
 /// The actions every result has.
@@ -106,16 +108,20 @@ impl Action {
         WITH_PREVIEW
     }
 
-    /// The actions offered for a kind of thing.
+    /// The actions offered for a row.
     ///
-    /// The preview needs a file whose bytes can be read as text: a
-    /// document and a file of no kind of its own. The other three are
-    /// offered for every row — a folder is opened, the folder that holds
-    /// it is opened and its path is copied like anybody else's.
-    pub fn for_kind(kind: IconKind) -> &'static [Action] {
-        match kind {
-            IconKind::Document | IconKind::File => WITH_PREVIEW,
-            _ => COMMON,
+    /// The preview needs a file whose bytes can be read as text, and
+    /// that is the row's `IconInfo::previewable` decision — an explicit
+    /// text-extension allowlist, not the `IconKind` the icon uses. A PDF
+    /// is a document whose head is a binary container; a `.ps1` script
+    /// is a program whose head is plain text. The other three actions
+    /// are offered for every row — a folder is opened, the folder that
+    /// holds it is opened and its path is copied like anybody else's.
+    pub fn for_kind(icon: IconInfo) -> &'static [Action] {
+        if icon.previewable {
+            WITH_PREVIEW
+        } else {
+            COMMON
         }
     }
 
@@ -123,13 +129,17 @@ impl Action {
     ///
     /// The refusal says **why**, in the user's language: a key that was
     /// pressed and refused in silence is a key the user presses again.
+    /// The preview fits exactly when [`Action::for_kind`] offers it, so
+    /// the menu and the key answer the same question; the sentence names
+    /// the icon kind, which is the thing the user sees, and not the
+    /// decision.
     ///
     /// `None` when the action fits the row — the launcher does not
     /// refuse what it offers.
-    pub fn refusal(&self, kind: IconKind, lang: Lang) -> Option<String> {
+    pub fn refusal(&self, icon: IconInfo, lang: Lang) -> Option<String> {
         match self {
-            Action::Preview if !Self::for_kind(kind).contains(&Action::Preview) => {
-                Some(text::no_preview_of(kind, lang))
+            Action::Preview if !Self::for_kind(icon).contains(&Action::Preview) => {
+                Some(text::no_preview_of(icon.kind, lang))
             }
             _ => None,
         }
@@ -139,6 +149,11 @@ impl Action {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The icon and the preview decision of a path, for the tests below.
+    fn info(path: &str) -> IconInfo {
+        IconInfo::of(path)
+    }
 
     #[test]
     fn every_action_of_the_launcher_is_listed_once_each() {
@@ -164,7 +179,7 @@ mod tests {
     /// head: the action would fail on every folder of the index.
     #[test]
     fn the_actions_of_a_folder_do_not_offer_the_preview() {
-        let actions = Action::for_kind(IconKind::Folder);
+        let actions = Action::for_kind(info("/a/folder/"));
         assert!(!actions.contains(&Action::Preview), "{actions:?}");
         // The other three are offered for every row.
         for action in [Action::Open, Action::OpenFolder, Action::CopyPath] {
@@ -172,33 +187,86 @@ mod tests {
         }
     }
 
-    /// An image, a video, a sound and a program are not text.
+    /// An image, a video, a sound, an executable and a binary document
+    /// are not text.
     ///
-    /// The preview would show twelve lines of noise, and a menu that
-    /// offers it is a menu that fails every time it is used.
+    /// The icon classification used to offer the preview to a PDF and a
+    /// DOCX because they are "documents"; the head of a ZIP or an office
+    /// container is a size and a wall of noise. The decision is the
+    /// extension's now, not the icon's.
     #[test]
     fn the_actions_of_a_binary_do_not_offer_the_preview() {
-        for kind in [
-            IconKind::Image,
-            IconKind::Video,
-            IconKind::Audio,
-            IconKind::Application,
+        for path in [
+            "/a/foto.png",
+            "/a/filme.mp4",
+            "/a/musica.mp3",
+            "/a/programa.exe",
+            "/a/report.pdf",
+            "/a/book.docx",
+            "/a/sheet.xlsx",
+            "/a/archive.zip",
         ] {
-            let actions = Action::for_kind(kind);
-            assert!(!actions.contains(&Action::Preview), "{kind:?}: {actions:?}");
+            let actions = Action::for_kind(info(path));
+            assert!(!actions.contains(&Action::Preview), "{path}: {actions:?}");
         }
     }
 
-    /// A document and a plain file are text.
+    /// The regression: a plain-text script is offered a preview and a
+    /// binary document is refused one.
     ///
-    /// The head of the file is what the user is looking for, and the
-    /// preview is how they read it.
+    /// `.ps1`, `.bat` and `.cmd` are programs to the icon table but
+    /// their head is text; a PDF is a document but its head is a binary
+    /// container. Taking the decision from the icon got both backwards.
     #[test]
-    fn the_actions_of_a_document_and_of_a_plain_file_offer_the_preview() {
-        for kind in [IconKind::Document, IconKind::File] {
+    fn a_text_script_is_offered_the_preview_and_a_pdf_is_refused() {
+        for path in [
+            "/a/deploy.ps1",
+            "/a/build.bat",
+            "/a/run.cmd",
+            "/a/start.sh",
+            "/a/tool.py",
+            "/a/main.rs",
+            "/a/notes.md",
+            "/a/log.txt",
+            "/a/data.csv",
+            "/a/config.json",
+            "/a/Cargo.toml",
+            "/a/ci.yaml",
+        ] {
             assert!(
-                Action::for_kind(kind).contains(&Action::Preview),
-                "{kind:?} is text"
+                Action::for_kind(info(path)).contains(&Action::Preview),
+                "{path} is text and is offered the preview"
+            );
+            assert!(
+                Action::Preview.refusal(info(path), Lang::English).is_none(),
+                "{path} is not refused"
+            );
+        }
+        for path in [
+            "/a/report.pdf",
+            "/a/book.docx",
+            "/a/sheet.xlsx",
+            "/a/archive.zip",
+        ] {
+            assert!(
+                !Action::for_kind(info(path)).contains(&Action::Preview),
+                "{path} is binary"
+            );
+            assert!(
+                Action::Preview.refusal(info(path), Lang::English).is_some(),
+                "{path} is refused"
+            );
+        }
+    }
+
+    /// A text file and a plain file with no extension are offered the
+    /// preview: the head is what the user is looking for.
+    #[test]
+    fn the_actions_of_text_and_plain_files_offer_the_preview() {
+        for path in ["/a/notas.txt", "/a/README", "/a/.gitignore"] {
+            assert!(
+                Action::for_kind(info(path)).contains(&Action::Preview),
+                "{path} is text"
             );
         }
     }
@@ -209,16 +277,20 @@ mod tests {
     /// menu the user is already in.
     #[test]
     fn the_actions_of_a_row_do_not_include_the_menu() {
-        for kind in [
-            IconKind::Folder,
-            IconKind::Document,
-            IconKind::Image,
-            IconKind::Video,
-            IconKind::Audio,
-            IconKind::Application,
-            IconKind::File,
+        for path in [
+            "/a/folder/",
+            "/a/notas.txt",
+            "/a/report.pdf",
+            "/a/foto.png",
+            "/a/filme.mp4",
+            "/a/musica.mp3",
+            "/a/programa.exe",
+            "/a/README",
         ] {
-            assert!(!Action::for_kind(kind).contains(&Action::Menu), "{kind:?}");
+            assert!(
+                !Action::for_kind(info(path)).contains(&Action::Menu),
+                "{path}"
+            );
         }
     }
 
@@ -230,24 +302,24 @@ mod tests {
     #[test]
     fn the_refusal_says_why() {
         let reason = Action::Preview
-            .refusal(IconKind::Folder, Lang::English)
+            .refusal(info("/a/folder/"), Lang::English)
             .expect("a folder has no preview");
         assert!(reason.contains("a folder"), "{reason}");
         assert!(reason.contains("no preview"), "{reason}");
         // And what fits is not refused.
         assert!(
             Action::Preview
-                .refusal(IconKind::Document, Lang::English)
+                .refusal(info("/a/notas.txt"), Lang::English)
                 .is_none()
         );
         assert!(
             Action::Open
-                .refusal(IconKind::Folder, Lang::English)
+                .refusal(info("/a/folder/"), Lang::English)
                 .is_none()
         );
         assert!(
             Action::CopyPath
-                .refusal(IconKind::Image, Lang::English)
+                .refusal(info("/a/foto.png"), Lang::English)
                 .is_none()
         );
     }
@@ -259,7 +331,7 @@ mod tests {
     #[test]
     fn the_refusal_is_said_in_the_users_language() {
         let reason = Action::Preview
-            .refusal(IconKind::Folder, Lang::Portuguese)
+            .refusal(info("/a/folder/"), Lang::Portuguese)
             .expect("a folder has no preview");
         assert!(reason.contains("uma pasta"), "{reason}");
         assert!(reason.contains("pré-visualização"), "{reason}");

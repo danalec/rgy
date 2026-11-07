@@ -35,7 +35,9 @@
 //! that comes back is the answer to the question that was asked, and an
 //! answer for a question the user has moved on from is dropped.
 
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{Receiver, Sender, SyncSender, channel, sync_channel};
 
 use rgy_launcher::TapKey;
 use rgy_launcher::latency::LatencyMeter;
@@ -52,9 +54,85 @@ use crate::Options;
 use crate::daemon::{DaemonSource, Status};
 use crate::mru;
 use crate::preview;
+use crate::rgx;
 
 /// How many results the window asks for.
 const LIMIT: usize = 50;
+
+/// The bound on the stderr writer's queue.
+///
+/// A pipe nobody reads fills in a second; a queue that grows with the
+/// news is a queue that grows for ever. The writer drops what does not
+/// fit instead of waiting for a reader that is not coming.
+const STDERR_QUEUE: usize = 64;
+
+/// How many stderr writer threads were started. The test's seam: the
+/// answer is one, however much the daemon flaps.
+static STDERR_THREADS: AtomicUsize = AtomicUsize::new(0);
+
+/// The launcher's one stderr writer.
+///
+/// A full stderr pipe is a pipe that does not take the message back, and
+/// a thread per message is a resident process that slowly fills with
+/// blocked threads: a daemon that flaps gone -> up -> slow -> gone
+/// changes the news every cycle, and each change used to start a thread
+/// that blocked on `eprintln!` for ever. So there is **one** writer
+/// thread, started once, fed by a bounded channel; a line that does not
+/// fit is dropped, never waited for, and never starts another thread.
+struct Stderr {
+    /// `None` when the writer thread could not be started: the launcher
+    /// stays up and drops the news instead of panicking.
+    lines: Option<SyncSender<String>>,
+}
+
+/// The process's one stderr writer.
+static STDERR: OnceLock<Stderr> = OnceLock::new();
+
+impl Stderr {
+    /// The one writer, started on the first message.
+    fn get() -> &'static Stderr {
+        STDERR.get_or_init(Stderr::start)
+    }
+
+    fn start() -> Stderr {
+        let (tx, rx) = sync_channel(STDERR_QUEUE);
+        match std::thread::Builder::new()
+            .name("rgxy-stderr".to_string())
+            .spawn(move || {
+                for line in rx {
+                    eprintln!("{line}");
+                }
+            }) {
+            Ok(_) => {
+                STDERR_THREADS.fetch_add(1, Ordering::Release);
+                Stderr { lines: Some(tx) }
+            }
+            // A platform that will not give the launcher a thread is
+            // survived: the window keeps answering the keyboard and the
+            // news is dropped rather than blocking it.
+            Err(_) => Stderr { lines: None },
+        }
+    }
+
+    /// Say the news without ever blocking the window's thread.
+    fn say(&self, lines: Vec<String>) {
+        let Some(tx) = &self.lines else {
+            return;
+        };
+        for line in lines {
+            // `try_send` never waits: a full queue drops the line, and a
+            // dropped line is cheaper than a window that stops answering.
+            let _ = tx.try_send(line);
+        }
+    }
+}
+
+/// How many workers read the head of a file the user asked to preview.
+const PREVIEW_WORKERS: usize = 4;
+/// How many preview jobs may wait for a worker.
+const PREVIEW_QUEUE: usize = 16;
+/// The bounded pool that reads previews off the window's thread.
+static PREVIEWS: rgx::BoundedPool = rgx::BoundedPool::new(PREVIEW_WORKERS, PREVIEW_QUEUE);
 
 /// The armed hotkey: the shape the settings chose.
 ///
@@ -249,42 +327,68 @@ impl Worker for DaemonWorker {
     }
 }
 
-/// The thread that asks the daemon.
+/// The body of the thread that asks the daemon.
+type ThreadBody = Box<dyn FnOnce() + Send + 'static>;
+
+/// The thread that asks the daemon, with an injected thread starter.
 ///
 /// The worker is built **inside** the thread: the source that answers
 /// holds a connection, and a connection is not something the thread
 /// that draws the window may keep.
-fn spawn_worker<F, W>(make: F) -> (Sender<Request>, Receiver<Reply>)
+///
+/// The starter is a seam: a platform that will not give the launcher a
+/// thread is a machine the launcher has to survive. When it refuses,
+/// the body is dropped with the channels it owns, so the question
+/// channel is closed and no answer is invented — a degraded daemon,
+/// not a panic and not a lie.
+fn start_worker<F, W, S>(make: F, start: S) -> (Sender<Request>, Receiver<Reply>, bool)
+where
+    F: FnOnce() -> W + Send + 'static,
+    W: Worker + 'static,
+    S: FnOnce(ThreadBody) -> std::io::Result<()>,
+{
+    let (outbox, requests) = channel::<Request>();
+    let (answers, inbox) = channel::<Reply>();
+    let body: ThreadBody = Box::new(move || {
+        let mut worker = make();
+        while let Ok(request) = requests.recv() {
+            let Some(reply) = worker.answer(request) else {
+                continue;
+            };
+            if answers.send(reply).is_err() {
+                // The window is gone: nobody is going to read the
+                // answer.
+                break;
+            }
+            // The answer is in the channel, and the window's thread
+            // is asleep in its message loop: the worker is the one
+            // that knows the answer is there, so it is the one that
+            // wakes the loop for it.
+            if let Some(hwnd) = worker.wake() {
+                rgy_launcher_windows::window::wake(hwnd);
+            }
+        }
+    });
+    let started = start(body).is_ok();
+    (outbox, inbox, started)
+}
+
+/// The thread that asks the daemon.
+///
+/// The `bool` says whether the thread started. A refusal is passed up
+/// to the window, which says it on the line under the field instead of
+/// panicking: a launcher that died over one thread is no launcher at all.
+fn spawn_worker<F, W>(make: F) -> (Sender<Request>, Receiver<Reply>, bool)
 where
     F: FnOnce() -> W + Send + 'static,
     W: Worker + 'static,
 {
-    let (outbox, requests) = channel::<Request>();
-    let (answers, inbox) = channel::<Reply>();
-    std::thread::Builder::new()
-        .name("rgxy-daemon".to_string())
-        .spawn(move || {
-            let mut worker = make();
-            while let Ok(request) = requests.recv() {
-                let Some(reply) = worker.answer(request) else {
-                    continue;
-                };
-                if answers.send(reply).is_err() {
-                    // The window is gone: nobody is going to read the
-                    // answer.
-                    break;
-                }
-                // The answer is in the channel, and the window's thread
-                // is asleep in its message loop: the worker is the one
-                // that knows the answer is there, so it is the one that
-                // wakes the loop for it.
-                if let Some(hwnd) = worker.wake() {
-                    rgy_launcher_windows::window::wake(hwnd);
-                }
-            }
-        })
-        .expect("the daemon's thread starts");
-    (outbox, inbox)
+    start_worker(make, |body| {
+        std::thread::Builder::new()
+            .name("rgxy-daemon".to_string())
+            .spawn(body)
+            .map(|_| ())
+    })
 }
 
 /// The daemon, asked on a worker thread.
@@ -310,7 +414,11 @@ impl Daemon {
     /// `None` is a daemon with no window to wake — the tests' sources
     /// answer questions, and the window's own daemon is the one with a
     /// handle.
-    fn new(source: DaemonSource, wake: Option<usize>) -> Daemon {
+    ///
+    /// The `bool` is whether the worker thread started. When it did not,
+    /// the channels are dead and the caller says so on the line under the
+    /// field; there is no panic and no answer that was never given.
+    fn new(source: DaemonSource, wake: Option<usize>) -> (Daemon, bool) {
         // The source that answers is the worker's: the window's thread
         // must not hold the connection, because the connection is what
         // waits.
@@ -318,11 +426,11 @@ impl Daemon {
         let rgx = source.rgx().map(str::to_string);
         let window = source.window();
         let lang = source.lang();
-        let (outbox, inbox) = spawn_worker(move || DaemonWorker {
+        let (outbox, inbox, started) = spawn_worker(move || DaemonWorker {
             source: DaemonSource::with_window(endpoint, rgx, window, lang),
             wake,
         });
-        Daemon { outbox, inbox }
+        (Daemon { outbox, inbox }, started)
     }
 
     /// A daemon whose worker is gone.
@@ -344,7 +452,7 @@ impl Daemon {
         F: FnOnce() -> W + Send + 'static,
         W: Worker + 'static,
     {
-        let (outbox, inbox) = spawn_worker(make);
+        let (outbox, inbox, _started) = spawn_worker(make);
         Daemon { outbox, inbox }
     }
 }
@@ -652,6 +760,12 @@ pub fn run(
     let usage_path = mru::store_path();
     let (history, memory_note) = memory(usage_path.as_deref(), lang);
 
+    // The daemon is asked on a worker thread. When the platform will not
+    // give the launcher one, the launcher says so on the line under the
+    // field instead of panicking: the question channel is closed, no
+    // answer is invented, and the window keeps answering the keyboard.
+    let (daemon, worker_started) = Daemon::new(source, Some(window.hwnd() as usize));
+
     // What the launcher has to say about the machine it is on: a
     // refused hotkey and a memory that could not be read are two
     // facts, and the line under the field carries both of them — in
@@ -683,6 +797,13 @@ pub fn run(
     if window.compositor() == Compositor::Refused {
         facts.push(Text::for_lang(lang).screen_refused_the_surface.to_string());
     }
+    // A worker that could not start is a fact about the machine, and the
+    // line under the field is where the machine is described. The daemon
+    // is not there and did not answer: the note says why rather than
+    // pretending a question went down.
+    if !worker_started {
+        facts.push(Text::for_lang(lang).worker_died.to_string());
+    }
     let note = if facts.is_empty() {
         None
     } else {
@@ -704,7 +825,7 @@ pub fn run(
         hwnd: window.hwnd(),
         rows_fit: rgy_launcher::app::rows_that_fit(window.work_area_height()),
         settings_path: crate::settings_store::store_path(),
-        source: Box::new(Daemon::new(source, Some(window.hwnd() as usize))),
+        source: Box::new(daemon),
         clipboard: Box::new(actions::paste_text),
         // The seams answer in the user's language: the machine's own
         // refusal is said in the language the user reads.
@@ -1590,16 +1711,17 @@ fn run_action(state: &mut State, action: Action) -> Control {
             // The preview reads the file, and the file may be on a share
             // that is not there: the read blocks for the SMB timeout, and
             // the thread that draws the window must not block. The read
-            // goes to a thread of its own, and the panel says it is
-            // waiting.
+            // goes to the bounded preview pool, not a thread of its own:
+            // a Ctrl+P per file must not grow the thread count without
+            // limit. The panel says it is waiting.
             let path = row.path.clone();
             let tx = state.preview_tx.clone();
             let lang = state.lang;
             state.preview_pending = Some(path.clone());
             state.app.set_preview(preview::pending(&path, lang));
-            std::thread::spawn(move || {
+            PREVIEWS.submit(Box::new(move || {
                 let _ = tx.send((path.clone(), preview::of(&path, lang)));
-            });
+            }));
             paint(state)
         }
         Action::Menu => {
@@ -1628,6 +1750,10 @@ fn run_action(state: &mut State, action: Action) -> Control {
 ///
 /// So the stderr carries the message once, when it changes, and the
 /// window carries it the whole time, in the line under the field.
+///
+/// The lines are handed to the one bounded stderr writer by the caller;
+/// this function is the pure dedupe seam, and never starts a thread or
+/// touches a pipe itself.
 fn said_once(said: &mut Vec<String>, messages: &[String]) -> Option<Vec<String>> {
     if messages == said.as_slice() {
         return None;
@@ -1665,18 +1791,15 @@ fn apply_reply(state: &mut State) -> bool {
             }
             // The stderr carries the message once, when it changes.
             //
-            // And the write is on a thread of its own: a pipe that is
-            // full does not take the message back, and a window that
-            // waits for the pipe is a window that stops answering. The
-            // launcher is resident, and a resident launcher that freezes
-            // when the machine's log is full is a launcher the user has
-            // to kill.
+            // And the write goes to the ONE long-lived writer: a pipe
+            // that is full does not take the message back, and a window
+            // that waits for the pipe is a window that stops answering.
+            // A thread per change used to leave another thread blocked
+            // on that pipe for every state a flapping daemon reported;
+            // the writer's bounded channel drops the news instead, and
+            // the thread count never grows.
             if let Some(lines) = said_once(&mut state.said, &messages) {
-                std::thread::spawn(move || {
-                    for line in lines {
-                        eprintln!("{line}");
-                    }
-                });
+                Stderr::get().say(lines);
             }
             if !messages.is_empty() {
                 // Whatever the user has to be told, the window tells it:
@@ -3257,6 +3380,112 @@ mod tests {
         assert!(
             said_once(&mut said, &news).is_some(),
             "the news that changed is said again"
+        );
+    }
+
+    /// A flapping daemon starts exactly one stderr writer.
+    ///
+    /// Gone -> up -> slow -> gone changes the news every cycle, and a
+    /// thread per change is a resident process that slowly fills with
+    /// threads blocked on a full stderr pipe. The writer is started once;
+    /// every change after it only feeds the same bounded channel.
+    #[test]
+    fn many_daemon_state_changes_start_exactly_one_stderr_writer() {
+        let mut source = Recording::new(Rc::new(RefCell::new(Vec::new())), Rc::new(Cell::new(0)));
+        for i in 0..200 {
+            source.answers.push(Reply::Who {
+                messages: vec![format!("the daemon is in state {i}")],
+                status: Status::default(),
+            });
+        }
+        let (mut state, _) = recording();
+        state.source = Box::new(source);
+        for _ in 0..200 {
+            apply_reply(&mut state);
+        }
+        assert_eq!(
+            STDERR_THREADS.load(Ordering::Acquire),
+            1,
+            "state changes never start a second writer thread"
+        );
+    }
+
+    /// A full stderr channel does not block the window or grow a thread.
+    ///
+    /// The real writer drains as fast as the pipe lets it, so a writer
+    /// held at a gate is the way to see a channel that is definitely
+    /// full: `say` must drop the news, never wait for it, and never
+    /// start another thread that would also block on the pipe.
+    #[test]
+    fn a_full_stderr_channel_does_not_block_or_grow() {
+        // Start the one writer first: a parallel test cannot then change
+        // the count halfway through this one.
+        let _ = Stderr::get();
+        let before = STDERR_THREADS.load(Ordering::Acquire);
+
+        let (tx, rx) = sync_channel::<String>(2);
+        let (gate_tx, gate_rx) = channel::<()>();
+        std::thread::Builder::new()
+            .spawn(move || {
+                let _ = gate_rx.recv();
+                drop(rx);
+            })
+            .expect("the stalled writer starts");
+        let stalled = Stderr { lines: Some(tx) };
+
+        let started = std::time::Instant::now();
+        for i in 0..10_000 {
+            stalled.say(vec![format!("the daemon changed again {i}")]);
+        }
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "the window's thread was never blocked: {elapsed:?}"
+        );
+        assert_eq!(
+            STDERR_THREADS.load(Ordering::Acquire),
+            before,
+            "a full channel starts no new writer thread"
+        );
+        assert_eq!(before, 1, "the one writer was started once");
+        assert!(
+            stalled
+                .lines
+                .as_ref()
+                .expect("the stalled writer has a channel")
+                .try_send(String::from("one more"))
+                .is_err(),
+            "a full queue drops the newest line"
+        );
+        drop(gate_tx);
+    }
+
+    /// A platform that refuses the daemon's thread is survived.
+    ///
+    /// Thread creation can fail under resource exhaustion. The launcher
+    /// reports it instead of panicking: the body and the channels it owns
+    /// are dropped, no question goes down, and no answer is invented.
+    #[test]
+    fn a_daemon_thread_that_cannot_start_leaves_a_dead_daemon() {
+        struct NoWorker;
+        impl Worker for NoWorker {
+            fn answer(&mut self, _request: Request) -> Option<Reply> {
+                None
+            }
+        }
+
+        let (outbox, inbox, started) = start_worker(
+            || NoWorker,
+            |_body| Err(std::io::Error::other("the machine has no threads left")),
+        );
+        assert!(!started, "the failure is reported, not panicked on");
+        assert!(
+            outbox.send(Request::Who).is_err(),
+            "no question goes down to a worker that is not there"
+        );
+        assert!(
+            inbox.try_recv().is_err(),
+            "no answer is pretended: the channel is closed"
         );
     }
 

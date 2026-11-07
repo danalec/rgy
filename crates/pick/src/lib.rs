@@ -270,8 +270,21 @@ pub fn status(code: i32, no_selection: bool) -> Result<i32> {
 /// The picker that will run, and the separator it will speak.
 #[cfg(feature = "std")]
 struct Plan {
-    binary: String,
+    /// The path is kept as bytes: a `PATH` entry on unix need not be UTF-8,
+    /// and a lossy spelling of it would name a file that does not exist.
+    binary: std::path::PathBuf,
     separator: Separator,
+}
+
+/// The picker's name, for the decisions made from the name alone.
+///
+/// The separator and the flags are decided by the ASCII names `fzf` and
+/// `sk`, so a lossy spelling cannot change those decisions. This is the
+/// only place a path becomes text; the path handed to `Command::new` keeps
+/// its original bytes.
+#[cfg(feature = "std")]
+fn picker_name(binary: &std::path::Path) -> String {
+    binary.to_string_lossy().into_owned()
 }
 
 /// The picker that will run, and the separator it will speak.
@@ -282,7 +295,7 @@ struct Plan {
 #[cfg(feature = "std")]
 fn plan(req: &Request<'_>) -> Result<Plan> {
     let binary = match req.binary {
-        Some(p) => p.to_string(),
+        Some(p) => std::path::PathBuf::from(p),
         None => locate().ok_or_else(|| {
             alloc::format!(
                 "the picker needs one of {} on PATH (install one, or point --fzf-binary at another picker)",
@@ -291,7 +304,7 @@ fn plan(req: &Request<'_>) -> Result<Plan> {
         })?,
     };
     Ok(Plan {
-        separator: separator_for(&binary, req.separator),
+        separator: separator_for(&picker_name(&binary), req.separator),
         binary,
     })
 }
@@ -348,17 +361,30 @@ fn spawn(command: &mut std::process::Command) -> std::io::Result<std::process::C
     command.spawn()
 }
 
+/// Read the picker's selection, telling EOF from a real I/O error.
+///
+/// EOF is a possibly-empty selection, but a read that failed is neither
+/// that nor "no matches" (exit 1): reporting it as exit 1 would lie about
+/// an external process that broke.
+#[cfg(feature = "std")]
+fn read_selection<R: std::io::Read>(reader: &mut R, out: &mut Vec<u8>) -> Result<()> {
+    reader
+        .read_to_end(out)
+        .map(|_| ())
+        .map_err(|e| alloc::format!("the picker's selection could not be read: {e}"))
+}
+
 /// Runs the picker and reads back what it chose.
 #[cfg(feature = "std")]
 fn run(search: Search, req: &Request<'_>, plan: &Plan) -> Result<(i32, Vec<Vec<u8>>)> {
-    use std::io::{Read, Write};
+    use std::io::Write;
     use std::process::{Command, Stdio};
     use std::sync::mpsc;
 
     let mut command = Command::new(&plan.binary);
     command
         .args(plan.separator.args())
-        .args(order_args(req.order, &plan.binary))
+        .args(order_args(req.order, &picker_name(&plan.binary)))
         .args(req.args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -366,7 +392,7 @@ fn run(search: Search, req: &Request<'_>, plan: &Plan) -> Result<(i32, Vec<Vec<u
         // complaints belong on our stderr, not folded into a pipe.
         .stderr(Stdio::inherit());
     let mut child = spawn(&mut command)
-        .map_err(|e| alloc::format!("the picker cannot run {}: {e}", plan.binary))?;
+        .map_err(|e| alloc::format!("the picker cannot run {}: {e}", plan.binary.display()))?;
 
     let stdin = child.stdin.take().expect("stdin was piped");
     let (tx, rx) = mpsc::channel();
@@ -386,9 +412,13 @@ fn run(search: Search, req: &Request<'_>, plan: &Plan) -> Result<(i32, Vec<Vec<u
     });
 
     let mut selected: Vec<u8> = Vec::new();
-    if let Some(mut stdout) = child.stdout.take() {
-        // A picker that dies mid-read must not take the search down with it.
-        let _ = stdout.read_to_end(&mut selected);
+    // The child and the writer thread have to be reaped whatever the read
+    // answers, so the error is kept until after both are done.
+    let mut read_error: Option<Error> = None;
+    if let Some(mut stdout) = child.stdout.take()
+        && let Err(err) = read_selection(&mut stdout, &mut selected)
+    {
+        read_error = Some(err);
     }
     let code = wait(&mut child);
     let (searched, finished, dropped) = rx.recv().unwrap_or((Ok(false), Ok(()), 0));
@@ -407,6 +437,9 @@ fn run(search: Search, req: &Request<'_>, plan: &Plan) -> Result<(i32, Vec<Vec<u
 
     searched?;
     finished.map_err(|e| alloc::format!("the picker stopped reading the list: {e}"))?;
+    if let Some(err) = read_error {
+        return Err(err);
+    }
     if dropped > 0 {
         // The user has to know that a result is missing: the record was
         // left out because the picker could not have carried it whole.
@@ -722,10 +755,10 @@ fn wait(child: &mut std::process::Child) -> i32 {
 
 /// The picker on `PATH`, memoised per process.
 #[cfg(feature = "std")]
-fn locate() -> Option<String> {
+fn locate() -> Option<std::path::PathBuf> {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
-    static FOUND: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
+    static FOUND: OnceLock<Mutex<HashMap<String, Option<std::path::PathBuf>>>> = OnceLock::new();
     let mut memo = FOUND
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
@@ -754,35 +787,61 @@ pub fn takes_colour_flags(binary: Option<&str>) -> bool {
     match binary {
         Some(named) => stem(named).eq_ignore_ascii_case("fzf"),
         None => locate()
-            .map(|found| stem(&found).eq_ignore_ascii_case("fzf"))
+            .map(|found| stem(&picker_name(&found)).eq_ignore_ascii_case("fzf"))
             .unwrap_or(false),
     }
 }
 
-/// Look for one picker on `PATH`.
+/// Whether a path is a file the platform can execute.
+///
+/// `is_file()` alone is not enough on unix: a `PATH` entry without any
+/// execute bit is not a picker, and choosing it makes the spawn fail with
+/// EACCES even though a working `sk` sits later on `PATH`.
 #[cfg(feature = "std")]
-fn scan(binary: &str) -> Option<String> {
-    use std::path::Path;
-    if binary.contains('/') || binary.contains('\\') {
-        return Path::new(binary).is_file().then(|| binary.to_string());
+fn executable(path: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path)
+            .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
     }
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).find_map(|dir| {
-        let candidate = dir.join(binary);
-        if candidate.is_file() {
-            return Some(candidate.to_string_lossy().into_owned());
-        }
-        #[cfg(windows)]
-        {
-            for ext in ["exe", "bat", "cmd"] {
-                let candidate = candidate.with_extension(ext);
-                if candidate.is_file() {
-                    return Some(candidate.to_string_lossy().into_owned());
-                }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
+}
+
+/// The picker in one `PATH` directory, keeping the path's own bytes.
+///
+/// Windows asks for the executable extensions BEFORE the bare name: an
+/// extension-less `fzf` file cannot be run, and picking it before `fzf.exe`
+/// is a picker that refuses to start. Every path stays a `PathBuf`, so a
+/// `PATH` entry that is not UTF-8 is not mangled.
+#[cfg(feature = "std")]
+fn candidate_in(dir: &std::path::Path, binary: &str) -> Option<std::path::PathBuf> {
+    let bare = dir.join(binary);
+    #[cfg(windows)]
+    {
+        for ext in ["exe", "bat", "cmd"] {
+            let named = bare.with_extension(ext);
+            if executable(&named) {
+                return Some(named);
             }
         }
-        None
-    })
+    }
+    if executable(&bare) { Some(bare) } else { None }
+}
+
+/// Look for one picker on `PATH`.
+#[cfg(feature = "std")]
+fn scan(binary: &str) -> Option<std::path::PathBuf> {
+    if binary.contains('/') || binary.contains('\\') {
+        let named = std::path::PathBuf::from(binary);
+        return executable(&named).then_some(named);
+    }
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path).find_map(|dir| candidate_in(&dir, binary))
 }
 
 #[cfg(test)]
@@ -1451,5 +1510,95 @@ exit "$1"
             "the selection must be printed in the separator the caller asked for; got {stdout:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file without an execute bit is not a picker on unix.
+    #[cfg(feature = "std")]
+    #[cfg(unix)]
+    #[test]
+    fn a_file_without_an_execute_bit_is_not_a_picker() {
+        let dir = std::env::temp_dir().join(format!("rgy-pick-mode-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("the test folder");
+        let plain = dir.join("fzf");
+        std::fs::write(&plain, b"not executable").expect("the file");
+        assert!(!executable(&plain));
+        assert!(
+            candidate_in(&dir, "fzf").is_none(),
+            "a non-executable fzf must not shadow a working sk later on PATH"
+        );
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&plain).expect("the file").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&plain, perms).expect("the file runs");
+        }
+        assert!(executable(&plain));
+        assert_eq!(candidate_in(&dir, "fzf"), Some(plain));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A `PATH` entry that is not UTF-8 keeps its bytes.
+    ///
+    /// `to_string_lossy()` would name a file that does not exist; the path
+    /// handed to `Command::new` has to be the one `PATH` held.
+    #[cfg(feature = "std")]
+    #[cfg(unix)]
+    #[test]
+    fn a_path_that_is_not_utf8_keeps_its_bytes() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = std::env::temp_dir().join(format!("rgy-pick-nonutf8-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("the test folder");
+        let odd = dir.join(std::ffi::OsStr::from_bytes(b"bin\xff"));
+        std::fs::create_dir_all(&odd).expect("the odd folder");
+        let picker = odd.join("fzf");
+        std::fs::write(&picker, b"#!/bin/sh\n").expect("the picker file");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&picker).expect("the file").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&picker, perms).expect("the file runs");
+        }
+        assert!(
+            picker.to_str().is_none(),
+            "the test path really is not UTF-8"
+        );
+        let found = candidate_in(&odd, "fzf").expect("the picker is found");
+        assert_eq!(found, picker, "the path's bytes must survive the lookup");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Windows asks for `fzf.exe` before an extension-less `fzf` file.
+    #[cfg(feature = "std")]
+    #[cfg(windows)]
+    #[test]
+    fn the_windows_executable_extension_wins_over_a_bare_file() {
+        let dir = std::env::temp_dir().join(format!("rgy-pick-ext-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("the test folder");
+        std::fs::write(dir.join("fzf"), b"not runnable").expect("the bare file");
+        std::fs::write(dir.join("fzf.exe"), b"MZ").expect("the executable");
+        let found = candidate_in(&dir, "fzf").expect("a picker is found");
+        assert_eq!(found.extension().and_then(|e| e.to_str()), Some("exe"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A real read error is an error, not "no matches"; EOF is not one.
+    #[cfg(feature = "std")]
+    #[test]
+    fn a_broken_selection_read_is_an_error_not_no_matches() {
+        struct Broken;
+        impl std::io::Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("the pipe broke"))
+            }
+        }
+        let mut out = Vec::new();
+        let err = read_selection(&mut Broken, &mut out).expect_err("a broken read is an error");
+        assert!(err.contains("could not be read"), "{err}");
+        assert!(err.contains("the pipe broke"), "{err}");
+
+        let mut empty = std::io::Cursor::new(Vec::<u8>::new());
+        let mut out = Vec::new();
+        read_selection(&mut empty, &mut out).expect("EOF is not an error");
+        assert!(out.is_empty());
     }
 }

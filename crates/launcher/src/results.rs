@@ -51,17 +51,23 @@ impl Row {
         self
     }
 
-    /// The kind of thing the row is, for the icon beside it.
+    /// The icon beside the row, and whether a preview is worth offering.
     ///
     /// The flag comes first: the source said, and the source looked at
     /// the index. The spelling is the fallback for a row whose source did
     /// not say — a path that ends in a separator is a folder the way the
     /// platform spells one.
-    pub fn icon(&self) -> IconKind {
+    ///
+    /// The icon is `IconKind`, and the icon is all it decides. Whether
+    /// the head of the file says anything as text is a separate question
+    /// answered from the extension: a PDF is a document and a `.ps1`
+    /// script is a program, but only the script has a head worth reading.
+    /// See [`IconInfo`].
+    pub fn icon(&self) -> IconInfo {
         if self.is_folder {
-            return IconKind::Folder;
+            return IconInfo::new(IconKind::Folder, false);
         }
-        IconKind::of(&self.path)
+        IconInfo::of(&self.path)
     }
 
     /// The name: the last component of the path.
@@ -155,15 +161,9 @@ impl IconKind {
         if trimmed.len() != path.len() {
             return IconKind::Folder;
         }
-        let name = match trimmed.rfind(['/', '\\']) {
-            Some(i) => &trimmed[i + 1..],
-            None => trimmed,
-        };
-        // A dot at the start of the name is part of the name
-        // (`.gitignore`), and a dot at the end is nothing at all.
-        match name.rfind('.') {
-            Some(i) if i > 0 && i + 1 < name.len() => IconKind::of_extension(&name[i + 1..]),
-            _ => IconKind::File,
+        match extension_of(path) {
+            Some(ext) => IconKind::of_extension(ext),
+            None => IconKind::File,
         }
     }
 
@@ -190,6 +190,98 @@ impl IconKind {
         }
     }
 }
+
+/// The extension of a path, when its name has one.
+///
+/// A dot at the start of the name is part of the name (`.gitignore`),
+/// and a dot at the end is nothing at all. A path that ends in a
+/// separator is a folder and has no name to take an extension from.
+/// Both the icon and the preview decision read the extension from here,
+/// so the two cannot spell the same name differently.
+fn extension_of(path: &str) -> Option<&str> {
+    let trimmed = path.trim_end_matches(['/', '\\']);
+    if trimmed.len() != path.len() {
+        return None;
+    }
+    let name = match trimmed.rfind(['/', '\\']) {
+        Some(i) => &trimmed[i + 1..],
+        None => trimmed,
+    };
+    match name.rfind('.') {
+        Some(i) if i > 0 && i + 1 < name.len() => Some(&name[i + 1..]),
+        _ => None,
+    }
+}
+
+/// What a row says about its icon and about a preview of its bytes.
+///
+/// The two are different questions. [`IconKind`] picks the icon the
+/// shell draws — a document icon for a PDF and a program icon for a
+/// `.ps1` script — while `previewable` says whether the head of the
+/// file is worth reading as text. The preview reads bytes, not icons:
+/// a PDF or a DOCX is a ZIP container that says "binary file" as text,
+/// and a plain-text script says something even though its icon is a
+/// program's. Keeping the decision here, beside the extension tables,
+/// stops the icon classification from answering a question it cannot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IconInfo {
+    /// The kind of thing, for the icon beside the name.
+    pub kind: IconKind,
+    /// Whether the head of the file is text worth previewing.
+    pub previewable: bool,
+}
+
+impl IconInfo {
+    /// The icon and the preview decision for a path.
+    ///
+    /// A folder has no head to read. Everything else is decided by its
+    /// extension: an extension on the text allowlist is previewable, and
+    /// a name with no extension is a plain file the launcher has always
+    /// offered a preview for. Binary documents, images, videos, sounds
+    /// and executables are not text. A caller that knows the row is a
+    /// folder applies the flag itself (see [`Row::icon`]).
+    pub fn of(path: &str) -> IconInfo {
+        let kind = IconKind::of(path);
+        let previewable = kind != IconKind::Folder && has_text_head(path);
+        IconInfo { kind, previewable }
+    }
+
+    /// Build one from a kind and the decision, for callers that know.
+    pub fn new(kind: IconKind, previewable: bool) -> IconInfo {
+        IconInfo { kind, previewable }
+    }
+}
+
+/// Whether the name's extension is one whose bytes are read as text.
+///
+/// A plain file with no extension was offered the preview before: a
+/// README or a Makefile is text, and its head is worth reading. An
+/// extension nobody knows is left alone rather than guessed at.
+fn has_text_head(path: &str) -> bool {
+    match extension_of(path) {
+        Some(ext) => TEXT_EXTENSIONS.iter().any(|e| ext.eq_ignore_ascii_case(e)),
+        None => true,
+    }
+}
+
+/// The extensions whose bytes are read as text.
+///
+/// The preview is the head of a file as text, so it is worth offering
+/// only where that head says something. This list is the decision; the
+/// icon's own tables below answer a different question and must not be
+/// used for it. A PDF, a DOCX, an XLSX, an EPUB, an ODT, an RTF and a
+/// ZIP are binary or containers that read as "binary file"; a `.ps1`,
+/// `.bat` or `.cmd` script is plain text even though its icon is a
+/// program's.
+const TEXT_EXTENSIONS: &[&str] = &[
+    // Plain text, markup and data.
+    "txt", "text", "md", "markdown", "log", "csv", "tsv", "tex", "json", "jsonl", "toml", "yaml",
+    "yml", "xml", "html", "htm", "css", "ini", "cfg", "conf", "env", "lock",
+    // Source and scripts: a program to the icon table, text to the head.
+    "bat", "cmd", "ps1", "psm1", "psd1", "sh", "bash", "zsh", "fish", "py", "rs", "c", "h", "cpp",
+    "cc", "cxx", "hpp", "java", "go", "rb", "pl", "php", "lua", "sql", "js", "ts", "jsx", "tsx",
+    "mk", "cmake",
+];
 
 /// The extensions that make a document.
 const DOCUMENT_EXTENSIONS: &[&str] = &[
@@ -478,13 +570,14 @@ mod tests {
     #[test]
     fn the_flag_says_what_the_spelling_cannot() {
         let folder = Row::new("C:\\Users\\dana\\Docs".to_string(), 1).with_folder(true);
-        assert_eq!(folder.icon(), IconKind::Folder);
+        assert_eq!(folder.icon().kind, IconKind::Folder);
+        assert!(!folder.icon().previewable, "a folder is not text");
         // Without the flag the same spelling is a file with no extension.
         let file = Row::new("C:\\Users\\dana\\Docs".to_string(), 1);
-        assert_eq!(file.icon(), IconKind::File);
+        assert_eq!(file.icon().kind, IconKind::File);
         // And the extension still says what the file is.
         let doc = Row::new("C:\\a\\relatorio.docx".to_string(), 1);
-        assert_eq!(doc.icon(), IconKind::Document);
+        assert_eq!(doc.icon().kind, IconKind::Document);
     }
 
     #[test]
@@ -516,5 +609,41 @@ mod tests {
     #[test]
     fn an_extension_nobody_knows_is_a_plain_file() {
         assert_eq!(IconKind::of("/a/coisa.qqq"), IconKind::File);
+    }
+
+    /// The preview decision follows the text, not the icon.
+    ///
+    /// A `.ps1` script and a `.bat` file are programs to the icon table
+    /// and text to the head; a PDF and a DOCX are documents and binary
+    /// containers. A plain file with no extension is still text.
+    #[test]
+    fn the_preview_decision_is_about_text_and_not_the_icon() {
+        for path in [
+            "/a/deploy.ps1",
+            "/a/build.bat",
+            "/a/run.cmd",
+            "/a/notes.txt",
+            "/a/config.toml",
+            "/a/README",
+        ] {
+            assert!(IconInfo::of(path).previewable, "{path} is text");
+        }
+        for path in [
+            "/a/report.pdf",
+            "/a/book.docx",
+            "/a/sheet.xlsx",
+            "/a/archive.zip",
+            "/a/foto.png",
+            "/a/filme.mp4",
+            "/a/musica.mp3",
+            "/a/programa.exe",
+            "/a/folder/",
+        ] {
+            assert!(!IconInfo::of(path).previewable, "{path} is not text");
+        }
+        // The icon is unchanged by the decision: a script is still a
+        // program and a PDF is still a document.
+        assert_eq!(IconInfo::of("/a/deploy.ps1").kind, IconKind::Application);
+        assert_eq!(IconInfo::of("/a/report.pdf").kind, IconKind::Document);
     }
 }

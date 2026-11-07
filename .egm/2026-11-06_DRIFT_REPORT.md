@@ -135,10 +135,11 @@ accumulating.
 
 - `check-egm-contracts.py`: `checked=51 failed=0`;
   `--generated-check`: `checked=51 failed=0`;
-  `--self-test`: `cases=41 failed=0`.
+  `--self-test`: `cases=55 failed=0` (41 at the first pass, 55 after the
+  0.1.10 pairing).
 - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets
   -- -D warnings`, `cargo build --workspace` and
-  `cargo test --workspace --no-fail-fast` (81 targets, 0 failed) on
+  `cargo test --workspace --no-fail-fast` (82 targets, 0 failed) on
   Windows; the same suite, `bench-names.py check --runs 7` and
   `check-twins.sh` (13 agreeing pairs) on the CachyOS box; the
   bare-metal `x86_64-unknown-none` build on Windows.
@@ -271,3 +272,58 @@ The same suite, `bash scripts/check-twins.sh` (13 agreeing pairs) and the
 reset to the commit by an offline `git bundle`. The Windows and Linux
 `CONTRACTS.index` SHA-256 values are compared byte-for-byte before the
 commit; both are `c83e205cb3548843fe33472980edfd34ee193a10e17bd4b5ff27c925ebdd002c`.
+
+## 10. Closing the remaining UI review findings
+
+The UI review (§5's sibling pass, and the three fresh-context reviewers
+whose findings are listed below) produced 24 findings. Ten were fixed in
+`661a2ff`; this pass closes the other fourteen. Two contracts were edited
+to match the new behaviour — `bins/rgxy/src/EGM.md` and
+`bins/search-ui/src/EGM.md` — and `CONTRACTS.index` was regenerated in the
+same commit that carries this report, so the derived half and the reviewed
+half travel together.
+
+Closed here, with regression tests:
+
+- **Terminal input** (`bins/search-ui`): a truncated multibyte run at the
+  end of a read is dropped instead of blocking `read()` forever; both
+  platform read loops wait on a bounded tick and emit `Event::Resize` so a
+  resize while idle repaints; Windows sets `ENABLE_WINDOW_INPUT` and the
+  previously dead `WINDOW_BUFFER_SIZE_EVENT` branch is live; bracketed
+  paste is enabled and a `\r` inside a burst is a character, not Enter;
+  the tautological attribute oracle test now goes through `Styled`'s
+  `Display` (including reverse and the combined bold+dim+reverse span).
+- **Picker** (`crates/pick`): the PATH scan checks the execute bit on
+  unix, tries `.exe`/`.bat`/`.cmd` before a bare name on Windows, and keeps
+  the path as `PathBuf` so a non-UTF-8 PATH entry is not mangled; a real
+  error reading the picker's stdout is an error, not "no matches".
+- **Resident launcher** (`bins/rgxy`): stat, reader and preview threads go
+  through bounded worker pools instead of one detached thread per query;
+  daemon-state news goes through ONE long-lived stderr writer behind a
+  bounded channel; a worker thread that cannot start degrades to a dead
+  daemon instead of panicking.
+- **Launcher model and window** (`crates/launcher*`): the preview decision
+  is separated from `IconKind` behind an explicit text-extension allowlist
+  (a `.ps1` is previewable, a PDF is not); every struct the platform
+  writes into has a compile-time size/offset assertion; the actions column
+  no longer squeezes the settings panel; the write-only `painted` field was
+  removed and the picture size now drives a real release-build decision.
+- **Working notes**: the stale claim that the NFC/NFD fold "does not exist
+  yet" was corrected against `crates/name-core/src/fold.rs`.
+
+One residual is recorded rather than hidden: conhost (the legacy Windows
+console) delivers key records, not bracketed-paste byte sequences, so a
+`\r` in a conhost paste still arrives as `VK_RETURN` -> Enter. The byte
+decoder path is fully fixed and the enable/disable escapes are written on
+all platforms; closing the conhost gap needs a VT byte parser in the
+Windows read loop, a separate change with its own regression surface. The
+reason is written into `bins/search-ui/src/EGM.md` so the next reader does
+not have to rediscover it.
+
+Verification of this pass: Windows `cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo build --workspace`, `cargo test --workspace --no-fail-fast`
+(82 targets, 0 failed), checker `51/0` in all modes, self-test `55/55`,
+the bare-metal build and the perf gate; the CachyOS box re-runs the same
+suite under rustfmt 1.9.0 plus `cargo check`/clippy for the FreeBSD and
+both macOS targets, `check-twins.sh` and `check-vendoring.sh`.

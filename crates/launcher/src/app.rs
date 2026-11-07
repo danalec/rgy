@@ -567,9 +567,18 @@ impl App {
         // The room is the geometry's rule and not the model's: the picture
         // asks the same question, and the two have to answer it the same
         // way or the column is drawn over the names.
-        let entries = self.menu_actions().len() as u32;
-        if layout.column_fits(entries) {
-            layout = layout.with_side_bar(SIDE_BAR_WIDTH);
+        // In `Mode::Settings` the panel has the keyboard and the column
+        // is an inert legend: it squeezes the panel's label and value
+        // columns and, with stale results on the screen, makes the
+        // panel narrower than it is without them. The settings panel
+        // owns the whole content width while it holds the keyboard, so
+        // the column is not applied in that mode. `paint::model_of`
+        // asks the same question, and the two answer it the same way.
+        if self.mode != Mode::Settings {
+            let entries = self.menu_actions().len() as u32;
+            if layout.column_fits(entries) {
+                layout = layout.with_side_bar(SIDE_BAR_WIDTH);
+            }
         }
         // The settings panel is its own list: the results give up the
         // room to it, and a command line has no results at all — so the
@@ -1486,5 +1495,51 @@ mod tests {
         // The panel closed is the results' size again.
         app.settings_closed();
         assert_eq!(app.layout().list_height(), 0, "the room goes with it");
+    }
+
+    /// The settings panel owns the whole content width, with or without
+    /// stale results on the screen.
+    ///
+    /// The actions column used to be added in `Mode::Settings` too: an
+    /// inert legend while the panel had the keyboard. With results left
+    /// over from the last answer the column took `SIDE_BAR_WIDTH` away
+    /// from the panel, so its label and value columns changed width
+    /// depending on whether stale results happened to be there. The
+    /// column is gated on the modes where the actions are reachable, and
+    /// `paint::model_of` gates it the same way.
+    #[test]
+    fn the_settings_panel_has_the_same_room_with_or_without_stale_results() {
+        let mut app = App::new();
+        app.show();
+        app.set_settings_rows(12);
+        app.open_settings();
+
+        // A command line: `>settings` has no results at all.
+        app.set_results(Vec::new());
+        let without = app.layout();
+
+        // The same panel with the last answer's rows still on the screen:
+        // four rows are enough that the column would have fit before the
+        // gate.
+        app.set_results(vec![row(0), row(1), row(2), row(3)]);
+        let with = app.layout();
+
+        assert_eq!(app.mode(), Mode::Settings);
+        assert_eq!(
+            without.side_bar_width(),
+            0,
+            "the panel, not the actions, has the keyboard"
+        );
+        assert_eq!(
+            with.side_bar_width(),
+            0,
+            "stale results do not put the actions column back"
+        );
+        assert_eq!(
+            with.list_width(),
+            without.list_width(),
+            "the panel owns the whole content width either way"
+        );
+        assert_eq!(with.panel, without.panel, "the panel has the same rows");
     }
 }

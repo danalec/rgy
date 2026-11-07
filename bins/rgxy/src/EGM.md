@@ -44,13 +44,13 @@ settings file ([settings_store.rs:pub fn store_path]) and the usage history
 - [preview.rs:const MAX_BYTES] is 64 KiB and [preview.rs:const MAX_LINES] is 12; [preview.rs:fn is_binary] decides what is not text.
 - [lang.rs:pub fn from_env] reads the language once, in the order `RGY_LANG` → `LC_ALL` → `LANG`, defaulting to `Lang::English`.
 - [main.rs:fn resident_launch] treats a bare command line as the resident launcher; [main.rs:fn one_shot] uses exit 0 for a match and 1 for none; [main.rs:const OUTPUT_NOT_DELIVERED] is 2; [main.rs:const DAEMON_WAIT] is 2 s.
-- [gui.rs:fn said_once] emits a machine message only when it changes; [gui.rs:fn adds_to_the_query] and [gui.rs:fn menu_key] bound which keys the field and the actions menu own.
+- [gui.rs:fn said_once] emits a machine message only when it changes and hands it to [gui.rs:struct Stderr], the single long-lived stderr writer behind a bounded channel; [gui.rs:fn adds_to_the_query] and [gui.rs:fn menu_key] bound which keys the field and the actions menu own.
 
 ## Side Effects
 - [main.rs:fn main] writes stdout/stderr, initialises the console code page and, on Windows, gives the console back through [main.rs:fn resident_launch]; [main.rs:fn one_shot] and [main.rs:fn pick] write results and selections to stdout.
 - [daemon.rs:pub fn connect] opens the pipe/UDS/stdio client; [daemon.rs:impl Source for DaemonSource] writes the request to the connected peer.
-- [gui.rs:pub fn run] creates the window, installs the low-level hotkey hook, checks the compositor and drives [gui.rs:fn spawn_worker] and [gui.rs:fn save_settings] on their own threads; [gui.rs:fn said_once] writes stderr once per change.
-- [rgx.rs:pub fn grep] starts the `rgx` process, reads its JSON lines with `mpsc::channel` and `std::thread::spawn`; [rgx.rs:fn only_files] stats the scoped paths.
+- [gui.rs:pub fn run] creates the window, installs the low-level hotkey hook, checks the compositor and drives [gui.rs:fn spawn_worker] and [gui.rs:fn save_settings] on their own threads; a worker that cannot start degrades to a dead daemon instead of panicking, and [gui.rs:struct Stderr] writes every machine message on one bounded channel, not one thread per change.
+- [rgx.rs:pub fn grep] starts the `rgx` process and reads its JSON lines through [rgx.rs:struct BoundedPool]'s bounded worker pool; [rgx.rs:fn only_files] stats the scoped paths on the same pool, so a blocked stat cannot grow the resident process's thread count.
 - [settings_store.rs:pub fn load], [settings_store.rs:pub fn save] and [settings_store.rs:fn quarantine] read and write `settings.tsv` in the cache dir, with `std::fs::create_dir_all`, `std::fs::write` and `std::fs::rename`.
 - [mru.rs:pub fn load], [mru.rs:pub fn save] and [mru.rs:fn write_store] read and write the usage file; [mru.rs:struct Lock] uses `std::fs::OpenOptions` and, on unix, [mru.rs:fn flock]; [mru.rs:static TEMP_ID] is an `AtomicU64`.
 - [preview.rs:fn read_head] opens the file and reads its head (`std::fs::File::open`, `std::fs::metadata`).

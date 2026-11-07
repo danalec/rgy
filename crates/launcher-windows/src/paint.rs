@@ -360,7 +360,7 @@ impl Icons {
     /// handlers — and a PDF with the reader's icon is the difference
     /// between a launcher that knows the machine and one that does not.
     pub fn get(&mut self, row: &Row) -> Option<HICON> {
-        let kind = row.icon();
+        let kind = row.icon().kind;
         let source = icon_source_for(row);
         let key = source.key();
         if let Some(icon) = self.icons.get(key.as_str()).copied() {
@@ -482,7 +482,7 @@ const FOLDER_NAME: &str = "folder";
 /// the right extension is what gets the icon the user expects — a PDF
 /// with the reader's icon and not with Word's.
 fn icon_source_for(row: &Row) -> IconSource {
-    if row.icon() == IconKind::Folder {
+    if row.icon().kind == IconKind::Folder {
         return IconSource {
             name: FOLDER_NAME.to_string(),
             attributes: FILE_ATTRIBUTE_DIRECTORY,
@@ -510,6 +510,21 @@ fn kind_name(kind: IconKind) -> &'static str {
         IconKind::File => "file",
     }
 }
+
+/// The shell writes the whole of `SHFILEINFOW`, so its layout is fixed
+/// at COMPILE TIME.
+///
+/// A struct the platform writes is the platform's struct, whole: a
+/// truncated one is a buffer the platform writes past, and the size
+/// handed to `SHGetFileInfoW` has to be the platform's own. A runtime
+/// assertion protects one host, and only while the tests happen to run;
+/// these fail the build on every host the crate is compiled for. The
+/// notification-area structs are asserted beside their definitions in
+/// `win.rs`; this one is asserted beside the call that fills it in.
+const _: () = assert!(core::mem::size_of::<SHFILEINFOW>() == 696);
+const _: () = assert!(core::mem::offset_of!(SHFILEINFOW, hIcon) == 0);
+const _: () = assert!(core::mem::offset_of!(SHFILEINFOW, szDisplayName) == 16);
+const _: () = assert!(core::mem::offset_of!(SHFILEINFOW, szTypeName) == 536);
 
 /// The shell's icon for a name.
 ///
@@ -612,7 +627,12 @@ fn model_of(view: &View) -> Layout {
     // The room is the geometry's rule and not the picture's: the model
     // asked the same question when it sized the window, and the two have
     // to answer it the same way or the column is drawn over the names.
-    if model.column_fits(view.menu.len() as u32) {
+    // In `Mode::Settings` the panel holds the keyboard and owns the
+    // whole content width: the column there would be an inert legend
+    // drawn over the panel and taking its width. `App::layout` asks the
+    // same question, and the model and the picture answer it the same
+    // way.
+    if view.mode != Mode::Settings && model.column_fits(view.menu.len() as u32) {
         model = model.with_side_bar(SIDE_BAR_WIDTH);
     }
     model
@@ -641,6 +661,11 @@ fn model_of(view: &View) -> Layout {
 /// language, and a struct would be a struct that only this function and
 /// its caller ever see.
 ///
+/// The answer is the picture's size in device pixels: the caller asks
+/// whether it covers the surface it is presented on. It is a returned
+/// value and not stored state — a field written every frame and read
+/// nowhere only looks like somebody used it.
+///
 /// # Safety
 ///
 /// `hdc` must be a device context the thread may draw on.
@@ -648,14 +673,13 @@ fn model_of(view: &View) -> Layout {
 pub unsafe fn paint(
     hdc: HDC,
     view: &View,
-    painted: &mut (i32, i32),
     backdrop: bool,
     icons: &mut Icons,
     fonts: &Fonts,
     colours: &Colours,
     scale: u32,
     lang: Lang,
-) {
+) -> (i32, i32) {
     let model = model_of(view);
     let column = model.side_bar != 0;
     // The picture is the window's own size: `model_of` measured it from
@@ -665,7 +689,6 @@ pub unsafe fn paint(
     // leave a strip the compositor turns into a solid bar.
     let width = device_pixels(model.width, scale) as i32;
     let height = device_pixels(model.height(), scale) as i32;
-    *painted = (width, height);
     // The geometry inside the picture: every number of it is a model
     // unit, and every one of them is at this screen's scale.
     let layout = model.scaled(scale);
@@ -889,7 +912,8 @@ pub unsafe fn paint(
 
         // The context is left as it was found.
         select(hdc, stock);
-    }
+    };
+    (width, height)
 }
 
 /// The figures of the meter, as the window draws them: the chart of the
@@ -1506,20 +1530,19 @@ mod tests {
         };
         let fonts = Fonts::new(SCALE_PERCENT);
         let mut icons = Icons::new();
-        let mut painted = (0, 0);
-        unsafe {
+        let painted = unsafe {
             paint(
                 canvas.dc,
                 view,
-                &mut painted,
                 false,
                 &mut icons,
                 &fonts,
                 &Colours::WARM,
                 SCALE_PERCENT,
                 Lang::English,
-            );
-        }
+            )
+        };
+        assert_eq!(painted, (width, height), "the picture is the surface");
         (canvas, width, height)
     }
 
@@ -1629,20 +1652,18 @@ mod tests {
         };
         let fonts = Fonts::new(SCALE_PERCENT);
         let mut icons = Icons::new();
-        let mut painted = (0, 0);
-        unsafe {
+        let painted = unsafe {
             paint(
                 canvas.dc,
                 &view,
-                &mut painted,
                 false,
                 &mut icons,
                 &fonts,
                 &Colours::WARM,
                 SCALE_PERCENT,
                 Lang::English,
-            );
-        }
+            )
+        };
         assert_eq!(painted, surface, "the picture is as wide as the window");
 
         // The strip a 600-unit picture would have left is painted: an
@@ -1742,6 +1763,57 @@ mod tests {
         assert!(
             count(&canvas, width, height, band) > 0,
             "the panel's selected row carries its band"
+        );
+    }
+
+    /// The settings picture is the same width with and without stale
+    /// results.
+    ///
+    /// The actions column used to be added in `Mode::Settings`, and with
+    /// four results left over from the last answer it took the side
+    /// bar's width away from the settings panel. The picture gates the
+    /// column on the modes where the actions are reachable, exactly as
+    /// `App::layout` does, so the panel owns the whole content width
+    /// either way.
+    #[test]
+    fn the_settings_picture_is_not_squeezed_by_stale_results() {
+        let mut view = View {
+            query: ">settings".to_string(),
+            mode: Mode::Settings,
+            settings: (0..12)
+                .map(|i| (alloc::format!("row{i}"), "value".to_string()))
+                .collect(),
+            menu: vec![
+                Action::Open,
+                Action::OpenFolder,
+                Action::CopyPath,
+                Action::Preview,
+            ],
+            ..View::default()
+        };
+        let without_rows = model_of(&view);
+        view.rows = vec![
+            Row::new("C:/a/one.txt".to_string(), 0),
+            Row::new("C:/a/two.txt".to_string(), 1),
+            Row::new("C:/a/three.txt".to_string(), 2),
+            Row::new("C:/a/four.txt".to_string(), 3),
+        ];
+        let with_rows = model_of(&view);
+
+        assert_eq!(
+            without_rows.side_bar_width(),
+            0,
+            "the panel, not the actions, has the keyboard"
+        );
+        assert_eq!(
+            with_rows.side_bar_width(),
+            0,
+            "stale results do not bring the actions column back"
+        );
+        assert_eq!(
+            with_rows.list_width(),
+            without_rows.list_width(),
+            "the panel owns the whole content width either way"
         );
     }
 
@@ -1954,20 +2026,18 @@ mod tests {
         };
         let fonts = Fonts::new(SCALE_PERCENT);
         let mut icons = Icons::new();
-        let mut painted = (0, 0);
-        unsafe {
+        let _ = unsafe {
             paint(
                 canvas.dc,
                 &view,
-                &mut painted,
                 false,
                 &mut icons,
                 &fonts,
                 &Colours::WARM,
                 SCALE_PERCENT,
                 Lang::English,
-            );
-        }
+            )
+        };
         // The lowest thing on the picture is the line under the field,
         // and it is above the rows: the first row's band is painted over
         // the bottom of the window, and a line under the band is a line

@@ -49,6 +49,41 @@ use rgy_launcher::{Action, Layout, Mode, Preview, Row};
 use crate::paint::{self, Fonts, Icons};
 use crate::win::*;
 
+// A struct the platform writes is the platform's struct, whole. Its
+// layout is fixed at COMPILE TIME, not in a runtime test: a truncated
+// struct is a buffer the platform writes past, and the size the caller
+// hands to `cbSize` is the platform's own number. A runtime assertion
+// protects one host, and only while the tests happen to run; these fail
+// the build on every host the crate is compiled for. `win.rs` asserts
+// the notification-area structs beside their definitions; the structs
+// the window and its layer hand to the platform are asserted here.
+//
+// `MONITORINFO` (GetMonitorInfoW), `MSG` (GetMessageW), `PAINTSTRUCT`
+// (BeginPaint), `RECT` (GetWindowRect) and `KBDLLHOOKSTRUCT` (the
+// low-level hook) are filled in by the platform. `BitmapInfoHeader`,
+// `BitmapInfo`, `BlendFunction`, `Size` and `WNDCLASSEXW` are laid out
+// for it to read. Fields whose offset the code reads are fixed too, so
+// a reordering fails the build rather than misreading the answer.
+const _: () = assert!(core::mem::size_of::<MONITORINFO>() == 40);
+const _: () = assert!(core::mem::offset_of!(MONITORINFO, rcMonitor) == 4);
+const _: () = assert!(core::mem::offset_of!(MONITORINFO, rcWork) == 20);
+const _: () = assert!(core::mem::offset_of!(MONITORINFO, dwFlags) == 36);
+const _: () = assert!(core::mem::size_of::<MSG>() == 48);
+const _: () = assert!(core::mem::offset_of!(MSG, wParam) == 16);
+const _: () = assert!(core::mem::offset_of!(MSG, lParam) == 24);
+const _: () = assert!(core::mem::offset_of!(MSG, pt) == 36);
+const _: () = assert!(core::mem::size_of::<PAINTSTRUCT>() == 72);
+const _: () = assert!(core::mem::offset_of!(PAINTSTRUCT, rcPaint) == 12);
+const _: () = assert!(core::mem::offset_of!(PAINTSTRUCT, rgbReserved) == 36);
+const _: () = assert!(core::mem::size_of::<BitmapInfoHeader>() == 40);
+const _: () = assert!(core::mem::size_of::<BitmapInfo>() == 44);
+const _: () = assert!(core::mem::size_of::<BlendFunction>() == 4);
+const _: () = assert!(core::mem::size_of::<Size>() == 8);
+const _: () = assert!(core::mem::size_of::<RECT>() == 16);
+const _: () = assert!(core::mem::size_of::<POINT>() == 8);
+const _: () = assert!(core::mem::size_of::<WNDCLASSEXW>() == 80);
+const _: () = assert!(core::mem::size_of::<KBDLLHOOKSTRUCT>() == 24);
+
 /// The window's class name. One window, one class, one registration.
 const CLASS_NAME: &[u16] = &[
     b'r' as u16,
@@ -320,8 +355,10 @@ struct State {
     /// vocabulary has a column per language: the window holds the
     /// language it was given and asks the table for the word it needs.
     lang: Lang,
-    /// The geometry the last paint used, so a resize knows what changed.
-    painted: (i32, i32),
+    // The picture's size is not state. `paint` returns it and `present`
+    // uses it in the same frame to decide how much of the layer the
+    // compositor may be given; a field written every frame and read
+    // nowhere only gives false assurance that a resize used it.
     /// Whether the platform really gave the window its blur.
     ///
     /// The blur is behind the window, so the painting has to leave the
@@ -476,6 +513,23 @@ const AC_SRC_ALPHA: u8 = 1;
 /// The window is put on the screen with the alpha of its own pixels.
 const ULW_ALPHA: u32 = 0x0000_0002;
 
+/// The part of a layer the last picture covers, in device pixels.
+///
+/// The picture is measured from the view and the layer from the window;
+/// the window can be clipped to the work area, so the picture is
+/// normally the larger of the two. Only what the picture painted may be
+/// handed to the compositor: `compose` gives every other pixel full
+/// alpha, and an unpainted strip would become a solid black bar.
+/// Clamping the picture to the layer is the comparison that catches a
+/// picture that came out smaller than the surface it was drawn on — the
+/// decision the last painted geometry is for.
+fn covered_layer(layer: (i32, i32), picture: (i32, i32)) -> (i32, i32) {
+    (
+        picture.0.clamp(0, layer.0.max(0)),
+        picture.1.clamp(0, layer.1.max(0)),
+    )
+}
+
 impl Layer {
     /// A layer for a panel of this size.
     ///
@@ -609,7 +663,6 @@ impl Layer {
         &mut self,
         hwnd: HWND,
         view: &View,
-        painted: &mut (i32, i32),
         icons: &mut Icons,
         fonts: &Fonts,
         colours: &paint::Colours,
@@ -619,18 +672,22 @@ impl Layer {
     ) -> bool {
         unsafe {
             // The panel's own colour is what the desktop shows through.
-            paint::paint(
-                self.dc, view, painted, false, icons, fonts, colours, scale, lang,
-            );
-            // The picture has to cover the whole layer: the window sized
-            // the layer from the host's layout, and the paint measures
-            // itself from the view, which carries that same width. A
-            // picture narrower or shorter leaves an unpainted strip, and
-            // compose gives an unpainted pixel full alpha -- a solid black
-            // bar. Clipping can only make the layer smaller than the
-            // model, so the picture covering it is the invariant to hold.
+            // `paint` answers the size of the picture it drew: the layer
+            // is measured from the window and the picture from the view,
+            // and the two disagree when the window was clipped to the
+            // work area. The size is used in this frame, not stored in
+            // the window's state — a field written every frame and read
+            // nowhere would only look like a resize used it.
+            let painted = paint::paint(self.dc, view, false, icons, fonts, colours, scale, lang);
+            // Only the part of the layer the picture covers is handed to
+            // the compositor. The picture is normally the larger of the
+            // two; a smaller one would leave an unpainted strip, and
+            // `compose` gives an unpainted pixel full alpha -- a solid
+            // black bar. Comparing against the layer's own size is what
+            // catches a picture/layer mismatch.
+            let (covered_width, covered_height) = covered_layer((self.width, self.height), painted);
             debug_assert!(
-                painted.0 >= self.width && painted.1 >= self.height,
+                (covered_width, covered_height) == (self.width, self.height),
                 "the picture does not cover the layer"
             );
             // The alpha is worked out after the drawing: GDI writes the
@@ -647,8 +704,8 @@ impl Layer {
                 y: rect.top,
             };
             let size = Size {
-                width: self.width,
-                height: self.height,
+                width: covered_width,
+                height: covered_height,
             };
             let source = POINT { x: 0, y: 0 };
             let blend = BlendFunction {
@@ -822,7 +879,6 @@ impl Window {
                 ..View::default()
             },
             lang: Lang::English,
-            painted: (0, 0),
             backdrop: false,
             compositor: Compositor::Unknown,
             awareness,
@@ -1005,7 +1061,6 @@ impl Window {
             Some(layer) => layer.present(
                 hwnd,
                 &state.view,
-                &mut state.painted,
                 &mut state.icons,
                 &state.fonts,
                 &state.colours,
@@ -2190,7 +2245,6 @@ unsafe extern "system" fn wnd_proc(
                             if !layer.present(
                                 hwnd,
                                 &state.view,
-                                &mut state.painted,
                                 &mut state.icons,
                                 &state.fonts,
                                 &state.colours,
@@ -2211,10 +2265,9 @@ unsafe extern "system" fn wnd_proc(
                         // The platform's own backdrop is behind this
                         // window, and the drawing leaves it alone.
                         None => {
-                            paint::paint(
+                            let _ = paint::paint(
                                 hdc,
                                 &state.view,
-                                &mut state.painted,
                                 state.backdrop,
                                 &mut state.icons,
                                 &state.fonts,
@@ -2652,6 +2705,25 @@ mod tests {
         );
     }
     use super::*;
+
+    /// The presented region is the part of the layer the picture covers.
+    ///
+    /// The picture is normally the larger of the two, because the window
+    /// was clipped to the work area; a picture that came out smaller must
+    /// not hand its unpainted strip to the compositor. This is the
+    /// decision the last painted geometry is used for now — a value
+    /// returned by `paint` and read in `present`, not a field written
+    /// every frame and read nowhere.
+    #[test]
+    fn the_picture_covers_the_layer_it_is_presented_on() {
+        assert_eq!(covered_layer((600, 480), (600, 480)), (600, 480));
+        assert_eq!(covered_layer((600, 480), (800, 600)), (600, 480));
+        assert_eq!(covered_layer((600, 480), (500, 480)), (500, 480));
+        assert_eq!(covered_layer((600, 480), (600, 400)), (600, 400));
+        // A picture with no size leaves nothing to present, not a
+        // negative region.
+        assert_eq!(covered_layer((600, 480), (-1, -1)), (0, 0));
+    }
 
     /// A 1920 by 1080 screen with a 40-pixel taskbar at the bottom.
     fn area() -> RECT {

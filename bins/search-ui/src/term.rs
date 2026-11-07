@@ -393,6 +393,22 @@ impl<W: Write> Screen<W> {
         Ok(())
     }
 
+    /// Ask the terminal to bracket pastes.
+    ///
+    /// A terminal that brackets a paste wraps the text in `ESC [ 200 ~` and
+    /// `ESC [ 201 ~`, so a line break inside the pasted text can be told from
+    /// the enter key and delivered to the query field as a character.
+    pub fn enable_bracketed_paste(&mut self) -> std::io::Result<()> {
+        self.out.write_all(b"\x1b[?2004h")?;
+        Ok(())
+    }
+
+    /// Stop asking the terminal to bracket pastes, on the way out.
+    pub fn disable_bracketed_paste(&mut self) -> std::io::Result<()> {
+        self.out.write_all(b"\x1b[?2004l")?;
+        Ok(())
+    }
+
     /// Set the background colour.
     pub fn background(&mut self, colour: Color) -> std::io::Result<()> {
         self.out
@@ -523,6 +539,66 @@ pub enum Decoded {
     Incomplete,
 }
 
+/// The bytes a terminal writes around a bracketed paste.
+const PASTE_START: &[u8] = b"\x1b[200~";
+const PASTE_END: &[u8] = b"\x1b[201~";
+
+/// A decoder for the bytes a terminal sends.
+///
+/// A bracketed paste burst (`ESC [ 200 ~` … `ESC [ 201 ~`) can be split across
+/// two reads, and the bytes inside it, including `\r` and `\n`, are text for
+/// the query field rather than keys. This type carries the "inside a paste"
+/// bit between calls, so `imp::read()` can hand it one run of bytes at a time
+/// and still keep a burst whole.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Decoder {
+    paste: bool,
+}
+
+impl Decoder {
+    /// A decoder that is not inside a paste.
+    pub const fn new() -> Decoder {
+        Decoder { paste: false }
+    }
+
+    /// The first token of `bytes`, and what the run says.
+    ///
+    /// `more_may_come` says whether the terminal may still have bytes to
+    /// send: a marker or a character cut in two is [`Decoded::Incomplete`]
+    /// while more may come, so the caller reads the rest before deciding.
+    pub fn decode(&mut self, bytes: &[u8], more_may_come: bool) -> Decoded {
+        if bytes.is_empty() {
+            return Decoded::Incomplete;
+        }
+        if self.paste {
+            // The closing marker ends the burst; it carries no key.
+            if bytes.starts_with(PASTE_END) {
+                self.paste = false;
+                return Decoded::Unknown(PASTE_END.len());
+            }
+            if PASTE_END.starts_with(bytes) && more_may_come {
+                return Decoded::Incomplete;
+            }
+            // Everything else in the burst is literal text: a `\r` or `\n`
+            // is a character for the query field, not the enter key that
+            // would choose a path and end the session.
+            return decode_char(bytes, more_may_come);
+        }
+        // The opening marker starts the burst; it carries no key.
+        if bytes.starts_with(PASTE_START) {
+            self.paste = true;
+            return Decoded::Unknown(PASTE_START.len());
+        }
+        // A marker cut in two: wait for the rest, so the whole marker reaches
+        // the branch above and opens the burst instead of being dropped by
+        // `decode_csi`.
+        if PASTE_START.starts_with(bytes) && more_may_come {
+            return Decoded::Incomplete;
+        }
+        decode_key(bytes, more_may_come)
+    }
+}
+
 /// The key in a run of bytes, and what the run says.
 ///
 /// A terminal sends a character on its own, or an escape sequence for a key
@@ -533,7 +609,15 @@ pub enum Decoded {
 /// `more_may_come` says whether the terminal may still have bytes to send.
 /// A lone escape is the escape key only when nothing else is coming, since
 /// a terminal that sends a sequence sends it in one piece.
+///
+/// This is the stateless form, for one run that holds a whole key. The reader
+/// that must carry bracketed-paste state across reads uses a [`Decoder`].
 pub fn decode(bytes: &[u8], more_may_come: bool) -> Decoded {
+    Decoder::new().decode(bytes, more_may_come)
+}
+
+/// One key of a run of bytes, with no paste state.
+fn decode_key(bytes: &[u8], more_may_come: bool) -> Decoded {
     let Some(first) = bytes.first().copied() else {
         return Decoded::Incomplete;
     };
@@ -560,18 +644,27 @@ pub fn decode(bytes: &[u8], more_may_come: bool) -> Decoded {
             1,
         ),
         0x00 => Decoded::Key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL), 1),
-        _ => decode_char(bytes),
+        _ => decode_char(bytes, more_may_come),
     }
 }
 
 /// The character at the start of the run.
 ///
 /// A character that is not whole yet is not a character: the answer is
-/// [`Decoded::Incomplete`] and the caller reads more.
-fn decode_char(bytes: &[u8]) -> Decoded {
+/// [`Decoded::Incomplete`] and the caller reads more — but only when more
+/// bytes may actually come. A truncated lead byte with nothing else behind
+/// it (a paste cut in two) is not the beginning of a character, and
+/// returning `Incomplete` for it makes `imp::read()` block on a byte that
+/// will never arrive. It is dropped instead, the way any other unknown run
+/// is.
+fn decode_char(bytes: &[u8], more_may_come: bool) -> Decoded {
     let width = utf8_width(bytes[0]);
     if bytes.len() < width {
-        return Decoded::Incomplete;
+        return if more_may_come {
+            Decoded::Incomplete
+        } else {
+            Decoded::Unknown(bytes.len())
+        };
     }
     let Ok(text) = std::str::from_utf8(&bytes[..width]) else {
         return Decoded::Unknown(width);
@@ -739,6 +832,31 @@ pub fn read() -> std::io::Result<Event> {
     imp::read()
 }
 
+/// How long `read()` waits for a key before it re-checks the terminal's size.
+///
+/// A resize while idle is invisible to a blocking read: without a bounded
+/// wait the frame stays at the old size until the next keystroke. A ~100 ms
+/// tick keeps both platforms' wait/poll loops bounded, and there is no
+/// signal handler to install on unix.
+const RESIZE_TICK: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Whether a fresh size differs from the size the frame was drawn at.
+///
+/// Pure, so a simulated size change can be held to the resize path without
+/// a terminal: a change is a resize to repaint, an unchanged size is not.
+pub(crate) fn size_changed(drawn: (u16, u16), now: (u16, u16)) -> bool {
+    drawn != now
+}
+
+/// The [`Event::Resize`] a fresh reading of the terminal's size implies.
+///
+/// `drawn` is the size the frame was last painted at, `now` the size it has
+/// now. Both platform read loops call this on every tick; a change makes
+/// `read()` return a resize the runner answers with a repaint.
+pub(crate) fn resize_event(drawn: (u16, u16), now: (u16, u16)) -> Option<Event> {
+    size_changed(drawn, now).then_some(Event::Resize(now.0, now.1))
+}
+
 // --- the unix half ----------------------------------------------------------
 
 /// The unix half: the terminal, the line discipline and the bytes.
@@ -749,7 +867,7 @@ mod imp {
     use std::sync::{Mutex, OnceLock};
     use std::time::Duration;
 
-    use super::{Decoded, Event, decode};
+    use super::{Decoded, Decoder, Event};
 
     /// The terminal's own attributes.
     ///
@@ -1070,6 +1188,11 @@ mod imp {
     /// over are kept here.
     static PENDING: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 
+    /// The decoder that turns the pending bytes into keys. It carries the
+    /// "inside a bracketed paste" bit, which has to survive a paste split
+    /// across two reads.
+    static DECODER: Mutex<Decoder> = Mutex::new(Decoder::new());
+
     /// The attributes of a terminal that gives the program the keyboard.
     fn raw(attributes: &mut Termios) {
         // Imported here, not at module scope: every constant is used in this
@@ -1171,12 +1294,16 @@ mod imp {
 
     pub fn read() -> io::Result<Event> {
         let fd = tty()?.fd();
+        // The size the frame was drawn at. A resize while idle is measured
+        // against it on each tick of the bounded wait below.
+        let drawn = size()?;
         let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+        let mut decoder = DECODER.lock().unwrap_or_else(|e| e.into_inner());
         let mut chunk = [0u8; 64];
         loop {
             // A key already in the buffer is a key the last read brought.
             if !pending.is_empty() {
-                match decode(&pending, ready(fd)?) {
+                match decoder.decode(&pending, ready(fd)?) {
                     Decoded::Key(event, len) => {
                         pending.drain(..len);
                         return Ok(Event::Key(event));
@@ -1190,6 +1317,17 @@ mod imp {
                     }
                     Decoded::Incomplete => {}
                 }
+            }
+            // Wait a bounded tick for the next bytes. A tick that expires
+            // with nothing to read is a chance to notice that the terminal
+            // changed size while idle, so a resize is not left until the
+            // next keystroke.
+            if !poll(super::RESIZE_TICK)? {
+                let now = size()?;
+                if let Some(event) = super::resize_event(drawn, now) {
+                    return Ok(event);
+                }
+                continue;
             }
             let count = unsafe { read_bytes(fd, chunk.as_mut_ptr().cast(), chunk.len()) };
             if count < 0 {
@@ -1235,6 +1373,9 @@ mod imp {
     const ENABLE_PROCESSED_INPUT: u32 = 0x0001;
     const ENABLE_LINE_INPUT: u32 = 0x0002;
     const ENABLE_ECHO_INPUT: u32 = 0x0004;
+    /// Makes the console report window-buffer-size changes as input records;
+    /// without it the `WINDOW_BUFFER_SIZE_EVENT` branch in `read()` is dead.
+    const ENABLE_WINDOW_INPUT: u32 = 0x0008;
 
     /// The console mode bit that makes the console read escape sequences.
     const ENABLE_VIRTUAL_TERMINAL_PROCESSING: u32 = 0x0004;
@@ -1507,11 +1648,15 @@ mod imp {
         }
 
         // The keys come to the program one at a time, and the console does
-        // not echo them.
+        // not echo them. `ENABLE_WINDOW_INPUT` makes it also report a resize
+        // as an input record; the original mode is saved above and restored
+        // exactly by `disable_raw_mode`, so this bit is put back on the way
+        // out with everything else.
         if unsafe {
             SetConsoleMode(
                 input,
-                input_mode & !(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT),
+                (input_mode & !(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT))
+                    | ENABLE_WINDOW_INPUT,
             )
         } == 0
         {
@@ -1605,11 +1750,26 @@ mod imp {
     }
 
     pub fn read() -> io::Result<Event> {
+        // The size the frame was drawn at. A resize while idle is measured
+        // against it on each tick of the bounded wait below.
+        let drawn = size()?;
         // A character outside the basic plane comes in two records, and the
         // second one is only a character when the first one is still in
         // hand.
         let mut surrogate: Option<u16> = None;
         loop {
+            // A bounded wait for a console record. A tick that expires with
+            // no record is a chance to notice that the terminal changed size
+            // while idle, so a resize is not left until the next keystroke.
+            // With `ENABLE_WINDOW_INPUT` set, a resize also wakes the wait
+            // at once as a `WINDOW_BUFFER_SIZE_EVENT` handled below.
+            if !poll(super::RESIZE_TICK)? {
+                let now = size()?;
+                if let Some(event) = super::resize_event(drawn, now) {
+                    return Ok(event);
+                }
+                continue;
+            }
             let record = next_record()?;
             if record.event_type == KEY_EVENT {
                 // The record is a union, and only the key arm is read.

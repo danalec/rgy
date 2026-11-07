@@ -28,13 +28,12 @@ use crossterm::event::{
     KeyModifiers as OracleKeyModifiers,
 };
 use crossterm::style::{
-    Attribute, Color as OracleColour, PrintStyledContent, ResetColor, SetAttribute,
-    SetBackgroundColor, SetForegroundColor,
+    Color as OracleColour, PrintStyledContent, ResetColor, SetBackgroundColor, SetForegroundColor,
 };
 use crossterm::terminal::{Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen};
 
 use rgy_search_ui::term::{
-    self, Color, Decoded, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, Paint, Screen,
+    self, Color, Decoded, Decoder, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, Paint, Screen,
 };
 
 /// The oracle writes the escape sequences when the console can read them.
@@ -232,24 +231,35 @@ fn the_reset_is_the_oracles_bytes() {
     assert_eq!(String::from_utf8_lossy(&mine), oracle_bytes(ResetColor));
 }
 
-/// The attributes are the oracle's bytes.
+/// The attributes are the oracle's bytes — through the tree's own code.
+///
+/// `Screen::print` writes whatever bytes it is handed, so feeding it a
+/// literal `\x1b[1m` and comparing with `SetAttribute` proved nothing
+/// about `Styled`: a regression in its bold/dim/reverse escapes or its
+/// `\x1b[0m` reset could not make this test fail. The comparison now goes
+/// through `Paint` and `Styled`'s `Display`, where the bytes are actually
+/// written, and includes reverse — the attribute the selected row uses —
+/// and the reset that undoes each one.
 #[test]
 fn the_attributes_are_the_oracles_bytes() {
     the_terminal_is_one();
-    let bold = written(|screen| screen.print("\x1b[1m"));
-    assert_eq!(
-        String::from_utf8_lossy(&bold),
-        oracle_bytes(SetAttribute(Attribute::Bold))
-    );
-    let dim = written(|screen| screen.print("\x1b[2m"));
-    assert_eq!(
-        String::from_utf8_lossy(&dim),
-        oracle_bytes(SetAttribute(Attribute::Dim))
-    );
-    let reverse = written(|screen| screen.print("\x1b[7m"));
-    assert_eq!(
-        String::from_utf8_lossy(&reverse),
-        oracle_bytes(SetAttribute(Attribute::Reverse))
+    let bold_oracle = oracle_bytes(PrintStyledContent(crossterm::style::Stylize::bold(
+        "zen-rs".to_string(),
+    )));
+    let dim_oracle = oracle_bytes(PrintStyledContent(crossterm::style::Stylize::dim(
+        "zen-rs".to_string(),
+    )));
+    let reverse_oracle = oracle_bytes(PrintStyledContent(crossterm::style::Stylize::reverse(
+        "zen-rs".to_string(),
+    )));
+    assert_eq!("zen-rs".bold().to_string(), bold_oracle);
+    assert_eq!("zen-rs".dim().to_string(), dim_oracle);
+    assert_eq!("zen-rs".reverse().to_string(), reverse_oracle);
+    // The reset is part of the answer: an attribute that is never undone
+    // would leave the rest of the frame in the wrong style.
+    assert!(
+        "zen-rs".reverse().to_string().ends_with("\x1b[0m"),
+        "the reverse span does not reset the attributes"
     );
 }
 
@@ -271,14 +281,22 @@ fn the_text_is_the_oracles_bytes() {
 /// A styled span is the oracle's bytes.
 ///
 /// The span is the composition the oracle makes: the colour, the
-/// attributes, the text, and the reset that undoes them. The dim arm is
-/// held to the oracle here too, because the attributes test can only
-/// compare the literal escape — the span is where the tree writes it.
+/// attributes, the text, and the reset that undoes them. Reverse is held
+/// to the oracle here too: `result_cell` draws the selected row with it,
+/// and a span with all three attributes proves the SGR order and the
+/// single reset at the end.
 #[test]
 fn a_styled_span_is_the_oracles_bytes() {
     the_terminal_is_one();
+    let combinations = [
+        (false, false, false),
+        (true, false, false),
+        (false, true, false),
+        (false, false, true),
+        (true, true, true),
+    ];
     for colour in colours() {
-        for (bold, dim) in [(false, false), (true, false), (false, true), (true, true)] {
+        for (bold, dim, reverse) in combinations {
             let mut mine = "zen-rs".with(colour);
             if bold {
                 mine = mine.bold();
@@ -286,11 +304,16 @@ fn a_styled_span_is_the_oracles_bytes() {
             if dim {
                 mine = mine.dim();
             }
+            if reverse {
+                mine = mine.reverse();
+            }
             let mine = mine.to_string();
-            let oracle = oracle_bytes(PrintStyledContent(oracle_span("zen-rs", colour, bold, dim)));
+            let oracle = oracle_bytes(PrintStyledContent(oracle_span(
+                "zen-rs", colour, bold, dim, reverse,
+            )));
             assert_eq!(
                 mine, oracle,
-                "the span {colour:?} (bold: {bold}, dim: {dim}) is not the oracle's bytes"
+                "the span {colour:?} (bold: {bold}, dim: {dim}, reverse: {reverse}) is not the oracle's bytes"
             );
         }
     }
@@ -305,6 +328,7 @@ fn oracle_span(
     colour: Color,
     bold: bool,
     dim: bool,
+    reverse: bool,
 ) -> crossterm::style::StyledContent<String> {
     let styled = crossterm::style::Stylize::with(text.to_string(), oracle_colour(colour));
     let styled = if bold {
@@ -312,8 +336,13 @@ fn oracle_span(
     } else {
         styled
     };
-    if dim {
+    let styled = if dim {
         crossterm::style::Stylize::dim(styled)
+    } else {
+        styled
+    };
+    if reverse {
+        crossterm::style::Stylize::reverse(styled)
     } else {
         styled
     }
@@ -579,14 +608,136 @@ fn a_sequence_that_is_not_whole_is_not_a_key() {
     ));
 }
 
-/// A sequence the program does not know is dropped, not waited for.
+/// A cut-off multibyte character is dropped at the end of a run.
 ///
-/// A terminal that sends a sequence the program has never heard of must
-/// not leave the program waiting for the rest of it.
+/// `more_may_come == false` says the run is over. A lone lead byte is not
+/// the beginning of a character then, and answering `Incomplete` would make
+/// `imp::read()` block on a byte that will never arrive — a paste cut in
+/// two would freeze the interface. When more may come, the same bytes are
+/// still incomplete, and the whole character is still a key.
 #[test]
-fn a_sequence_the_program_does_not_know_is_dropped() {
-    // The bracketed paste: a sequence with no key in it.
-    assert_eq!(term::decode(b"\x1b[200~", false), Decoded::Unknown(6));
-    // And the program does not wait for the rest of it.
-    assert_eq!(term::decode(b"\x1b[200~", true), Decoded::Unknown(6));
+fn a_cut_off_character_is_dropped_at_the_end_of_a_run() {
+    // 0xc3 starts the two-byte 'é'; 0xe2 0x82 starts the three-byte '€'.
+    assert_eq!(term::decode(b"\xc3", false), Decoded::Unknown(1));
+    assert_eq!(term::decode(b"\xc3", true), Decoded::Incomplete);
+    assert_eq!(term::decode(b"\xe2\x82", false), Decoded::Unknown(2));
+    assert_eq!(term::decode(b"\xe2\x82", true), Decoded::Incomplete);
+    assert!(matches!(
+        term::decode("é".as_bytes(), false),
+        Decoded::Key(_, 2)
+    ));
+}
+
+/// A sequence the program does not know is dropped; a bracketed paste,
+/// which it does know, is delivered as literal text.
+///
+/// A `\r` inside a paste is a character for the query field, not the enter
+/// key that would choose a path and end the session. The old assertion here
+/// held the opening marker `ESC [ 200 ~` to `Unknown(6)`; it now holds the
+/// whole burst to the characters it delivers.
+#[test]
+fn a_bracketed_paste_is_delivered_as_text() {
+    // A sequence that is genuinely unknown is still dropped, not waited for.
+    assert_eq!(term::decode(b"\x1b[999~", false), Decoded::Unknown(6));
+    assert_eq!(term::decode(b"\x1b[999~", true), Decoded::Unknown(6));
+
+    // A whole paste burst in one run: the markers carry no key, and "a\rb"
+    // is three literal characters — the \r is a character, never Enter.
+    let keys = pasted_keys(b"\x1b[200~a\rb\x1b[201~");
+    let codes: Vec<KeyCode> = keys.iter().map(|key| key.code).collect();
+    assert_eq!(
+        codes,
+        vec![KeyCode::Char('a'), KeyCode::Char('\r'), KeyCode::Char('b')],
+        "a paste is literal text, not keys"
+    );
+    assert!(
+        !codes.contains(&KeyCode::Enter),
+        "a carriage return inside a paste must not be the enter key"
+    );
+
+    // Once the burst is closed, a \r is the enter key again: the paste state
+    // does not leak past the closing marker.
+    let mut decoder = Decoder::new();
+    assert_eq!(
+        decoder.decode(b"\r", false),
+        Decoded::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), 1)
+    );
+}
+
+/// A paste cut across two reads still delivers its text.
+///
+/// The decoder carries the "inside a paste" bit between runs, and the
+/// `Incomplete` answer makes the reader wait for the rest of a marker.
+#[test]
+fn a_paste_split_across_reads_still_delivers_its_text() {
+    let mut decoder = Decoder::new();
+    let mut buffer: Vec<u8> = Vec::new();
+    // The first read ends in the middle of the closing marker.
+    buffer.extend_from_slice(b"\x1b[200~a\rb\x1b[20");
+    let first = drain(&mut decoder, &mut buffer, true);
+    let codes: Vec<KeyCode> = first.iter().map(|key| key.code).collect();
+    assert_eq!(
+        codes,
+        vec![KeyCode::Char('a'), KeyCode::Char('\r'), KeyCode::Char('b')]
+    );
+    assert_eq!(
+        buffer.as_slice(),
+        &b"\x1b[20"[..],
+        "the unfinished marker waits for more"
+    );
+
+    // The second read finishes the marker and closes the burst.
+    buffer.extend_from_slice(b"1~");
+    let second = drain(&mut decoder, &mut buffer, false);
+    assert!(second.is_empty(), "the closing marker carries no key");
+    assert!(buffer.is_empty(), "the whole marker was consumed");
+
+    // A \r after the burst is the enter key again.
+    assert_eq!(
+        decoder.decode(b"\r", false),
+        Decoded::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), 1)
+    );
+}
+
+/// Drain a run of bytes through one decoder the way `imp::read()` does,
+/// returning the keys and leaving any unfinished bytes in the buffer.
+fn drain(decoder: &mut Decoder, buffer: &mut Vec<u8>, more_may_come: bool) -> Vec<KeyEvent> {
+    let mut keys = Vec::new();
+    loop {
+        if buffer.is_empty() {
+            break;
+        }
+        let decoded = decoder.decode(buffer.as_slice(), more_may_come);
+        match decoded {
+            Decoded::Key(event, len) => {
+                keys.push(event);
+                buffer.drain(..len);
+            }
+            Decoded::Unknown(len) => {
+                buffer.drain(..len);
+            }
+            Decoded::Incomplete => break,
+        }
+    }
+    keys
+}
+
+/// The keys one whole run of bytes yields, drained through a fresh decoder.
+fn pasted_keys(bytes: &[u8]) -> Vec<KeyEvent> {
+    let mut decoder = Decoder::new();
+    let mut buffer = bytes.to_vec();
+    drain(&mut decoder, &mut buffer, false)
+}
+
+/// Enabling and disabling bracketed paste are the terminal's own escapes.
+#[test]
+fn bracketed_paste_is_switched_on_and_off() {
+    assert_eq!(
+        written(|screen| screen.enable_bracketed_paste()),
+        b"\x1b[?2004h".to_vec()
+    );
+    assert_eq!(
+        written(|screen| screen.disable_bracketed_paste()),
+        b"\x1b[?2004l".to_vec()
+    );
 }

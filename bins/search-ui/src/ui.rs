@@ -202,6 +202,7 @@ impl TerminalGuard {
         let mut screen = term::Screen::new(&mut *out);
         screen
             .enter_alternate_screen()
+            .and_then(|()| screen.enable_bracketed_paste())
             .and_then(|()| screen.hide())
             .and_then(|()| screen.background(bg))
             .and_then(|()| screen.clear_all())
@@ -216,6 +217,7 @@ impl Drop for TerminalGuard {
         let mut out = rgy_engine::console::stdout();
         let mut screen = term::Screen::new(&mut out);
         let _ = screen.reset_colour();
+        let _ = screen.disable_bracketed_paste();
         let _ = screen.show();
         let _ = screen.leave_alternate_screen();
         let _ = screen.flush();
@@ -324,6 +326,9 @@ enum Outcome {
     /// A result was chosen: its path is printed after the screen is
     /// restored.
     Chosen,
+    /// The terminal changed size: draw the frame again at the new size.
+    /// This is a repaint, not a key — it chooses no path and quits nothing.
+    Repaint,
 }
 
 /// What a command has to say.
@@ -1340,6 +1345,19 @@ fn drain_goes_on(event: &term::Event) -> bool {
     matches!(event, term::Event::Key(_))
 }
 
+/// The outcome the runner records for an event that ended the drain.
+///
+/// A resize is a repaint: the frame on screen no longer matches the terminal,
+/// so the outer loop draws it again at the new size. It is not a key, so it
+/// does not choose a path and does not quit. Kept pure so a simulated size
+/// change — no key and no terminal — can be held to it.
+fn outcome_of(event: &term::Event) -> Outcome {
+    match event {
+        term::Event::Resize(..) => Outcome::Repaint,
+        term::Event::Key(_) => Outcome::None,
+    }
+}
+
 /// Run the interactive search. Enter prints the selected path to stdout after
 /// the screen is restored, so the result can be piped onward.
 pub fn run(live: Live, root: String, indexed: usize) -> Result<(), String> {
@@ -1447,6 +1465,11 @@ fn run_app(mut app: App) -> Result<(), String> {
             // searches, one per letter, each one paid for in full and
             // then thrown away.
             if !drain_goes_on(&event) {
+                // A resize (the only non-key event) is a reason to repaint,
+                // not to break the session or choose a path: record the
+                // outcome and let the outer loop draw the frame again at the
+                // new size.
+                outcome = outcome_of(&event);
                 break;
             }
             match event {
@@ -1477,9 +1500,10 @@ fn run_app(mut app: App) -> Result<(), String> {
                 // console sends one for every press, and the drain goes
                 // on.
                 term::Event::Key(_) => {}
-                // A resize and anything else want the next frame, not more
-                // keys: what is on screen no longer matches the terminal.
-                _ => break,
+                // A resize was already handled above (`drain_goes_on` ends
+                // the drain and records a repaint); this arm only keeps the
+                // match exhaustive over `Event`.
+                term::Event::Resize(..) => break,
             }
         }
         if edited {
@@ -1493,7 +1517,10 @@ fn run_app(mut app: App) -> Result<(), String> {
                 chosen = app.selected_path();
                 break;
             }
-            Outcome::None => {}
+            // `None` and `Repaint` both send the outer loop back to its
+            // `size()` and `draw()` at the top; a resize repaints with no
+            // key and with no path chosen.
+            Outcome::None | Outcome::Repaint => {}
         }
     }
 
@@ -2063,6 +2090,84 @@ mod tests {
             !drain_goes_on(&term::Event::Resize(80, 24)),
             "a resize ends it: the frame on screen is the old one"
         );
+    }
+
+    /// A simulated size change produces a repaint, with no key, and does not
+    /// end the session.
+    ///
+    /// `term::size_changed` and `term::resize_event` are the pure seam: two
+    /// sizes stand in for the bounded tick noticing a resize while idle, with
+    /// no terminal and no keyboard. The runner's answer to that event —
+    /// `Outcome::Repaint` — neither chooses a path nor quits, and the outer
+    /// loop draws the frame again at the top.
+    #[test]
+    fn a_resize_repaints_without_a_key() {
+        assert!(
+            term::size_changed((80, 24), (100, 30)),
+            "a change of size is a resize"
+        );
+        assert!(
+            !term::size_changed((80, 24), (80, 24)),
+            "the same size is not a resize"
+        );
+        let event =
+            term::resize_event((80, 24), (100, 30)).expect("a size change produces a resize event");
+        assert_eq!(event, term::Event::Resize(100, 30));
+        assert_eq!(term::resize_event((80, 24), (80, 24)), None);
+
+        let outcome = outcome_of(&event);
+        assert_eq!(outcome, Outcome::Repaint, "a resize asks for a new frame");
+        assert_ne!(outcome, Outcome::Chosen, "a resize chooses no path");
+        assert_ne!(outcome, Outcome::Quit, "a resize does not quit");
+        // No key was involved: the drain ends, and the outer loop repaints.
+        assert!(!drain_goes_on(&event), "a resize ends the drain of keys");
+        // A plain key does not on its own become a repaint outcome.
+        assert_eq!(
+            outcome_of(&term::Event::Key(KeyEvent::new(
+                KeyCode::Char('a'),
+                KeyModifiers::NONE
+            ))),
+            Outcome::None
+        );
+    }
+
+    /// A paste of several lines leaves the field with literal characters and
+    /// does not end the session.
+    ///
+    /// A `\r` inside a bracketed paste used to be decoded as Enter, which
+    /// chose a path and ended the session at the first newline. Decoded as
+    /// text, "a\rb" reaches the query field as three characters and no key
+    /// ends the session.
+    #[test]
+    fn a_paste_leaves_the_field_with_literal_characters() {
+        let mut app = app_new();
+        let mut decoder = term::Decoder::new();
+        let mut buffer = b"\x1b[200~a\rb\x1b[201~".to_vec();
+        let mut ended = false;
+        loop {
+            if buffer.is_empty() {
+                break;
+            }
+            let decoded = decoder.decode(buffer.as_slice(), false);
+            match decoded {
+                term::Decoded::Key(key, len) => {
+                    let action = handle_key(&mut app, key);
+                    if matches!(action, Action::Quit | Action::Run(_)) {
+                        ended = true;
+                    }
+                    buffer.drain(..len);
+                }
+                term::Decoded::Unknown(len) => {
+                    buffer.drain(..len);
+                }
+                term::Decoded::Incomplete => break,
+            }
+        }
+        assert_eq!(
+            app.input, "a\rb",
+            "the pasted text, \\r included, is literal"
+        );
+        assert!(!ended, "a paste must not choose a path or quit");
     }
 
     /// The width is in cells, and not in characters.

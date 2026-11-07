@@ -89,6 +89,16 @@ struct UserObjectFlags {
     dw_flags: u32,
 }
 
+// The platform writes the whole structure and checks the size it is
+// given, so its layout is fixed at COMPILE TIME. A runtime assertion
+// protects one host, and only while its tests happen to run; a
+// truncated structure is a buffer `GetUserObjectInformationW` writes
+// past on every host. `dw_flags` is the third field: reading the first
+// one would read `fInherit` instead. The runtime test below stays as a
+// second pair of eyes on the same numbers.
+const _: () = assert!(core::mem::size_of::<UserObjectFlags>() == 12);
+const _: () = assert!(core::mem::offset_of!(UserObjectFlags, dw_flags) == 8);
+
 #[cfg(test)]
 mod tests {
     use super::*;
