@@ -31,6 +31,20 @@ else, so the non-Windows `main` says so and stops.
   `[vtprobe.rs:probe::ENABLE_WINDOW_INPUT]` — the two mode bits.
 
 ## Invariants
+- The probe is installed as a command, not built per test:
+  `cargo install --path bins/search-ui --example vtprobe --force` puts
+  `vtprobe` in cargo's bin directory, which is on `PATH`. Measured on
+  2026-11-07: installed to `~/.cargo/bin/vtprobe.exe`, and both consoles
+  reached from the same installed binary.
+- Either console can be reached without changing the machine's default
+  terminal. A Windows Terminal tab runs `vtprobe <log> <seconds>`
+  directly; the legacy host is reached by asking `conhost.exe` to host it,
+  `conhost.exe cmd /c vtprobe <log> <seconds>`. Measured on 2026-11-07:
+  the first reports `PseudoConsoleWindow` with `0x01f7` -> `0x03f8`
+  (`vt_bit=true`), the second reports `ConsoleWindowClass` with `0x01f7` ->
+  `0x01f8` (`vt_bit=false`). The probe's own console class is therefore
+  the whole answer to "which path will this console take", and no registry
+  change is needed to ask it.
 - The console's class is the decision `enable_raw_mode` makes: a
   `PseudoConsoleWindow` is a terminal that implements bracketed paste
   (Windows Terminal today) and takes the VT byte path;
@@ -68,6 +82,8 @@ else, so the non-Windows `main` says so and stops.
 ## Verification
 - Run: `cargo test --workspace --no-fail-fast --locked`
 - The probe is the answer to a question no test can ask, so it is run by
-  hand: `cargo build --example vtprobe -p rgy-search-ui`, then
-  `target/debug/examples/vtprobe.exe <log> <seconds>` in a console window,
-  `Ctrl+V`, `Escape`, and read the log.
+  hand. Install it once with
+  `cargo install --path bins/search-ui --example vtprobe --force`; then
+  `vtprobe <log> <seconds>` in a Windows Terminal tab, or
+  `conhost.exe cmd /c vtprobe <log> <seconds>` for the legacy host. Press
+  `Ctrl+V`, then `Escape`, and read the log.

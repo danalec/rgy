@@ -80,6 +80,18 @@ claims the foreground so it can be started in the background, logs the
 console's class with every mode it reads, and needs nothing but a paste and
 an `Escape`.
 
+It is installed as a command rather than built per test:
+`cargo install --path bins/search-ui --example vtprobe --force` puts
+`vtprobe` on `PATH`, and both consoles are then reachable from the same
+binary without touching the machine's default terminal — `vtprobe` in a
+Windows Terminal tab, and `conhost.exe cmd /c vtprobe` for the legacy host.
+Measured on 2026-11-07 with the installed binary: the first reports
+`PseudoConsoleWindow` and `0x01f7` -> `0x03f8` (`vt_bit=true`), the second
+reports `ConsoleWindowClass` and `0x01f7` -> `0x01f8` (`vt_bit=false`). The
+delegation-key change the first measurement used is not needed for a
+reproduction, which is the better outcome: a test that edits `HKCU` is a
+test that can be left half-applied.
+
 **What the live test could not settle, stated honestly.** The conhost paste
 could not be driven reliably with synthetic keys: the control modifier did
 not always register in the console's key records, so the flag-off conhost
