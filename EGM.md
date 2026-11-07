@@ -32,7 +32,7 @@ The root holds one in-scope source file by the skill's extension list:
 `pgo.sh` / `pgo.ps1` are gitignored scratch). Verified symbols and flags:
 
 - `[install.sh:version]` = `rgy-v0.1.10.0`, the four-number release tag the crates' three-number 0.1.10 line ships as; `[install.sh:install_dir]` = `$HOME/.local/bin`; `[install.sh:base_url]` = the GitHub releases download URL.
-- `[install.sh:expected_linux_x86_64]`, `[install.sh:expected_linux_aarch64]`, `[install.sh:expected_macos_x86_64]`, `[install.sh:expected_macos_aarch64]`, `[install.sh:expected_freebsd_x86_64]` — one pinned uppercase-hex SHA256 digest per platform/architecture. The x86_64 Linux pin is a real digest of an archive built and smoked here; the rest are placeholders until their archives are built on the runners that have those platforms, and `publish-release.sh` rewrites them from the real SHA256SUMS.
+- `[install.sh:expected_linux_x86_64]`, `[install.sh:expected_linux_aarch64]`, `[install.sh:expected_macos_x86_64]`, `[install.sh:expected_macos_aarch64]`, `[install.sh:expected_freebsd_x86_64]` — one pinned uppercase-hex SHA256 digest per platform/architecture, each a real digest of an archive built and smoked on the runner that has that platform. `publish-release.sh` rewrites them from the combined SHA256SUMS of the CI release run.
 - `[install.sh:placeholder]` — the all-zero digest standing for "an archive nobody has published yet".
 - `[install.sh:rgy_read_options]` — the fallback option parser used when the installer is piped into a shell with no tree to read `scripts/lib/options.sh` from; it refuses an unknown option with `unknown option:` and exit 2.
 - `[install.sh:profile_path_entries]`, `[install.sh:already_on_path]` — PATH helpers.
@@ -43,7 +43,7 @@ The root holds one in-scope source file by the skill's extension list:
 Local invariants read from the file:
 
 - `[install.sh:expected_linux_x86_64]` — the digest is pinned inside the installer itself, "so a tampered or substituted download is refused before anything is unpacked"; `scripts/publish-release.sh` rewrites the pins from the artifacts it has just built.
-- `[install.sh:placeholder]` — "The platforms this release does not carry still hold the placeholder digest, and the installer refuses those by name before it downloads anything".
+- `[install.sh:placeholder]` — "A platform whose archive this release does not carry would hold the placeholder digest, and that is refused by name, before anything is downloaded".
 - `[install.sh:rgy_read_options]` — the option vocabulary, digest helper and refusal behaviour are shared with `install.ps1` through `scripts/lib/options.sh` and `scripts/lib/digest.sh`, so the two twins answer the same question the same way.
 
 ## Subdirectories & System Boundaries

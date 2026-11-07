@@ -408,7 +408,7 @@ still rgy.
 |---|---|---|
 | Windows | Scoop | **out** — `scoop bucket add danalec/scoop-alts` and `scoop install rgy`. The same bucket carries `rgx`, the upstream engine this repository is built on |
 | Windows | winget | the manifest in this repository validates and is refreshed by every release; the submission to `microsoft/winget-pkgs` ([#469679](https://github.com/microsoft/winget-pkgs/pull/469679)) was closed unmerged — `winget install danalec.rgy-search` installs nothing today |
-| macOS | Homebrew | the formula's digests are placeholders, and the tap is not published — `brew install danalec/rgy/rgy-search` installs nothing today |
+| macOS | Homebrew | the formula pins the real digests of both macOS archives; the tap is not published — `brew install danalec/rgy/rgy-search` installs nothing today |
 
 The merge is landed end to end: name search,
 content search, one daemon/CLI, and the polish layer — and now the

@@ -1,11 +1,11 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.9.0.schema.json
 # SPDX-License-Identifier: Apache-2.0
-# The x86_64 Windows archive was built and smoked here, and its real
-# digest and release date are written below by
+# The portable x86_64 Windows archive was built and smoked on the CI
+# runner, and its real digest and release date are written below by
 # `scripts/publish-release.ps1` from the SHA256SUMS in .dist/. The
-# manifest still installs only that portable archive; the aarch64 one is
-# built on the CI runner that has the platform. Rewriting from the real
-# archive is what stops a manifest that names one release and pins
+# manifest installs only that portable archive; the aarch64 one ships in
+# the same release for the installer that asks for it. Rewriting from the
+# real archive is what stops a manifest that names one release and pins
 # another's digest from being published.
 PackageIdentifier: danalec.rgy-search
 PackageVersion: 0.1.10.0
@@ -33,6 +33,6 @@ ReleaseDate: 2026-11-07
 Installers:
   - Architecture: x64
     InstallerUrl: https://github.com/danalec/rgy/releases/download/rgy-v0.1.10.0/rgy-v0.1.10.0-x86_64-windows.zip
-    InstallerSha256: 738F87F9BBA83432BE70DF6EABE86B4022D98A318F7D9BFA85EBD95D3A60B42D
+    InstallerSha256: 10EE557BFDB32166BF62DF133AC7CB097750EA00E97402CB26B215603B09B1D0
 ManifestType: installer
 ManifestVersion: 1.9.0

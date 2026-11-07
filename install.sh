@@ -30,14 +30,14 @@
 # emulator, and an installer that hands it one installs something that will
 # not start.
 #
-# The pins below are the digests of the archives this release carries. The
-# x86_64 Linux one is real: that archive was built and smoked here and its
-# digest was written by `scripts/publish-release.sh` from SHA256SUMS. The
-# others are still placeholders — their archives belong to platforms this
-# desk does not have, and the CI release matrix builds them. The installer
-# refuses a placeholder by name before it downloads anything, so it never
-# hands out an archive it cannot vouch for. A digest left over from an
-# earlier tag would refuse every download of the new one.
+# The pins below are the real digests of the twelve archives this release
+# carries: each was built and smoked on the runner that has its platform,
+# and `scripts/publish-release.sh` rewrote these lines from the combined
+# SHA256SUMS the CI run produced. The installer still refuses a zero
+# placeholder by name before it downloads anything, so a future release
+# whose archives are not built yet cannot hand out something it cannot
+# vouch for. A digest left over from an earlier tag would refuse every
+# download of the new one.
 #
 # The options, the digest and the refusal are the tree's own
 # (scripts/lib/options.sh and scripts/lib/digest.sh), so that this script
@@ -64,11 +64,11 @@ no_launcher=0
 # The digest is uppercase hex, and it is rewritten in place by
 # scripts/publish-release.sh -- so the shape of these lines is part of the
 # contract, not a formatting choice.
-expected_linux_x86_64="F7B03964AA3BDB626789780A5FA8CC56DA11FD1966680BEFFF785FB271EA1DD0"
-expected_linux_aarch64="0000000000000000000000000000000000000000000000000000000000000000"
-expected_macos_x86_64="0000000000000000000000000000000000000000000000000000000000000000"
-expected_macos_aarch64="0000000000000000000000000000000000000000000000000000000000000000"
-expected_freebsd_x86_64="0000000000000000000000000000000000000000000000000000000000000000"
+expected_linux_x86_64="0C2557E04312587AFEB19E43BC9AC77FFB81E2424BA2E2BF76E7FB2E9A6DF0FE"
+expected_linux_aarch64="38032B97CEE06E610602547011E2572F89439C28C4178AB8A28A1EB9ECC6FEBF"
+expected_macos_x86_64="CDD87FB38791A834156ADF6B7140F80F1071D32C61E02D1321B9FF1517AA25A0"
+expected_macos_aarch64="93E31AF3E06C1DA15937EBE9494FA0EF6B6EA89533F1B2D7CDE086C3BF2F6612"
+expected_freebsd_x86_64="202808C2C2A3AABD9173FFC8D7B9210F15B6B30EFA87EE4C17960D91CD292743"
 
 # The pin of an archive nobody has published yet.
 placeholder="0000000000000000000000000000000000000000000000000000000000000000"
@@ -256,10 +256,10 @@ url="$base_url/$version/$asset"
 # out an archive it cannot vouch for is worse than one that says there is
 # none.
 #
-# The platforms this release does not carry still hold the placeholder
-# digest, and those are refused by name, before anything is downloaded. The
-# sentence names the platform and the architecture, because the
-# architecture alone is a lie on some of them: there is no published
+# A platform whose archive this release does not carry would hold the
+# placeholder digest, and that is refused by name, before anything is
+# downloaded. The sentence names the platform and the architecture, because
+# the architecture alone is a lie on some of them: there is no published
 # rgy release for x86_64 macOS, and there is a published one for x86_64
 # Linux, and a sentence that said only "x86_64" would be wrong on one of
 # the two.

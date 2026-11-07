@@ -143,19 +143,20 @@ Read-RgyOptions -Switches @{ "skipchecksum" = "SkipChecksum"; "noautostart" = "N
 # The digest is uppercase hex, and it is rewritten in place by
 # scripts/publish-release.ps1 from the real SHA256SUMS on the day the
 # release is cut -- so the shape of these lines is part of the contract,
-# not a formatting choice. The x86_64 Windows one is real (built and
-# smoked here); the aarch64 one is a placeholder until the CI runner with
-# that platform builds its archive, and the installer refuses a
-# placeholder by name before it downloads anything. A digest left over
-# from an earlier tag would refuse every download of the new one.
+# not a formatting choice. Both are real: each Windows archive was built
+# and smoked on the runner that has its architecture. The installer still
+# refuses a zero placeholder by name before it downloads anything, so a
+# future release whose archives are not built yet cannot hand out
+# something it cannot vouch for. A digest left over from an earlier tag
+# would refuse every download of the new one.
 #
 # There is one digest per architecture, because the architecture decides
 # the archive: an aarch64 machine does not run the x86_64 binary without
 # an emulator, and an installer that hands it one installs something that
 # will not start.
 $expected = @{
-    'x86_64-windows.zip' = '738F87F9BBA83432BE70DF6EABE86B4022D98A318F7D9BFA85EBD95D3A60B42D'
-    'aarch64-windows.zip' = '0000000000000000000000000000000000000000000000000000000000000000'
+    'x86_64-windows.zip' = '10EE557BFDB32166BF62DF133AC7CB097750EA00E97402CB26B215603B09B1D0'
+    'aarch64-windows.zip' = '85131D3E7779FEB9C8210E0403DBA51B9ABFB84D41B9E8EA9753EDB3F0904C0E'
 }
 
 # The digest of an archive nobody has published yet.
@@ -191,9 +192,9 @@ $digest = $expected[$assetName]
 # out an archive it cannot vouch for is worse than one that says there is
 # none.
 #
-# The platforms this release does not carry still hold the placeholder
-# digest, and those are refused by name, before anything is downloaded. The
-# sentence names the platform and the architecture, the way the unix twin
+# A platform whose archive this release does not carry would hold the
+# placeholder digest, and that is refused by name, before anything is
+# downloaded. The sentence names the platform and the architecture, the way the unix twin
 # does: the architecture alone is a lie on some of them -- there is no
 # published rgy release for x86_64 macOS, and there is a published one for
 # x86_64 Linux, and a sentence that said only "x86_64" would be wrong on

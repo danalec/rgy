@@ -1,8 +1,8 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.9.0.schema.json
 # SPDX-License-Identifier: Apache-2.0
-# STAGED: the 0.1.10.0 release ships the Windows archives; this manifest
-# names it and the notes URL that goes with it. `scripts/publish-release.ps1`
-# rewrites the version and the notes URL from the archive on publish day.
+# The 0.1.10.0 release ships the Windows archives; this manifest names it
+# and the notes URL that goes with it. `scripts/publish-release.ps1` rewrites
+# the version and the notes URL from the archive on publish day.
 PackageIdentifier: danalec.rgy-search
 PackageVersion: 0.1.10.0
 PackageLocale: en-US

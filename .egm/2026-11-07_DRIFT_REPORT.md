@@ -248,23 +248,34 @@ and the same three for x86_64 Linux glibc. `scripts/build-release.ps1` and
 digests, and a single canonical `SHA256SUMS` (six rows, LF only) now names
 all six; `sha256sum` of every archive matches its row on both hosts.
 `publish-release.ps1 -SkipBuild -ManifestsOnly` and
-`publish-release.sh --skip-build --manifests-only` both return 0 with that
-`.dist/` and agree on the rewrite: `install.ps1`'s x86_64-windows pin and
-`install.sh`'s x86_64-linux pin are now real uppercase-hex digests, the
-winget installer manifest carries the real Windows digest and the release
-date, and the other six pins stay placeholders with the publish step saying
-so by name. Those two real digests are committed; `.dist/` itself is
-gitignored and is not, by design.
+`publish-release.sh --skip-build --manifests-only` both returned 0 with that
+`.dist/` and agreed on the two pins available at the time. `.dist/` itself
+is gitignored and is not, by design.
 
-**What the CI run still owes.** The other six archives — aarch64 Windows,
-aarch64 Linux, x86_64 musl, FreeBSD (VM), and both macOS arches — need
-runners this desk does not have (no macOS SDK, no musl-gcc, no FreeBSD VM,
-no ARM machine that can start the binary). The `release` matrix in
-`.github/workflows/ci.yml` already names all twelve rows with their targets
-and variants; it runs on a push to `main` on the GitHub side, which this
-tree deliberately does not push to. Renaming the 0.1.9.1 archives that
-happen to sit in `.dist/` was refused: a tag must name the bytes it ships.
-To finish the release: start that matrix, collect its artifacts into one
-`.dist/` beside these six, regenerate the combined SHA256SUMS, and let the
-publish step fill the remaining pins and the Homebrew formula. Nothing in
-the tree pretends those six exist yet.
+**The full release, from the CI run.** With the owner's explicit
+authorization, `main` was mirrored to GitHub as a new **orphan commit**
+(no parents, the flat mirror the house keeps), which triggered the
+`release` matrix in `.github/workflows/ci.yml`. The first run
+(`42418859771`) built all twelve archives successfully but failed
+`suite on macos-15`: the test
+`crates/pick`'s `a_path_that_is_not_utf8_keeps_its_bytes` tried to create
+a directory whose name carries byte `0xff`, and macOS refuses it with
+`EILSEQ` ("Illegal byte sequence"). That is a platform limit, not a
+production defect — `candidate_in` takes `Path` and never rewrites it
+through `to_string_lossy()` — so the test now stands
+`#[cfg(target_os = "linux")]`, where the bytes are representable, with the
+reason written beside it. The fix (commit `1971d7d`) was pushed to Forgejo
+and to a fresh GitHub orphan, and the second run (`42419907051`) closed
+**`success`, 32/32 jobs, 12/12 release archives green**.
+
+`scripts/fetch-ci-assets.ps1 42419907051` brought the twelve archives and
+their twelve 17-file document sidecars into one `.dist/` with a combined
+SHA256SUMS; every archive's sha256 matches its row, and every sidecar
+carries the tree's release-page hash. Both publishers with
+`-SkipBuild`/`--skip-build` returned 0 and agreed on the rewrite: all
+seven installer pins, the winget `InstallerSha256` and the Homebrew
+formula's two `sha256` values are now real digests, with `winget validate`
+passing. No placeholder remains in the release data. The `release` run is
+therefore complete on the build side; only the publication act itself —
+uploading the assets and creating the tag on the forge and the mirror —
+is a separate step the publishers perform.

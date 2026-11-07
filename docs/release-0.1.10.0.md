@@ -136,12 +136,12 @@ anywhere, and they pick their kernels at run time. The SIMD variants are
 only to the target's own artifacts so the build scripts still run on the
 building machine.
 
-The six x86_64 archives (Windows and Linux, portable/AVX2/Zen 4) are built
-and checksummed, and the installers pin their real digests. The remaining
-six — aarch64 Windows and Linux, musl, FreeBSD, and both macOS arches — are
-built by the CI matrix on the runners that have those platforms; their
-digests stay placeholders in the installers and the Homebrew formula until
-that run is collected, and the installer refuses a placeholder by name.
+All twelve archives are built and smoked on the runner that has their
+platform, and one combined `SHA256SUMS` names every one of them. The
+installers, the winget manifest and the Homebrew formula pin the real
+digests of the archives they install. The CI release matrix that produced
+them is the same matrix that gates the tree; the Windows and Linux x86_64
+variants were also built and checked locally before the run.
 
 Apache-2.0.
 
