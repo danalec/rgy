@@ -1206,6 +1206,34 @@ mod imp {
             assert_eq!(std::mem::size_of::<Termios>(), 44);
         }
 
+        /// The terminal's own numbers are the platform's, and nothing else
+        /// in the tree pins them.
+        ///
+        /// `TIOCGWINSZ` is a request number the tree declares by hand, and
+        /// `libc` stopped exposing the Apple one after 0.2.186 — so this
+        /// test is the only place the value is written down twice. It is
+        /// `_IOR('t', 104, struct winsize)`: out, length 8, group `t`,
+        /// number 104, which is `0x40087468` on every BSD. The three
+        /// indices are the ones `c_cc` uses for "a character is enough",
+        /// "no timer" and the platform's control-character count.
+        #[test]
+        fn the_terminal_numbers_are_the_platforms_own() {
+            #[cfg(target_os = "linux")]
+            {
+                assert_eq!(TIOCGWINSZ, 0x5413);
+                assert_eq!(Termios::NCCS, 32);
+                assert_eq!((VMIN, VTIME), (6, 5));
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                assert_eq!(TIOCGWINSZ, 0x4008_7468);
+                assert_eq!(Termios::NCCS, 20);
+                assert_eq!((VMIN, VTIME), (16, 17));
+            }
+            assert_eq!(TCSANOW, 0);
+            assert_eq!(POLLIN, 0x001);
+        }
+
         /// `raw()` clears the flags it names and arms the one-character read.
         #[test]
         fn raw_mode_clears_the_local_flags() {
