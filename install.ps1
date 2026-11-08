@@ -348,8 +348,8 @@ if ($Activate) {
 # an emulator, and an installer that hands it one installs something that
 # will not start.
 $expected = @{
-    'x86_64-windows.zip' = '0000000000000000000000000000000000000000000000000000000000000000'
-    'aarch64-windows.zip' = '0000000000000000000000000000000000000000000000000000000000000000'
+    'x86_64-windows.zip' = '84B3FC839678BEB8AC4C3D4556AAE77048AB7940E51CEDC73C9ECB6FDCFA95CA'
+    'aarch64-windows.zip' = '913EAD81227EE6F0ACBCDA96862FC4C825080A6E6A9632E61CD10F6814FA9C14'
 }
 
 # The digest of an archive nobody has published yet.

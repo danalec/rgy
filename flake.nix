@@ -20,25 +20,24 @@
       ];
 
       # One release asset per platform. The digests are the SHA-256 of the
-      # archive itself, in SRI form, from the release's SHA256SUMS. They are
-      # placeholders until the 0.1.10.1 archives are published; `nix flake
-      # check` verifies them against the real downloads after publish day.
+      # archive itself, in SRI form, from the 0.1.10.1 release's SHA256SUMS;
+      # `nix flake check` verifies them against the real downloads.
       assets = {
         x86_64-linux = {
           file = "rgy-v${version}-x86_64-linux.tar.gz";
-          hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+          hash = "sha256-z+H247rhpjlEblVm2UoFfwNpOi8LeLgY23p+/HinlSw=";
         };
         aarch64-linux = {
           file = "rgy-v${version}-aarch64-linux.tar.gz";
-          hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+          hash = "sha256-zhI4nByLcPQzSNwUVCWOaT7r2vf4ojxW79GRgIWvfjM=";
         };
         x86_64-darwin = {
           file = "rgy-v${version}-x86_64-apple-darwin.tar.gz";
-          hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+          hash = "sha256-ZGIiS036+qCYX6Gk3WOEJAJttiEkXC2Vz/c+a9EJWFk=";
         };
         aarch64-darwin = {
           file = "rgy-v${version}-aarch64-apple-darwin.tar.gz";
-          hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+          hash = "sha256-jesHF0yTwfx0YsZohISdVrrP2SxTzo9hxRtN/+azu+8=";
         };
       };
 
@@ -48,11 +47,11 @@
         x86_64-linux = {
           rgy-search-avx2 = {
             file = "rgy-v${version}-avx2-linux.tar.gz";
-            hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+            hash = "sha256-rKLOsqjIjjjU1ulBCO06dHeuk8sr+OiW0R+Lhx75080=";
           };
           rgy-search-znver4 = {
             file = "rgy-v${version}-znver4-linux.tar.gz";
-            hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+            hash = "sha256-e9myErnr8Z+EmIG3wENvwNtvQmHRndFepzPBlbdglG0=";
           };
         };
       };

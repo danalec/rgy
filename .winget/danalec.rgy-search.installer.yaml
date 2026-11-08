@@ -29,11 +29,11 @@ InstallModes:
   - silent
   - interactive
 UpgradeBehavior: uninstallPrevious
-ReleaseDate: 2026-11-07
+ReleaseDate: 2026-11-08
 Installers:
   - Architecture: x64
     InstallerUrl: https://github.com/danalec/rgy/releases/download/rgy-v0.1.10.1/rgy-v0.1.10.1-x86_64-windows.zip
-    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+    InstallerSha256: 84B3FC839678BEB8AC4C3D4556AAE77048AB7940E51CEDC73C9ECB6FDCFA95CA
     # A portable install has no ARP entry, so the client has little to
     # correlate. Naming the files it puts down gives it a deeper check
     # without changing what is installed or where. DefaultInstallLocation
