@@ -197,6 +197,16 @@ is a machine.
 
 ### Starting the daemon at login
 
+**A name that misleads: `searchctl` is not a systemd service, is not part of
+systemd, and does not require systemd.** It is an ordinary CLI — run it, it
+walks `--root`, it exits. The `searchd` daemon is a separate, optional
+binary, and "starting the daemon at login" is about that binary, not about
+`searchctl`. `rgy-autostart` uses a systemd **user** unit on Linux simply as
+one way to start it; on Windows it uses Task Scheduler or the `HKCU` run
+value, on macOS launchd, and on FreeBSD there is no login item yet. rgy
+works on machines with no systemd, with systemd disabled, or with no init
+at all. Nothing is installed into the system's init.
+
 `searchctl` walks the tree it is given, so it answers on its own: the
 daemon is what keeps an index warm between queries, and it is the daemon
 that has to be there at login for that to happen.
@@ -261,13 +271,43 @@ that repairs it.
 
 ### Without the daemon: a daily index refresh
 
-**If you installed from a package manager and did nothing else:** `searchctl`
-still answers — the first query builds an index — but it is a snapshot, so a
-file created in the last 30 minutes can be missing until the next rebuild.
-`rgxy` is the one thing that stops working outright: it is a client of the
-daemon and prints `no connection to the daemon`. `rgy-autostart install` (or
-`install.sh --activate` / `install.ps1 -Activate`) fixes both;
-`rgy-autostart doctor` reports what is registered and whether it is up.
+**If you installed from a package manager and did nothing else, be precise
+about what needs what:**
+
+- **`searchctl` needs an index, not a daemon.** Run the one-shot command below
+  at least once to build it; from then on `searchctl` answers with no service
+  at all (the snapshot can be up to 30 minutes stale until the next rebuild).
+- **`rgxy` needs a *running* `searchd`, not an index.** It is a client of the
+  daemon over a socket or named pipe. Indexing once does **not** make `rgxy`
+  work — with no daemon it prints `no connection to the daemon`.
+
+`rgy-autostart install` (or `install.sh --activate` / `install.ps1 -Activate`)
+installs and configures that daemon; `rgy-autostart doctor` reports what is
+registered and whether it is up.
+
+### Trying `rgxy` without installing the daemon
+
+You can try the launcher with **nothing installed or configured**: start
+`searchd` in the foreground on a temporary endpoint, point `rgxy` at it, and
+stop it with Ctrl-C when you are done. No systemd unit, no login entry, no
+registry value — a plain process you own:
+
+```sh
+# Linux, macOS, FreeBSD
+searchd --root ~ --listen uds:/tmp/rgy-try.sock &
+rgxy --endpoint uds:/tmp/rgy-try.sock --query invoice
+rgxy --endpoint uds:/tmp/rgy-try.sock --tui
+```
+
+```powershell
+# Windows
+Start-Process searchd.exe -ArgumentList '--root', $env:USERPROFILE, '--listen', 'pipe:rgy-try'
+rgxy.exe --endpoint pipe:rgy-try --query invoice
+```
+
+Stop the foreground `searchd` when finished; it wrote nothing permanent.
+For one question with no daemon at all, use `searchctl --root ~ "invoice"`
+instead — that is the tool that needs only an index.
 
 The daemon is one way to keep the index fresh; the other is the one rgy shares
 with `locate` / `updatedb` — a **snapshot rebuilt on a schedule**, with no

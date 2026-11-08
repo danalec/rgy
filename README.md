@@ -155,6 +155,16 @@ chosen by `cfg` at build time.
 
 ## The index, and how it stays fresh
 
+**`searchctl` is not a systemd service, has nothing to do with systemd, and
+does not require systemd.** Despite the name, it is an ordinary command-line
+program: you run it, it walks the tree you name with `--root`, and it exits.
+The `searchd` daemon is a *separate, optional* binary. `rgy-autostart` uses
+systemd **user** units on Linux only as one convenient way to start that
+daemon at login; on Windows it uses Task Scheduler or the `HKCU` run value,
+on macOS launchd, and on FreeBSD there is no login item at all. Nothing in
+rgy is installed into, or depends on, the system init — you can use rgy on a
+machine with no systemd, with systemd disabled, or with no init at all.
+
 `searchctl` reads a name index it keeps in the platform cache folder, keyed by
 the tree you point `--root` at. There are **two ways to keep that index
 fresh** — pick one, because both write the same file:
@@ -181,14 +191,39 @@ rebuilds it. The one-line installer activates the daemon for you; a package
 manager (Scoop, AUR, an extracted archive, crates.io) does **not**, and its
 post-install message offers these same two commands.
 
-**If you did nothing after a package-manager install:** `searchctl` still
-answers — it builds an index on the first query — but that index is a
-snapshot, so a file created in the last 30 minutes can be missing until the
-next rebuild. The `rgxy` launcher is the one thing that stops working
-outright: it is a client of the daemon and says `no connection to the
-daemon`. Run `rgy-autostart install` (or `install.sh --activate` /
-`install.ps1 -Activate`) and both are fixed. `rgy-autostart doctor` reports
-what is registered and whether it is up.
+**If you did nothing after a package-manager install, be precise about what
+needs what:**
+
+- **`searchctl` needs an index, not a daemon.** It builds one on the first
+  query (or on the one-shot command above) and answers without any service.
+  Rebuilding it at least once is what makes searches fast; the result can be
+  up to 30 minutes stale until the next rebuild.
+- **`rgxy` needs a *running* `searchd`, not an index.** It is a client of the
+  daemon over a socket or named pipe. Merely indexing once does **not** make
+  `rgxy` work — with no daemon it says `no connection to the daemon`.
+
+To install and configure the daemon, run `rgy-autostart install` (or
+`install.sh --activate` / `install.ps1 -Activate` after the fact);
+`rgy-autostart doctor` reports what is registered and whether it is up.
+
+**To try `rgxy` without installing anything**, start a daemon in the
+foreground — no systemd, no login entry, nothing registered — and point the
+launcher at it. Stop it with Ctrl-C when you are done:
+
+```sh
+# Linux, macOS, FreeBSD
+searchd --root ~ --listen uds:/tmp/rgy-try.sock &
+rgxy --endpoint uds:/tmp/rgy-try.sock --query invoice
+```
+
+```powershell
+# Windows
+Start-Process searchd.exe -ArgumentList '--root', $env:USERPROFILE, '--listen', 'pipe:rgy-try'
+rgxy.exe --endpoint pipe:rgy-try --query invoice
+```
+
+Or, for a single question with no daemon at all, use `searchctl` directly:
+`searchctl --root ~ "invoice"`. The [manual](MANUAL.md) has the full picture.
 
 ### Compared with `locate` / `updatedb`
 
