@@ -36,7 +36,8 @@ The root holds one in-scope source file by the skill's extension list:
 - `[install.sh:placeholder]` — the all-zero digest standing for "an archive nobody has published yet".
 - `[install.sh:rgy_read_options]` — the fallback option parser used when the installer is piped into a shell with no tree to read `scripts/lib/options.sh` from; it refuses an unknown option with `unknown option:` and exit 2.
 - `[install.sh:profile_path_entries]`, `[install.sh:already_on_path]` — PATH helpers.
-- `[install.sh:skip_checksum]`, `[install.sh:no_autostart]`, `[install.sh:no_launcher]` — option flags.
+- `[install.sh:skip_checksum]`, `[install.sh:no_autostart]`, `[install.sh:no_launcher]`, `[install.sh:uninstall]` — option flags; `uninstall` is the switch that reverses the install.
+- `[install.sh:rgy_uninstall]` — the uninstall branch: `rgy-autostart uninstall` takes out both login entries, the twelve copied files and the `docs/` tree are removed by name, and the exact two-line PATH block is filtered out of the profile. The install directory itself is never removed.
 - `[install.sh:tmp]` = `mktemp -d`; `[install.sh:stage]`, `[install.sh:stage_root]` — the unpack staging directory.
 - `[Cargo.toml:workspace.members]`, `[Cargo.toml:workspace.package]`, `[Cargo.toml:profile.release]`.
 
@@ -45,6 +46,7 @@ Local invariants read from the file:
 - `[install.sh:expected_linux_x86_64]` — the digest is pinned inside the installer itself, "so a tampered or substituted download is refused before anything is unpacked"; `scripts/publish-release.sh` rewrites the pins from the artifacts it has just built.
 - `[install.sh:placeholder]` — "A platform whose archive this release does not carry would hold the placeholder digest, and that is refused by name, before anything is downloaded".
 - `[install.sh:rgy_read_options]` — the option vocabulary, digest helper and refusal behaviour are shared with `install.ps1` through `scripts/lib/options.sh` and `scripts/lib/digest.sh`, so the two twins answer the same question the same way.
+- `[install.sh:rgy_uninstall]` — "--uninstall takes out exactly what install put in"; the same URL installs and uninstalls, so there is no second script to keep in step with this one.
 
 ## Subdirectories & System Boundaries
 

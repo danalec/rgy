@@ -6,6 +6,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/danalec/rgy/main/install.sh | bash
 #   bash install.sh --install-dir /usr/local/bin
 #   bash install.sh --version rgy-v0.1.10.0
+#   bash install.sh --uninstall
 #
 # Downloads the rgy release tarball, verifies its SHA256, unpacks the four
 # binaries into the install directory, prepends it to the user's PATH and
@@ -14,6 +15,11 @@
 # FreeBSD the launcher is the terminal interface: it needs a terminal, a
 # login entry has none, and `rgy-autostart` says so instead of writing a
 # unit that starts and exits 0 without drawing anything.
+#
+# --uninstall takes out exactly what install put in: the login entries,
+# the copied files and the PATH block. It removes no directory it did not
+# create, and no file install did not put there. The same URL installs and
+# uninstalls, so there is no second script to keep in step with this one.
 #
 # The digest is PINNED HERE, exactly as install.ps1 pins the Windows zip.
 # That is the whole point of a pin: the installer carries the digest of the
@@ -58,6 +64,7 @@ base_url="https://github.com/danalec/rgy/releases/download"
 skip_checksum=0
 no_autostart=0
 no_launcher=0
+uninstall=0
 
 # The digests of the archives this installer is allowed to install.
 #
@@ -183,8 +190,72 @@ else
     }
 fi
 
-rgy_read_options "skipchecksum=skip_checksum noautostart=no_autostart nolauncher=no_launcher" \
+rgy_read_options "skipchecksum=skip_checksum noautostart=no_autostart nolauncher=no_launcher uninstall=uninstall" \
                  "installdir=install_dir baseurl=base_url version=version" "" "$@"
+
+# --uninstall takes out exactly what install put in.
+#
+# The install is four things: the login entries, the binaries and documents
+# copied into the install directory, the alias, and the two-line PATH block
+# appended to the profile. The uninstall reverses those four and nothing
+# else: it never removes the install directory itself, because on unix that
+# directory is shared with everything else the user put in ~/.local/bin.
+#
+# The autostart tool removes both entries in one call -- the daemon's and
+# the launcher's -- and says so in its own words. A missing tool is not an
+# error: an install with --no-autostart wrote no entries to remove.
+rgy_uninstall() {
+    dir="$1"
+    if [ -x "$dir/rgy-autostart" ]; then
+        "$dir/rgy-autostart" uninstall
+        code=$?
+        if [ "$code" -eq 0 ]; then
+            echo "The login entries were removed."
+        else
+            echo "The login entries could not be removed (see above)." >&2
+        fi
+    else
+        echo "No rgy-autostart in $dir; no login entries to remove."
+    fi
+
+    removed=0
+    for f in searchctl searchd rgy-autostart rgxy rgy \
+             README.md MANUAL.md FORMATS.md COPYING NOTICE \
+             LICENSE-APACHE LICENSE-MIT; do
+        if [ -e "$dir/$f" ] || [ -L "$dir/$f" ]; then
+            rm -f "$dir/$f" && removed=$((removed + 1))
+        fi
+    done
+    if [ -d "$dir/docs" ]; then
+        rm -rf "$dir/docs"
+    fi
+    echo "Removed $removed rgy files from $dir."
+
+    # The exact two lines install appended, and only those. A profile that
+    # carries a different line mentioning rgy is a profile the user wrote,
+    # and taking it out would remove a PATH they still need.
+    case "${SHELL:-}" in
+        */zsh|*/zsh-*|*/zsh[0-9]*) profile="$HOME/.zshrc" ;;
+        */bash|*/bash-*)           profile="$HOME/.bashrc" ;;
+        *)                         profile="$HOME/.profile" ;;
+    esac
+    if [ -f "$profile" ] && grep -F -x -q -e "export PATH=\"$dir:\$PATH\"" "$profile"; then
+        tmp_profile=$(mktemp)
+        grep -F -x -v -e '# rgy' -e "export PATH=\"$dir:\$PATH\"" \
+            "$profile" > "$tmp_profile" || true
+        cat "$tmp_profile" > "$profile"
+        rm -f "$tmp_profile"
+        echo "Removed the rgy PATH block from $profile."
+    else
+        echo "No rgy PATH block in $profile."
+    fi
+    echo "Uninstalled rgy from $dir."
+}
+
+if [ "$uninstall" -eq 1 ]; then
+    rgy_uninstall "$install_dir"
+    exit $?
+fi
 
 # The platform and the architecture decide the archive. The release carries
 # a portable build for each one it targets, and nothing else: the AVX2 and

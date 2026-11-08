@@ -8,6 +8,10 @@
     binaries into the install directory, prepends it to the user PATH and
     registers the daemon -- and the launcher -- to start at login.
 
+    -Uninstall takes out exactly what install put in: the login entries,
+    the copied files, the alias and the user PATH entry. It removes no
+    directory it did not create, and no file install did not put there.
+
 .EXAMPLE
     irm https://raw.githubusercontent.com/danalec/rgy/main/install.ps1 | iex
 
@@ -16,6 +20,9 @@
 
 .EXAMPLE
     .\install.ps1 -NoAutostart
+
+.EXAMPLE
+    .\install.ps1 -Uninstall
 #>
 
 # The options, the digest and the refusal are the tree's own
@@ -132,11 +139,81 @@ $Version = 'rgy-v0.1.10.0'
 $SkipChecksum = $false
 $NoAutostart = $false
 $NoLauncher = $false
+$Uninstall = $false
 
-Read-RgyOptions -Switches @{ "skipchecksum" = "SkipChecksum"; "noautostart" = "NoAutostart"; "nolauncher" = "NoLauncher" } `
+Read-RgyOptions -Switches @{ "skipchecksum" = "SkipChecksum"; "noautostart" = "NoAutostart"; "nolauncher" = "NoLauncher"; "uninstall" = "Uninstall" } `
                 -Values   @{ "installdir" = "InstallDir"; "baseurl" = "BaseUrl"; "version" = "Version" } `
                 -Positionals @{ } `
                 -Arguments $args
+
+# -Uninstall takes out exactly what install put in.
+#
+# The install is four things: the login entries, the binaries and documents
+# copied into the install directory, the alias, and the user PATH entry. The
+# uninstall reverses those four and nothing else: it never removes the
+# install directory itself, because that directory belongs to the user.
+#
+# The autostart tool removes both entries in one call -- the daemon's and
+# the launcher's -- and says so in its own words. A missing tool is not an
+# error: an install with -NoAutostart wrote no entries to remove.
+function Remove-RgyInstallation {
+    param([string]$Dir)
+
+    $tool = Join-Path $Dir 'rgy-autostart.exe'
+    if (Test-Path -LiteralPath $tool -PathType Leaf) {
+        $before = $ErrorActionPreference
+        $ErrorActionPreference = 'SilentlyContinue'
+        try {
+            & $tool uninstall
+            $code = $LASTEXITCODE
+        } catch {
+            $code = 1
+        } finally {
+            $ErrorActionPreference = $before
+        }
+        if ($code -eq 0) {
+            Write-Host "The login entries were removed."
+        } else {
+            [Console]::Error.Write("The login entries could not be removed (see above).`n")
+        }
+    } else {
+        Write-Host "No rgy-autostart in $Dir; no login entries to remove."
+    }
+
+    $removed = 0
+    foreach ($f in @('searchctl.exe', 'searchd.exe', 'rgy-autostart.exe', 'rgxy.exe', 'rgy.exe',
+                     'README.md', 'MANUAL.md', 'FORMATS.md', 'COPYING', 'NOTICE',
+                     'LICENSE-APACHE', 'LICENSE-MIT')) {
+        $p = Join-Path $Dir $f
+        if (Test-Path -LiteralPath $p) {
+            Remove-Item -LiteralPath $p -Force
+            $removed++
+        }
+    }
+    $docs = Join-Path $Dir 'docs'
+    if (Test-Path -LiteralPath $docs -PathType Container) {
+        Remove-Item -LiteralPath $docs -Recurse -Force
+    }
+    Write-Host "Removed $removed rgy files from $Dir."
+
+    # The exact entry install prepended, and only that one. The user PATH
+    # is split on ';' and compared entry by entry, because a substring
+    # check would also match a directory whose name merely starts with it.
+    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    if ($userPath -and (($userPath -split ';') -contains $Dir)) {
+        $entries = @($userPath -split ';' | Where-Object { $_ -and $_ -ne $Dir })
+        [Environment]::SetEnvironmentVariable('Path', ($entries -join ';'), 'User')
+        Write-Host "Removed $Dir from the user PATH (open a new terminal to pick it up)."
+    } else {
+        Write-Host "$Dir is not on the user PATH."
+    }
+    Write-Host "Uninstalled rgy from $Dir."
+}
+
+if ($Uninstall) {
+    Remove-RgyInstallation -Dir $InstallDir
+    exit 0
+}
 
 # The digests of the archives this installer is allowed to install.
 #

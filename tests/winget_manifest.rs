@@ -75,6 +75,37 @@ fn fields(text: &str, key: &str) -> Vec<String> {
     out
 }
 
+/// The lines of the YAML block that starts at `key:`.
+///
+/// `RelativeFilePath` appears in two blocks now: `NestedInstallerFiles`
+/// (the five portable executables) and `InstallationMetadata.Files` (the
+/// same five, for a deeper installed-files check). Reading every occurrence
+/// in the file would count ten, so a caller names the block whose list it
+/// means. A line at column zero that is not a comment ends the block.
+fn section(text: &str, key: &str) -> String {
+    let prefix = format!("{key}:");
+    let mut out = Vec::new();
+    let mut inside = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if !inside {
+            if trimmed.starts_with(prefix.as_str()) {
+                inside = true;
+            }
+            continue;
+        }
+        let top_level = !line.starts_with(' ')
+            && !line.starts_with('\t')
+            && !trimmed.is_empty()
+            && !trimmed.starts_with('#');
+        if top_level {
+            break;
+        }
+        out.push(line);
+    }
+    out.join("\n")
+}
+
 #[test]
 fn the_manifests_name_one_release_and_the_files_in_its_archive() {
     let version_manifest = manifest("danalec.rgy-search.yaml");
@@ -115,8 +146,6 @@ fn the_manifests_name_one_release_and_the_files_in_its_archive() {
     // version, so unlike a version-numbered directory there is no stale
     // number to hide in them -- what is checked is that the manifest names
     // the whole product the installers copy.
-    let mut nested = fields(&installer, "RelativeFilePath");
-    nested.sort();
     let mut expected = vec![
         "rgy-autostart.exe".to_string(),
         "rgy.exe".to_string(),
@@ -125,8 +154,28 @@ fn the_manifests_name_one_release_and_the_files_in_its_archive() {
         "searchd.exe".to_string(),
     ];
     expected.sort();
+
+    let mut nested = fields(
+        &section(&installer, "NestedInstallerFiles"),
+        "RelativeFilePath",
+    );
+    nested.sort();
     assert_eq!(
         nested, expected,
         "the installer's nested files do not name the product's binaries"
+    );
+
+    // The metadata is a second list of the same files. It is there for
+    // detection, so a list that drifted away from what the portable install
+    // actually puts down would make the client look for files that are not
+    // installed.
+    let mut metadata = fields(
+        &section(&installer, "InstallationMetadata"),
+        "RelativeFilePath",
+    );
+    metadata.sort();
+    assert_eq!(
+        metadata, expected,
+        "the installation metadata names different files than the nested installers"
     );
 }
