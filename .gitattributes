@@ -51,6 +51,12 @@ LICENSE* text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
 *.rb text eol=lf
+# Nix reads the flake's bytes and hashes them (the narHash in flake.lock and
+# the source tree hash of a path: flake). A CRLF checkout is a different
+# flake, so the Nix files are LF in the index and on every disk. flake.lock
+# has no extension, so name it too.
+*.nix text eol=lf
+flake.lock text eol=lf
 
 # The fixtures and the patches, byte for byte -- and THIS is where the rules
 # have to be.
