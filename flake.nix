@@ -9,7 +9,7 @@
       nixpkgs,
     }:
     let
-      version = "0.1.10.0";
+      version = "0.1.10.1";
       base = "https://github.com/danalec/rgy/releases/download/rgy-v${version}";
 
       systems = [
@@ -20,23 +20,25 @@
       ];
 
       # One release asset per platform. The digests are the SHA-256 of the
-      # archive itself, in SRI form, from the release's SHA256SUMS.
+      # archive itself, in SRI form, from the release's SHA256SUMS. They are
+      # placeholders until the 0.1.10.1 archives are published; `nix flake
+      # check` verifies them against the real downloads after publish day.
       assets = {
         x86_64-linux = {
           file = "rgy-v${version}-x86_64-linux.tar.gz";
-          hash = "sha256-pRv/s6AZKB61PTPLqnqJebmZXZGS+ZZ695NX57kT0lM=";
+          hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
         };
         aarch64-linux = {
           file = "rgy-v${version}-aarch64-linux.tar.gz";
-          hash = "sha256-0/yp7Vh7Xx/Oxzbd01fip2GD2Q0Gx8h2t7rcTy8vCvM=";
+          hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
         };
         x86_64-darwin = {
           file = "rgy-v${version}-x86_64-apple-darwin.tar.gz";
-          hash = "sha256-AbBfhJMEIwDrg0/Cb8AVHJ2V1yLkaPLpgz1+SI+TRj0=";
+          hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
         };
         aarch64-darwin = {
           file = "rgy-v${version}-aarch64-apple-darwin.tar.gz";
-          hash = "sha256-r4tXrBhprtzzSHYtaa6n6jQ1syLssdeXeTpam9f8DO0=";
+          hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
         };
       };
 
@@ -46,11 +48,11 @@
         x86_64-linux = {
           rgy-search-avx2 = {
             file = "rgy-v${version}-avx2-linux.tar.gz";
-            hash = "sha256-fnVDgx5j/KI7mOUfIwEXjFVmldTrUV+v29ymCz8y74Y=";
+            hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
           };
           rgy-search-znver4 = {
             file = "rgy-v${version}-znver4-linux.tar.gz";
-            hash = "sha256-Pp/3MwiB0O080kFDXPQKjMvdQOrrCN5KkE81crr3iOM=";
+            hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
           };
         };
       };

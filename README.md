@@ -21,9 +21,9 @@ Two faces, one daemon. Click either one to watch it move.
 
 ## Install
 
-The current release is **0.1.10.0**; the crates are at **0.1.10** (the
+The current release is **0.1.10.1**; the crates are at **0.1.10** (the
 registry takes three numbers, the release tag carries a fourth). The
-[release page](docs/release-0.1.10.0.md) is the changelog.
+[release page](docs/release-0.1.10.1.md) is the changelog.
 
 **One line** installs the tool, the daemon and the launcher:
 
@@ -67,9 +67,9 @@ the documents, and needs neither Rust nor a compiler:
 
 | platform | archive |
 |---|---|
-| Windows x86_64 | `rgy-v0.1.10.0-x86_64-windows.zip` |
-| Linux x86_64 | `rgy-v0.1.10.0-x86_64-linux.tar.gz` |
-| FreeBSD x86_64 | `rgy-v0.1.10.0-x86_64-freebsd.tar.gz` |
+| Windows x86_64 | `rgy-v0.1.10.1-x86_64-windows.zip` |
+| Linux x86_64 | `rgy-v0.1.10.1-x86_64-linux.tar.gz` |
+| FreeBSD x86_64 | `rgy-v0.1.10.1-x86_64-freebsd.tar.gz` |
 
 The release carries twelve archives in all — portable, AVX2 and Zen 4 builds
 for Windows and Linux x86_64, aarch64 Windows and Linux, static musl,

@@ -16,7 +16,7 @@
 //! last publish made. Comparing them with `Cargo.toml` would fail the gate
 //! of the release that is about to fix them: the crates are 0.1.10 (three
 //! numbers, the registry takes three) while the release and its binary
-//! assets carry 0.1.10.0 (four, the fix count of the line). So the test
+//! assets carry 0.1.10.1 (four, the fix count of the line). So the test
 //! holds the manifests to one another and to their own tag, and leaves the
 //! crate version out of it.
 //!
