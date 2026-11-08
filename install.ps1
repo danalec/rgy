@@ -232,8 +232,8 @@ if ($Uninstall) {
 # an emulator, and an installer that hands it one installs something that
 # will not start.
 $expected = @{
-    'x86_64-windows.zip' = 'DC5DD5ABF36C8614B1BCF5A4E2A24502B2E9AA0B9DDA0AB3D4B65ADFC0004656'
-    'aarch64-windows.zip' = 'FEA7F1E81D146ACEED432C31725BE380C3271E00C2210DC15C250D4E5E9C0857'
+    'x86_64-windows.zip' = '9DB42026E6290B29E6E890B54F03EAEA41AFDE6A7E2B207172F84AD65F217A07'
+    'aarch64-windows.zip' = '6B3E73CE02E2706FC4D09DF1066983A12491F59FC372875ECC66C06528725846'
 }
 
 # The digest of an archive nobody has published yet.
