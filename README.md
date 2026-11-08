@@ -206,6 +206,15 @@ To install and configure the daemon, run `rgy-autostart install` (or
 `install.sh --activate` / `install.ps1 -Activate` after the fact);
 `rgy-autostart doctor` reports what is registered and whether it is up.
 
+**One platform detail:** `rgy-autostart install` starts the daemon
+immediately on Linux (`systemctl --user enable --now`) and macOS
+(`launchctl bootstrap`), but on Windows it only registers a **logon** task —
+the daemon starts at your *next* login, not in the current session. The
+Windows installer (`install.ps1 -Activate`, and the end of a normal
+`install.ps1` install) runs `schtasks /Run /TN rgy-searchd` right after
+registering, so the daemon is up now too. If you register by hand on
+Windows, `rgy-autostart doctor` prints that same `fix:` command.
+
 **Wondering what the daemon has indexed?** It prints `walking the tree`,
 `scanning… <dirs> dirs, <entries> entries` every 500 ms and then
 `indexed N entries → <path>` to stderr while it starts. Once it is up,

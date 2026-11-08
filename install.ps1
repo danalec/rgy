@@ -8,15 +8,15 @@
     binaries into the install directory, prepends it to the user PATH and
     registers the daemon -- and the launcher -- to start at login.
 
-    -Activate is the post-install option: it registers and arms the daemon
-    on an install that is already here, and downloads nothing. A package
-    manager (Scoop, an extracted archive, crates.io) puts the binaries on
-    the PATH but never runs this installer, so the daemon is not running
-    after those installs -- this switch is the one command that turns it on.
-    It is the same action the end of a normal install takes, so an install
-    made with -NoAutostart, or an `rgy-autostart uninstall`, is put back with
-    the same words and the same result. It is re-runnable: the registration
-    is idempotent.
+    -Activate is the post-install option: it registers the daemon AND
+    starts it now on Windows, and downloads nothing. A package manager
+    (Scoop, an extracted archive, crates.io) puts the binaries on the PATH
+    but never runs this installer, so the daemon is neither registered nor
+    running after those installs -- this switch is the one command that
+    turns it on. It is the same action the end of a normal install takes,
+    so an install made with -NoAutostart, or an `rgy-autostart uninstall`,
+    is put back with the same words and the same result. It is re-runnable:
+    the registration is idempotent.
 
     -Uninstall takes out exactly what install put in: the login entries,
     the copied files, the alias and the user PATH entry. It removes no
@@ -224,7 +224,7 @@ function Remove-RgyInstallation {
     Write-Host "Uninstalled rgy from $Dir."
 }
 
-# Register and arm the daemon on an install that is already in place.
+# Register and start the daemon on an install that is already in place.
 #
 # This is the post-install activation and the last step of a normal install,
 # and it is ONE function so the two answer the same question the same way:
@@ -233,11 +233,16 @@ function Remove-RgyInstallation {
 # second, because a package manager put the binaries on the PATH and not in
 # $InstallDir, and that install still has a daemon to activate.
 #
-# `rgy-autostart install` both writes the login entry and ARMS it now (a
-# Task Scheduler task run at once, `enable --now`, `launchctl bootstrap`), so
-# "activate" is a real start, not only an entry that waits for the next
-# login. It is idempotent: a second call leaves one entry and starts nothing
-# twice. Running this command IS the consent -- no prompt, no elevation.
+# `rgy-autostart install` writes the login entry. What it does NOT do on
+# Windows is start the daemon in THIS session: a Task Scheduler task with an
+# ONLOGON trigger, or an HKCU Run value, only runs at the next logon. Linux
+# (`systemctl --user enable --now`) and macOS (`launchctl bootstrap`) do
+# start it at once. So after a successful install this function runs the
+# task with `schtasks /Run` on Windows -- the same command `rgy-autostart
+# doctor` prints as its `fix:` -- so the daemon is up now too. The start is
+# best-effort: a machine with no Task Scheduler task (the RegistryRun
+# fallback) simply starts at the next logon, and the install still succeeds.
+# Running this command IS the consent -- no prompt, no elevation.
 #
 # The function returns the tool's exit code; a normal install ignores it and
 # -Activate propagates it, because activation is the whole of that action.
@@ -290,6 +295,18 @@ function Invoke-RgyRegisterDaemon {
         Write-Host "The daemon starts at login. To take it out: rgy-autostart uninstall"
         if ($autostartArgs -contains '--launcher') {
             Write-Host "The launcher starts at login too: Control twice opens the window."
+        }
+        # Windows: `install` registered a logon task but did not start it in
+        # this session. Run it now, so rgxy works immediately instead of
+        # after the next logon. This is exactly the `fix:` line of
+        # `rgy-autostart doctor`. It is best-effort: on a machine whose
+        # mechanism was the HKCU Run fallback there is no task to run, and
+        # the daemon simply starts at the next logon.
+        $run = Start-Process -FilePath 'schtasks.exe' -ArgumentList '/Run','/TN','rgy-searchd' -Wait -PassThru -WindowStyle Hidden -ErrorAction SilentlyContinue
+        if ($run -and $run.ExitCode -eq 0) {
+            Write-Host "The daemon was started now too; it is indexing before it opens its pipe."
+        } else {
+            Write-Host "No startup task to run now (the daemon starts at your next logon). Start it by hand with: rgy-autostart doctor"
         }
     } elseif ($code -eq 2) {
         [Console]::Error.Write("The entries were written but the platform could not arm them (see above).`n")

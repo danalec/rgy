@@ -17,10 +17,11 @@
 # login entry has none, and `rgy-autostart` says so instead of writing a
 # unit that starts and exits 0 without drawing anything.
 #
-# --activate is the post-install option: it registers and arms the daemon
-# on an install that is already here, and downloads nothing. A package
-# manager (Scoop, AUR, an extracted archive, crates.io) puts the binaries
-# on the PATH but never runs this installer, so the daemon is not running
+# --activate is the post-install option: it registers the daemon and starts
+# it now (Windows: the Windows twin runs the logon task with `schtasks
+# /Run`), and downloads nothing. A package manager (Scoop, AUR, an
+# extracted archive, crates.io) puts the binaries on the PATH but never
+# runs this installer, so the daemon is neither registered nor running
 # after those installs -- this switch is the one command that turns it on.
 # It is the same action the end of a normal install takes, so an install
 # that was made with --no-autostart, or an `rgy-autostart uninstall`, is
@@ -273,11 +274,15 @@ rgy_uninstall() {
 # second, because a package manager put the binaries on the PATH and not in
 # $install_dir, and that install still has a daemon to activate.
 #
-# `rgy-autostart install` both writes the login entry and ARMS it now
-# (`systemctl --user enable --now`, `launchctl bootstrap`, `schtasks /Run`),
-# so "activate" is a real start, not only an entry that waits for the next
-# login. It is idempotent: a second call leaves one entry and starts nothing
-# twice. Running this command IS the consent -- no prompt, no elevation.
+# On Linux and macOS `rgy-autostart install` both writes the login entry
+# and starts the daemon at once (`systemctl --user enable --now`,
+# `launchctl bootstrap`), so "activate" is a real start here, not an entry
+# that waits for the next login. The Windows twin cannot say that: a Task
+# Scheduler ONLOGON task only runs at the next logon, so install.ps1 runs
+# the task with `schtasks /Run` after registering it. (FreeBSD has no login
+# item yet, and the tool says so.) It is idempotent: a second call leaves
+# one entry and starts nothing twice. Running this command IS the consent
+# -- no prompt, no elevation.
 #
 # The launcher is asked for only when it is actually on the machine, and the
 # autostart tool decides whether the platform has that entry (Windows only).

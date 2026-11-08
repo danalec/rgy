@@ -340,6 +340,14 @@ and at every login. It listens on a unix socket and applies changes through
 inotify as they happen; no timer is needed. `rgy-autostart status` and
 `rgy-autostart doctor` report what is registered and whether it is up.
 
+That "starts now" is Linux and macOS only. On Windows the same command
+writes a Task Scheduler task with an `ONLOGON` trigger (or an `HKCU` Run
+value as the weaker fallback): it registers the daemon but does **not** start
+it in the current session. `rgy-autostart doctor` prints the fix —
+`schtasks /Run /TN "rgy-searchd"` — and `install.ps1 -Activate` (and the end
+of a normal `install.ps1` install) runs it automatically right after
+registering. FreeBSD has no login item yet.
+
 For the **scheduled** model instead, write a oneshot service and a timer in
 that same user-unit directory and enable the *timer*, never the service:
 
