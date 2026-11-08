@@ -153,6 +153,97 @@ differ per operating system (the Windows MFT walk, the Linux change feed, the
 macOS FSEvents feed, the FreeBSD `getdirentries` walk) are compiled in and
 chosen by `cfg` at build time.
 
+## The index, and how it stays fresh
+
+`searchctl` reads a name index it keeps in the platform cache folder, keyed by
+the tree you point `--root` at. There are **two ways to keep that index
+fresh** — pick one, because both write the same file:
+
+| | daemon | one-shot + schedule |
+|---|---|---|
+| Process | resident `searchd`, started at login | none; one `searchctl` run at a time |
+| Freshness | a live change feed (inotify / USN journal / FSEvents): changes land as they happen | a snapshot, rebuilt whenever you run the command |
+| Queries | always warm | reuse the snapshot for 30 minutes (`--max-age`), then rebuild on demand |
+| Setup | `rgy-autostart install`; after the fact, `install.sh --activate` / `install.ps1 -Activate` | `searchctl --root ~ --reindex --count '*'`, then schedule it |
+
+**Recreate the index and pick up new, changed and deleted files in one
+command** — rgy's equivalent of `updatedb`:
+
+```sh
+searchctl --root ~ --reindex --count '*'
+```
+
+`--reindex` forces a full walk even when a usable snapshot exists, `'*'` is a
+whole-path glob matching every entry (a query is required), and `--count`
+prints one number instead of every hit. A later plain query reuses that
+snapshot for 30 minutes; `--max-age 0` means *never reuse*, so every query
+rebuilds it. The one-line installer activates the daemon for you; a package
+manager (Scoop, AUR, an extracted archive, crates.io) does **not**, and its
+post-install message offers these same two commands.
+
+### Compared with `locate` / `updatedb`
+
+`locate` answers from a static database that `updatedb` rebuilds on a
+schedule (traditionally a daily cron job); a file created after the last
+`updatedb` is invisible until the next run. rgy's one-shot mode is exactly
+that model: `searchctl --reindex` is `updatedb`, a daily timer is the cron
+job, and `searchctl <query>` is `locate`. rgy's daemon mode is the other
+answer — a resident `updatedb` that never sleeps, applying changes
+continuously, so no schedule is needed.
+
+| | `locate` / `updatedb` | rgy |
+|---|---|---|
+| Match | path substring / glob | typo-tolerant fuzzy, plus exact (`'x`, `^x`, `x$`, `=x`), phrase, negation (`!x`), OR (alternatives with a pipe) and whole-path globs |
+| Filters | none | `ext:` `type:` `size:` `dir:` `in:` `mtime:` `re:` `limit:` `sort:` |
+| Inside the file | never | `grep:` `regex:` `sym:` with `path:line:text` output |
+| Ranking | none | ranked results |
+| Privileges | `updatedb` usually needs root to walk the whole disk | per-user, no root: you choose the tree with `--root`; the daemon is a systemd **user** unit |
+| Freshness | next scheduled `updatedb` | live (daemon) or on demand (one-shot) |
+
+`locate` is a fine, tiny tool for "find a path by substring". rgy is for when
+you also want typo tolerance, filters, content search and ranked results over
+a tree you chose.
+
+### Once a day with systemd, without the daemon
+
+On Linux, `rgy-autostart install` is itself the systemd integration **for the
+daemon**: it writes a **user** unit `rgy-searchd.service` and arms it with
+`enable --now`. If you prefer the snapshot model instead, write a oneshot
+service and a timer in the same user-unit directory:
+
+```ini
+# ~/.config/systemd/user/rgy-index.service
+[Unit]
+Description=Rebuild the rgy name index once
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/searchctl --root %h --reindex --count '*'
+```
+
+```ini
+# ~/.config/systemd/user/rgy-index.timer
+[Unit]
+Description=Daily rgy index refresh
+[Timer]
+OnCalendar=daily
+Persistent=true
+[Install]
+WantedBy=timers.target
+```
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now rgy-index.timer
+```
+
+`Persistent=true` runs a missed rebuild at the next boot. Use `/usr/bin/searchctl`
+in `ExecStart` when a package manager put the binary there. **Do not run this
+timer and the daemon on the same tree**: both write one index file, and a
+scheduled `--reindex` would overwrite the daemon's live state. [The
+manual](MANUAL.md#without-the-daemon-a-daily-index-refresh) has the full
+recipe, a cron and Task Scheduler equivalent, and the unit that
+`rgy-autostart` writes.
+
 ## rgy or rgx?
 
 [rgx](https://github.com/danalec/rgx) is the content-search specialist: an

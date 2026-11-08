@@ -8,6 +8,16 @@
     binaries into the install directory, prepends it to the user PATH and
     registers the daemon -- and the launcher -- to start at login.
 
+    -Activate is the post-install option: it registers and arms the daemon
+    on an install that is already here, and downloads nothing. A package
+    manager (Scoop, an extracted archive, crates.io) puts the binaries on
+    the PATH but never runs this installer, so the daemon is not running
+    after those installs -- this switch is the one command that turns it on.
+    It is the same action the end of a normal install takes, so an install
+    made with -NoAutostart, or an `rgy-autostart uninstall`, is put back with
+    the same words and the same result. It is re-runnable: the registration
+    is idempotent.
+
     -Uninstall takes out exactly what install put in: the login entries,
     the copied files, the alias and the user PATH entry. It removes no
     directory it did not create, and no file install did not put there.
@@ -20,6 +30,9 @@
 
 .EXAMPLE
     .\install.ps1 -NoAutostart
+
+.EXAMPLE
+    .\install.ps1 -Activate
 
 .EXAMPLE
     .\install.ps1 -Uninstall
@@ -139,9 +152,10 @@ $Version = 'rgy-v0.1.10.0'
 $SkipChecksum = $false
 $NoAutostart = $false
 $NoLauncher = $false
+$Activate = $false
 $Uninstall = $false
 
-Read-RgyOptions -Switches @{ "skipchecksum" = "SkipChecksum"; "noautostart" = "NoAutostart"; "nolauncher" = "NoLauncher"; "uninstall" = "Uninstall" } `
+Read-RgyOptions -Switches @{ "skipchecksum" = "SkipChecksum"; "noautostart" = "NoAutostart"; "nolauncher" = "NoLauncher"; "activate" = "Activate"; "uninstall" = "Uninstall" } `
                 -Values   @{ "installdir" = "InstallDir"; "baseurl" = "BaseUrl"; "version" = "Version" } `
                 -Positionals @{ } `
                 -Arguments $args
@@ -210,9 +224,94 @@ function Remove-RgyInstallation {
     Write-Host "Uninstalled rgy from $Dir."
 }
 
+# Register and arm the daemon on an install that is already in place.
+#
+# This is the post-install activation and the last step of a normal install,
+# and it is ONE function so the two answer the same question the same way:
+# no download, no PATH edit, no copy -- just `rgy-autostart install`. The
+# tool is looked for next to where the install put it first, and on the PATH
+# second, because a package manager put the binaries on the PATH and not in
+# $InstallDir, and that install still has a daemon to activate.
+#
+# `rgy-autostart install` both writes the login entry and ARMS it now (a
+# Task Scheduler task run at once, `enable --now`, `launchctl bootstrap`), so
+# "activate" is a real start, not only an entry that waits for the next
+# login. It is idempotent: a second call leaves one entry and starts nothing
+# twice. Running this command IS the consent -- no prompt, no elevation.
+#
+# The function returns the tool's exit code; a normal install ignores it and
+# -Activate propagates it, because activation is the whole of that action.
+function Invoke-RgyRegisterDaemon {
+    $exe = Join-Path $InstallDir 'rgy-autostart.exe'
+    $tool = $null
+    if (Test-Path -LiteralPath $exe -PathType Leaf) {
+        $tool = $exe
+    } else {
+        $found = Get-Command 'rgy-autostart.exe' -ErrorAction SilentlyContinue
+        if ($found) { $tool = $found.Source }
+    }
+    if (-not $tool) {
+        [Console]::Error.Write("rgy-autostart was not found: install rgy first, then -Activate it.`n")
+        return 1
+    }
+
+    # The launcher is asked for only when it is actually on the machine: an
+    # entry that points at a binary that is not there is an entry that fails
+    # at every login. The autostart tool decides whether the platform has
+    # that entry (Windows only) and says why when it does not.
+    $launcher = Join-Path $InstallDir 'rgxy.exe'
+    $haveLauncher = Test-Path -LiteralPath $launcher -PathType Leaf
+    if (-not $haveLauncher) {
+        $foundLauncher = Get-Command 'rgxy.exe' -ErrorAction SilentlyContinue
+        if ($foundLauncher) { $haveLauncher = $true }
+    }
+    $autostartArgs = @('install')
+    if ((-not $NoLauncher) -and $haveLauncher) { $autostartArgs += '--launcher' }
+
+    # The call is made with the error preference that does not turn a
+    # failing native command into a terminating error, and the answer is
+    # read from $LASTEXITCODE -- the way the .sh twin reads it. Out-Host
+    # shows the tool's own sentences without letting them become the
+    # function's return value; only the integer code comes back.
+    $code = 1
+    $before = $ErrorActionPreference
+    $ErrorActionPreference = 'SilentlyContinue'
+    try {
+        & $tool @autostartArgs | Out-Host
+        $code = $LASTEXITCODE
+    } catch {
+        # The tool is not there, or the platform refused to start it.
+        $code = 1
+    } finally {
+        $ErrorActionPreference = $before
+    }
+
+    if ($code -eq 0) {
+        Write-Host "The daemon starts at login. To take it out: rgy-autostart uninstall"
+        if ($autostartArgs -contains '--launcher') {
+            Write-Host "The launcher starts at login too: Control twice opens the window."
+        }
+    } elseif ($code -eq 2) {
+        [Console]::Error.Write("The entries were written but the platform could not arm them (see above).`n")
+    } else {
+        [Console]::Error.Write("The daemon was not registered. To register it: rgy-autostart install`n")
+    }
+    return $code
+}
+
 if ($Uninstall) {
     Remove-RgyInstallation -Dir $InstallDir
     exit 0
+}
+
+# -Activate is a post-install action, so it never reaches the download. It
+# works on an install made by a package manager, by an extracted archive, by
+# crates.io, or by this installer with -NoAutostart: the binaries are on the
+# PATH already, and the only thing left to do is turn the daemon on.
+if ($Activate) {
+    Write-Host "Activating the rgy daemon on the install that is already here ..."
+    $code = Invoke-RgyRegisterDaemon
+    exit $code
 }
 
 # The digests of the archives this installer is allowed to install.
@@ -420,14 +519,10 @@ Remove-Item $staging -Recurse -Force
 
 # The daemon at login.
 #
-# The autostart tool finds the daemon next to itself -- the two were just
-# copied into the same directory -- and registers it with the tree it
-# indexes. The entry goes into the user's own session: no administrator,
-# no prompt, no dialog.
-#
-# The launcher is registered with it, under its own name: the window is
-# there in a few milliseconds because the *daemon* has the index warm, not
-# because the launcher built one.
+# The same action -Activate takes, through the same function: the autostart
+# tool finds the daemon next to itself -- the two were just copied into the
+# same directory -- and registers it with the tree it indexes. The entry
+# goes into the user's own session: no administrator, no prompt, no dialog.
 #
 # This step is a convenience, and a failure here is not a reason to tell
 # the user the install failed: by the time it runs, the daemon, the
@@ -436,42 +531,9 @@ Remove-Item $staging -Recurse -Force
 # installer that aborted here would leave a half-installed tool behind
 # and a non-zero exit on top of it.
 if (-not $NoAutostart) {
-    # The launcher is registered with the daemon, under its own name, and
-    # only when it is actually on the machine: an entry that points at a
-    # binary that is not there is an entry that fails at every login.
-    $launcher = Join-Path $InstallDir 'rgxy.exe'
-    $autostartArgs = @('install')
-    if ((-not $NoLauncher) -and (Test-Path $launcher)) { $autostartArgs += '--launcher' }
-
-    # The call is made with the error preference that does not turn a
-    # failing native command into a terminating error, and the answer is
-    # read from $LASTEXITCODE -- the way the .sh twin reads it. The
-    # error record PowerShell writes for the failure is silenced too: the
-    # tool's own sentence and the line below say what happened, and the
-    # .sh twin prints no third line.
-    $code = 1
-    $before = $ErrorActionPreference
-    $ErrorActionPreference = 'SilentlyContinue'
-    try {
-        & (Join-Path $InstallDir 'rgy-autostart.exe') @autostartArgs
-        $code = $LASTEXITCODE
-    } catch {
-        # The tool is not there, or the platform refused to start it.
-        $code = 1
-    } finally {
-        $ErrorActionPreference = $before
-    }
-
-    if ($code -eq 0) {
-        Write-Host "The daemon starts at login. To take it out: rgy-autostart uninstall"
-        if ($autostartArgs -contains '--launcher') {
-            Write-Host "The launcher starts at login too: Control twice opens the window."
-        }
-    } elseif ($code -eq 2) {
-        [Console]::Error.Write("The entries were written but the platform could not arm them (see above).`n")
-    } else {
-        [Console]::Error.Write("The daemon was not registered. To register it: rgy-autostart install`n")
-    }
+    # A normal install ignores the code: the function has already said what
+    # happened, and the install is complete with or without the daemon.
+    $null = Invoke-RgyRegisterDaemon
 }
 
 Write-Host "Installed: searchctl, searchd, rgy-autostart and rgxy in $InstallDir" -ForegroundColor Green

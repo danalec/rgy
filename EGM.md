@@ -36,7 +36,8 @@ The root holds one in-scope source file by the skill's extension list:
 - `[install.sh:placeholder]` — the all-zero digest standing for "an archive nobody has published yet".
 - `[install.sh:rgy_read_options]` — the fallback option parser used when the installer is piped into a shell with no tree to read `scripts/lib/options.sh` from; it refuses an unknown option with `unknown option:` and exit 2.
 - `[install.sh:profile_path_entries]`, `[install.sh:already_on_path]` — PATH helpers.
-- `[install.sh:skip_checksum]`, `[install.sh:no_autostart]`, `[install.sh:no_launcher]`, `[install.sh:uninstall]` — option flags; `uninstall` is the switch that reverses the install.
+- `[install.sh:skip_checksum]`, `[install.sh:no_autostart]`, `[install.sh:no_launcher]`, `[install.sh:activate]`, `[install.sh:uninstall]` — option flags; `activate` is the post-install switch that registers and arms the daemon on an install that is already in place (no download), and `uninstall` is the switch that reverses the install.
+- `[install.sh:rgy_register_daemon]` — the one function both `--activate` and the end of a normal install call: it resolves `rgy-autostart` next to the install dir first and on the PATH second (a package manager put the binaries on the PATH, not in `install_dir`), runs `rgy-autostart install` with `--launcher` when `rgxy` is present, and prints the same result for both callers. A normal install ignores its exit code; `--activate` propagates it.
 - `[install.sh:rgy_uninstall]` — the uninstall branch: `rgy-autostart uninstall` takes out both login entries, the twelve copied files and the `docs/` tree are removed by name, and the exact two-line PATH block is filtered out of the profile. The install directory itself is never removed.
 - `[install.sh:tmp]` = `mktemp -d`; `[install.sh:stage]`, `[install.sh:stage_root]` — the unpack staging directory.
 - `[Cargo.toml:workspace.members]`, `[Cargo.toml:workspace.package]`, `[Cargo.toml:profile.release]`.
@@ -47,6 +48,7 @@ Local invariants read from the file:
 - `[install.sh:placeholder]` — "A platform whose archive this release does not carry would hold the placeholder digest, and that is refused by name, before anything is downloaded".
 - `[install.sh:rgy_read_options]` — the option vocabulary, digest helper and refusal behaviour are shared with `install.ps1` through `scripts/lib/options.sh` and `scripts/lib/digest.sh`, so the two twins answer the same question the same way.
 - `[install.sh:rgy_uninstall]` — "--uninstall takes out exactly what install put in"; the same URL installs and uninstalls, so there is no second script to keep in step with this one.
+- `[install.sh:rgy_register_daemon]` — "--activate is a post-install action, so it never reaches the download"; the daemon registration is one function shared by the post-install switch and a normal install, so an install made with `--no-autostart`, a package-manager install, or an `rgy-autostart uninstall` is put back with the same words and the same result.
 
 ## Subdirectories & System Boundaries
 

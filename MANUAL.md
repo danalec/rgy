@@ -213,8 +213,12 @@ rgy-autostart uninstall    # take it out
 
 `install` needs nothing: the daemon is the `searchd` beside the tool, and
 the tree it indexes is your home directory. The one-line installers do this
-for you; every other way in leaves it to you, so run `rgy-autostart install`
-once after installing by hand.
+for you; every other way in (Scoop, AUR, an extracted archive, crates.io)
+leaves it to you. Run `rgy-autostart install` once after installing by hand,
+or `install.sh --activate` / `install.ps1 -Activate` — the installer's
+post-install switch that does the same thing and downloads nothing. If you
+would rather not run a daemon at all, [a daily index refresh](#without-the-daemon-a-daily-index-refresh)
+is the `locate` / `updatedb` alternative.
 
 What gets registered depends on the operating system: a Task Scheduler task
 (or the `HKCU` run value) on Windows, a systemd **user** unit on Linux, a
@@ -254,6 +258,106 @@ path:       /home/you/.local/bin is on the PATH
 
 `doctor` also prints a `fix:` line when something is not right — the command
 that repairs it.
+
+### Without the daemon: a daily index refresh
+
+The daemon is one way to keep the index fresh; the other is the one rgy shares
+with `locate` / `updatedb` — a **snapshot rebuilt on a schedule**, with no
+resident process. Both `searchctl` and `searchd` read and write the **same**
+index file (the platform cache folder, keyed by `--root`), so the two are
+interchangeable and you should run **one of them, not both**: a scheduled
+`--reindex` would overwrite the daemon's live state, and a running daemon
+would keep rewriting the snapshot a timer just built.
+
+The one command that recreates the index and picks up every file created,
+changed or deleted since the last build is:
+
+```sh
+searchctl --root ~ --reindex --count '*'
+```
+
+`--reindex` forces a full walk even when a usable snapshot exists; `'*'` is a
+whole-path glob matching every entry (a query is required); `--count` prints
+one number instead of every hit. This is rgy's `updatedb`. Without the
+daemon, a later plain query reuses the snapshot for 30 minutes (`--max-age`),
+then rebuilds it on demand; `--max-age 0` means *never reuse*, so every
+query walks the tree again. A full walk of a large home directory is a real
+cost — that is exactly what the daemon avoids.
+
+`rgy-autostart install` is itself the **systemd integration for the daemon**:
+it writes a **user** unit at
+`~/.config/systemd/user/rgy-searchd.service` and arms it with
+`systemctl --user enable --now rgy-searchd.service`, so the daemon starts now
+and at every login. It listens on a unix socket and applies changes through
+inotify as they happen; no timer is needed. `rgy-autostart status` and
+`rgy-autostart doctor` report what is registered and whether it is up.
+
+For the **scheduled** model instead, write a oneshot service and a timer in
+that same user-unit directory and enable the *timer*, never the service:
+
+```ini
+# ~/.config/systemd/user/rgy-index.service
+[Unit]
+Description=Rebuild the rgy name index once
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/searchctl --root %h --reindex --count '*'
+```
+
+```ini
+# ~/.config/systemd/user/rgy-index.timer
+[Unit]
+Description=Daily rgy index refresh
+[Timer]
+OnCalendar=daily
+Persistent=true
+[Install]
+WantedBy=timers.target
+```
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now rgy-index.timer
+systemctl --user list-timers rgy-index.timer     # when it last ran, and next
+systemctl --user start rgy-index.service         # force a rebuild right now
+```
+
+`%h` is systemd's home-directory specifier. Change the `ExecStart` path to
+`/usr/bin/searchctl` when a package manager (AUR) installed the binary
+there, and to the Scoop shim directory on Windows. `Persistent=true` runs a
+missed rebuild at the next boot, so a laptop that was off at 03:00 still
+refreshes. `OnCalendar=` accepts any systemd calendar expression —
+`*-*-* 03:00`, `weekly`, `Mon..Fri 08:00` — so "once a day" is a choice,
+not a limit.
+
+The same idea without systemd:
+
+```sh
+# cron (Linux, macOS, FreeBSD): every day at 03:00
+0 3 * * * $HOME/.local/bin/searchctl --root "$HOME" --reindex --count '*'
+```
+
+On macOS use a launchd agent with `StartCalendarInterval`, and on Windows a
+Task Scheduler task with a daily trigger running
+`searchctl.exe --root %USERPROFILE% --reindex --count *`. Both are the same
+oneshot command on a schedule; neither needs the daemon.
+
+**After installing from a package manager.** Scoop, the AUR packages, an
+extracted archive and crates.io put the binaries on the PATH but do not run
+the one-line installer, so neither the daemon nor a timer is armed. Their
+post-install message offers both options above. The daemon option is also
+available directly from the installer after the fact, with no download:
+
+```sh
+# Linux, macOS and FreeBSD
+install.sh --activate
+# Windows
+install.ps1 -Activate
+```
+
+`--activate` runs `rgy-autostart install` on the installed tree, is
+re-runnable, and is the same action the end of a normal install takes.
+`--uninstall` reverses it.
 
 ## 3. Build it
 

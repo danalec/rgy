@@ -6,6 +6,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/danalec/rgy/main/install.sh | bash
 #   bash install.sh --install-dir /usr/local/bin
 #   bash install.sh --version rgy-v0.1.10.0
+#   bash install.sh --activate
 #   bash install.sh --uninstall
 #
 # Downloads the rgy release tarball, verifies its SHA256, unpacks the four
@@ -15,6 +16,16 @@
 # FreeBSD the launcher is the terminal interface: it needs a terminal, a
 # login entry has none, and `rgy-autostart` says so instead of writing a
 # unit that starts and exits 0 without drawing anything.
+#
+# --activate is the post-install option: it registers and arms the daemon
+# on an install that is already here, and downloads nothing. A package
+# manager (Scoop, AUR, an extracted archive, crates.io) puts the binaries
+# on the PATH but never runs this installer, so the daemon is not running
+# after those installs -- this switch is the one command that turns it on.
+# It is the same action the end of a normal install takes, so an install
+# that was made with --no-autostart, or an `rgy-autostart uninstall`, is
+# put back with the same words and the same result. It is re-runnable: the
+# registration is idempotent.
 #
 # --uninstall takes out exactly what install put in: the login entries,
 # the copied files and the PATH block. It removes no directory it did not
@@ -64,6 +75,7 @@ base_url="https://github.com/danalec/rgy/releases/download"
 skip_checksum=0
 no_autostart=0
 no_launcher=0
+activate=0
 uninstall=0
 
 # The digests of the archives this installer is allowed to install.
@@ -190,7 +202,7 @@ else
     }
 fi
 
-rgy_read_options "skipchecksum=skip_checksum noautostart=no_autostart nolauncher=no_launcher uninstall=uninstall" \
+rgy_read_options "skipchecksum=skip_checksum noautostart=no_autostart nolauncher=no_launcher activate=activate uninstall=uninstall" \
                  "installdir=install_dir baseurl=base_url version=version" "" "$@"
 
 # --uninstall takes out exactly what install put in.
@@ -252,8 +264,73 @@ rgy_uninstall() {
     echo "Uninstalled rgy from $dir."
 }
 
+# Register and arm the daemon on an install that is already in place.
+#
+# This is the post-install activation and the last step of a normal install,
+# and it is ONE function so the two answer the same question the same way:
+# no download, no PATH edit, no copy -- just `rgy-autostart install`. The
+# tool is looked for next to where the install put it first, and on the PATH
+# second, because a package manager put the binaries on the PATH and not in
+# $install_dir, and that install still has a daemon to activate.
+#
+# `rgy-autostart install` both writes the login entry and ARMS it now
+# (`systemctl --user enable --now`, `launchctl bootstrap`, `schtasks /Run`),
+# so "activate" is a real start, not only an entry that waits for the next
+# login. It is idempotent: a second call leaves one entry and starts nothing
+# twice. Running this command IS the consent -- no prompt, no elevation.
+#
+# The launcher is asked for only when it is actually on the machine, and the
+# autostart tool decides whether the platform has that entry (Windows only).
+# A failure here is never a reason to fail a normal install: by the time the
+# install reaches this function, the binaries, the alias and the PATH are all
+# in place. --activate, which does nothing else, propagates the code instead.
+rgy_register_daemon() {
+    tool=""
+    if [ -x "$install_dir/rgy-autostart" ]; then
+        tool="$install_dir/rgy-autostart"
+    elif command -v rgy-autostart > /dev/null 2>&1; then
+        tool=$(command -v rgy-autostart)
+    fi
+    if [ -z "$tool" ]; then
+        echo "rgy-autostart was not found: install rgy first, then --activate it." >&2
+        return 1
+    fi
+
+    launcher=""
+    if [ -x "$install_dir/rgxy" ]; then
+        launcher="$install_dir/rgxy"
+    elif command -v rgxy > /dev/null 2>&1; then
+        launcher=$(command -v rgxy)
+    fi
+    args="install"
+    if [ "$no_launcher" -eq 0 ] && [ -n "$launcher" ]; then
+        args="$args --launcher"
+    fi
+
+    "$tool" $args
+    code=$?
+    if [ "$code" -eq 0 ]; then
+        echo "The daemon starts at login. To take it out: rgy-autostart uninstall"
+    elif [ "$code" -eq 2 ]; then
+        echo "The entries were written but the platform could not arm them (see above)." >&2
+    else
+        echo "The daemon was not registered. To register it: rgy-autostart install" >&2
+    fi
+    return "$code"
+}
+
 if [ "$uninstall" -eq 1 ]; then
     rgy_uninstall "$install_dir"
+    exit $?
+fi
+
+# --activate is a post-install action, so it never reaches the download. It
+# works on an install made by a package manager, by an extracted archive, by
+# crates.io, or by this installer with --no-autostart: the binaries are on
+# the PATH already, and the only thing left to do is turn the daemon on.
+if [ "$activate" -eq 1 ]; then
+    echo "Activating the rgy daemon on the install that is already here ..."
+    rgy_register_daemon
     exit $?
 fi
 
@@ -536,18 +613,10 @@ fi
 
 # The daemon at login.
 #
-# The autostart tool finds the daemon next to itself -- the two were just
-# copied into the same directory -- and registers it with the tree it
-# indexes. The entry goes into the user's own session: no root, no prompt,
-# no dialog.
-#
-# The launcher is asked for too, under its own name, and the autostart tool
-# decides whether the platform has that entry. On Windows it does: the
-# launcher is a resident floating window, and the window is there in a few
-# milliseconds because the *daemon* has the index warm. On Linux, macOS and
-# FreeBSD the launcher is the terminal interface, a login entry has no
-# terminal, and the tool says so -- a unit that is registered, enabled and
-# exits 0 without drawing anything promises a launcher that never appears.
+# The same action --activate takes, through the same function: the autostart
+# tool finds the daemon next to itself -- the two were just copied into the
+# same directory -- and registers it with the tree it indexes. The entry
+# goes into the user's own session: no root, no prompt, no dialog.
 #
 # This step is a convenience, and a failure here is not a reason to tell
 # the user the install failed: by the time it runs, the daemon, the
@@ -556,23 +625,9 @@ fi
 # installer that aborted here would leave a half-installed tool behind
 # and a non-zero exit on top of it.
 if [ "$no_autostart" -eq 0 ]; then
-    # The launcher is asked for only when it is actually on the machine: an
-    # entry that points at a binary that is not there is an entry that
-    # fails at every login. The tool ignores the request on the platforms
-    # where the launcher has no login entry, and says why on the console.
-    args="install"
-    if [ "$no_launcher" -eq 0 ] && [ -x "$install_dir/rgxy" ]; then
-        args="$args --launcher"
-    fi
-    "$install_dir/rgy-autostart" $args
-    code=$?
-    if [ "$code" -eq 0 ]; then
-        echo "The daemon starts at login. To take it out: rgy-autostart uninstall"
-    elif [ "$code" -eq 2 ]; then
-        echo "The entries were written but the platform could not arm them (see above)." >&2
-    else
-        echo "The daemon was not registered. To register it: rgy-autostart install" >&2
-    fi
+    # A normal install ignores the code: the function has already said what
+    # happened, and the install is complete with or without the daemon.
+    rgy_register_daemon
 fi
 
 echo "Installed: searchctl, searchd, rgy-autostart and rgxy in $install_dir"
