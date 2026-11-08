@@ -128,12 +128,15 @@ one on the runner that has the platform.
 
 | platform | package | state |
 |---|---|---|
-| Windows | Scoop | **out** — `scoop bucket add danalec/scoop-alts` and `scoop install rgy`. The same bucket carries `rgx`, the upstream engine this repository is built on |
-| Windows | winget | the manifest in this repository validates and is refreshed by every release; the submission to `microsoft/winget-pkgs` ([#469679](https://github.com/microsoft/winget-pkgs/pull/469679)) was closed unmerged — `winget install danalec.rgy-search` installs nothing today |
+| Windows | Scoop | **out** — `scoop bucket add danalec_scoop-alts https://github.com/danalec/scoop-alts` and `scoop install danalec_scoop-alts/rgy`. The same bucket carries `rgx`, the upstream engine this repository is built on |
+| Windows | winget | the manifest in this repository validates and is refreshed by every release; the submission to `microsoft/winget-pkgs` ([#474460](https://github.com/microsoft/winget-pkgs/pull/474460)) is open awaiting a moderator — `winget install danalec.rgy-search` installs nothing until it merges |
+| Arch Linux | AUR | **out** — three binary packages at 0.1.10.0: `rgy-search-bin` (portable), `rgy-search-avx2-bin` and `rgy-search-znver4-bin`. They conflict, because all three install `/usr/bin/searchctl`: `yay -S rgy-search-bin` (or `paru -S`) installs one of them |
 | macOS | Homebrew | the formula pins the real digests of both macOS archives; the tap is not published — `brew install danalec/rgy/rgy-search` installs nothing today |
+| any | crates.io | all thirty-two crates at 0.1.10 — `cargo install rgy-search --version 0.1.10` gives you `searchctl`; `rgy-searchd`, `rgy-autostart` and `rgxy` are separate crates |
 
-The **packages** — the winget manifest, the Scoop manifest and the Homebrew
-formula — are called **rgy-search**, and not `rgy`, because `rgy` is taken on
+The **packages** — the winget manifest, the Scoop manifest, the Homebrew
+formula and the AUR PKGBUILDs — are called **rgy-search** (or a suffixed
+form such as `rgy-search-bin`), and not `rgy`, because `rgy` is taken on
 crates.io (a GameBoy emulator library from 2019). The command-line tool's
 crate carries the same name, so the package manager and the registry say one
 thing: beside it are `rgy-searchd`, `rgy-autostart` and `rgxy`, and the

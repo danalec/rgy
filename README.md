@@ -71,6 +71,53 @@ cargo install rgy-autostart --version 0.1.10     # the login item: rgy-autostart
 cargo install rgxy --version 0.1.10            # the window: rgxy
 ```
 
+**From a package manager** — the same release, without the one-line
+installer:
+
+| platform | manager | command |
+|---|---|---|
+| Windows | [Scoop](https://scoop.sh/) | `scoop bucket add danalec_scoop-alts https://github.com/danalec/scoop-alts` · `scoop install danalec_scoop-alts/rgy` |
+| Arch Linux | AUR | `yay -S rgy-search-bin` |
+| any | crates.io | `cargo install rgy-search --version 0.1.10` |
+
+The [scoop-alts](https://github.com/danalec/scoop-alts) bucket carries `rgy`
+at **0.1.10.0**, the same portable Windows archive the installer downloads,
+and the same bucket carries `rgx`, the upstream engine this repository is
+built on.
+
+On Arch Linux and derivatives, three binary AUR packages install the
+prebuilt Linux archives, so no Rust toolchain is needed:
+[rgy-search-bin](https://aur.archlinux.org/packages/rgy-search-bin)
+(portable),
+[rgy-search-avx2-bin](https://aur.archlinux.org/packages/rgy-search-avx2-bin)
+(AVX2) and
+[rgy-search-znver4-bin](https://aur.archlinux.org/packages/rgy-search-znver4-bin)
+(AMD Zen 4). They conflict with one another, because all three install
+`/usr/bin/searchctl`: install one, not three.
+
+```sh
+yay -S rgy-search-bin             # or paru -S rgy-search-bin
+# yay -S rgy-search-avx2-bin     # AVX2 build
+# yay -S rgy-search-znver4-bin   # AMD Zen 4 build
+```
+
+All thirty-two crates are on crates.io at **0.1.10** — the registry takes
+three numbers, while the release tag carries a fourth, the fix count of the
+line. The programme crates named above are the ones most people want; the
+library crates are there too, and `scripts/publish-crates.sh` publishes them
+in dependency order.
+
+Two more manifests live in this repository but are not published as packages
+yet: `.winget/` (the submission to
+[microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs/pull/474460)
+is awaiting a moderator) and `Formula/rgy-search.rb` (the Homebrew tap is
+not published). `winget install danalec.rgy-search` and
+`brew install danalec/rgy/rgy-search` install nothing today. The
+[manual](MANUAL.md#the-packages) says the state of each one plainly.
+
+The FreeBSD archive is picked by `install.sh` from `uname -s` by itself;
+there is no login item there yet.
+
 **From the release** — the archive carries the four binaries, the `rgy`
 alias and the documents, and it needs neither Rust nor a compiler:
 

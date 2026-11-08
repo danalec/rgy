@@ -57,22 +57,36 @@ installer, so a substituted download is refused before anything is unpacked.
   same bucket carries `rgx`, the upstream engine this repository is built on:
 
   ```sh
-  scoop bucket add danalec/scoop-alts
-  scoop install rgy
+  scoop bucket add danalec_scoop-alts https://github.com/danalec/scoop-alts
+  scoop install danalec_scoop-alts/rgy
   ```
 
+- **AUR** (Arch Linux and derivatives) carries three binary packages at
+  **0.1.10.0-1**: `rgy-search-bin` (portable), `rgy-search-avx2-bin` (AVX2)
+  and `rgy-search-znver4-bin` (AMD Zen 4). They install the prebuilt Linux
+  archives, so no Rust toolchain is needed, and they conflict with one
+  another because all three install `/usr/bin/searchctl`:
+
+  ```sh
+  yay -S rgy-search-bin             # or paru -S rgy-search-bin
+  # yay -S rgy-search-avx2-bin     # AVX2 build
+  # yay -S rgy-search-znver4-bin   # AMD Zen 4 build
+  ```
+
+  The PKGBUILDs live in their own AUR repositories, not in this tree.
 - **winget** (Windows) and **Homebrew** (macOS) carry their manifests in this
   repository — `.winget/` and `Formula/rgy-search.rb` — rewritten from the
-  archives on publish day. The winget submission is not merged and the
-  Homebrew tap is not published, so those two commands install nothing yet;
-  the MANUAL.md that travels in the archive says the state of each one
-  plainly in its "The packages" section.
+  archives on publish day. The winget submission
+  ([#474460](https://github.com/microsoft/winget-pkgs/pull/474460)) is open
+  awaiting a moderator, and the Homebrew tap is not published, so those two
+  commands install nothing yet. The MANUAL.md that travels in the archive
+  states each one plainly in its "The packages" section.
 - **crates.io** carries all thirty-two crates at **0.1.10** — the registry
   takes three numbers, while the release tag carries a fourth. The publish
   order is computed from the manifests and the index is waited on before
   each crate goes up (`scripts/publish-crates.sh`).
-- **AUR** is not distributed by this tree; the FreeBSD archive is picked by
-  the installer from `uname -s`, and there is no login item there yet.
+- The **FreeBSD** archive is picked by `install.sh` from `uname -s` by
+  itself; there is no login item there yet.
 
 ## What changed in 0.1.10.0
 
