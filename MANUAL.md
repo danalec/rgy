@@ -261,6 +261,14 @@ that repairs it.
 
 ### Without the daemon: a daily index refresh
 
+**If you installed from a package manager and did nothing else:** `searchctl`
+still answers — the first query builds an index — but it is a snapshot, so a
+file created in the last 30 minutes can be missing until the next rebuild.
+`rgxy` is the one thing that stops working outright: it is a client of the
+daemon and prints `no connection to the daemon`. `rgy-autostart install` (or
+`install.sh --activate` / `install.ps1 -Activate`) fixes both;
+`rgy-autostart doctor` reports what is registered and whether it is up.
+
 The daemon is one way to keep the index fresh; the other is the one rgy shares
 with `locate` / `updatedb` — a **snapshot rebuilt on a schedule**, with no
 resident process. Both `searchctl` and `searchd` read and write the **same**

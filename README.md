@@ -181,6 +181,15 @@ rebuilds it. The one-line installer activates the daemon for you; a package
 manager (Scoop, AUR, an extracted archive, crates.io) does **not**, and its
 post-install message offers these same two commands.
 
+**If you did nothing after a package-manager install:** `searchctl` still
+answers — it builds an index on the first query — but that index is a
+snapshot, so a file created in the last 30 minutes can be missing until the
+next rebuild. The `rgxy` launcher is the one thing that stops working
+outright: it is a client of the daemon and says `no connection to the
+daemon`. Run `rgy-autostart install` (or `install.sh --activate` /
+`install.ps1 -Activate`) and both are fixed. `rgy-autostart doctor` reports
+what is registered and whether it is up.
+
 ### Compared with `locate` / `updatedb`
 
 `locate` answers from a static database that `updatedb` rebuilds on a
