@@ -206,6 +206,17 @@ To install and configure the daemon, run `rgy-autostart install` (or
 `install.sh --activate` / `install.ps1 -Activate` after the fact);
 `rgy-autostart doctor` reports what is registered and whether it is up.
 
+**Wondering what the daemon has indexed?** It prints `walking the tree`,
+`scanning… <dirs> dirs, <entries> entries` every 500 ms and then
+`indexed N entries → <path>` to stderr while it starts. Once it is up,
+`rgy-autostart doctor` tells you whether it is running, and sending
+`{"op":"status"}` to its socket returns
+`{"op":"status","docs":N,"event_id":…,"catch_up":"relisted","tv":false,"feed":"live"}` —
+`docs` is the live entry count, `catch_up` says whether it replayed a change
+journal or walked the tree again, and `feed` says whether the tree is still
+being followed (`live` / `gone` / `none`). [The manual](MANUAL.md#watching-the-index-being-built-and-asking-its-state)
+has the exact commands and every field.
+
 **To try `rgxy` without installing anything**, start a daemon in the
 foreground — no systemd, no login entry, nothing registered — and point the
 launcher at it. Stop it with Ctrl-C when you are done:

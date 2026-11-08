@@ -926,6 +926,69 @@ has a pack store, which is the corpus packed once and mmapped. Both are
 additive, and a reader that does not know them reads the status as it
 was before they existed.
 
+#### Watching the index being built, and asking its state
+
+There are three ways to see what indexing is doing, and they answer three
+different questions.
+
+**1. While it starts (stderr).** `searchd` writes its progress to stderr, so
+it never pollutes the answers on stdout. On a machine with no usable saved
+index it walks the tree:
+
+```
+searchd: walking the tree with the linux backend
+searchd: scanning… 899 dirs, 221021 entries
+searchd: indexed 3 entries → /home/you/.cache/rgy/<hash>.idx
+searchd: following the tree with inotify
+```
+
+`scanning…` is printed every 500 ms during the walk, with a real tally of
+directories listed and entries seen — it is the sign that a long first run is
+working, not hung. `indexed N entries → <path>` is the moment the snapshot is
+saved. With a reusable saved index the walk is skipped:
+
+```
+searchd: reusing index /home/you/.cache/rgy/<hash>.idx (3 entries, built 4m) — no change journal: this platform keeps no change history, so the changes made since the index was built are not in it
+searchd: following the tree with inotify
+searchd: the tree was walked again and diffed
+```
+
+The daemon only binds its socket **after** the index is ready, so a client
+that connects is talking to a daemon whose index is built. On Linux and
+FreeBSD the tree is walked again and diffed at every start (there is no
+journal to resume); on Windows it resumes the USN journal at the watermark
+the index carries when the journal still covers it.
+
+**2. `rgy-autostart doctor` — is it up?** This is the quick check: it reports
+`registered`, `running: yes/no`, the `root` the registered command indexes,
+and the `listens:` endpoint, with a `fix:` line when something is wrong. It
+opens and closes a connection, sends no request, and changes nothing — so it
+tells you the daemon is reachable, **not** how much it has indexed.
+
+**3. `{"op":"status"}` — what has it indexed?** Send that one JSON line to
+the daemon's endpoint and read one line back. The `docs` field is the live
+count (base index minus dead entries plus the overlay), `event_id` is the
+journal position the index is current as of, `catch_up` is `replayed` or
+`relisted`, `feed` is `live` / `gone` / `none`, and `tv` says whether a pack
+store backs content search. On Linux/FreeBSD, with no `socat` or `nc`
+installed, a Python one-liner is enough — use the path `doctor` printed on
+its `listens:` line:
+
+```sh
+python3 -c 'import socket; s=socket.socket(socket.AF_UNIX); s.connect("/home/you/.cache/rgy/searchd.sock"); s.sendall(b"{\"op\":\"status\"}\n"); print(s.recv(4096).decode().strip())'
+```
+
+On Windows the daemon listens on a named pipe, so the same question goes
+through the client library (or `rgxy`), which knows the pipe's name. The
+`rgxy` launcher asks `status` itself: it draws `docs` in its header and warns
+`the tree is no longer followed by the daemon` when `feed` is `gone` and
+`the daemon does not follow this tree: the index is a snapshot` when it is
+`none`.
+
+A `feed: "gone"` is the state to act on: the daemon is still answering, but
+from a frozen snapshot. `rgy-autostart doctor` will show `running: yes` while
+the tree is no longer followed — only the `status` frame says so.
+
 A content search answers with the files it read and says whether it read
 all of them:
 
