@@ -29,18 +29,27 @@ mod daemon;
 // down to everything that has a word to say.
 mod lang;
 // The memory of what the user used. The window is the only thing that
-// records a use, and the window is Windows-only for now: elsewhere the
-// module is compiled — and tested — with nothing calling it yet.
-#[cfg_attr(not(windows), allow(dead_code))]
+// records a use; on a host with neither window the module is compiled —
+// and tested — with nothing calling it yet.
+#[cfg_attr(
+    not(any(windows, target_os = "linux", target_os = "freebsd")),
+    allow(dead_code)
+)]
 mod mru;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux", target_os = "freebsd"))]
 mod preview;
+// The name the window driver knows the platform by.
+mod platform;
 mod rgx;
 mod tools;
+// The machine behind the terminal interface's actions: the same open,
+// open-folder, clipboard and settings the window uses, reached through
+// the platform backend where there is one.
+mod tui_actions;
 // The help text, in the language the launcher is speaking.
 mod usage;
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux", target_os = "freebsd"))]
 mod gui;
 // The settings file: the one place the launcher's preferences live,
 // written by the panel and edited by hand.
@@ -51,7 +60,10 @@ mod gui;
 // one the writer and the helpers it needs are compiled and never called,
 // and the lint that says so is silenced the way the tree says it: with the
 // reason next to it.
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(
+    not(any(windows, target_os = "linux", target_os = "freebsd")),
+    allow(dead_code)
+)]
 mod settings_store;
 
 use std::io::{IsTerminal, Write};
@@ -633,8 +645,19 @@ fn run_tui(mut source: DaemonSource, reason: Option<&str>, lang: Lang) -> Result
         .and_then(|path| settings_store::load(&path).ok())
         .map(|settings| settings.tui.theme(rgy_launcher::Theme::MIDNIGHT))
         .unwrap_or(rgy_launcher::Theme::MIDNIGHT);
-    rgy_search_ui::run_with_source_lang_and_theme(Box::new(source), root, lang, theme)
-        .map(|_| ExitCode::SUCCESS)
+    // The terminal gets the same machine the window has: opening a result,
+    // opening its folder, the clipboard and the settings file are carried
+    // out, not just described. Without this the terminal is a launcher that
+    // names its options and then declines them.
+    let runner = tui_actions::TuiActions::new(lang);
+    rgy_search_ui::run_with_source_lang_theme_and_runner(
+        Box::new(source),
+        root,
+        lang,
+        theme,
+        Box::new(runner),
+    )
+    .map(|_| ExitCode::SUCCESS)
 }
 
 /// The sentences the terminal prints before the interface takes the screen.
@@ -665,14 +688,22 @@ fn notices(source: &mut DaemonSource, reason: Option<&str>, terminal: bool) -> V
 }
 
 /// The window, where there is a desktop to put it on.
-#[cfg(windows)]
+///
+/// One body for Windows and Linux: the two backends export the same
+/// interface, and the name they are reached by is
+/// [`platform::backend`]. The single-instance claim, the settings read
+/// and the window driver are the same on both — only the crate that owns
+/// the window differs.
+#[cfg(any(windows, target_os = "linux", target_os = "freebsd"))]
 fn run_window(
     endpoint: Endpoint,
     rgx: Option<String>,
     options: &Options,
     lang: Lang,
 ) -> Result<ExitCode, String> {
-    if !rgy_launcher_windows::session_available() {
+    use crate::platform::backend;
+
+    if !backend::session_available() {
         // No desktop: the terminal is the fallback, and it says so.
         return run_tui(
             DaemonSource::new(endpoint, rgx, lang),
@@ -681,42 +712,32 @@ fn run_window(
         );
     }
     // One launcher per session. The resident launcher holds a global
-    // keyboard hook, an icon in the notification area and a topmost
-    // window, and a second `rgxy` is a second one of each: two hooks
-    // competing for the double tap, two icons, two windows. The claim is
-    // taken **before** anything is built, and a start that finds it taken
-    // asks the launcher that is there to show itself and leaves — which
-    // is what a user who typed the command again asked for.
-    //
-    // The claim lives as long as the run: it is dropped when the window
-    // says goodbye, and a launcher that is killed gives its name back
-    // with its process, so the next start is a first start again.
-    let (_claim, claim_note) = match rgy_launcher_windows::Sole::take() {
-        rgy_launcher_windows::Taken::First(sole) => (Some(sole), None),
-        rgy_launcher_windows::Taken::Other => {
+    // keyboard hook (or an X11 passive grab), an icon in the notification
+    // area (or an XEmbed tray icon) and a topmost window, and a second
+    // `rgxy` is a second one of each. The claim is taken **before**
+    // anything is built, and a start that finds it taken asks the
+    // launcher that is there to show itself and leaves.
+    let (_claim, claim_note) = match backend::Sole::take() {
+        backend::Taken::First(sole) => (Some(sole), None),
+        backend::Taken::Other => {
             // The window belongs to the launcher that is running, and the
             // start that arrives while it is still being built waits for
-            // it: the claim is taken before the window exists, and a
-            // second start that concluded "there is none" from a window
-            // that is not there yet would be a second launcher after all.
-            rgy_launcher_windows::sole::ask_the_running_one_to_show();
+            // it: the claim is taken before the window exists.
+            backend::sole::ask_the_running_one_to_show();
             return Ok(ExitCode::SUCCESS);
         }
-        rgy_launcher_windows::Taken::Unknown(reason) => {
+        backend::Taken::Unknown(reason) => {
             // The platform would not say whether another launcher is
-            // there. The launcher runs — a question that cannot be asked
-            // is not a reason to refuse to start — and the reason goes to
-            // the line under the field, where the launcher says what is
-            // true of the machine it is on. It does **not** go to the
-            // stderr: a resident launch gave its console back, and a
-            // write to a handle whose console is gone is a panic.
+            // there. The launcher runs anyway, and the reason goes to the
+            // line under the field, where the launcher says what is true
+            // of the machine it is on. On Windows it does not go to
+            // stderr: a resident launch gave its console back.
             (None, Some(reason))
         }
     };
-    // The settings are the file's, and the file is read once, here: the
-    // panel writes it, the next start reads it, and a file that cannot
-    // be read is the defaults plus a sentence on the line under the
-    // field — the launcher still comes up.
+    // The settings are the file's, read once, here: the panel writes it,
+    // the next start reads it, and a file that cannot be read is the
+    // defaults plus a sentence on the line under the field.
     let (settings, settings_note) = match settings_store::store_path() {
         Some(path) => match settings_store::load(&path) {
             Ok(settings) => (settings, None),
@@ -749,11 +770,13 @@ fn run_window(
 
 /// The window, where there is a desktop to put it on.
 ///
-/// The floating window is a Windows thing for now: the double-Control
-/// hotkey is a low-level keyboard hook, and the hook this repository has
-/// is the Windows one. Everywhere else the terminal interface is the
-/// launcher, and it is the same interface over the same source.
-#[cfg(not(windows))]
+/// The floating window is a Windows, a Linux and a FreeBSD thing: the
+/// last two share the X11 backend. Only macOS (and a host with no known
+/// backend) takes the terminal interface here, and it is the same
+/// interface over the same source. The double-Control hotkey is a
+/// low-level keyboard hook on Windows and an X11 passive grab on Linux
+/// and FreeBSD; neither exists here.
+#[cfg(not(any(windows, target_os = "linux", target_os = "freebsd")))]
 fn run_window(
     endpoint: Endpoint,
     rgx: Option<String>,
@@ -762,7 +785,7 @@ fn run_window(
 ) -> Result<ExitCode, String> {
     run_tui(
         DaemonSource::new(endpoint, rgx, lang),
-        Some(Text::for_lang(lang).the_window_is_windows_only),
+        Some(Text::for_lang(lang).no_window_backend),
         lang,
     )
 }

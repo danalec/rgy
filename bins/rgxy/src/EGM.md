@@ -7,14 +7,19 @@ search daemon ([main.rs:fn main], [main.rs:mod daemon]). It is a **client**: the
 index lives in the daemon and a keystroke is a question sent down a pipe
 ([daemon.rs:use rgy_proto::client::Client], [daemon.rs:use rgy_proto::endpoint::Endpoint]).
 `main.rs` declares the module set — [main.rs:mod lang], [main.rs:mod mru],
-[main.rs:mod rgx], [main.rs:mod tools], [main.rs:mod usage] — plus the two
-Windows-only modules [main.rs:mod gui] and [main.rs:mod preview]. The window
-driver is [gui.rs:pub fn run], which wires the model, source and window through
-`rgy_launcher` and `rgy_launcher_windows`
+[main.rs:mod rgx], [main.rs:mod tools], [main.rs:mod usage], [main.rs:mod platform],
+[main.rs:mod tui_actions] — plus the two window modules [main.rs:mod gui] and [main.rs:mod preview], gated
+`#[cfg(any(windows, target_os = "linux", target_os = "freebsd"))]`. The window driver is
+[gui.rs:pub fn run], which wires the model, source and window through
+`rgy_launcher` and the platform backend named by [platform.rs:pub use ... as backend]
 ([gui.rs:use rgy_launcher::{Action, Answer, App, Layer, Mode, Preview, Row, Source, commands}],
-[gui.rs:use rgy_launcher_windows::window::{Compositor, Control, Event, Key, View, Window}]).
-On a machine without a desktop the binary runs the terminal interface instead
-([main.rs:fn run_tui]). Supporting modules provide the localized help
+[gui.rs:use crate::platform::backend::window::{Compositor, Control, Event, Key, View, Window}]).
+The backend is `rgy_launcher_windows` on Windows and `rgy_launcher_x11` on
+Linux and FreeBSD; both export the same interface. On a machine without a desktop the binary
+runs the terminal interface instead ([main.rs:fn run_tui]), and it hands that
+interface a [tui_actions.rs:pub struct TuiActions] implementing
+`rgy_search_ui::Runner` so the terminal opens, copies and edits settings with
+the same machine the window uses. Supporting modules provide the localized help
 ([usage.rs:pub fn text]), the language ([lang.rs:pub fn from_env]), the `rgx`
 fallback ([rgx.rs:pub fn grep]), the preview ([preview.rs:pub fn of]), the
 settings file ([settings_store.rs:pub fn store_path]) and the usage history
@@ -29,6 +34,7 @@ settings file ([settings_store.rs:pub fn store_path]) and the usage history
 - [rgx.rs:pub fn grep] — content search fallback over the name layer's chosen files; [rgx.rs:pub fn split_pattern] splits a query into `ContentMode` and pattern; [rgx.rs:fn only_files] and [rgx.rs:fn stat_files] shape the scope.
 - [preview.rs:pub fn of] and [preview.rs:pub fn pending] — the head-of-file preview.
 - [settings_store.rs:pub fn store_path], [settings_store.rs:pub fn load], [settings_store.rs:pub fn save] — the settings file.
+- [tui_actions.rs:pub struct TuiActions] with [tui_actions.rs:impl Runner for TuiActions] — the terminal's action machine: `open`/`open_folder` delegate to the platform backend where there is one, `copy_path` uses the Win32 clipboard on Windows and OSC 52 to `/dev/tty` on unix, and `settings`/`save_settings` go through [settings_store.rs:pub fn load] / [settings_store.rs:pub fn save].
 - [mru.rs:pub fn store_path], [mru.rs:pub fn now], [mru.rs:pub fn load], [mru.rs:pub fn read_error], [mru.rs:pub fn parse], [mru.rs:pub fn save], [mru.rs:pub fn render], [mru.rs:pub fn escape_path], [mru.rs:pub fn unescape_path] — the usage-history store.
 - [daemon.rs:pub struct DaemonSource] with [daemon.rs:pub fn new], [daemon.rs:pub fn with_window], [daemon.rs:pub fn connect], [daemon.rs:pub fn ask_the_daemon], [daemon.rs:pub fn status], [daemon.rs:pub fn endpoint], [daemon.rs:pub fn rgx], [daemon.rs:pub fn snapshot] and [daemon.rs:impl Source for DaemonSource]; [daemon.rs:pub struct Status]; [daemon.rs:pub const LAUNCHER_WINDOW].
 - [gui.rs:pub fn run] — the resident window driver, over [gui.rs:trait WindowSource], [gui.rs:trait Worker] and [gui.rs:struct State].
@@ -57,6 +63,7 @@ settings file ([settings_store.rs:pub fn store_path]) and the usage history
 - [preview.rs:fn read_head] opens the file and reads its head (`std::fs::File::open`, `std::fs::metadata`).
 - [tools.rs:pub fn scan] reads `std::env::var_os("PATH")` and stats candidate files; [lang.rs:pub fn from_env] and [main.rs:fn home_dir] read environment variables.
 - [main.rs:fn pick] delegates to `rgy_pick::pick_records` and writes the chosen paths to stdout.
+- [main.rs:fn run_tui] hands [tui_actions.rs:pub struct TuiActions] to `rgy_search_ui::run_with_source_lang_theme_and_runner`; [tui_actions.rs:impl Runner for TuiActions] spawns the platform's opener (or delegates to the window backend), reads and writes the Win32 clipboard on Windows, writes OSC 52 to `/dev/tty` on unix, and loads/saves `settings.tsv`. A detached child is reaped on a thread of its own so a resident launcher does not collect zombies.
 
 ## Verification
 - Run: `cargo test --workspace --no-fail-fast --locked`

@@ -21,10 +21,15 @@
 //! the `>copy` command.
 
 use crate::preview;
+use crate::runner::{NoRunner, Runner};
 use crate::term::{self, Color, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, Paint};
 use rgy_launcher::Action as LauncherAction;
+use rgy_launcher::Settings;
+use rgy_launcher::TapKey;
 use rgy_launcher::latency::{LatencyMeter, duration};
-use rgy_launcher::text::{Brand, Lang, Text};
+use rgy_launcher::results::IconInfo;
+use rgy_launcher::settings::Hotkey;
+use rgy_launcher::text::{Brand, Lang, Text, fill};
 use rgy_launcher::theme::{Rgb, Theme};
 use rgy_name_core::live::Live;
 use rgy_name_core::name_query::{Alternatives, Hit, Searcher};
@@ -301,6 +306,19 @@ struct App {
     /// that does something and says nothing is a launcher the user
     /// cannot tell from a frozen one.
     notice: Option<Notice>,
+    /// The machine behind the launcher's actions.
+    ///
+    /// [`NoRunner`] keeps the old, honest notices; a real runner — the
+    /// window's own platform actions, wired by `rgxy` — really opens
+    /// files, folders and the clipboard, reads the clipboard and carries
+    /// the settings store.
+    runner: Box<dyn Runner>,
+    /// The settings the editable panel reads and writes.
+    settings: Settings,
+    /// The interactive actions menu, when it is open.
+    action_menu: Option<ActionMenu>,
+    /// The selected row of the settings panel, when it is open.
+    settings_panel: Option<usize>,
 }
 
 /// What a key press did to the app.
@@ -312,6 +330,10 @@ enum Action {
     Quit,
     /// Do one of the launcher's actions to the selected result.
     Run(LauncherAction),
+    /// Print the selected path and end the session — the picker contract.
+    /// `Enter` on a result still does this; an action from the menu or a
+    /// command does not.
+    Choose,
     /// The line names a command that does not exist.
     Unknown,
 }
@@ -347,6 +369,72 @@ struct Notice {
     /// The lines under it.
     lines: Vec<String>,
 }
+
+/// The interactive menu of actions for one result.
+///
+/// The window offers the actions of the selected row as a menu; the
+/// terminal used to show them as a static legend. With a machine behind
+/// it the list is a real one: the arrows move a highlight and `Enter`
+/// runs the highlighted action on the path the menu was opened for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ActionMenu {
+    /// The path whose actions are listed.
+    path: String,
+    /// The actions offered for that path, in the launcher's order.
+    actions: Vec<LauncherAction>,
+    /// Which action the highlight is on.
+    selected: usize,
+}
+
+/// One row of the editable settings panel.
+///
+/// The GUI's list in `bins/rgxy/src/gui.rs` is the authority; this is the
+/// terminal's copy of it, in the same order: the rows are navigated by
+/// index, and an order that differed between the two would be a panel
+/// that adjusts another row than the one it lit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Setting {
+    /// The overlay's template.
+    Theme,
+    /// How wide the window is.
+    Width,
+    /// How many rows the list shows.
+    Rows,
+    /// Where the window sits across the work area.
+    Across,
+    /// Where the window sits down the work area.
+    Down,
+    /// How opaque the panel is.
+    Alpha,
+    /// The key that opens the launcher.
+    Hotkey,
+    /// How long the window between the two taps is.
+    HotkeyWindow,
+    /// The terminal's template.
+    Tui,
+    /// The picker's template.
+    Fzf,
+    /// The picker's free arguments, read from the file.
+    FzfArgs,
+    /// The way back to the faces as they were.
+    Defaults,
+}
+
+/// The rows of the settings panel, in the order the GUI lists them.
+const SETTINGS: &[Setting] = &[
+    Setting::Theme,
+    Setting::Width,
+    Setting::Rows,
+    Setting::Across,
+    Setting::Down,
+    Setting::Alpha,
+    Setting::Hotkey,
+    Setting::HotkeyWindow,
+    Setting::Tui,
+    Setting::Fzf,
+    Setting::FzfArgs,
+    Setting::Defaults,
+];
 
 impl Notice {
     /// Nothing to act on: the command had no result to work on.
@@ -397,24 +485,40 @@ impl Notice {
         }
     }
 
+    /// The outcome of an action the machine really carried out.
+    ///
+    /// The title names what was attempted and the line says what the
+    /// machine did (or why it refused). An empty line is a panel with
+    /// only a title, which is the honest shape of "nothing to report".
+    fn outcome(title: &str, line: String) -> Notice {
+        Notice {
+            title: title.to_string(),
+            lines: if line.is_empty() { vec![] } else { vec![line] },
+        }
+    }
+
     /// The actions of the launcher, with the key that does each one.
     ///
-    /// What each action does is the terminal's own word, and the word is
-    /// the vocabulary's: the two faces say the same thing about the same
-    /// action, in the same language.
-    fn menu(lang: Lang) -> Notice {
+    /// What each action does is the vocabulary's own word, and the word
+    /// follows the machine: with a runner behind it the terminal says the
+    /// window's labels and advertises the window's keys, and without one
+    /// it keeps the honest older words and the keys a terminal can send.
+    fn menu(lang: Lang, available: bool) -> Notice {
         let text = Text::for_lang(lang);
         let lines = rgy_launcher::COMMANDS
             .iter()
             .map(|command| {
                 let name = format!(">{}", command.name);
-                let key = shortcut(command.action);
+                let key = shortcut(command.action, available);
                 // The two columns are the longest command and the longest
                 // key plus the space between them: `>settings` is nine
                 // cells in both columns, and a nine-cell name column put
                 // the two together -- the row read `>settings>settings`,
                 // which is a command nobody can type.
-                format!("{name:<10}{key:<12}{}", describe(command.action, text))
+                format!(
+                    "{name:<10}{key:<12}{}",
+                    describe(command.action, lang, available)
+                )
             })
             .collect();
         Notice {
@@ -450,11 +554,17 @@ impl Notice {
     }
 }
 
-/// What each action does, in the terminal's own words.
+/// What each action does, in the words the two faces share.
 ///
-/// The launcher's labels are the window's; the terminal has a voice of
-/// its own, and this is it — in the language the launcher speaks.
-fn describe(action: LauncherAction, text: &Text) -> &'static str {
+/// With a machine behind it the terminal does what the window does, so
+/// it says the window's own label for the action. Without one it keeps
+/// the terminal's older words, which say the honest half — the path it
+/// prints, the folder it names, the path it cannot copy.
+fn describe(action: LauncherAction, lang: Lang, available: bool) -> &'static str {
+    if available {
+        return action.label(lang);
+    }
+    let text = Text::for_lang(lang);
     match action {
         LauncherAction::Open => text.terminal_open,
         LauncherAction::OpenFolder => text.terminal_open_folder,
@@ -468,6 +578,12 @@ fn describe(action: LauncherAction, text: &Text) -> &'static str {
 /// The key that does the action in the terminal, and the command where
 /// there is no key.
 ///
+/// With a machine behind it the terminal advertises the window's keys:
+/// `Enter` is the picker's answer now, so opening a file is `Ctrl+O`, and
+/// the settings are `Ctrl+S`. Without one it keeps the older, honest
+/// list — described below — where a menu that sent the user to a key the
+/// terminal cannot send would be a menu that lies.
+///
 /// The launcher's menu says `Ctrl+C` for the copy; in a terminal that
 /// key quits, and a menu that sends the user to the wrong key is a menu
 /// that lies. The copy is the `>copy` command there.
@@ -480,7 +596,17 @@ fn describe(action: LauncherAction, text: &Text) -> &'static str {
 /// cannot arrive. The `>folder` command is how the terminal opens the
 /// folder — and the handler for the modifier sequence stays, because a
 /// backend that decoded one would not need the menu to change.
-fn shortcut(action: LauncherAction) -> &'static str {
+fn shortcut(action: LauncherAction, available: bool) -> &'static str {
+    if available {
+        return match action {
+            LauncherAction::Open => "Ctrl+O",
+            LauncherAction::OpenFolder => "Ctrl+Enter",
+            LauncherAction::CopyPath => ">copy",
+            LauncherAction::Preview => "Ctrl+P",
+            LauncherAction::Menu => "Ctrl+K",
+            LauncherAction::Settings => "Ctrl+S",
+        };
+    }
     match action {
         LauncherAction::Open => "Enter",
         LauncherAction::OpenFolder => ">folder",
@@ -518,6 +644,10 @@ impl App {
             meter: LatencyMeter::new(),
             source: None,
             notice: None,
+            runner: Box::new(NoRunner),
+            settings: Settings::default(),
+            action_menu: None,
+            settings_panel: None,
         };
         app.search();
         app
@@ -557,6 +687,10 @@ impl App {
             meter: LatencyMeter::new(),
             source: Some(source),
             notice: None,
+            runner: Box::new(NoRunner),
+            settings: Settings::default(),
+            action_menu: None,
+            settings_panel: None,
         };
         app.search();
         app
@@ -715,6 +849,17 @@ impl App {
         self.caret += 1;
     }
 
+    /// Insert every character of a string at the caret.
+    ///
+    /// A clipboard paste arrives as text, not as keys: the field takes it
+    /// character by character so the caret and the byte offsets stay the
+    /// ones [`App::insert`] maintains.
+    fn insert_str(&mut self, s: &str) {
+        for c in s.chars() {
+            self.insert(c);
+        }
+    }
+
     fn delete_before_caret(&mut self) {
         if self.caret == 0 {
             return;
@@ -788,14 +933,24 @@ impl App {
 
     /// Do one of the launcher's actions to the selected result.
     ///
-    /// `true` when the session is over: `Open` is the one action that
-    /// ends it, because the terminal has no window to open a file in and
-    /// prints the path instead — which is what `Enter` does too.
+    /// `true` when the session is over. Without a machine `Open` ends it,
+    /// because the terminal has no window to open a file in and prints
+    /// the path instead — which is what `Enter` does too. With a
+    /// [`Runner`] every action carries itself out and says what it did in
+    /// a notice, and the session stays: printing a path and leaving is
+    /// the picker's `Action::Choose`, not an action from a menu.
     fn run_action(&mut self, action: LauncherAction) -> bool {
-        // The settings are nobody's row here either: the terminal has no
-        // panel, and the file is where they are. The notice says the
-        // true path, so the user can go and open it.
+        // The settings are the launcher's own editable panel when a machine
+        // is behind the terminal; without one they stay the honest notice
+        // that says where the file is.
         if action == LauncherAction::Settings {
+            if self.runner.available() {
+                self.settings = self.runner.settings();
+                self.settings_panel = Some(0);
+                self.notice = None;
+                self.action_menu = None;
+                return false;
+            }
             let text = Text::for_lang(self.lang);
             let where_ = rgy_proto::endpoint::cache_dir()
                 .map(|cache| {
@@ -810,13 +965,32 @@ impl App {
             return false;
         }
         // The menu is not an action **on** a row: it is the list of the
-        // actions and the keys that do them, and it is the launcher's only
-        // legend. Asked for a row it does not need, it answered "nothing
-        // to act on" -- which is the one thing it can never be, and said it
-        // exactly where the user goes to learn the keys: the empty box the
-        // launcher opens with.
+        // actions and the keys that do them. With a machine and a selected
+        // result it becomes an interactive menu; without one it stays the
+        // launcher's only legend, which acts on no row and must never say
+        // "nothing to act on" — the empty box is exactly where a user goes
+        // to learn the keys.
         if action == LauncherAction::Menu {
-            self.notice = Some(Notice::menu(self.lang));
+            // A machine and a row make an interactive menu; either one
+            // missing leaves the legend, which is the launcher's only
+            // list of keys and needs no row to be shown.
+            let row = if self.runner.available() {
+                self.selected_path()
+            } else {
+                None
+            };
+            if let Some(path) = row {
+                let actions = LauncherAction::for_kind(IconInfo::of(&path)).to_vec();
+                self.action_menu = Some(ActionMenu {
+                    path,
+                    actions,
+                    selected: 0,
+                });
+                self.notice = None;
+                self.settings_panel = None;
+                return false;
+            }
+            self.notice = Some(Notice::menu(self.lang, self.runner.available()));
             return false;
         }
         let Some(path) = self.selected_path() else {
@@ -826,33 +1000,68 @@ impl App {
             self.notice = Some(Notice::nothing(self.lang));
             return false;
         };
+
+        // No machine: the old notices stay true, word for word. `Open`
+        // ends the session and prints the path — the picker contract —
+        // and the others say what the terminal can and cannot do. Every
+        // existing test starts here.
+        if !self.runner.available() {
+            return match action {
+                LauncherAction::Open => true,
+                LauncherAction::OpenFolder => {
+                    self.notice = Some(Notice::folder(&path, self.lang));
+                    false
+                }
+                LauncherAction::CopyPath => {
+                    self.notice = Some(Notice::copy(&path, self.lang));
+                    false
+                }
+                LauncherAction::Preview => {
+                    self.notice = Some(Notice::preview(&path, self.lang));
+                    false
+                }
+                // The menu and the settings were taken above, before a row
+                // was asked for; the arms keep the match exhaustive.
+                LauncherAction::Menu | LauncherAction::Settings => false,
+            };
+        }
+
+        // A machine: carry the action out, then say what happened. An
+        // action result replaces the panel it came from, so no stale menu
+        // or settings panel stays over the notice.
+        let text = Text::for_lang(self.lang);
+        self.action_menu = None;
+        self.settings_panel = None;
         match action {
-            LauncherAction::Open => true,
+            LauncherAction::Open => {
+                let line = match self.runner.open(&path) {
+                    Ok(()) => fill(text.notice_opened, &[&path]),
+                    Err(reason) => fill(text.notice_open_failed, &[&path, &reason]),
+                };
+                self.notice = Some(Notice::outcome(text.notice_open_title, line));
+            }
             LauncherAction::OpenFolder => {
-                self.notice = Some(Notice::folder(&path, self.lang));
-                false
+                let line = match self.runner.open_folder(&path) {
+                    Ok(()) => fill(text.notice_folder_opened, &[&path]),
+                    Err(reason) => fill(text.notice_folder_failed, &[&path, &reason]),
+                };
+                self.notice = Some(Notice::outcome(text.notice_folder_title, line));
             }
             LauncherAction::CopyPath => {
-                self.notice = Some(Notice::copy(&path, self.lang));
-                false
+                let line = match self.runner.copy_path(&path) {
+                    Ok(()) => fill(text.notice_copied, &[&path]),
+                    Err(reason) => fill(text.notice_copy_failed, &[&path, &reason]),
+                };
+                self.notice = Some(Notice::outcome(text.notice_copy_title, line));
             }
             LauncherAction::Preview => {
                 self.notice = Some(Notice::preview(&path, self.lang));
-                false
             }
-            LauncherAction::Menu => {
-                // Taken above, before the row is asked for: the menu is a
-                // legend and not an action on a row. The arm is here
-                // because the match is on the whole action.
-                self.notice = Some(Notice::menu(self.lang));
-                false
-            }
-            // Taken above, before the row is asked for: the settings are
-            // nobody's row. The arm is here because the match is on the
-            // whole action, and a setting that somehow reached it answers
-            // the way the rowless path above does.
-            LauncherAction::Settings => false,
+            // The menu and the settings are handled above; the arms keep
+            // the match exhaustive over the whole action.
+            LauncherAction::Menu | LauncherAction::Settings => {}
         }
+        false
     }
 
     /// Say that the line names a command that does not exist.
@@ -860,17 +1069,208 @@ impl App {
         self.notice = Some(Notice::unknown(&self.input, self.lang));
     }
 
-    /// Whether a notice is on screen.
+    /// Whether any panel is on screen: a notice, the actions menu or the
+    /// settings panel.
+    ///
+    /// The three are one thing to the field's keys — a panel that holds
+    /// the keyboard — so `Escape` asks about all of them at once.
     fn has_notice(&self) -> bool {
-        self.notice.is_some()
+        self.notice.is_some() || self.action_menu.is_some() || self.settings_panel.is_some()
     }
 
-    /// Take the notice away, if there is one.
+    /// Take every panel away, if one is open.
     ///
     /// `Escape` closes the panel before it closes the session — the
-    /// order the window uses.
+    /// order the window uses — and an edit closes it too: a panel about
+    /// the last thing must not stay over the results of the next.
     fn close_notice(&mut self) {
         self.notice = None;
+        self.action_menu = None;
+        self.settings_panel = None;
+    }
+
+    /// The rows of whichever panel is open, wrapped to the width.
+    ///
+    /// Three panels share the place over the results — the editable
+    /// settings, the interactive actions menu and a plain notice — in
+    /// that order of priority. A panel is the app's own here, so it reads
+    /// the palette itself instead of being handed one (see
+    /// [`Notice::rows`], which is not). As there, a long line is wrapped
+    /// before it is styled, so the wrap is measured in the cells a user
+    /// sees and not in escape sequences.
+    fn panel_rows(&self, width: usize) -> Option<Vec<String>> {
+        let text = Text::for_lang(self.lang);
+        if let Some(selected) = self.settings_panel {
+            let mut out = vec![text.settings.with(self.palette.ink).bold().to_string()];
+            out.push(text.notice_settings_help.with(self.palette.dim).to_string());
+            for (index, (label, value)) in self.settings_rows().into_iter().enumerate() {
+                let line = format!("{label:<16}{value}");
+                for piece in wrap(&line, width) {
+                    let styled = piece.with(self.palette.ink);
+                    let styled = if index == selected {
+                        styled.reverse()
+                    } else {
+                        styled
+                    };
+                    out.push(styled.to_string());
+                }
+            }
+            return Some(out);
+        }
+        if let Some(menu) = &self.action_menu {
+            let title = fill(text.notice_action_menu_title, &[name_of(&menu.path)]);
+            let mut out = vec![title.with(self.palette.ink).bold().to_string()];
+            out.push(text.notice_panel_help.with(self.palette.dim).to_string());
+            for (index, action) in menu.actions.iter().enumerate() {
+                let line = format!("{:<14}{}", action.label(self.lang), shortcut(*action, true));
+                for piece in wrap(&line, width) {
+                    let styled = piece.with(self.palette.ink);
+                    let styled = if index == menu.selected {
+                        styled.reverse()
+                    } else {
+                        styled
+                    };
+                    out.push(styled.to_string());
+                }
+            }
+            return Some(out);
+        }
+        self.notice.as_ref().map(|n| n.rows(width, &self.palette))
+    }
+
+    /// The settings panel's rows, spelled the way the GUI spells them.
+    ///
+    /// The labels are the vocabulary's and the values are the settings'
+    /// own words — a template's name, a number, a hotkey's spell — so the
+    /// panel says exactly what the file says and the file says exactly
+    /// what the panel set. This is the terminal's copy of the GUI's
+    /// `settings_rows`, and the GUI's list is the authority.
+    fn settings_rows(&self) -> Vec<(String, String)> {
+        let text = Text::for_lang(self.lang);
+        let overlay = &self.settings.overlay;
+        SETTINGS
+            .iter()
+            .map(|setting| {
+                let (label, value) = match setting {
+                    Setting::Theme => (text.settings_theme, overlay.palette.template.clone()),
+                    Setting::Width => (text.settings_width, overlay.width.to_string()),
+                    Setting::Rows => (text.settings_rows, overlay.rows.to_string()),
+                    Setting::Across => (text.settings_position, format!("{}%", overlay.x / 10)),
+                    Setting::Down => (text.settings_position, format!("{}%", overlay.y / 10)),
+                    Setting::Alpha => (text.settings_alpha, overlay.alpha.to_string()),
+                    Setting::Hotkey => (text.settings_hotkey, overlay.hotkey.spell()),
+                    Setting::HotkeyWindow => (
+                        text.settings_hotkey_window,
+                        match overlay.hotkey {
+                            Hotkey::DoubleTap { window_ms, .. } => format!("{window_ms} ms"),
+                            Hotkey::Combo { .. } => "—".to_string(),
+                        },
+                    ),
+                    Setting::Tui => (text.settings_tui, self.settings.tui.template.clone()),
+                    Setting::Fzf => (
+                        text.settings_fzf,
+                        self.settings.fzf.palette.template.clone(),
+                    ),
+                    Setting::FzfArgs => (
+                        text.settings_fzf_args,
+                        if self.settings.fzf.args.is_empty() {
+                            "—".to_string()
+                        } else {
+                            self.settings.fzf.args.join(" ")
+                        },
+                    ),
+                    Setting::Defaults => (text.settings_defaults, String::new()),
+                };
+                (label.to_string(), value)
+            })
+            .collect()
+    }
+
+    /// Adjust the selected setting one step in the direction the key said.
+    ///
+    /// The step lands at once on the settings the panel edits, and the
+    /// whole store is written back through the runner. Unlike the GUI
+    /// there is no window to resize and no hotkey to re-arm here: the
+    /// terminal wears its own theme at once, and the hotkey is the
+    /// window's business. A step on `Defaults` restores every face;
+    /// `FzfArgs` is read from the file and has nothing to step.
+    fn adjust_setting(&mut self, dir: i32) {
+        let index = self.settings_panel.unwrap_or(0).min(SETTINGS.len() - 1);
+        match SETTINGS[index] {
+            Setting::Theme => step_template(&mut self.settings.overlay.palette.template, dir),
+            Setting::Width => {
+                self.settings.overlay.width = step(self.settings.overlay.width, 20, 400, 1000, dir);
+            }
+            Setting::Rows => {
+                self.settings.overlay.rows = step(self.settings.overlay.rows, 1, 1, 30, dir);
+            }
+            Setting::Across => {
+                self.settings.overlay.x = step(self.settings.overlay.x, 25, 0, 1000, dir);
+            }
+            Setting::Down => {
+                self.settings.overlay.y = step(self.settings.overlay.y, 25, 0, 1000, dir);
+            }
+            Setting::Alpha => {
+                self.settings.overlay.alpha = step(self.settings.overlay.alpha, 10, 64, 255, dir);
+            }
+            Setting::Hotkey => {
+                // Cycling the key takes the double-tap shape: a combo is a
+                // sentence a free-text field would have to write, and the
+                // file is where that sentence is written.
+                let key = match self.settings.overlay.hotkey {
+                    Hotkey::DoubleTap { key, .. } => key,
+                    Hotkey::Combo { .. } => TapKey::Ctrl,
+                };
+                let next = cycle(TapKey::ALL, key, dir);
+                self.settings.overlay.hotkey = Hotkey::DoubleTap {
+                    key: next,
+                    window_ms: 400,
+                };
+            }
+            Setting::HotkeyWindow => {
+                let (key, window_ms) = match self.settings.overlay.hotkey {
+                    Hotkey::DoubleTap { key, window_ms } => (key, window_ms),
+                    Hotkey::Combo { .. } => (TapKey::Ctrl, 400),
+                };
+                let window_ms = step(window_ms, 50, 100, 1500, dir);
+                self.settings.overlay.hotkey = Hotkey::DoubleTap { key, window_ms };
+            }
+            Setting::Tui => {
+                step_template(&mut self.settings.tui.template, dir);
+                // The frame wears the new theme at once, not only at the
+                // next start. `Theme::named` is the launcher's own lookup;
+                // a name from a newer file that names nothing falls back
+                // to the theme the terminal was drawn in.
+                self.palette = Palette::of(
+                    Theme::named(&self.settings.tui.template).unwrap_or(Theme::MIDNIGHT),
+                );
+            }
+            Setting::Fzf => step_template(&mut self.settings.fzf.palette.template, dir),
+            Setting::FzfArgs => {}
+            Setting::Defaults => {
+                self.settings = Settings::default();
+                self.palette = Palette::of(
+                    Theme::named(&self.settings.tui.template).unwrap_or(Theme::MIDNIGHT),
+                );
+            }
+        }
+        let text = Text::for_lang(self.lang);
+        match self.runner.save_settings(&self.settings) {
+            Ok(()) => {
+                // A success notice does not hide the panel: `panel_rows`
+                // gives the settings panel priority over a plain notice.
+                self.notice = Some(Notice::outcome(
+                    text.settings,
+                    text.notice_settings_saved.to_string(),
+                ));
+            }
+            Err(reason) => {
+                self.notice = Some(Notice::outcome(
+                    text.settings,
+                    fill(text.notice_settings_failed, &[&reason]),
+                ));
+            }
+        }
     }
 
     fn draw(&mut self, out: &mut impl Write, size: (u16, u16)) -> std::io::Result<()> {
@@ -941,9 +1341,11 @@ impl App {
         rows.push(self.prompt_line(width, &latency));
         rows.push("─".repeat(width).with(self.palette.dim).to_string());
 
-        // The notice, when there is one, is a panel over the results:
-        // the same place the window puts the preview and the menu.
-        let notice = self.notice.as_ref().map(|n| n.rows(width, &self.palette));
+        // The panel, when there is one, is drawn over the results: the
+        // same place the window puts the preview and the menu. The
+        // settings panel, the actions menu and a plain notice all take
+        // that place, in that order of priority.
+        let panel = self.panel_rows(width);
 
         let first = self.top.min(self.results.len());
         let last = (first + list_height).min(self.results.len());
@@ -960,8 +1362,8 @@ impl App {
         // and found nothing says "no result".
         for offset in 0..list_height {
             let row = first + offset;
-            rows.push(match &notice {
-                Some(panel) => panel.get(offset).cloned().unwrap_or_default(),
+            rows.push(match &panel {
+                Some(lines) => lines.get(offset).cloned().unwrap_or_default(),
                 None => {
                     if self.results.is_empty() && offset == 0 {
                         let said = if self.input.trim().is_empty() && !self.is_command() {
@@ -1206,8 +1608,126 @@ impl App {
     }
 }
 
+/// A number, one step in the direction the key said, inside the range
+/// the settings hold.
+fn step(value: u32, by: i32, min: u32, max: u32, dir: i32) -> u32 {
+    let moved = value as i64 + by as i64 * dir as i64;
+    moved.clamp(min as i64, max as i64) as u32
+}
+
+/// A template's name, one step in the direction the key said.
+///
+/// A name nobody has is the first one's neighbour: a file that named a
+/// theme from a newer launcher still gets to step somewhere.
+fn step_template(current: &mut String, dir: i32) {
+    let names = Theme::names();
+    let at = names
+        .iter()
+        .position(|name| *name == current.as_str())
+        .map(|at| at as i64)
+        .unwrap_or(0);
+    let next = (at + dir as i64).rem_euclid(names.len() as i64) as usize;
+    *current = names[next].to_string();
+}
+
+/// One of a short list, one step in the direction the key said.
+fn cycle<T: Copy + PartialEq>(all: &[T], current: T, dir: i32) -> T {
+    let at = all
+        .iter()
+        .position(|one| *one == current)
+        .map(|at| at as i64)
+        .unwrap_or(0);
+    all[(at + dir as i64).rem_euclid(all.len() as i64) as usize]
+}
+
+/// A key, while one of the interactive panels is open.
+///
+/// The panel holds the keyboard only for the keys that adjust it — the
+/// arrows that move, `Enter` that runs the highlighted action, `Escape`
+/// that closes — and every other key is the field's, handed over with the
+/// panel already closed, so there is one place where a letter means what
+/// a letter means. `None` says "no panel owns this key", so `handle_key`
+/// goes on as usual. The function never clamps the result selection:
+/// that is `handle_key`'s job at the end of every key.
+fn panel_key(app: &mut App, key: KeyEvent) -> Option<Action> {
+    if let Some(selected) = app.settings_panel {
+        return match key.code {
+            // `Esc` is handed back without closing: the field's own `Esc`
+            // branch asks `has_notice()` and closes every panel before it
+            // would quit the session.
+            KeyCode::Esc => None,
+            KeyCode::Up => {
+                app.settings_panel = Some(selected.saturating_sub(1));
+                Some(Action::None)
+            }
+            KeyCode::Down => {
+                app.settings_panel = Some((selected + 1).min(SETTINGS.len() - 1));
+                Some(Action::None)
+            }
+            KeyCode::Left => {
+                app.adjust_setting(-1);
+                Some(Action::None)
+            }
+            KeyCode::Right | KeyCode::Enter => {
+                app.adjust_setting(1);
+                Some(Action::None)
+            }
+            _ => {
+                app.close_notice();
+                None
+            }
+        };
+    }
+    if app.action_menu.is_some() {
+        let last = app
+            .action_menu
+            .as_ref()
+            .map(|menu| menu.actions.len().saturating_sub(1))
+            .unwrap_or(0);
+        return match key.code {
+            // As above: the field's `Esc` branch closes the panel.
+            KeyCode::Esc => None,
+            KeyCode::Up => {
+                if let Some(menu) = app.action_menu.as_mut() {
+                    menu.selected = menu.selected.saturating_sub(1);
+                }
+                Some(Action::None)
+            }
+            KeyCode::Down => {
+                if let Some(menu) = app.action_menu.as_mut() {
+                    menu.selected = (menu.selected + 1).min(last);
+                }
+                Some(Action::None)
+            }
+            KeyCode::Enter => {
+                // The menu is open and its list is never empty, but a
+                // guard keeps the production path free of an `unwrap`.
+                let action = app
+                    .action_menu
+                    .as_ref()
+                    .and_then(|menu| menu.actions.get(menu.selected).copied())
+                    .unwrap_or(LauncherAction::Open);
+                app.close_notice();
+                Some(Action::Run(action))
+            }
+            _ => {
+                app.close_notice();
+                None
+            }
+        };
+    }
+    None
+}
+
 /// Apply one key press, re-scanning only when the query text actually changed.
 fn handle_key(app: &mut App, key: KeyEvent) -> Action {
+    // A panel takes the keys that adjust it. `Esc` is the one it hands
+    // back: `panel_key` answers `None` without closing, so the field's own
+    // `Esc` branch below can ask `has_notice()` and close every panel
+    // before it would quit the session.
+    if let Some(action) = panel_key(app, key) {
+        return action;
+    }
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
 
@@ -1231,17 +1751,42 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Action {
         KeyCode::Char('c') if ctrl => Action::Quit,
         KeyCode::Char('p') if ctrl => Action::Run(LauncherAction::Preview),
         KeyCode::Char('k') if ctrl => Action::Run(LauncherAction::Menu),
+        // With a machine behind it the terminal opens a file for real;
+        // `Ctrl+O` does that without ending the session, so `Enter` can
+        // keep the picker's contract of printing the chosen path.
+        KeyCode::Char('o') if ctrl => Action::Run(LauncherAction::Open),
+        // The settings are an editable panel when the machine carries the
+        // store; without one the key still opens the honest notice.
+        KeyCode::Char('s') if ctrl => Action::Run(LauncherAction::Settings),
+        // Paste from the machine's clipboard when it can read one. The
+        // terminal's own bracketed paste still delivers its text as
+        // characters through the field, and `Ctrl+C` stays the way out.
+        KeyCode::Char('v') if ctrl => {
+            if let Some(pasted) = app.runner.paste_text() {
+                app.insert_str(&pasted);
+                Action::Edited
+            } else {
+                let text = Text::for_lang(app.lang);
+                app.notice = Some(Notice::outcome(
+                    text.notice_paste_title,
+                    text.notice_paste_empty.to_string(),
+                ));
+                Action::None
+            }
+        }
         KeyCode::Enter if ctrl => Action::Run(LauncherAction::OpenFolder),
         KeyCode::Enter => {
-            // A command line runs the command; anything else opens the
-            // selected result.
+            // A command line runs the command; a result line is the
+            // picker's answer — print the selected path and leave.
+            // Opening the file is `Ctrl+O` now, so choosing and opening
+            // are two different things.
             if app.is_command() {
                 match app.command() {
                     Some(action) => Action::Run(action),
                     None => Action::Unknown,
                 }
             } else {
-                Action::Run(LauncherAction::Open)
+                Action::Choose
             }
         }
 
@@ -1418,6 +1963,28 @@ pub fn run_with_source_lang_and_theme(
     run_app(app)
 }
 
+/// Run the interactive search with a machine behind its actions.
+///
+/// The runner is what makes the terminal really open files, folders and
+/// the clipboard, paste from it and carry the settings store — the same
+/// platform actions the window uses. The five entry points above take no
+/// runner and stay without one, so a caller that has no machine keeps
+/// the old, honest notices.
+pub fn run_with_source_lang_theme_and_runner(
+    source: Box<dyn rgy_launcher::Source>,
+    root: String,
+    lang: Lang,
+    theme: Theme,
+    runner: Box<dyn Runner>,
+) -> Result<(), String> {
+    let mut app = App::with_source(source, root);
+    app.lang = lang;
+    app.palette = Palette::of(theme);
+    app.runner = runner;
+    app.settings = app.runner.settings();
+    run_app(app)
+}
+
 /// The runner, over an app that is already built.
 fn run_app(mut app: App) -> Result<(), String> {
     // The console decides how the UTF-8 bytes are decoded, so it is put
@@ -1482,14 +2049,18 @@ fn run_app(mut app: App) -> Result<(), String> {
                             break;
                         }
                         Action::Run(action) => {
-                            // `Open` is the one action that ends the
-                            // session: the terminal has no window to open
-                            // a file in, so it prints the path — which is
-                            // what `Enter` does too.
+                            // Without a runner, `Open` ends the session
+                            // and prints the path; with one it opens the
+                            // file and stays. `Action::Choose` is the
+                            // picker's answer, and is handled below.
                             if app.run_action(action) {
                                 outcome = Outcome::Chosen;
                                 break;
                             }
+                        }
+                        Action::Choose => {
+                            outcome = Outcome::Chosen;
+                            break;
                         }
                         Action::Unknown => app.say_unknown(),
                         Action::Edited => edited = true,
@@ -3373,7 +3944,7 @@ mod tests {
                 rest.starts_with(' '),
                 "the command and its key ran together: {line:?}"
             );
-            let key = shortcut(command.action);
+            let key = shortcut(command.action, false);
             assert!(
                 rest.trim_start().starts_with(key),
                 "the key column does not carry {key}: {line:?}"
@@ -3469,5 +4040,242 @@ mod tests {
                 "footer overflowed at width {width}"
             );
         }
+    }
+
+    // --- the machine behind the actions ---------------------------------
+
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// A machine that records what it was asked to do, for the tests below.
+    struct MockRunner {
+        /// Every call, in order, so a test can hold the actions to it.
+        calls: Rc<RefCell<Vec<String>>>,
+        /// The store the settings panel reads and writes.
+        settings: Rc<RefCell<Settings>>,
+    }
+
+    impl Runner for MockRunner {
+        fn available(&self) -> bool {
+            true
+        }
+
+        fn open(&self, path: &str) -> Result<(), String> {
+            self.calls.borrow_mut().push(format!("open:{path}"));
+            Ok(())
+        }
+
+        fn open_folder(&self, path: &str) -> Result<(), String> {
+            self.calls.borrow_mut().push(format!("folder:{path}"));
+            Ok(())
+        }
+
+        fn copy_path(&self, path: &str) -> Result<(), String> {
+            self.calls.borrow_mut().push(format!("copy:{path}"));
+            Ok(())
+        }
+
+        fn paste_text(&self) -> Option<String> {
+            Some("pasted text".to_string())
+        }
+
+        fn settings(&self) -> Settings {
+            self.calls.borrow_mut().push("settings".to_string());
+            self.settings.borrow().clone()
+        }
+
+        fn save_settings(&self, settings: &Settings) -> Result<(), String> {
+            *self.settings.borrow_mut() = settings.clone();
+            self.calls.borrow_mut().push("save".to_string());
+            Ok(())
+        }
+    }
+
+    /// Put a mock machine behind an app, sharing its call log and store.
+    fn with_runner(
+        mut app: App,
+        calls: Rc<RefCell<Vec<String>>>,
+        settings: Rc<RefCell<Settings>>,
+    ) -> App {
+        app.settings = settings.borrow().clone();
+        app.runner = Box::new(MockRunner { calls, settings });
+        app
+    }
+
+    /// `>open` with a machine really opens the path and the session stays:
+    /// ending it is the picker's `Enter`, not an action.
+    #[test]
+    fn open_with_a_runner_really_opens_and_stays() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let store = Rc::new(RefCell::new(Settings::default()));
+        let mut app = with_runner(app_with("main"), calls.clone(), store);
+        let path = app.selected_path().expect("a result is selected");
+        assert!(!app.run_action(LauncherAction::Open), "the session stays");
+        assert!(
+            calls.borrow().iter().any(|c| c == &format!("open:{path}")),
+            "the runner was asked to open the path: {:?}",
+            calls.borrow()
+        );
+        let notice = app.notice.as_ref().expect("the outcome is there");
+        assert!(
+            notice.lines.join("\n").contains("opened"),
+            "{:?}",
+            notice.lines
+        );
+    }
+
+    /// `>folder` and `>copy` reach the machine's calls, not a refusal.
+    #[test]
+    fn folder_and_copy_with_a_runner_really_run() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let store = Rc::new(RefCell::new(Settings::default()));
+        let mut app = with_runner(app_with("main"), calls.clone(), store);
+        let path = app.selected_path().expect("a result is selected");
+
+        assert!(!app.run_action(LauncherAction::OpenFolder));
+        assert!(!app.run_action(LauncherAction::CopyPath));
+        assert!(
+            calls
+                .borrow()
+                .iter()
+                .any(|c| c == &format!("folder:{path}")),
+            "{:?}",
+            calls.borrow()
+        );
+        assert!(
+            calls.borrow().iter().any(|c| c == &format!("copy:{path}")),
+            "{:?}",
+            calls.borrow()
+        );
+    }
+
+    /// The two new control keys, and `Control+C` still the way out.
+    #[test]
+    fn the_new_control_keys_do_their_actions_and_control_c_still_quits() {
+        let mut app = app_new();
+        let ctrl = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        assert_eq!(
+            handle_key(&mut app, ctrl('o')),
+            Action::Run(LauncherAction::Open)
+        );
+        assert_eq!(
+            handle_key(&mut app, ctrl('s')),
+            Action::Run(LauncherAction::Settings)
+        );
+        assert_eq!(handle_key(&mut app, ctrl('c')), Action::Quit);
+    }
+
+    /// A plain `Enter` on a result is the picker's answer, not an action.
+    #[test]
+    fn enter_on_a_result_chooses_it() {
+        let mut app = app_with("main");
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(handle_key(&mut app, enter), Action::Choose);
+    }
+
+    /// `Ctrl+V` inserts the machine's text into the field.
+    #[test]
+    fn control_v_pastes_the_runners_text() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let store = Rc::new(RefCell::new(Settings::default()));
+        let mut app = with_runner(app_new(), calls, store);
+        let key = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL);
+        assert_eq!(handle_key(&mut app, key), Action::Edited);
+        assert_eq!(app.input, "pasted text");
+    }
+
+    /// `Ctrl+K` with a selected result opens an interactive menu: the
+    /// arrows move the highlight, `Enter` runs the highlighted action and
+    /// closes the menu, and `Esc` closes it without quitting the session.
+    #[test]
+    fn control_k_opens_an_interactive_menu() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let store = Rc::new(RefCell::new(Settings::default()));
+        let mut app = with_runner(app_with("main"), calls, store);
+        let ctrl_k = KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL);
+        assert_eq!(
+            handle_key(&mut app, ctrl_k),
+            Action::Run(LauncherAction::Menu)
+        );
+        app.run_action(LauncherAction::Menu);
+
+        assert!(
+            app.action_menu.is_some(),
+            "the menu is a panel, not a notice"
+        );
+        assert!(app.notice.is_none());
+        let first = app.action_menu.as_ref().expect("the menu").actions[0];
+        assert_eq!(first, LauncherAction::Open);
+        assert_eq!(app.action_menu.as_ref().expect("the menu").selected, 0);
+
+        assert_eq!(
+            panel_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            Some(Action::None)
+        );
+        assert_eq!(app.action_menu.as_ref().expect("the menu").selected, 1);
+        assert_eq!(
+            panel_key(&mut app, KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+            Some(Action::None)
+        );
+        assert_eq!(app.action_menu.as_ref().expect("the menu").selected, 0);
+
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(panel_key(&mut app, enter), Some(Action::Run(first)));
+        assert!(app.action_menu.is_none(), "Enter closes the menu");
+
+        // Reopen it: `Esc` through the normal `handle_key` closes a panel
+        // without quitting, because `has_notice()` covers every panel.
+        app.run_action(LauncherAction::Menu);
+        assert!(app.has_notice());
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(handle_key(&mut app, esc), Action::None);
+        assert!(!app.has_notice(), "Esc closed the menu");
+        assert!(app.action_menu.is_none());
+    }
+
+    /// The settings are an editable panel: a step changes a value and
+    /// writes the store, and `Esc` closes the panel.
+    #[test]
+    fn settings_opens_an_editable_panel_and_right_saves() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let store = Rc::new(RefCell::new(Settings::default()));
+        let mut app = with_runner(app_with("main"), calls.clone(), store);
+        app.run_action(LauncherAction::Settings);
+        assert_eq!(app.settings_panel, Some(0));
+        assert!(app.notice.is_none());
+
+        // Row 0 is the overlay theme: `Right` steps the template and saves.
+        let before = app.settings.overlay.palette.template.clone();
+        assert_eq!(
+            panel_key(&mut app, KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)),
+            Some(Action::None)
+        );
+        assert_ne!(
+            app.settings.overlay.palette.template, before,
+            "the value changed"
+        );
+        assert!(
+            calls.borrow().iter().any(|c| c == "save"),
+            "the store was written: {:?}",
+            calls.borrow()
+        );
+
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(handle_key(&mut app, esc), Action::None);
+        assert!(!app.has_notice());
+    }
+
+    /// The regression for the fallback: without a machine `>copy` still
+    /// says the terminal owns no clipboard, and never claims a copy.
+    #[test]
+    fn with_no_runner_copy_still_says_the_terminal_has_no_clipboard() {
+        let mut app = app_with("main");
+        assert!(!app.run_action(LauncherAction::CopyPath));
+        let notice = app.notice.as_ref().expect("the notice is there");
+        assert!(
+            notice.lines.join("\n").contains("clipboard"),
+            "{:?}",
+            notice.lines
+        );
     }
 }

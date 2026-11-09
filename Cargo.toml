@@ -15,6 +15,7 @@ members = [
     "crates/adapters",
     "crates/launcher",
     "crates/launcher-windows",
+    "crates/launcher-x11",
     "crates/autostart",
     "crates/rgx-core",
     "crates/rar-codec",

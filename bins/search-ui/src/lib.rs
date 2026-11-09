@@ -9,8 +9,11 @@
 
 mod preview;
 
+pub mod runner;
+
 pub mod term;
 
 mod ui;
 
+pub use runner::{NoRunner, Runner};
 pub use ui::*;

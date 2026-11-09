@@ -45,10 +45,12 @@ use rgy_launcher::settings::Hotkey;
 use rgy_launcher::text::{Lang, Text};
 use rgy_launcher::usage::History;
 use rgy_launcher::{Action, Answer, App, Layer, Mode, Preview, Row, Source, commands};
-use rgy_launcher_windows::actions;
-use rgy_launcher_windows::combo::Combo;
-use rgy_launcher_windows::hook::Hook;
-use rgy_launcher_windows::window::{Compositor, Control, Event, Key, View, Window};
+// The driver is one on both platforms: the backend is reached through
+// `crate::platform`, and the two crates export the same vocabulary.
+use crate::platform::backend::actions;
+use crate::platform::backend::combo::Combo;
+use crate::platform::backend::hook::Hook;
+use crate::platform::backend::window::{Compositor, Control, Event, Key, View, Window};
 
 use crate::Options;
 use crate::daemon::{DaemonSource, Status};
@@ -378,7 +380,7 @@ where
             // that knows the answer is there, so it is the one that
             // wakes the loop for it.
             if let Some(hwnd) = worker.wake() {
-                rgy_launcher_windows::window::wake(hwnd);
+                crate::platform::backend::window::wake(hwnd);
             }
         }
     });
@@ -2341,6 +2343,12 @@ mod tests {
     }
 
     /// Hold the lock, the way another writer holds it.
+    ///
+    /// The two platforms hold a file in the two ways the store takes it:
+    /// Windows with an exclusive share mode, unix with `flock`. The
+    /// window driver is shared between them now, so its test has to ask
+    /// the same question in the platform's own words.
+    #[cfg(windows)]
     fn hold(path: &std::path::Path) -> std::fs::File {
         use std::os::windows::fs::OpenOptionsExt;
         std::fs::OpenOptions::new()
@@ -2348,6 +2356,23 @@ mod tests {
             .share_mode(0)
             .open(path)
             .expect("the lock is held")
+    }
+
+    /// Hold the lock with `flock`, the way the store takes it on unix.
+    #[cfg(unix)]
+    fn hold(path: &std::path::Path) -> std::fs::File {
+        use std::os::unix::io::AsRawFd;
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("the lock is held");
+        unsafe extern "C" {
+            fn flock(fd: i32, operation: i32) -> i32;
+        }
+        const LOCK_EX: i32 = 2;
+        let taken = unsafe { flock(file.as_raw_fd(), LOCK_EX) };
+        assert_eq!(taken, 0, "the lock is held by the test");
+        file
     }
 
     #[test]

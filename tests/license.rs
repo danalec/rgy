@@ -49,6 +49,7 @@ const PRODUCT: &[&str] = &[
     "crates/autostart/",
     "crates/launcher/",
     "crates/launcher-windows/",
+    "crates/launcher-x11/",
     "crates/pick/",
     "crates/adapters/",
     "bins/searchctl/",

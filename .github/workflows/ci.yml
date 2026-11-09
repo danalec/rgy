@@ -382,7 +382,7 @@ jobs:
       # rgy-vendored-core/tv" -- a failure that reads like a missing
       # feature and is a misspelled name. Measured on 2026-11-03: the flag
       # below builds, the package's spelling does not.
-      - run: cargo build --release --locked --no-default-features -p rgy-par -p rgy-discovery -p rgy-name-core -p rgy-proto -p rgy-engine -p rgy-discovery-dispatch -p rgy-autostart -p rgy-discovery-linux -p rgy-discovery-freebsd -p rgy-discovery-windows -p rgy-discovery-macos -p rgy-launcher -p rgy-pick -p rgy-launcher-windows --features rgx-core/tv --target x86_64-unknown-none
+      - run: cargo build --release --locked --no-default-features -p rgy-par -p rgy-discovery -p rgy-name-core -p rgy-proto -p rgy-engine -p rgy-discovery-dispatch -p rgy-autostart -p rgy-discovery-linux -p rgy-discovery-freebsd -p rgy-discovery-windows -p rgy-discovery-macos -p rgy-launcher -p rgy-pick -p rgy-launcher-windows -p rgy-launcher-x11 --features rgx-core/tv --target x86_64-unknown-none
       # The lint of the same tree. A build that prints a warning is a
       # warning somebody has to read, and the code that only exists
       # without `std` -- the `not(feature = "std")` arms of `par`,
@@ -391,7 +391,7 @@ jobs:
       # sees those arms. Clippy reads a target's code the way it reads
       # the host's -- it does not link, so a bare-metal binary is never
       # needed.
-      - run: cargo clippy --release --locked --no-default-features -p rgy-par -p rgy-discovery -p rgy-name-core -p rgy-proto -p rgy-engine -p rgy-discovery-dispatch -p rgy-autostart -p rgy-discovery-linux -p rgy-discovery-freebsd -p rgy-discovery-windows -p rgy-discovery-macos -p rgy-launcher -p rgy-pick -p rgy-launcher-windows --features rgx-core/tv --target x86_64-unknown-none -- -D warnings
+      - run: cargo clippy --release --locked --no-default-features -p rgy-par -p rgy-discovery -p rgy-name-core -p rgy-proto -p rgy-engine -p rgy-discovery-dispatch -p rgy-autostart -p rgy-discovery-linux -p rgy-discovery-freebsd -p rgy-discovery-windows -p rgy-discovery-macos -p rgy-launcher -p rgy-pick -p rgy-launcher-windows -p rgy-launcher-x11 --features rgx-core/tv --target x86_64-unknown-none -- -D warnings
       # The other half of the same claim: the crates' TESTS compile
       # without an operating system too.
       #
@@ -409,11 +409,11 @@ jobs:
       # `no_std` test build did not compile -- and the CI was green,
       # because the CI never compiled it.
       #
-      # The same fourteen crates, the same list, in the same job: the two
+      # The same fifteen crates, the same list, in the same job: the two
       # halves are one claim, and a list that lives in two places is a
       # list that drifts.
       - name: the tests compile without std too
-        run: cargo clippy --locked --no-default-features -p rgy-par -p rgy-discovery -p rgy-name-core -p rgy-proto -p rgy-engine -p rgy-discovery-dispatch -p rgy-autostart -p rgy-discovery-linux -p rgy-discovery-freebsd -p rgy-discovery-windows -p rgy-discovery-macos -p rgy-launcher -p rgy-pick -p rgy-launcher-windows --features rgx-core/tv --all-targets -- -D warnings
+        run: cargo clippy --locked --no-default-features -p rgy-par -p rgy-discovery -p rgy-name-core -p rgy-proto -p rgy-engine -p rgy-discovery-dispatch -p rgy-autostart -p rgy-discovery-linux -p rgy-discovery-freebsd -p rgy-discovery-windows -p rgy-discovery-macos -p rgy-launcher -p rgy-pick -p rgy-launcher-windows -p rgy-launcher-x11 --features rgx-core/tv --all-targets -- -D warnings
 
   msrv:
     name: "the oldest rustc the tree promises still builds it"

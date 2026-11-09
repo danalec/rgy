@@ -28,20 +28,20 @@ pub fn text(lang: Lang) -> String {
 /// The help, in English.
 fn english() -> String {
     format!(
-        "rgxy {version} — the launcher of the rgy daemon: a floating window on Windows, a terminal interface elsewhere.\n\
+        "rgxy {version} — the launcher of the rgy daemon: a floating window on Windows, Linux and FreeBSD, a terminal interface elsewhere.\n\
          \n\
          usage:\n  \
-           rgxy                    # the resident launcher: the window on Windows; the terminal interface on Linux, macOS and FreeBSD\n  \
+           rgxy                    # the resident launcher: the window on Windows, Linux and FreeBSD; the terminal interface on macOS\n  \
            rgxy [--tui] [--query <text>] [--limit <n>] [--endpoint <e>] [--no-hook] [--show]\n  \
                 [--pick] [--fzf-binary <p>] [--fzf-arg <arg>]\n\
          \n\
          options:\n  \
-           --tui              the terminal interface (the launcher on Linux, macOS and FreeBSD)\n  \
+           --tui              the terminal interface (an alternative on Windows, Linux and FreeBSD; the launcher on macOS)\n  \
            --query <text>     one search: prints the paths and leaves\n  \
            --limit <n>        how many results (default: 50)\n  \
            --endpoint <e>     pipe:<name> | uds:<path> | stdio\n  \
-           --no-hook          does not install the global shortcut (Windows)\n  \
-           --show             opens the window right away (Windows)\n  \
+           --no-hook          does not install the global shortcut\n  \
+           --show             opens the window right away\n  \
            --pick             hands the results to a picker and prints the choice\n  \
            --fzf-binary <p>   the picker to run (default: fzf or sk on the PATH)\n  \
            --fzf-arg <arg>    one argument for the picker, repeatable\n  \
@@ -66,7 +66,14 @@ fn english() -> String {
          >open >folder >copy >preview >menu >settings — commands; grep: —\n\
          the content of the files the name search chose. The settings\n\
          live in settings.tsv, beside the index, and >settings is the\n\
-         panel that writes it.",
+         panel that writes it.\n\
+         \n\
+         Both faces carry out the same actions: open a result, open its\n\
+         folder, copy its path, preview its head and edit the settings.\n\
+         In the terminal Ctrl+O opens, Ctrl+Enter opens the folder,\n\
+         Ctrl+P previews, Ctrl+K opens the actions menu, Ctrl+S edits\n\
+         the settings and Ctrl+V pastes; Enter still prints the chosen\n\
+         path so it can be piped onward.",
         version = env!("CARGO_PKG_VERSION"),
     )
 }
@@ -74,20 +81,20 @@ fn english() -> String {
 /// The help, in Portuguese.
 fn portuguese() -> String {
     format!(
-        "rgxy {version} — o lançador do daemon rgy: uma janela flutuante no Windows, uma interface de terminal nas outras plataformas.\n\
+        "rgxy {version} — o lançador do daemon rgy: uma janela flutuante no Windows, no Linux e no FreeBSD, uma interface de terminal nas outras plataformas.\n\
          \n\
          usage:\n  \
-           rgxy                    # o lançador residente: a janela no Windows; a interface de terminal no Linux, macOS e FreeBSD\n  \
+           rgxy                    # o lançador residente: a janela no Windows, no Linux e no FreeBSD; a interface de terminal no macOS\n  \
            rgxy [--tui] [--query <texto>] [--limit <n>] [--endpoint <e>] [--no-hook] [--show]\n  \
                 [--pick] [--fzf-binary <p>] [--fzf-arg <arg>]\n\
          \n\
          options:\n  \
-           --tui              a interface de terminal (o lançador no Linux, macOS e FreeBSD)\n  \
+           --tui              a interface de terminal (uma alternativa no Windows, no Linux e no FreeBSD; o lançador no macOS)\n  \
            --query <texto>    uma busca só: imprime os caminhos e sai\n  \
            --limit <n>        quantos resultados (default: 50)\n  \
            --endpoint <e>     pipe:<nome> | uds:<caminho> | stdio\n  \
-           --no-hook          não instala o atalho global (Windows)\n  \
-           --show             abre a janela logo de início (Windows)\n  \
+           --no-hook          não instala o atalho global\n  \
+           --show             abre a janela logo de início\n  \
            --pick             entrega os resultados a um picker e imprime a escolha\n  \
            --fzf-binary <p>   o picker a rodar (default: fzf ou sk no PATH)\n  \
            --fzf-arg <arg>    um argumento para o picker, repetível\n  \
@@ -112,7 +119,14 @@ fn portuguese() -> String {
          >open >folder >copy >preview >menu >settings — comandos; grep: —\n\
          o conteúdo dos ficheiros que a busca de nomes escolheu. As\n\
          configurações vivem em settings.tsv, ao lado do índice, e\n\
-         >settings é o painel que o escreve.",
+         >settings é o painel que o escreve.\n\
+         \n\
+         As duas faces executam as mesmas ações: abrir um resultado, abrir\n\
+         a sua pasta, copiar o caminho, pré-visualizar o início e editar\n\
+         as configurações. No terminal Ctrl+O abre, Ctrl+Enter abre a\n\
+         pasta, Ctrl+P pré-visualiza, Ctrl+K abre o menu de ações, Ctrl+S\n\
+         edita as configurações e Ctrl+V cola; Enter continua a imprimir\n\
+         o caminho escolhido para poder ser encaminhado.",
         version = env!("CARGO_PKG_VERSION"),
     )
 }

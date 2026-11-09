@@ -32,6 +32,7 @@ future file claiming another licence has to be named on purpose.
     crates/autostart/                  the login-item registration (parity row 4.13)
     crates/launcher/                   the launcher's model: query, results, actions, geometry
     crates/launcher-windows/           the launcher's window on Windows: Win32 + GDI
+    crates/launcher-x11/               the launcher's window on X11 (Linux, FreeBSD): overlay + XEmbed tray
     crates/pick/                       the hand-off to an external picker (fzf and its family)
     crates/adapters/                   the rgx adapter registry: the formats a search reads into
     bins/searchctl/                   the CLI

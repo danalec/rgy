@@ -19,10 +19,18 @@ half and a Windows half ([term.rs:mod imp] under `#[cfg(unix)]` and
 can be split, and both halves wait on a bounded tick that notices a resize
 while idle. `preview.rs` reads the head of a file for the preview panel
 ([preview.rs:pub fn of], [preview.rs:use rgy_launcher::Preview]).
+`runner.rs` is the seam the caller fills: [runner.rs:pub trait Runner] opens
+a result, opens its folder, takes and gives the clipboard, and reads and
+writes the settings; [runner.rs:pub struct NoRunner] keeps the older
+descriptive notices when no machine was handed over. With a runner the
+terminal has an interactive actions menu ([ui.rs:struct ActionMenu]), an
+editable settings panel ([ui.rs:enum Setting]) and real action outcomes, so
+its options match the window's.
 
 ## Interface
 - [lib.rs:pub mod term] and [lib.rs:pub use ui::*] — the crate's public surface; [lib.rs:mod preview] and [lib.rs:mod ui] are private.
-- [ui.rs:pub fn run], [ui.rs:pub fn run_with_lang], [ui.rs:pub fn run_with_source], [ui.rs:pub fn run_with_source_and_lang], [ui.rs:pub fn run_with_source_lang_and_theme] — interactive search entry points over a `Live` index or a boxed `rgy_launcher::Source` trait object.
+- [ui.rs:pub fn run], [ui.rs:pub fn run_with_lang], [ui.rs:pub fn run_with_source], [ui.rs:pub fn run_with_source_and_lang], [ui.rs:pub fn run_with_source_lang_and_theme] — interactive search entry points over a `Live` index or a boxed `rgy_launcher::Source` trait object; [ui.rs:pub fn run_with_source_lang_theme_and_runner] adds a boxed [runner.rs:pub trait Runner].
+- [runner.rs:pub trait Runner] (`available`, `open`, `open_folder`, `copy_path`, `paste_text`, `settings`, `save_settings`) and [runner.rs:pub struct NoRunner] — the action seam; re-exported by [lib.rs:pub use runner::{NoRunner, Runner}].
 - [term.rs:pub struct Screen] (generic over a `Write` output) and its method impl: `new`, `move_to`, `hide`, `show`, `clear_all`, `clear_line`, `enter_alternate_screen`, `leave_alternate_screen`, `enable_bracketed_paste`, `disable_bracketed_paste`, `background`, `foreground`, `reset_colour`, `print`, `flush`.
 - [term.rs:pub trait Paint] with [term.rs:impl Paint for &str], [term.rs:impl Paint for String], [term.rs:impl Paint for char] and [term.rs:impl Paint for Styled]; [term.rs:pub struct Styled]; [term.rs:pub enum Color].
 - [term.rs:pub enum KeyCode], [term.rs:pub struct KeyModifiers] (with `NONE`, `SHIFT`, `CONTROL`, `ALT`, `contains`, `union`), [term.rs:pub enum KeyEventKind], [term.rs:pub enum Event] (including `Resize`), [term.rs:pub struct KeyEvent] with [term.rs:pub fn new], [term.rs:pub enum Decoded], [term.rs:pub struct Decoder] and [term.rs:pub fn decode].
@@ -42,7 +50,9 @@ while idle. `preview.rs` reads the head of a file for the preview panel
 - [ui.rs:enum Action], [ui.rs:enum Outcome] and [ui.rs:struct Notice] carry the model's decisions; [ui.rs:fn handle_key] and [ui.rs:fn drain_goes_on] bound what a key and a drain do.
 - [preview.rs:const MAX_BYTES] is 64 KiB and [preview.rs:const MAX_LINES] is 12; [preview.rs:fn is_binary] decides what is not text.
 - [ui.rs:fn strip_ansi], [ui.rs:fn display_width], [ui.rs:fn truncate_visible], [ui.rs:fn is_wide] and [ui.rs:fn is_combining] keep the drawn cells within the terminal width.
-- [ui.rs:pub fn run] prints the selected path to stdout after the screen is restored, so the result can be piped onward.
+- [ui.rs:pub fn run] prints the selected path to stdout after the screen is restored, so the result can be piped onward. `Enter` chooses and prints; [ui.rs:enum Action::Choose] is that one decision, and an action from the menu or a command does not end the session.
+- [ui.rs:fn panel_key] owns the keyboard while the actions menu or the settings panel is open; `Esc` closes the panel before it closes the session, the same order the window uses. The actions offered are `rgy_launcher::Action::for_kind(IconInfo::of(path))`, so a binary or folder never offers a preview.
+- With [runner.rs:pub struct NoRunner], `>copy`, `>folder` and `>settings` keep their descriptive notices exactly as before; with a runner they call the machine and say what it did.
 
 ## Side Effects
 - [ui.rs:impl TerminalGuard] enters raw mode, the alternate screen and bracketed paste through `term::enable_raw_mode` and `term::Screen`; [ui.rs:impl Drop for TerminalGuard] writes the reset bytes — including `\x1b[?2004l` — to `rgy_engine::console::stdout()` and calls `term::disable_raw_mode`.

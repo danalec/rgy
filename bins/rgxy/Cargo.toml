@@ -41,8 +41,13 @@ rgy-engine = { path = "../../crates/engine", version = "0.1.10" }
 # `searchctl` hands them over.
 rgy-pick = { path = "../../crates/pick", version = "0.1.10" }
 
-# The window is a platform thing, and it only exists on the platform that
-# has one. The binary is the same everywhere: the launcher falls back to
-# the terminal where there is no desktop.
+# The window is a platform thing, and it only exists on the platforms that
+# have one. The binary is the same everywhere: the launcher falls back to
+# the terminal where there is no desktop. Both backends export the SAME
+# interface, so the window driver in src/gui.rs is one driver reached
+# through src/platform.rs. Linux and FreeBSD share the X11 backend.
 [target.'cfg(windows)'.dependencies]
 rgy-launcher-windows = { path = "../../crates/launcher-windows", version = "0.1.10" }
+
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+rgy-launcher-x11 = { path = "../../crates/launcher-x11", version = "0.1.10" }

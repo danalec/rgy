@@ -371,6 +371,7 @@ dependencies = [
  "rgy-engine",
  "rgy-launcher",
  "rgy-launcher-windows",
+ "rgy-launcher-x11",
  "rgy-pick",
  "rgy-proto",
  "rgy-search-ui",
@@ -474,6 +475,13 @@ version = "0.1.10"
 
 [[package]]
 name = "rgy-launcher-windows"
+version = "0.1.10"
+dependencies = [
+ "rgy-launcher",
+]
+
+[[package]]
+name = "rgy-launcher-x11"
 version = "0.1.10"
 dependencies = [
  "rgy-launcher",

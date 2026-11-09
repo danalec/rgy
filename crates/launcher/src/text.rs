@@ -254,6 +254,37 @@ vocabulary! {
         "o terminal não tem área de transferência — copie o caminho daqui:";
     notice_preview_title => "preview — {}", "pré-visualização — {}";
 
+    // --- the terminal's actions, really carried out -------------------------
+    // The window has a machine behind it and, since the runner seam, so
+    // does the terminal. These are the sentences an action says *after* it
+    // has done something, and the ones it says when the machine refused.
+    // Every one names the path, because a panel that says "done" about a
+    // file the user did not choose is a panel the user cannot trust.
+    notice_open_title => "opened", "aberto";
+    notice_opened => "opened {} with its default program",
+        "abriu {} com o programa predefinido";
+    notice_open_failed => "could not open {}: {}", "não pôde abrir {}: {}";
+    notice_folder_opened => "opened the folder that holds {}",
+        "abriu a pasta que contém {}";
+    notice_folder_failed => "could not open the folder of {}: {}",
+        "não pôde abrir a pasta de {}: {}";
+    notice_copied => "copied {} to the clipboard",
+        "copiou {} para a área de transferência";
+    notice_copy_failed => "could not copy {} to the clipboard: {}",
+        "não pôde copiar {} para a área de transferência: {}";
+    notice_paste_title => "paste", "colar";
+    notice_paste_empty => "the clipboard has no text — paste with your terminal's shortcut",
+        "a área de transferência não tem texto — cole com o atalho do terminal";
+    notice_action_menu_title => "actions — {}", "ações — {}";
+    notice_panel_help => "↑ ↓ move · Enter runs · Esc closes",
+        "↑ ↓ move · Enter executa · Esc fecha";
+    notice_settings_help => "← → change · ↑ ↓ move · Esc closes",
+        "← → altera · ↑ ↓ move · Esc fecha";
+    notice_settings_saved => "the settings were saved",
+        "as configurações foram gravadas";
+    notice_settings_failed => "the settings were not saved: {}",
+        "as configurações não foram gravadas: {}";
+
     // The box is empty: there is no question yet, and "no matches" is the
     // answer to a question nobody asked.
     terminal_type_to_search => "type to search", "escreva para procurar";
@@ -349,9 +380,9 @@ vocabulary! {
         "os resultados não chegaram ao picker: {e}";
     no_graphical_screen => "no graphical screen; the terminal interface is the alternative",
         "sem ecrã gráfico; a interface de terminal é a alternativa";
-    the_window_is_windows_only =>
-        "the floating window is Windows-only for now; the terminal interface is the alternative",
-        "a janela flutuante é só no Windows por agora; a interface de terminal é a alternativa";
+    no_window_backend =>
+        "the floating window has a backend on Windows, Linux and FreeBSD; the terminal interface is the alternative here",
+        "a janela flutuante tem backend no Windows, no Linux e no FreeBSD; a interface de terminal é a alternativa aqui";
 }
 
 /// Which program is showing the interface.

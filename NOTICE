@@ -46,6 +46,13 @@ crates/rgx-core/src/frequency.rs
     names the upstream and says that the values are copied, not measured
     here.
 
+crates/launcher-x11/src/paint.rs
+    The 8x8 bitmap glyph table is the public-domain `font8x8_basic` set
+    (https://github.com/dhepper/font8x8), carried as a data table of 95
+    bytes-per-row bitmaps rather than as source code. The renderer, the
+    layout and the derivation of accented Latin-1 letters are this
+    project's own, Apache-2.0.
+
 What is not this project's code
 -------------------------------
 No source file of any upstream project is included in this repository. What

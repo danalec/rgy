@@ -202,8 +202,9 @@ fn presence(e: &std::io::Error) -> Presence {
 ///
 /// The window is the only reader: the platforms that have no window do
 /// not compile the module that reads them, and a method with no reader
-/// is a warning the gate fails on.
-#[cfg(windows)]
+/// is a warning the gate fails on. Windows and Linux both have a window,
+/// and both compile the same driver, so both need these accessors.
+#[cfg(any(windows, target_os = "linux", target_os = "freebsd"))]
 impl DaemonSource {
     /// Where the daemon is asked.
     ///
@@ -366,7 +367,7 @@ impl DaemonSource {
     ///
     /// A new window is a new session: the previous window's result set is
     /// not the answer to a new question.
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux", target_os = "freebsd"))]
     pub fn set_session(&mut self, id: u64) {
         self.session = Some(id);
         if let Some(client) = self.client.as_mut() {

@@ -32,6 +32,7 @@ seam.
 - [discovery-windows](./discovery-windows/EGM.md) — `rgy-discovery-windows`: "Windows discovery backend: NTFS MFT streaming + USN journal (from zen-rs)" (`[discovery-windows/Cargo.toml:package.description]`).
 - [engine](./engine/EGM.md) — `rgy-engine`: "Orchestration: keep-warm, TV pack store glue" (`[engine/Cargo.toml:package.description]`).
 - [launcher](./launcher/EGM.md) — `rgy-launcher`: "The launcher's model: the query, the results, the actions, the hotkey" (`[launcher/Cargo.toml:package.description]`).
+- [launcher-x11](./launcher-x11/EGM.md) — `rgy-launcher-x11`: "The launcher's window on X11 (Linux and FreeBSD): a floating overlay and a system-tray icon, drawn in pure Rust" (`[launcher-x11/Cargo.toml:package.description]`). One X11 backend, shared by the two kernels.
 - [launcher-windows](./launcher-windows/EGM.md) — `rgy-launcher-windows`: "The launcher's window on Windows: a floating overlay, drawn with GDI" (`[launcher-windows/Cargo.toml:package.description]`).
 - [name-core](./name-core/EGM.md) — `rgy-name-core`: "Name index, query filters, fuzzy ranking (name engine + zen query vocabulary)" (`[name-core/Cargo.toml:package.description]`).
 - [par](./par/EGM.md) — `rgy-par`: "The parallelism rgy carries: split the work, run the pieces, join them" (`[par/Cargo.toml:package.description]`); declares no dependencies on purpose.
@@ -47,7 +48,7 @@ seam.
 
 ## Interface
 
-- `[Cargo.toml:workspace.members]` — the 27 `crates/*` directories above are the complete library membership of the workspace; `bins/*` and `tests` are separate members.
+- `[Cargo.toml:workspace.members]` — the 28 `crates/*` directories above are the complete library membership of the workspace; `bins/*` and `tests` are separate members.
 - `[Cargo.toml:workspace.package]` — `edition = "2021"`, `license = "Apache-2.0"` are the workspace defaults; the owned crates declare `edition = "2024"` in their own manifests.
 - `[crates/rgx-core/Cargo.toml:lib.name]` — the vendored crates keep upstream's library target names (`rgx_core`, `rgx_adapters_*`, `rar_codec`) while publishing under `rgy-vendored-*` package names.
 - The public symbols of each crate are rolled up in that crate's own `./<crate>/EGM.md`, and the symbols of each `src/` tree in `./<crate>/src/EGM.md`.
