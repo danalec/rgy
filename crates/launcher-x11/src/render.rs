@@ -77,6 +77,19 @@ impl IconFamily {
         }
     }
 }
+/// How many latency samples the bars carry.
+///
+/// The meter's window is 64; the strip is a glance and not a chart, so the
+/// newest two dozen are what a person reads while typing.
+const BAR_CAP: usize = 24;
+/// One bar's width in pixels.
+const BAR_WIDTH: i32 = 3;
+/// The gap between two bars.
+const BAR_GAP: i32 = 1;
+/// How tall a full-level bar is.
+const BAR_HEIGHT: i32 = 9;
+/// The sub-levels the easing works in: one of the meter's eight levels.
+const BAR_SCALE: i16 = 16;
 /// Which of the loaded faces a line is set in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Face {
@@ -102,6 +115,15 @@ pub struct Renderer {
     /// `Some(None)` means "asked, the theme has none", so a missing theme
     /// costs one look and not one per row per frame.
     icons: [Option<Option<crate::icons::Icon>>; 7],
+    /// The latency bars as drawn this frame, in sixteenths of a level: the
+    /// meter offers eight levels and the sixteenths are what make a bar grow
+    /// instead of jump.
+    bars: [i16; BAR_CAP],
+    /// How many bars the meter currently offers.
+    bar_count: usize,
+    /// Whether a bar moved on the last frame, which is the pump's cue to
+    /// keep painting at the animation's rate.
+    animating: bool,
 }
 
 impl Renderer {
@@ -122,9 +144,51 @@ impl Renderer {
             strong,
             small,
             icons: [None, None, None, None, None, None, None],
+            bars: [0; BAR_CAP],
+            bar_count: 0,
+            animating: false,
         }
     }
 
+    /// Move the bars one step towards the samples the meter now holds.
+    ///
+    /// The sparkline is the meter's own eight levels, one character per
+    /// sample; reading them back is how the strip stays the model's decision
+    /// and not a second measurement. Each bar moves a quarter of the way to
+    /// its target, so a new sample grows in over a handful of frames and a
+    /// dropped one settles back — and the flag says whether anything moved,
+    /// which is the pump's cue to keep painting at the animation's rate.
+    fn animate_bars(&mut self, spark: &str) {
+        let offered = spark.chars().count();
+        let total = offered.min(BAR_CAP);
+        // The window slides: the newest samples are the ones on the right.
+        let skip = offered.saturating_sub(total);
+        let mut target = [0i16; BAR_CAP];
+        for (slot, ch) in spark.chars().skip(skip).enumerate() {
+            target[slot] = level_of(ch) as i16 * BAR_SCALE;
+        }
+        self.bar_count = total;
+        let mut moved = false;
+        for (index, want) in target.iter().enumerate() {
+            let want = if index < total { *want } else { 0 };
+            let have = self.bars[index];
+            if have == want {
+                continue;
+            }
+            let step = (want - have) / 4;
+            self.bars[index] = have + if step == 0 { want - have } else { step };
+            moved = true;
+        }
+        self.animating = moved;
+    }
+
+    /// Whether the bars are still moving.
+    ///
+    /// The pump reads this to tick faster than its slow clock while a frame
+    /// would change something, and to go quiet once the strip has settled.
+    pub fn is_animating(&self) -> bool {
+        self.animating
+    }
     /// Resize the frame's surface.
     pub fn resize(&mut self, width: u32, height: u32) {
         self.surface.resize(width, height);
@@ -522,25 +586,54 @@ impl Renderer {
             wy -= small_size + 2;
         }
 
-        // The latency, bottom right, in the "the machine is fine" colour.
-        if let Some(label) = view.latency.last_label() {
-            let lw = self.text_width(&label, Face::Small);
+        // The latency: the number, and the bars behind it.
+        //
+        // The meter keeps a rolling window and offers eight levels as block
+        // characters; the bars are those levels and they ease towards the
+        // newest sample instead of jumping to it, which is what makes typing
+        // feel measured rather than twitchy. The strip is drawn left to
+        // right with the newest sample on the right.
+        self.animate_bars(&view.latency.spark);
+        let bars_w = self.bar_count as i32 * (BAR_WIDTH + BAR_GAP);
+        let label = view.latency.last_label().unwrap_or_default();
+        let label_w = if label.is_empty() {
+            0
+        } else {
+            self.text_width(&label, Face::Small)
+        };
+        if !label.is_empty() {
             let colour = solid(theme.good, 245);
-            self.text(w - pad - lw, h - 7, &label, colour, Face::Small, w - pad);
-            let spark = &view.latency.spark;
-            if !spark.is_empty() {
-                let sw = self.text_width(spark, Face::Small);
-                let sx = w - pad - lw - sw - 8;
-                if sx > pad {
-                    self.text(
-                        sx,
-                        h - 7,
-                        spark,
-                        solid(theme.dim, 200),
-                        Face::Small,
-                        w - pad,
-                    );
+            self.text(
+                w - pad - label_w,
+                h - 8,
+                &label,
+                colour,
+                Face::Small,
+                w - pad,
+            );
+        }
+        if self.bar_count > 0 {
+            let bars_left = w - pad - bars_w - if label_w > 0 { label_w + 8 } else { 0 };
+            let floor = h - 9;
+            for index in 0..self.bar_count {
+                let level = self.bars[index].max(0) as i32;
+                if level == 0 {
+                    continue;
                 }
+                let bar_h = level * BAR_HEIGHT / (8 * BAR_SCALE as i32) + 1;
+                let x = bars_left + index as i32 * (BAR_WIDTH + BAR_GAP);
+                if x < pad || x + BAR_WIDTH > w - pad {
+                    continue;
+                }
+                // The newest sample is the one the reader is watching: it
+                // carries the accent, the older history stays quiet.
+                let colour = if index + 1 == self.bar_count {
+                    solid(theme.accent, 235)
+                } else {
+                    solid(theme.dim, 150)
+                };
+                self.surface
+                    .fill_round_rect(x, floor - bar_h, BAR_WIDTH, bar_h, 1, colour);
             }
         }
 
@@ -710,6 +803,23 @@ fn isqrt(n: u32) -> u32 {
         y = (x + n / x) / 2;
     }
     x
+}
+/// The level a sparkline character names, 1..=8.
+///
+/// The meter offers the eight block characters `▁▂▃▄▅▆▇█`; anything else is
+/// not a sample and answers zero, which draws no bar.
+fn level_of(ch: char) -> u8 {
+    match ch {
+        '▁' => 1,
+        '▂' => 2,
+        '▃' => 3,
+        '▄' => 4,
+        '▅' => 5,
+        '▆' => 6,
+        '▇' => 7,
+        '█' => 8,
+        _ => 0,
+    }
 }
 /// A theme colour with an alpha.
 fn solid(c: Rgb, a: u8) -> u32 {

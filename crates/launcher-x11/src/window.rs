@@ -53,6 +53,10 @@ use crate::x as xlib;
 /// The clock's period, in milliseconds, while the window is visible.
 const TICK_MS: i32 = 120;
 
+/// The `poll` timeout while the latency bars are easing: one frame of the
+/// animation, at about sixty a second.
+const ANIMATION_MS: i32 = 16;
+
 /// Where the window sits by default, in thousandths of the work area.
 ///
 /// Centred across, a little under a fifth of the way down — the same
@@ -317,6 +321,9 @@ impl Window {
             ..View::default()
         };
 
+        // The panel's opacity is a compositor property, and the default view
+        // is already the one the window opens with.
+        apply_opacity(display, win, view.alpha);
         unsafe {
             xlib::XFlush(display);
         }
@@ -377,6 +384,9 @@ impl Window {
         // few words and the repaint it would cause is not. This is also
         // where the stored colours are read, kept in step with the view.
         let changed = self.colours != theme || self.alpha != alpha;
+        if self.alpha != alpha {
+            apply_opacity(self.display, self.win, alpha);
+        }
         self.colours = theme;
         self.alpha = alpha;
         if changed && self.visible {
@@ -469,7 +479,10 @@ impl Window {
     fn install(&mut self, mut view: View) {
         view.placeholder = Text::for_lang(self.lang).placeholder.to_string();
         self.colours = view.theme;
-        self.alpha = view.alpha;
+        if self.alpha != view.alpha {
+            self.alpha = view.alpha;
+            apply_opacity(self.display, self.win, self.alpha);
+        }
         let anchor = geometry::clamp_anchor(view.anchor.0, view.anchor.1);
         if anchor != self.anchor {
             self.anchor = anchor;
@@ -490,8 +503,7 @@ impl Window {
     /// The geometry of a resize, with repainting left to the caller.
     fn resize_inner(&mut self, width: i32, height: i32, repaint: bool) {
         self.model = (width, height);
-        let (sw, sh) = self.screen_size();
-        let spot = geometry::spot_on(work_area_of(sw, sh), width, height, self.anchor);
+        let spot = geometry::spot_on(self.work_area(), width, height, self.anchor);
         let w = spot.width.max(1);
         let h = spot.height.max(1);
         if self.width == w && self.height == h {
@@ -512,6 +524,29 @@ impl Window {
         }
     }
 
+    /// The desktop's work area: the screen minus its panels.
+    ///
+    /// `_NET_WORKAREA` is what a desktop with a panel publishes, and asking
+    /// on each placement (rather than caching) keeps a panel the user moved
+    /// where it now is. A desktop that says nothing answers with the screen,
+    /// which is what the launcher assumed before.
+    fn work_area(&self) -> geometry::WorkArea {
+        let (sw, sh) = self.screen_size();
+        work_area_of_screen(
+            work_area(self.display, self.root_window(), self.screen),
+            sw,
+            sh,
+        )
+    }
+
+    /// The root window this display was opened on.
+    fn root_window(&self) -> u64 {
+        if self.display.is_null() {
+            return 0;
+        }
+        // SAFETY: the display is live for the window's whole life.
+        unsafe { xlib::XDefaultRootWindow(self.display) }
+    }
     /// The screen's device size, in pixels.
     fn screen_size(&self) -> (i32, i32) {
         if self.display.is_null() {
@@ -527,8 +562,7 @@ impl Window {
 
     /// Put the window at its seat on the work area.
     fn place(&mut self) {
-        let (sw, sh) = self.screen_size();
-        let spot = geometry::spot_on(work_area_of(sw, sh), self.width, self.height, self.anchor);
+        let spot = geometry::spot_on(self.work_area(), self.width, self.height, self.anchor);
         unsafe {
             xlib::XMoveResizeWindow(
                 self.display,
@@ -747,7 +781,10 @@ impl Window {
                     revents: 0,
                 },
             ];
-            let timeout = tick_timeout(self.visible && self.clock_running);
+            let timeout = tick_timeout(
+                self.visible && self.clock_running,
+                self.renderer.is_animating(),
+            );
             // SAFETY: `fds` is three contiguous pollfds that outlive the
             // call; poll only reads `fd`/`events` and writes `revents`.
             let rc = unsafe { xlib::poll(fds.as_mut_ptr(), fds.len(), timeout as c_int) };
@@ -801,6 +838,12 @@ impl Window {
                 if !self.apply(on_event(Event::Show)) {
                     return Ok(());
                 }
+            }
+
+            // The bars ease towards the meter's newest sample one frame at a
+            // time, so while anything still moves the loop paints.
+            if self.visible && self.renderer.is_animating() {
+                self.repaint();
             }
         }
     }
@@ -1103,10 +1146,135 @@ fn work_area_of(w: i32, h: i32) -> (i32, i32, i32, i32) {
     (0, 0, w, h)
 }
 
+/// The compositor's window-opacity property.
+///
+/// X11 has no layered window: translucency is a property the **compositor**
+/// reads, so this is the same setting the Windows backend composes itself,
+/// asked of the desktop. Without a compositor nothing reads it, which is why
+/// the panel stays opaque there.
+const OPACITY_ATOM: &[u8] = b"_NET_WM_WINDOW_OPACITY\0";
+
+/// The desktop's work area, which is the screen minus its panels.
+const WORKAREA_ATOM: &[u8] = b"_NET_WORKAREA\0";
+
+/// Ask the compositor for a panel opacity, or drop the property when the
+/// panel is meant to be stone.
+///
+/// The value is a 32-bit fraction of `0xffff_ffff`, which is what the
+/// freedesktop specification says and what every compositor reads; `alpha`
+/// is the model's 0..=255, so the two are the same number scaled.
+fn apply_opacity(display: *mut c_void, win: u64, alpha: u32) {
+    if display.is_null() || win == 0 {
+        return;
+    }
+    let atom = intern(display, OPACITY_ATOM);
+    if atom == 0 {
+        return;
+    }
+    // SAFETY: the handles are the window's own, and the property is the one
+    // Xlib is asked to set on the launcher's window.
+    unsafe {
+        if alpha >= 255 {
+            xlib::XDeleteProperty(display, win, atom);
+            return;
+        }
+        let value: u64 = (alpha.clamp(1, 254) as u64) * 0xffff_ffff / 255;
+        xlib::XChangeProperty(
+            display,
+            win,
+            atom,
+            xlib::XA_CARDINAL,
+            32,
+            xlib::PropModeReplace,
+            (&value as *const u64).cast::<u8>(),
+            1,
+        );
+    }
+}
+
+/// The desktop's work area, or the whole screen when it does not say.
+///
+/// `_NET_WORKAREA` is four cardinals — `x, y, width, height` — of the
+/// region the desktop leaves for windows. A bare X server never sets it, so
+/// the screen is the answer there.
+fn work_area(display: *mut c_void, root: u64, screen: i32) -> (i32, i32, i32, i32) {
+    if display.is_null() {
+        return (0, 0, 0, 0);
+    }
+    // SAFETY: the display and root are live, every out-parameter is a live
+    // local, and the returned property is freed once it is read.
+    unsafe {
+        let width = xlib::XDisplayWidth(display, screen);
+        let height = xlib::XDisplayHeight(display, screen);
+        let atom = intern(display, WORKAREA_ATOM);
+        if atom == 0 {
+            return (0, 0, width, height);
+        }
+        let mut actual_format: c_int = 0;
+        let mut actual_type: xlib::Atom = 0;
+        let mut nitems: c_ulong = 0;
+        let mut bytes_after: c_ulong = 0;
+        let mut data: *mut core::ffi::c_uchar = core::ptr::null_mut();
+        let status = xlib::XGetWindowProperty(
+            display,
+            root,
+            atom,
+            0,
+            4,
+            0,
+            xlib::XA_CARDINAL,
+            &mut actual_format,
+            &mut actual_type,
+            &mut nitems,
+            &mut bytes_after,
+            &mut data,
+        );
+        if status != 0 || data.is_null() || nitems < 4 {
+            if !data.is_null() {
+                xlib::XFree(data.cast());
+            }
+            return (0, 0, width, height);
+        }
+        // A format-32 property arrives as an array of `c_ulong` words.
+        let values = core::slice::from_raw_parts(data.cast::<c_ulong>(), 4);
+        let area = (
+            values[0] as i32,
+            values[1] as i32,
+            values[2] as i32,
+            values[3] as i32,
+        );
+        xlib::XFree(data.cast());
+        if area.2 <= 0 || area.3 <= 0 {
+            (0, 0, width, height)
+        } else {
+            area
+        }
+    }
+}
+
+/// The work area the launcher settles on.
+///
+/// Kept apart from the read so the choice can be tested without a display:
+/// reading is the platform's job and choosing is the model's.
+fn work_area_of_screen(area: (i32, i32, i32, i32), w: i32, h: i32) -> (i32, i32, i32, i32) {
+    if area.2 <= 0 || area.3 <= 0 {
+        work_area_of(w, h)
+    } else {
+        area
+    }
+}
 /// The `poll` timeout: the clock ticks at 120 ms while visible, and waits
 /// forever when hidden.
-fn tick_timeout(visible: bool) -> i32 {
-    if visible { TICK_MS } else { -1 }
+fn tick_timeout(visible: bool, animating: bool) -> i32 {
+    if !visible {
+        -1
+    } else if animating {
+        // Fast enough that the ease reads as movement, and only while a
+        // frame would actually differ.
+        ANIMATION_MS
+    } else {
+        TICK_MS
+    }
 }
 
 /// The pure message -> event decision: the event types that name a whole
@@ -1168,11 +1336,40 @@ mod tests {
         assert_eq!(work_area_of(800, 600), (0, 0, 800, 600));
     }
 
+    /// A desktop that publishes `_NET_WORKAREA` gets it honoured, and one
+    /// that publishes nothing gets the screen.
+    #[test]
+    fn the_desktops_area_wins_when_it_is_real() {
+        assert_eq!(
+            work_area_of_screen((10, 20, 900, 600), 1280, 800),
+            (10, 20, 900, 600)
+        );
+        assert_eq!(
+            work_area_of_screen((0, 0, 0, 0), 1280, 800),
+            (0, 0, 1280, 800)
+        );
+        assert_eq!(
+            work_area_of_screen((0, 0, -5, 20), 1920, 1080),
+            (0, 0, 1920, 1080)
+        );
+    }
+
+    /// A window placed on a short work area stays inside it.
+    #[test]
+    fn the_window_lands_inside_the_work_area() {
+        let area = work_area_of_screen((0, 0, 1280, 500), 1280, 800);
+        let spot = geometry::spot_on(area, 600, 89, (500, 180));
+        assert!(spot.y >= 0, "never above the work area");
+        assert!(spot.y + spot.height <= 500, "never below it");
+    }
+
     /// The clock ticks only while the window is visible.
     #[test]
     fn the_clock_ticks_only_while_visible() {
-        assert_eq!(tick_timeout(true), 120);
-        assert_eq!(tick_timeout(false), -1);
+        assert_eq!(tick_timeout(true, false), 120, "the slow clock");
+        assert_eq!(tick_timeout(true, true), 16, "the animation's frame");
+        assert_eq!(tick_timeout(false, true), -1, "hidden waits forever");
+        assert_eq!(tick_timeout(false, false), -1);
     }
 
     /// A frame that has not changed is not painted again, and a frame with
