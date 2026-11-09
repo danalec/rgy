@@ -20,28 +20,25 @@
       ];
 
       # One release asset per platform. The digests are the SHA-256 of the
-      # archive itself, in SRI form. They are rewritten from the combined
-      # SHA256SUMS on publish day, together with the installer pins:
-      # until the 0.1.10.2 archives exist, the values below are still the
-      # 0.1.10.1 ones and `nix flake check` will (correctly) refuse them.
-      # `nix flake check` verifies them against the real downloads once
-      # the release is published.
+      # archive itself, in SRI form, from the 0.1.10.2 release's
+      # SHA256SUMS; `nix flake check` verifies them against the real
+      # downloads.
       assets = {
         x86_64-linux = {
           file = "rgy-v${version}-x86_64-linux.tar.gz";
-          hash = "sha256-z+H247rhpjlEblVm2UoFfwNpOi8LeLgY23p+/HinlSw=";
+          hash = "sha256-pBMOwYDX3PQVu48oqSvvr8RaqwJfVWm3orj1Tu+kxpM=";
         };
         aarch64-linux = {
           file = "rgy-v${version}-aarch64-linux.tar.gz";
-          hash = "sha256-zhI4nByLcPQzSNwUVCWOaT7r2vf4ojxW79GRgIWvfjM=";
+          hash = "sha256-gmYceu6TDXhb65zpGMLFm5xaa2E1h8ZU0PV0SpbeVVA=";
         };
         x86_64-darwin = {
           file = "rgy-v${version}-x86_64-apple-darwin.tar.gz";
-          hash = "sha256-ZGIiS036+qCYX6Gk3WOEJAJttiEkXC2Vz/c+a9EJWFk=";
+          hash = "sha256-kYAJVeYuWwEDIpvZ0yWBHQDoe9rzXKJMoFtxhj8vsVE=";
         };
         aarch64-darwin = {
           file = "rgy-v${version}-aarch64-apple-darwin.tar.gz";
-          hash = "sha256-jesHF0yTwfx0YsZohISdVrrP2SxTzo9hxRtN/+azu+8=";
+          hash = "sha256-5n2s+TdNraRItX9qtktZUF8M0VNIqbHyColdDZdWDZk=";
         };
       };
 
@@ -51,11 +48,11 @@
         x86_64-linux = {
           rgy-search-avx2 = {
             file = "rgy-v${version}-avx2-linux.tar.gz";
-            hash = "sha256-rKLOsqjIjjjU1ulBCO06dHeuk8sr+OiW0R+Lhx75080=";
+            hash = "sha256-RZgr+J5FK5eYaIoXWRwciTyO0c7VyvnNo3sud5tOu6o=";
           };
           rgy-search-znver4 = {
             file = "rgy-v${version}-znver4-linux.tar.gz";
-            hash = "sha256-e9myErnr8Z+EmIG3wENvwNtvQmHRndFepzPBlbdglG0=";
+            hash = "sha256-YPb4N58lTowmOTqyY1MceKGaZ92hmS8nxQfBPyZaM70=";
           };
         };
       };
