@@ -49,6 +49,54 @@ use rgy_proto::{CatchUp, GrepFile, Hit as WireHit, Request, Response};
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+// One of mimalloc's own tuning knobs. `mimalloc` (the crate) does not
+// re-export the sys crate, but its symbols are linked into this binary
+// because it is the global allocator, so declaring the one we need here
+// resolves at link time.
+//
+// Why it matters: building an index allocates a dozen per-entry `Vec`s plus
+// the walk's `Listing`s -- roughly 190 bytes per name at peak -- and then drops
+// them all when the finished blob is returned. On Windows mimalloc keeps freed
+// pages in its arenas for reuse and only purges them after a quiet window
+// (1000 ms by default in mimalloc v3, 10 ms in v2) with *no* allocations at
+// all. A daemon that is answering requests or following a change feed never
+// gets such a window, so the whole build peak stays resident for the life of
+// the process: measured 158 MB for 800k names when only ~25 MB is actually
+// live. Setting the purge delay to 0 releases those pages as they are freed.
+// (On Linux the same pages are decommitted anyway, so the option is a no-op
+// there -- measured 19 MB with and without it.)
+unsafe extern "C" {
+    fn mi_option_set(option: i32, value: std::ffi::c_long);
+}
+
+// Only the test that pins the enum position needs to read an option back.
+#[cfg(test)]
+unsafe extern "C" {
+    fn mi_option_get(option: i32) -> std::ffi::c_long;
+}
+
+/// mimalloc's `mi_option_purge_delay` (see `mimalloc.h`: "memory purging is
+/// delayed by N milli seconds; use 0 for immediate purging"). It is position
+/// 15 in the `mi_option_t` enum of both the v2 and v3 headers bundled with
+/// `libmimalloc-sys`; neither Rust crate re-exports the name, so the numeric
+/// position lives here and `tests::the_purge_delay_option_is_the_one_we_set`
+/// reads the default back to catch a reorder after an allocator upgrade.
+const MI_OPTION_PURGE_DELAY: i32 = 15;
+
+/// Ask the allocator to purge freed pages immediately.
+///
+/// This has to run **before** the index build allocates its transient Vecs:
+/// purging happens on free, so setting the option afterwards is too late for
+/// the memory we actually want back. mimalloc reads its options lazily on
+/// first use, so a call at the top of `main` is early enough.
+fn purge_on_free() {
+    // SAFETY: a plain mimalloc entry point with scalar arguments; the symbol
+    // is linked through the global allocator.
+    unsafe {
+        mi_option_set(MI_OPTION_PURGE_DELAY, 0);
+    }
+}
+
 /// How often the startup walk reports what it has covered.
 const REPORT_EVERY: Duration = Duration::from_millis(500);
 
@@ -516,6 +564,13 @@ fn parse_age(s: &str) -> Option<Duration> {
 }
 
 fn main() {
+    // Before anything allocates: a build of a large index frees ~190 bytes
+    // per name of transient buffers, and mimalloc's default 1000 ms purge
+    // delay never elapses in a daemon that keeps allocating. Those freed
+    // pages would otherwise stay in the process's working set for its whole
+    // life. Purge them as they are freed instead.
+    purge_on_free();
+
     // The console decides how the UTF-8 bytes are decoded, so it is put
     // into UTF-8 before anything is printed. The input
     // side too: in stdio mode the requests are typed by a person, and the
@@ -2867,6 +2922,37 @@ fn now_secs() -> u32 {
 
 #[cfg(test)]
 mod tests {
+
+    /// The purge-delay knob really is option 15, and setting it to 0 sticks.
+    ///
+    /// The enum is a numeric position in mimalloc's `mimalloc.h`, not a name
+    /// either Rust crate re-exports. A mimalloc upgrade that reorders it would
+    /// make `purge_on_free` silently tune the wrong option -- and the daemon
+    /// would quietly go back to hoarding its build peak. This reads the value
+    /// back through mimalloc itself, so it fails on the upgrade that breaks
+    /// it instead of on a user's memory report.
+    #[test]
+    fn the_purge_delay_option_is_the_one_we_set() {
+        // SAFETY: both are plain mimalloc entry points with scalar arguments.
+        unsafe {
+            // Read the default first. mimalloc v3 defaults purge_delay to
+            // 1000 ms and v2 to 10 ms; no other option at this position has
+            // either value. A reorder after an upgrade changes this number,
+            // and the test fails on that upgrade instead of on a user's
+            // memory report.
+            let default = mi_option_get(super::MI_OPTION_PURGE_DELAY);
+            assert!(
+                default == 1000 || default == 10,
+                "option 15 is mi_option_purge_delay (default {default})"
+            );
+            // And the setter works: the daemon calls it before the build.
+            mi_option_set(super::MI_OPTION_PURGE_DELAY, 0);
+            let got = mi_option_get(super::MI_OPTION_PURGE_DELAY);
+            // Leave the process as it was found: other tests share this heap.
+            mi_option_set(super::MI_OPTION_PURGE_DELAY, default);
+            assert_eq!(got, 0, "the purge delay can be set to immediate");
+        }
+    }
 
     /// The socket is the user's alone.
     ///
