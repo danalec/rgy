@@ -30,6 +30,7 @@ rgxy --show          # open it immediately
 rgxy --no-hook       # run without the global hotkey
 rgxy --tui           # the terminal interface, over the same source
 rgxy --query report  # one search, printed, and out
+rgxy            # then type >settings for the settings panel
 ```
 
 ## What it is made of

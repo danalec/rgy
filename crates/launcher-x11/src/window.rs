@@ -947,13 +947,15 @@ impl Window {
             }
             return true;
         }
-        // Our window. XLookupKeysym already accounts for the shift state;
-        // index 1 is tried when the first name is not a character. A
-        // Ctrl+letter comes back as the letter and decode::key_of turns it
-        // into the action. `ev` is the shared event the seam's
-        // `XLookupKeysym(&ev, 0)` is written for — exactly as `hotkey.rs`
-        // calls it.
+        // Our window. `XLookupKeysym(event, 0)` is the UNSHIFTED level:
+        // with Shift held it still answers `XK_period` for the key that
+        // spells `>`. So the character comes from `XLookupString`, which
+        // applies Shift, Caps Lock and AltGr; the keysym still decides
+        // the special keys and every Ctrl combination.
         unsafe {
+            let state = xlib::ev_state(ev);
+            let ctrl = decode::ctrl_of(state);
+            let alt = state & (xlib::Mod1Mask | xlib::Mod4Mask) != 0;
             let mut keysym = xlib::XLookupKeysym(ev, 0 as c_int) as u64;
             if keysym == 0 {
                 keysym = xlib::XKeycodeToKeysym(
@@ -962,14 +964,21 @@ impl Window {
                     0 as c_int,
                 ) as u64;
             }
-            let ctrl = decode::ctrl_of(xlib::ev_state(ev));
-            let mut key = decode::key_of(keysym, ctrl);
-            if key.is_none() {
-                let shifted = xlib::XLookupKeysym(ev, 1 as c_int) as u64;
-                if shifted != 0 && shifted != keysym {
-                    key = decode::key_of(shifted, ctrl);
-                }
-            }
+            let mut text = [0u8; 32];
+            let mut ignored: xlib::KeySym = 0;
+            let written = xlib::XLookupString(
+                ev,
+                text.as_mut_ptr().cast::<c_char>(),
+                text.len() as c_int,
+                &mut ignored,
+                core::ptr::null_mut(),
+            );
+            let text = if written > 0 {
+                &text[..(written as usize).min(text.len())]
+            } else {
+                &[][..]
+            };
+            let key = decode::typed_key(keysym, ctrl, alt, text);
             if let Some(k) = key {
                 return self.deliver(Event::Key(k), on_event);
             }

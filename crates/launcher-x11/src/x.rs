@@ -555,7 +555,7 @@ const XLIB: &[u8] = b"libX11.so.6\0";
 /// `RTLD_LAZY`; `RTLD_LOCAL` is 0 on Linux, so it is left out.
 const RTLD_LAZY: c_int = 1;
 /// The number of Xlib calls the launcher resolves.
-const XLIB_COUNT: usize = 62;
+const XLIB_COUNT: usize = 63;
 
 /// The 62 Xlib symbols the launcher uses, in a FIXED order: entry `i`
 /// belongs to the `xfn!` wrapper whose index is `i`. Each is a NUL-terminated
@@ -624,12 +624,13 @@ const SYMBOLS: [&[u8]; XLIB_COUNT] = [
     b"XPutImage\0", // 59
     b"XDefaultVisual\0", // 60
     b"XDefaultDepth\0", // 61
+    b"XLookupString\0", // 62
 ];
 
 /// The length of `SYMBOLS`, used as the pointer table's length.
 const XL: usize = SYMBOLS.len();
-// A missing wrapper is a compile error: the count is fixed at 62.
-const _: () = assert!(SYMBOLS.len() == 62);
+// A missing wrapper is a compile error: the count is fixed at 63.
+const _: () = assert!(SYMBOLS.len() == 63);
 const _: () = assert!(XL == XLIB_COUNT);
 
 // `PTRS` is a `static mut` rather than a lock or a `OnceCell`: this crate is
@@ -883,6 +884,8 @@ xfn!(59, XPutImage(display: *mut Display, drawable: Drawable, gc: GC, image: *mu
 xfn!(60, XDefaultVisual(display: *mut Display, screen: c_int) -> *mut Visual);
 #[rustfmt::skip]
 xfn!(61, XDefaultDepth(display: *mut Display, screen: c_int) -> c_int);
+#[rustfmt::skip]
+xfn!(62, XLookupString(event: *const XEvent, buffer: *mut c_char, bytes_buffer: c_int, keysym: *mut KeySym, status: *mut c_void) -> c_int);
 
 // --- the libc calls ----------------------------------------------------------
 //

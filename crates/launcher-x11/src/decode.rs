@@ -57,6 +57,31 @@ pub fn character_of(keysym: u64) -> Option<char> {
     None
 }
 
+/// A printable key, with the modifiers Xlib has already applied.
+///
+/// `XLookupKeysym(event, 0)` is always the **unshifted** level, so
+/// `Shift+.` reads as `XK_period` there and `>` never reaches the field —
+/// which made every `>` command (settings, menu, preview) unreachable on
+/// X11. `XLookupString` applies Shift, Caps Lock and AltGr and returns the
+/// actual bytes; this is the pure decision that prefers those bytes over
+/// the bare keysym, so it can be tested on a host with no display.
+///
+/// `text` is empty for a key that spells nothing (Return, an arrow, a
+/// modifier), and those fall back to [`key_of`]. Control and Alt keep the
+/// keysym path: a Ctrl+C is a command, not a control character, and an
+/// Alt+letter belongs to the window manager.
+pub fn typed_key(keysym: u64, ctrl: bool, alt: bool, text: &[u8]) -> Option<Key> {
+    if let (false, false, Some(&byte)) = (ctrl, alt, text.first()) {
+        // `XLookupString` hands back Latin-1 bytes. Latin-1 is the
+        // first 256 Unicode codepoints, so the byte *is* the char.
+        // A control byte (below the space, or DEL) is not text at all.
+        if (0x20..=0x7e).contains(&byte) || byte >= 0xa0 {
+            return char::from_u32(byte as u32).map(Key::Char);
+        }
+    }
+    key_of(keysym, ctrl)
+}
+
 /// Turn a keysym and a modifier mask into the launcher's own key.
 ///
 /// `None` says the event is not a key the field sees: a modifier press, a
@@ -117,6 +142,64 @@ fn control_letter(keysym: u64) -> Option<Key> {
 mod tests {
     use super::*;
 
+    /// `Shift+.` is `>`: the unshifted keysym says `.`, but Xlib's own
+    /// string says `>` and that is what a `>` command needs.
+    #[test]
+    fn a_shifted_period_is_the_command_prefix() {
+        assert_eq!(
+            typed_key(u64::from(b'.'), false, false, b">"),
+            Some(Key::Char('>'))
+        );
+    }
+
+    /// Shift on a letter is still a letter, and a plain key with no text
+    /// keeps the keysym's answer.
+    #[test]
+    fn shifted_letters_and_plain_keys_keep_their_spelling() {
+        assert_eq!(
+            typed_key(u64::from(b'a'), false, false, b"A"),
+            Some(Key::Char('A'))
+        );
+        assert_eq!(
+            typed_key(u64::from(b'r'), false, false, b"r"),
+            Some(Key::Char('r'))
+        );
+        assert_eq!(
+            typed_key(u64::from(b'r'), false, false, b""),
+            Some(Key::Char('r'))
+        );
+    }
+
+    /// A Ctrl combination is a command even though XLookupString would
+    /// hand back a control byte; Alt belongs to the window manager.
+    #[test]
+    fn control_and_alt_keep_the_keysym_path() {
+        assert_eq!(
+            typed_key(u64::from(b'c'), true, false, &[0x03]),
+            Some(Key::CtrlC)
+        );
+        assert_eq!(
+            typed_key(u64::from(b'x'), false, true, b"x"),
+            Some(Key::Char('x'))
+        );
+    }
+
+    /// Return and the arrows spell no text, so the keysym decides.
+    #[test]
+    fn a_key_that_spells_nothing_falls_back_to_the_keysym() {
+        assert_eq!(typed_key(x::XK_Return, false, false, b""), Some(Key::Enter));
+        assert_eq!(typed_key(x::XK_Left, false, false, b""), Some(Key::Left));
+        assert_eq!(
+            typed_key(x::XK_BackSpace, false, false, b""),
+            Some(Key::Backspace)
+        );
+    }
+
+    /// A Latin-1 byte is a character, not a control byte.
+    #[test]
+    fn a_latin1_letter_survives_the_lookup() {
+        assert_eq!(typed_key(0xe7, false, false, &[0xe7]), Some(Key::Char('ç')));
+    }
     /// The arrows, Home, End and the pages are the model's own keys.
     #[test]
     fn the_navigation_keys_are_the_models_keys() {

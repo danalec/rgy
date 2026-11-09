@@ -13,11 +13,10 @@ that run on every host, while the Xlib bodies (`x.rs`, `runtime.rs`,
 are inline re-export modules of `hotkey.rs` so the module names match the
 Windows backend.
 
-`x.rs` is the one seam: 62 Xlib calls declared by hand as Rust wrappers that
+`x.rs` is the one seam: 63 Xlib calls declared by hand as Rust wrappers that
 resolve their addresses with `dlopen("libX11.so.6")` + `dlsym` on first use,
 libc calls in a bare `extern "C"` block (no link attribute anywhere), and the
-platform's structs whole with compile-time size/offset assertions. All 62
-symbol names are verified against `nm -D libX11.so.6`.
+platform's structs whole with compile-time size/offset assertions. All 63 symbol names are verified against `nm -D libX11.so.6` on both kernels.
 
 **The frame is computed in client memory, not by the server.** `raster.rs` is
 a plain `u32`-per-pixel surface with integer source-over blending, a 4x4
@@ -71,6 +70,7 @@ on drop. Nothing else in the crate knows which kernel it is on.
 - `[font.rs:face_looks_sane]` — a face is only read once `num_glyphs`, `units_per_EM`, the ascender and the descender all land in ranges a real face uses; a refusal is the bitmap font, never a wrong read.
 - `[icons.rs:decode_png]` — bit depth 8 and no interlacing, and anything else is `None`; the decoder refuses rather than guesses.
 - `[icons.rs:Icon::from_rgba]` — the scale-down is a coverage-weighted average, so a transparent pixel cannot darken the icon's colour.
+- `[decode.rs:typed_key]` — a printable key is what `XLookupString` spells, not the unshifted keysym: `Shift+.` must be `>` or every `>` command (settings, menu, preview) is unreachable. Control and Alt keep the keysym path.
 - `[decode.rs:key_of]` — control letters are actions before characters; a modifier keysym answers `None`.
 - `[geometry.rs:spot_on]` — the window never falls outside the work area; `clamp_anchor` pins an anchor to 0..1000.
 - `[mark.rs:magnifier]` — the lens is a ring and the mark is the accent's blue; the same bytes the Windows tray uses.
@@ -79,7 +79,7 @@ on drop. Nothing else in the crate knows which kernel it is on.
 - `[actions.rs:serve_selection_request]` — the launcher owns CLIPBOARD until another client takes it; every request is answered.
 
 ## Side Effects
-- `[x.rs:XOpenDisplay]`, `[x.rs:XCreateWindow]`, `[x.rs:XCreateImage]`, `[x.rs:XPutImage]`, `[x.rs:XFillRectangles]`, `[x.rs:XGrabKey]`, `[x.rs:XSetSelectionOwner]`, `[x.rs:XConvertSelection]`, `[x.rs:XSendEvent]` — the X11 platform calls, each a runtime-resolved wrapper.
+- `[x.rs:XOpenDisplay]`, `[x.rs:XCreateWindow]`, `[x.rs:XCreateImage]`, `[x.rs:XPutImage]`, `[x.rs:XLookupString]`, `[x.rs:XFillRectangles]`, `[x.rs:XGrabKey]`, `[x.rs:XSetSelectionOwner]`, `[x.rs:XConvertSelection]`, `[x.rs:XSendEvent]` — the X11 platform calls, each a runtime-resolved wrapper.
 - `[x.rs:pipe2]`, `[x.rs:poll]`, `[x.rs:fork]`, `[x.rs:execvp]`, `[x.rs:socket]`, `[x.rs:bind]`, `[x.rs:unlink]`, `[x.rs:open]`, `[x.rs:read]`, `[x.rs:malloc]`, `[x.rs:free]` — the libc calls; `unlink` is FreeBSD's stale-socket cleanup, and `open`/`read` are how an icon file is read.
 - `[font.rs:dlopen]` — `libfreetype.so.6`, resolved once; a machine without it keeps the bitmap font. `[icons.rs:read_file]` — reads a theme PNG, capped at 512 KiB.
 - `[tray.rs:Tray::new]` — docks the icon and draws it; `[hotkey.rs:Hook::install]` — takes a global key grab; `[sole.rs:Sole::take]` — binds the session's socket; `[actions.rs:open]` — starts `xdg-open` in a detached process; `[window.rs:Window::repaint]` — one `XPutImage` per frame.
