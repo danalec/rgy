@@ -11,7 +11,7 @@ PublisherUrl: https://github.com/danalec
 PackageName: rgy-search
 PackageUrl: https://github.com/danalec/rgy
 License: Apache-2.0
-LicenseUrl: https://github.com/danalec/rgy/blob/main/COPYING
+LicenseUrl: https://github.com/danalec/rgy/blob/main/LICENSE
 ShortDescription: Whole-filesystem name search and content search in one stack
 Description: |-
   rgy answers two questions about the files on your computer: which file is

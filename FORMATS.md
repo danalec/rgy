@@ -28,6 +28,15 @@ text layer, a `.docx`'s paragraphs, a zip's members — and the rendering is
 what the search sees. A file no adapter claims is read as bytes, which is
 what a `.txt` has always been.
 
+> **Untrusted input.** Those adapters are linked into the search process;
+> they are not sandboxed. A PDF, zip or office file from somebody else is
+> hostile input to a decoder. The read is capped at 4 MiB, nesting at four
+> levels with 4096 members per level, and the compression decoders have an
+> output cap — but there is no process isolation and no timeout on one
+> parse. Set `RGY_ADAPTERS=off` to read only a file's own bytes and invoke
+> no parser at all; name search is unaffected. The full list of bounds and
+> omissions is in the [manual](MANUAL.md#untrusted-files-and-the-format-adapters).
+
 **The corpus.** A pack store (`searchd --tv-dir`, or `rgx-tv build`) ingests
 a tree once into verified packs, and content queries then run against the
 packed bytes. Same bytes, same answers, but a corpus that does not change

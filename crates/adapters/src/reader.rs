@@ -11,6 +11,18 @@
 //! crate answers it: **what does this file render to?** A file no adapter
 //! claims renders to nothing, and the engine reads its own bytes then, as
 //! it always did.
+//!
+//! **The parsers run in this process.** `rgx_core::process` below decodes
+//! archives, PDFs, office documents and media from bytes a stranger may
+//! have written, in the same address space as the search. Rust rules out
+//! most memory bugs, but a decoder can still panic, loop or allocate
+//! without bound on hostile input, and none of those need `unsafe`. The
+//! in-process limits (a 4 MiB input cap, a nesting depth of four,
+//! 4096 members per level, and an `OutputCap` on the compression decoders)
+//! bound the damage but do not isolate it. `RGY_ADAPTERS=off` is the
+//! escape hatch for an untrusted tree: it makes `rendered` answer with
+//! nothing for every file, so the content path reads only the file's own
+//! bytes and no parser is invoked at all. See README.md and MANUAL.md.
 
 use rgx_core::{Ctx, Registry};
 use rgy_name_core::content::{self, AdapterReader, Rendered};
@@ -18,17 +30,45 @@ use std::sync::OnceLock;
 
 use crate::registry;
 
+/// The environment switch that turns every in-process parser off.
+pub const ADAPTERS_ENV: &str = "RGY_ADAPTERS";
+
+/// Whether one value of `RGY_ADAPTERS` asks for the parsers to be off.
+///
+/// Pure so the answer can be tested without touching the process's
+/// environment: a value that is not one of the known off words leaves the
+/// adapters on, and an unset switch leaves them on too.
+pub fn adapters_disabled_from(value: Option<&str>) -> bool {
+    let Some(value) = value else { return false };
+    let value = value.trim();
+    ["off", "0", "false", "no", "disabled", "none"]
+        .iter()
+        .any(|off| value.eq_ignore_ascii_case(off))
+}
+
+/// The switch, read once for the life of the process.
+fn adapters_disabled() -> bool {
+    static DISABLED: OnceLock<bool> = OnceLock::new();
+    *DISABLED.get_or_init(|| adapters_disabled_from(std::env::var(ADAPTERS_ENV).ok().as_deref()))
+}
+
 /// The format adapters, as a reader for the content path.
 ///
 /// The content path asks per file and this is where the registry answers.
 pub struct Adapters;
 
-impl AdapterReader for Adapters {
-    /// The documents the adapters rendered for `path`.
+impl Adapters {
+    /// `rendered`, with the switch answered by the caller.
     ///
-    /// An empty vector means no adapter claims the file: the content path
-    /// reads the file's own bytes then, exactly as it always did.
-    fn rendered(&self, path: &[u8]) -> Vec<Rendered> {
+    /// Kept separate so a test can hold the disabled answer without
+    /// mutating the process environment, which the rest of the suite
+    /// shares.
+    fn rendered_when(&self, path: &[u8], disabled: bool) -> Vec<Rendered> {
+        if disabled {
+            // No registry, no file read, no `rgx_core::process`: the
+            // content path's plain branch reads the file's own bytes.
+            return Vec::new();
+        }
         let reg = shared_registry();
         // The path is spelled as text for the adapter, which asks about
         // extensions and not about bytes. `from_utf8_lossy` is enough here:
@@ -61,6 +101,17 @@ impl AdapterReader for Adapters {
                 bytes: f.bytes,
             })
             .collect()
+    }
+}
+
+impl AdapterReader for Adapters {
+    /// The documents the adapters rendered for `path`.
+    ///
+    /// An empty vector means no adapter claims the file: the content path
+    /// reads the file's own bytes then, exactly as it always did. With
+    /// `RGY_ADAPTERS=off` that is the answer for every file.
+    fn rendered(&self, path: &[u8]) -> Vec<Rendered> {
+        self.rendered_when(path, adapters_disabled())
     }
 }
 
@@ -395,5 +446,90 @@ mod tests {
         ));
 
         assert!(Adapters.rendered(&path).is_empty());
+    }
+
+    // --- the untrusted-tree switch -----------------------------------------
+
+    #[test]
+    fn an_unset_switch_keeps_the_adapters_on() {
+        assert!(!adapters_disabled_from(None), "unset means on");
+        assert!(!adapters_disabled_from(Some("")), "empty means on");
+        assert!(!adapters_disabled_from(Some("  \t ")), "blank means on");
+    }
+
+    #[test]
+    fn the_switch_knows_its_off_words() {
+        for value in ["off", "0", "false", "no", "disabled", "none"] {
+            assert!(
+                adapters_disabled_from(Some(value)),
+                "{value} asks for the parsers to be off"
+            );
+            assert!(
+                adapters_disabled_from(Some(&format!("  {}  ", value.to_uppercase()))),
+                "{value} is case-insensitive and trimmed"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_value_keeps_the_adapters_on() {
+        for value in ["on", "1", "true", "render", "nonsense"] {
+            assert!(
+                !adapters_disabled_from(Some(value)),
+                "{value} is not an off word: failing safe means staying on"
+            );
+        }
+    }
+
+    #[test]
+    fn a_disabled_reader_does_not_parse_a_pdf() {
+        // The same PDF the adapter path reads above. With the switch off
+        // the reader answers with nothing BEFORE the registry is even
+        // consulted, so no decoder sees the file.
+        let file = TempFile::new("switch-off.pdf", &pdf_with(MARKER));
+
+        assert!(
+            !Adapters.rendered_when(&file.bytes(), false).is_empty(),
+            "on: the PDF is rendered"
+        );
+        assert!(
+            Adapters.rendered_when(&file.bytes(), true).is_empty(),
+            "off: the PDF is not parsed at all"
+        );
+    }
+
+    /// A reader that never parses, the shape the disabled answer has.
+    struct PlainOnly;
+
+    impl AdapterReader for PlainOnly {
+        fn rendered(&self, _path: &[u8]) -> Vec<Rendered> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn a_disabled_search_reads_only_the_files_own_bytes() {
+        // The marker lives in the PDF's text layer and not in its bytes.
+        // With the parsers on the file matches; with them off the plain
+        // path reads the very same file and does not match. Name search is
+        // untouched either way — only the content path loses the adapter.
+        let file = TempFile::new("switch-search.pdf", &pdf_with(MARKER));
+        let path = file.bytes();
+        let paths = std::slice::from_ref(&path);
+        let needle = grep(MARKER);
+
+        let with_parsers = content::verify_paths_with(&needle, paths, 10, Some(&Adapters));
+        assert_eq!(with_parsers.files.len(), 1, "the adapter found the words");
+
+        let without_parsers = content::verify_paths_with(&needle, paths, 10, Some(&PlainOnly));
+        assert_eq!(
+            without_parsers.files.len(),
+            0,
+            "the raw bytes do not hold the marker, and no parser ran"
+        );
+        assert_eq!(
+            without_parsers.candidates, 1,
+            "the file was still considered, not skipped"
+        );
     }
 }

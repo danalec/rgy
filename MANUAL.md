@@ -14,6 +14,7 @@ the part you keep open while using it.
 3. [Build it](#3-build-it)
 4. [Your first queries](#4-your-first-queries)
 5. [The query language](#5-the-query-language)
+   - [Untrusted files and the format adapters](#untrusted-files-and-the-format-adapters)
 6. [The flags](#6-the-flags)
 7. [The daemon](#7-the-daemon)
 8. [The window](#8-the-window)
@@ -671,6 +672,87 @@ On a PDF or a Word document, `grep:` reads the document and not its
 compressed bytes: the format adapters are in the search path, and the words
 of a PDF's text layer are words the query can match. Those formats are listed
 in [FORMATS.md](FORMATS.md) with their state.
+
+### Untrusted files and the format adapters
+
+Name queries never open a file. Content queries do, and a file an adapter
+claims is **decoded in the same process** as `searchctl` or `searchd` — the
+ten adapter families (archives, office, PDF, mail, media, 3D, ...) are
+linked into the binary, not run in a sandbox. The bytes being decoded may
+have been written by somebody else: a PDF downloaded from the internet, a zip
+in a mail attachment, a document a colleague sent. Rust makes memory
+corruption unlikely, but it does not stop a decoder from panicking, looping
+forever, or allocating far more than the file is worth. The daemon runs as
+you, so a decoder bug is a bug with your privileges.
+
+This is the whole reason the distinction between your own notes and a
+Downloads folder matters: the first is data you trust, the second is input
+from strangers fed to a parser.
+
+What is in place today:
+
+| bound | value | what it stops |
+|---|---|---|
+| bytes read per file | 4 MiB (`MAX_FILE * 4`) | reading an entire disk into memory |
+| archive nesting | 4 levels | an archive that contains itself forever |
+| members per level | 4096 | a zip with millions of entries |
+| decoder output | `OutputCap`, counted as bytes are emitted | decompression bombs |
+| whole search | wall-clock budget, checked between files | a scan that never finishes |
+
+What is **not** in place:
+
+- **No process isolation.** There is no subprocess, no seccomp, no Landlock,
+  no privilege drop around a parse.
+- **No per-parse timeout.** The wall-clock budget is checked between files,
+  not inside `adapter.extract`; a decoder that hangs hangs the process. The
+  fuzz test harness has a watchdog, but it is a test harness, and a Rust
+  thread that will not stop cannot be killed from outside it.
+- **No memory ceiling on a rendering.** The `OutputCap` covers the
+  compression decoders; a renderer that builds a large document is not
+  bounded by it.
+- `rgx-core` contains `unsafe` code in its codecs and memory-mapping paths.
+  The adapter crates themselves contain none.
+
+#### Turning the parsers off
+
+`RGY_ADAPTERS` accepts `off`, `0`, `false`, `no`, `disabled` or `none`
+(case-insensitive, surrounding spaces ignored). An unset or unrecognised
+value leaves the adapters **on** — failing safe here means not silently
+losing the formats you asked for.
+
+```sh
+# one command, on Linux, macOS, FreeBSD
+RGY_ADAPTERS=off searchctl --root ~/Downloads --count 'grep:invoice'
+```
+
+```powershell
+# Windows, per process
+$env:RGY_ADAPTERS = 'off'
+.\searchctl.exe --root $env:USERPROFILE\Downloads --count 'grep:invoice'
+```
+
+With the switch off, `Adapters::rendered` answers with nothing before the
+registry is even consulted, so **no parser is invoked**. The content path
+then reads the file's own bytes (still capped at 4 MiB) and searches those;
+plain-text content search and all name queries are unchanged. What you lose
+is exactly what the adapters would have added: PDF text layers, `.docx`
+paragraphs, archive members, and the rest of [FORMATS.md](FORMATS.md). On a
+folder of PDFs, `grep:` over the raw bytes will usually find nothing — that
+is the expected, safe answer.
+
+**The daemon is a separate process.** `searchctl --daemon` and `rgxy` ask
+`searchd`, which has its own environment. If you want the whole stack off,
+set the variable when you **start** `searchd`:
+
+```sh
+RGY_ADAPTERS=off searchd --root "$HOME" --listen pipe:rgy-searchd-$USER
+```
+
+Setting it only in the shell that launches `rgxy` does not reach the daemon.
+
+For a corpus you believe may be actively hostile, no in-process switch is a
+substitute for a boundary: run the search in a container, a VM, or a
+separate unprivileged account with no access to anything you care about.
 
 ## 6. The flags
 

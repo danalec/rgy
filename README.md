@@ -362,12 +362,56 @@ perf gate fails a PR on a >20% regression against
 [`benchmark/baseline-names.md`](benchmark/baseline-names.md); the write-ups
 carry the host and date on every number.
 
+## Untrusted files and the format adapters
+
+**Name search never opens a file.** `invoice ext:pdf` is answered from the
+index alone. **Content search does**: `grep:`, `regex:` and `sym:` read the
+file, and a file an adapter claims — a PDF, a `.docx`, a zip, a mail file —
+is decoded **in the same process** as `searchctl` or `searchd`, from bytes
+you may not have written. Rust rules out most memory bugs, but a decoder can
+still panic, loop or allocate without bound on hostile input, and archive
+and PDF parsers are a classic source of those bugs. A content search over a
+Downloads folder full of strangers' PDFs is a different risk from one over
+your own notes.
+
+What bounds that today: a 4 MiB read cap per file, archive nesting capped at
+four levels with 4096 members per level, an `OutputCap` on the compression
+decoders (a decompression bomb is stopped as it emits), and a wall-clock
+budget on the whole search. What does **not** bound it: there is no process
+isolation, no privilege drop, and no timeout on a single parse — a parser
+that hangs hangs the process. `rgx-core` also contains `unsafe` code in its
+codecs and memory-mapping paths.
+
+For a tree you do not trust, turn the parsers off:
+
+```sh
+RGY_ADAPTERS=off searchctl --root ~/Downloads --count 'grep:invoice'
+```
+
+With the switch set, no adapter is invoked at all: the content path reads
+only the file's own bytes (still capped at 4 MiB), name search is unchanged,
+and plain-text content search still works. Set it for the **daemon** at
+startup too — `rgxy` and `searchctl --daemon` inherit `searchd`'s
+environment, not their own. See [MANUAL.md](MANUAL.md) for the full list of
+limits and what the switch does not cover, and [FORMATS.md](FORMATS.md) for
+which formats are parsed.
+
+If the corpus is actively hostile, no in-process setting is enough: run the
+search in a container, a VM or a separate unprivileged account.
+
 ## License
 
-Apache-2.0 for the product and the end-to-end harness, MIT OR Apache-2.0 for
-the tooling around it — the full map is in `COPYING`, with texts in
-`LICENSE-APACHE` and `LICENSE-MIT` and third-party notices in `NOTICE`.
-Every file carries its `SPDX-License-Identifier:` header.
+The repository as a whole is **Apache-2.0**
+(`SPDX-License-Identifier: Apache-2.0`); the canonical text is
+[`LICENSE`](LICENSE) at the root, the file GitHub's licence detector reads.
+[`COPYING`](COPYING) is the detailed map: the product and the end-to-end
+harness are Apache-2.0, while the tooling (`scripts/`, `tools/`,
+`benchmark/`, `install.sh`, `install.ps1`) is `MIT OR Apache-2.0`. Apache-2.0
+is therefore available for every file here — the MIT option is an extra
+permission on the tooling, not a second answer about the binaries. Full texts
+are in `LICENSE-APACHE` and `LICENSE-MIT`, third-party notices in `NOTICE`.
+Every source file carries its own `SPDX-License-Identifier:` header, audited
+by `tests/license.rs`.
 
 ## Related projects
 

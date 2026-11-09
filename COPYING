@@ -7,6 +7,15 @@ taste: it follows what each file's own `SPDX-License-Identifier:` header
 says, and the audit in `tests/license.rs` checks every source file against
 the claim made here.
 
+`LICENSE` at the root is the canonical, machine-readable declaration: the
+verbatim Apache-2.0 text, the one GitHub's licence detector reads. This file
+is the human-readable map behind it. Because the tooling's `MIT OR
+Apache-2.0` always includes Apache-2.0, the whole repository is available
+under Apache-2.0; the MIT option is an additional permission on those four
+trees, not a different licence for the shipped binaries. Every package
+manifest in this repository and its distribution repos states
+`Apache-2.0` for that reason.
+
 Apache-2.0 only
 ----------------
 

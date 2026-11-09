@@ -87,12 +87,12 @@
               install -m755 "$f" "$out/bin/$f"
             done
             ln -s searchctl "$out/bin/rgy"
-            for f in README.md MANUAL.md FORMATS.md COPYING NOTICE LICENSE-APACHE LICENSE-MIT; do
+            for f in README.md MANUAL.md FORMATS.md COPYING NOTICE LICENSE LICENSE-APACHE LICENSE-MIT; do
               if [ -f "$f" ]; then
                 install -m644 "$f" "$out/share/doc/rgy/$f"
               fi
             done
-            for f in COPYING NOTICE LICENSE-APACHE LICENSE-MIT; do
+            for f in COPYING NOTICE LICENSE LICENSE-APACHE LICENSE-MIT; do
               if [ -f "$f" ]; then
                 install -m644 "$f" "$out/share/licenses/rgy/$f"
               fi
