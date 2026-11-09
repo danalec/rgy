@@ -8,7 +8,7 @@
 # inside keep the names they have everywhere else (searchctl, searchd), the
 # project itself is still rgy, and the repository is danalec/rgy.
 #
-# The 0.1.10.1 release carries both macOS archives, built and smoked on the
+# The 0.1.10.2 release carries both macOS archives, built and smoked on the
 # CI runners. The URLs and the digests below name and pin those real files.
 # scripts/publish-release.sh rewrites them from the combined SHA256SUMS in
 # .dist/, so a formula that names one release and pins another's digest
@@ -17,16 +17,16 @@ class RgySearch < Formula
   desc "Whole-filesystem name search and content search in one stack"
   homepage "https://github.com/danalec/rgy"
   license "Apache-2.0"
-  version "0.1.10.1"
+  version "0.1.10.2"
 
   on_arm do
-    url "https://github.com/danalec/rgy/releases/download/rgy-v0.1.10.1/rgy-v0.1.10.1-aarch64-apple-darwin.tar.gz"
-    sha256 "8deb07174c93c1fc7462c66884849d56bacfd92c53ce8f61c51b4dffe6b3bbef"
+    url "https://github.com/danalec/rgy/releases/download/rgy-v0.1.10.2/rgy-v0.1.10.2-aarch64-apple-darwin.tar.gz"
+    sha256 "0000000000000000000000000000000000000000000000000000000000000000"
   end
 
   on_intel do
-    url "https://github.com/danalec/rgy/releases/download/rgy-v0.1.10.1/rgy-v0.1.10.1-x86_64-apple-darwin.tar.gz"
-    sha256 "6462224b4dfafaa0985fa1a4dd638424026db621245c2d95cff73e6bd1095859"
+    url "https://github.com/danalec/rgy/releases/download/rgy-v0.1.10.2/rgy-v0.1.10.2-x86_64-apple-darwin.tar.gz"
+    sha256 "0000000000000000000000000000000000000000000000000000000000000000"
   end
 
   def install

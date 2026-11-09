@@ -2,8 +2,8 @@
 # One row per directory that owes a contract: <relative-dir> <sha256>
 # Hashes are computed with CRLF normalised to LF, so a Windows checkout
 # and a Unix checkout produce the same digest.
-.	17e8681c4a368859ce3cf189332c4b69bcf899b78060b3455abd73d3f3b30f11
-Formula	677210807fdc86c0475f2b018125ac717e7206c4636d4da1335dcfb3c5f95707
+.	56da55a3d1fb27170131bcee9f6dc9f4ac753736b69e2b5b1423be1321da876d
+Formula	11ede96d67d48ddd4a85a73ecb12fb16fc25f6870539b7886b920df245070687
 bins	4f0c3a1f181fac6ac57560866649376f4d7b0acf57b3a139ef946af0e423d0f2
 bins/rgxy	05811a341605972553b9ce95248c3135010879cff8b8b046f87a3a4abbd5fe42
 bins/rgxy/src	d0641199cd12bd22002d446947ac0ce0dc6797eaf9714006c981108946549fce

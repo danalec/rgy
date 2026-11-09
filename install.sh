@@ -5,7 +5,7 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/danalec/rgy/main/install.sh | bash
 #   bash install.sh --install-dir /usr/local/bin
-#   bash install.sh --version rgy-v0.1.10.1
+#   bash install.sh --version rgy-v0.1.10.2
 #   bash install.sh --activate
 #   bash install.sh --uninstall
 #
@@ -67,10 +67,10 @@
 set -u
 
 # The tag of the release that ships the binary archives: the crates carry
-# three numbers (0.1.10) and the release carries a fourth (0.1.10.1), which
+# three numbers (0.1.10) and the release carries a fourth (0.1.10.2), which
 # is the fix count of the line. An installer that names another tag downloads
 # another release's archives and refuses them on the digest pinned below.
-version="rgy-v0.1.10.1"
+version="rgy-v0.1.10.2"
 install_dir="$HOME/.local/bin"
 base_url="https://github.com/danalec/rgy/releases/download"
 skip_checksum=0
@@ -84,11 +84,11 @@ uninstall=0
 # The digest is uppercase hex, and it is rewritten in place by
 # scripts/publish-release.sh -- so the shape of these lines is part of the
 # contract, not a formatting choice.
-expected_linux_x86_64="CFE1F6E3BAE1A639446E5566D94A057F03693A2F0B78B818DB7A7EFC78A7952C"
-expected_linux_aarch64="CE12389C1C8B70F43348DC1454258E693EEBDAF7F8A23C56EFD1918085AF7E33"
-expected_macos_x86_64="6462224B4DFAFAA0985FA1A4DD638424026DB621245C2D95CFF73E6BD1095859"
-expected_macos_aarch64="8DEB07174C93C1FC7462C66884849D56BACFD92C53CE8F61C51B4DFFE6B3BBEF"
-expected_freebsd_x86_64="A525DF2E76DAD6174616E588B2D39DA6756BCAC6D5C87A03DEF4DB75AF92410B"
+expected_linux_x86_64="0000000000000000000000000000000000000000000000000000000000000000"
+expected_linux_aarch64="0000000000000000000000000000000000000000000000000000000000000000"
+expected_macos_x86_64="0000000000000000000000000000000000000000000000000000000000000000"
+expected_macos_aarch64="0000000000000000000000000000000000000000000000000000000000000000"
+expected_freebsd_x86_64="0000000000000000000000000000000000000000000000000000000000000000"
 
 # The pin of an archive nobody has published yet.
 placeholder="0000000000000000000000000000000000000000000000000000000000000000"

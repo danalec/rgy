@@ -145,10 +145,10 @@ if ($here -and (Test-Path -LiteralPath (Join-Path $here 'scripts/lib/digest.ps1'
 $InstallDir = "$env:LOCALAPPDATA\Programs\rgy"
 $BaseUrl = 'https://github.com/danalec/rgy/releases/download'
 # The tag of the release that ships the binary archives: the crates carry
-# three numbers (0.1.10) and the release carries a fourth (0.1.10.1), which
+# three numbers (0.1.10) and the release carries a fourth (0.1.10.2), which
 # is the fix count of the line. An installer that names another tag downloads
 # another release's archives and refuses them on the digest pinned below.
-$Version = 'rgy-v0.1.10.1'
+$Version = 'rgy-v0.1.10.2'
 $SkipChecksum = $false
 $NoAutostart = $false
 $NoLauncher = $false

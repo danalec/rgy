@@ -48,8 +48,8 @@ carries everything with it.
 
 ## 2. Install it
 
-The release is **0.1.10.1**. It is on
-[GitHub](https://github.com/danalec/rgy/releases/tag/rgy-v0.1.10.1), and the
+The release is **0.1.10.2**. It is on
+[GitHub](https://github.com/danalec/rgy/releases/tag/rgy-v0.1.10.2), and the
 crates are on crates.io at 0.1.10 — the release's number carries a fourth
 place, the fix count of the line, and the registry takes three.
 
@@ -83,9 +83,9 @@ administrator — and a symlink on Linux, macOS and FreeBSD:
 
 | platform | archive |
 |---|---|
-| Windows x86_64 | `rgy-v0.1.10.1-x86_64-windows.zip` |
-| Linux x86_64 | `rgy-v0.1.10.1-x86_64-linux.tar.gz` |
-| FreeBSD x86_64 | `rgy-v0.1.10.1-x86_64-freebsd.tar.gz` |
+| Windows x86_64 | `rgy-v0.1.10.2-x86_64-windows.zip` |
+| Linux x86_64 | `rgy-v0.1.10.2-x86_64-linux.tar.gz` |
+| FreeBSD x86_64 | `rgy-v0.1.10.2-x86_64-freebsd.tar.gz` |
 
 The release page carries a `SHA256SUMS` beside the archives, and every arch
 the CI builds has one: aarch64 Windows, AVX2 and Zen 4 x86_64, static musl,
@@ -130,7 +130,7 @@ one on the runner that has the platform.
 |---|---|---|
 | Windows | Scoop | **out** — `scoop bucket add danalec_scoop-alts https://github.com/danalec/scoop-alts` and `scoop install danalec_scoop-alts/rgy`. The same bucket carries `rgx`, the upstream engine this repository is built on |
 | Windows | winget | the manifest in this repository validates and is refreshed by every release; the submission to `microsoft/winget-pkgs` ([#474460](https://github.com/microsoft/winget-pkgs/pull/474460)) is open awaiting a moderator — `winget install danalec.rgy-search` installs nothing until it merges |
-| Arch Linux | AUR | **out** — three binary packages at 0.1.10.1: `rgy-search-bin` (portable), `rgy-search-avx2-bin` and `rgy-search-znver4-bin`. They conflict, because all three install `/usr/bin/searchctl`: `yay -S rgy-search-bin` (or `paru -S`) installs one of them |
+| Arch Linux | AUR | **out** — three binary packages at 0.1.10.2: `rgy-search-bin` (portable), `rgy-search-avx2-bin` and `rgy-search-znver4-bin`. They conflict, because all three install `/usr/bin/searchctl`: `yay -S rgy-search-bin` (or `paru -S`) installs one of them |
 | macOS | Homebrew | the formula pins the real digests of both macOS archives; the tap is not published — `brew install danalec/rgy/rgy-search` installs nothing today |
 | any | crates.io | all thirty-two crates at 0.1.10 — `cargo install rgy-search --version 0.1.10` gives you `searchctl`; `rgy-searchd`, `rgy-autostart` and `rgxy` are separate crates |
 
@@ -1617,12 +1617,12 @@ being written. rgy skips it and lists it rather than failing the run.
 |---|---|
 | [README.md](README.md) | the map: what rgy is, how it compares to rgx |
 | [FORMATS.md](FORMATS.md) | what it reads inside a file, format by format |
-| [docs/release-0.1.10.1.md](docs/release-0.1.10.1.md) | the 0.1.10.1 release page, with the changelog in it |
+| [docs/release-0.1.10.2.md](docs/release-0.1.10.2.md) | the 0.1.10.2 release page, with the changelog in it |
 | [benchmark/](benchmark/) | the measured numbers |
 | [rgx](https://github.com/danalec/rgx) | the content-search specialist this workspace is built on |
 
 | link | what it is |
 |---|---|
-| [the 0.1.10.1 release](https://github.com/danalec/rgy/releases/tag/rgy-v0.1.10.1) | the archives, the `SHA256SUMS`, and the changelog |
+| [the 0.1.10.2 release](https://github.com/danalec/rgy/releases/tag/rgy-v0.1.10.2) | the archives, the `SHA256SUMS`, and the changelog |
 | [crates.io](https://crates.io/crates/rgy-search) | the thirty-two crates, all at 0.1.10 |
 | [docs.rs](https://docs.rs/rgy-name-core) | the API of each crate |
