@@ -202,10 +202,20 @@ pub enum Hotkey {
 }
 
 impl Default for Hotkey {
+    /// Alt+Space, the launcher's shortcut on every desktop.
+    ///
+    /// A registered combo beats a double tap: it is one gesture instead
+    /// of two, it cannot be mistaken for the user holding a modifier
+    /// while typing, and on X11 it is a passive `XGrabKey` that works
+    /// even when the launcher's window is hidden. The Windows backend
+    /// registers the same Alt+Space with `RegisterHotKey`, and the X11
+    /// backend translates `MOD_ALT` + `VK_SPACE` into `Mod1Mask` +
+    /// `XK_space`. The panel and the settings file can still choose a
+    /// double tap or another combo; this is only the starting point.
     fn default() -> Hotkey {
-        Hotkey::DoubleTap {
-            key: TapKey::Ctrl,
-            window_ms: 400,
+        Hotkey::Combo {
+            modifiers: mods::ALT,
+            key: 0x20, // VK_SPACE / XK_space
         }
     }
 }
@@ -263,10 +273,12 @@ impl Hotkey {
                         .parse::<u32>()
                         .ok()?
                         .clamp(MIN_WINDOW_MS, MAX_WINDOW_MS),
-                    None => match Hotkey::default() {
-                        Hotkey::DoubleTap { window_ms, .. } => window_ms,
-                        Hotkey::Combo { .. } => unreachable!("the default is a double tap"),
-                    },
+                    // A `double ctrl` without a window keeps the window
+                    // the launcher has always used, even though the
+                    // default hotkey is now a combo. The number is a
+                    // constant, not a property of the default: the
+                    // default and this fallback are different decisions.
+                    None => DEFAULT_WINDOW_MS,
                 };
                 Some(Hotkey::DoubleTap { key, window_ms })
             }
@@ -309,6 +321,9 @@ impl Hotkey {
 
 /// The narrowest window a double tap can have.
 const MIN_WINDOW_MS: u32 = 100;
+/// The window between two taps a `double <key>` line carries when it
+/// does not name one: four hundred milliseconds, the launcher's own.
+const DEFAULT_WINDOW_MS: u32 = 400;
 /// The widest window a double tap can have.
 const MAX_WINDOW_MS: u32 = 1500;
 /// The narrowest the overlay can be, in model units.
@@ -623,9 +638,9 @@ mod tests {
         assert_eq!(settings.overlay.alpha, 230);
         assert_eq!(
             settings.overlay.hotkey,
-            Hotkey::DoubleTap {
-                key: TapKey::Ctrl,
-                window_ms: 400
+            Hotkey::Combo {
+                modifiers: mods::ALT,
+                key: 0x20
             }
         );
         assert!(settings.fzf.args.is_empty());
@@ -678,6 +693,34 @@ mod tests {
         assert_eq!(settings.overlay.hotkey, Hotkey::default());
     }
 
+    /// Alt+Space is the default on every desktop: one registered combo,
+    /// not two taps of a lone modifier.
+    #[test]
+    fn the_default_hotkey_is_alt_space() {
+        assert_eq!(
+            Hotkey::default(),
+            Hotkey::Combo {
+                modifiers: mods::ALT,
+                key: 0x20
+            }
+        );
+        assert_eq!(Hotkey::default().spell(), "combo alt+space");
+    }
+
+    /// A `double` line without a window still works now that the default
+    /// is a combo: the window is a constant of the gesture, not a
+    /// property of the default hotkey.
+    #[test]
+    fn a_double_tap_without_a_window_keeps_its_own_window() {
+        let parsed = Hotkey::parse("double ctrl").expect("the line names a gesture");
+        assert_eq!(
+            parsed,
+            Hotkey::DoubleTap {
+                key: TapKey::Ctrl,
+                window_ms: 400
+            }
+        );
+    }
     /// The numbers are clamped to the ranges the model holds.
     #[test]
     fn the_numbers_are_clamped() {

@@ -37,6 +37,7 @@ references in the directory are inside `#[cfg(test)]` test code in `app.rs`.
 ## Invariants
 - `[lib.rs:no_std]` — `no_std` + `alloc`; no `std` feature and no
   `extern crate std` in production code.
+- `[settings.rs:impl Default for Hotkey]` — the default global shortcut is `Hotkey::Combo { modifiers: mods::ALT, key: 0x20 }` (Alt+Space) on every desktop; the X11 backend translates it to `Mod1Mask` + `XK_space` and a window manager that already owns the chord answers `BadAccess`, which the launcher says rather than hides.
 - `[app.rs:DEFAULT_VISIBLE_ROWS]` — `pub const DEFAULT_VISIBLE_ROWS: usize = 12`.
 - `[hotkey.rs:DEFAULT_WINDOW_MS]` — `pub const DEFAULT_WINDOW_MS: u64 = 400`,
   the double-Control window.

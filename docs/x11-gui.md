@@ -25,7 +25,7 @@ in `session_available()`, and takes one claim per session before it builds
 anything.
 
 ```sh
-rgxy                 # resident launcher, hidden until the hotkey or tray icon
+rgxy                 # resident launcher, hidden until Alt+Space or the tray icon
 rgxy --show          # open it immediately
 rgxy --no-hook       # run without the global hotkey
 rgxy --tui           # the terminal interface, over the same source
@@ -43,7 +43,7 @@ rgxy            # then type >settings for the settings panel
 | icons | the freedesktop **theme icons**, decoded by the crate (inflate and the five PNG row filters, bit depth 8, no interlacing); a drawn shape is the fallback |
 | rows | a selection pill with an accent bar, one icon per kind, the matched characters picked out in the match colour, and a scrollbar when the answer is longer than the panel |
 | tray | a freedesktop **XEmbed** system-tray icon (`_NET_SYSTEM_TRAY_S0`) with a three-item menu: Search, Settings, Quit |
-| hotkey | a passive `XGrabKey` on the root window; a double tap of Control (or Alt/Shift, or a registered combo, from the settings file) |
+| hotkey | **Alt+Space** by default — a passive `XGrabKey` on the root window (`Mod1Mask` + `XK_space`). The settings panel can change it to a double tap of Control/Alt/Shift or to another registered combo; the file spells it `combo alt+space`, `double ctrl 400`, and so on. |
 | one instance | Linux: an **abstract** Unix socket named with the uid and a hash of `DISPLAY`. FreeBSD has no abstract sockets, so a filesystem socket in `/tmp` is used instead, with a connect-first probe and `unlink` of a stale file. A second `rgxy` asks the first to show itself and leaves. |
 | actions | `xdg-open` for a result, the containing folder for *reveal*, the X `CLIPBOARD` selection for copy and paste |
 
@@ -89,8 +89,26 @@ exist in FreeBSD's libc; `RTLD_LAZY` is 1 on both.
   owner (a panel or a tray applet). If it does not, the icon is refused, the
   launcher still runs on the hotkey, and the reason is kept in the line under
   the field.
-- **The hotkey is a passive grab.** Grabbed Control presses are replayed with
-  `XAllowEvents(ReplayKeyboard)` so the user's Ctrl still works everywhere;
+**Alt+Space is the default on every desktop, but a window manager may
+already own it.** `openbox`, GNOME, KDE and COSMIC bind Alt+Space to the
+window menu; a passive `XGrabKey` of a key another client grabbed fails
+with `BadAccess`. The launcher says so in the line under the field and
+keeps running — the tray icon still opens it. On such a desktop put a
+different shortcut in `settings.tsv`, for example:
+
+```sh
+hotkey	combo ctrl+space
+hotkey	double ctrl 400
+```
+
+On a bare X server (or one whose WM does not take Alt+Space) the default
+works while the window is hidden: measured on FreeBSD 15.1, Escape hid
+the window and Alt+Space showed it again.
+
+- **The hotkey is a passive grab.** Alt+Space is a registered combo, so it is
+  one gesture rather than two taps and it works while the window is hidden.
+  Grabbed keys are replayed with `XAllowEvents(ReplayKeyboard)` so the user's
+  own Alt+Space still reaches the window manager;
   another program that grabbed the same key can still win the grab.
 - **The font is ASCII plus derived Latin-1.** Printable ASCII has real 8x8
   glyphs; accented letters (`ã`, `ç`, `é`, …) are the base letter with an

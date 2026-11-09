@@ -124,7 +124,7 @@ inside a file.
 |---|---|
 | `searchctl` | the command-line tool — the one you type |
 | `searchd` | the daemon: keeps the index warm between queries |
-| `rgxy` | the launcher: a floating window on Windows, the terminal interface on Linux, macOS and FreeBSD |
+| `rgxy` | the launcher: a floating window on Windows, Linux and FreeBSD, the terminal interface on macOS |
 | `rgy-autostart` | puts the daemon in place at login, and takes it out again |
 | `rgy` | another name for `searchctl` — the same binary |
 
@@ -142,6 +142,22 @@ rgy-autostart uninstall    # take it out
 rgxy --query invoice       # one search, printed, and out
 rgxy --tui                 # the terminal interface
 ```
+
+**The window opens with Alt+Space.** That is the default global shortcut on
+Windows, Linux and FreeBSD: one registered chord, not a double tap of a lone
+modifier. On Linux and FreeBSD it is a passive `XGrabKey` of `Mod1Mask` +
+`XK_space`; on Windows it is `RegisterHotKey(MOD_ALT, VK_SPACE)`. It works
+while the window is hidden, and grabbed keys are replayed so Alt+Space still
+reaches the window manager. The tray icon also opens it. `rgxy --no-hook`
+runs without the global shortcut. On desktops whose window manager already
+takes Alt+Space for the window menu, the grab is refused (`BadAccess`) and
+the launcher says so; set another shortcut in `settings.tsv` there.
+
+The settings panel (`>settings`, or the tray) can change the shortcut to a
+double tap of Control/Alt/Shift or to another combo; the file spells it as
+`combo alt+space`, `double ctrl 400`, and so on. Inside the window:
+`Ctrl+K` opens the actions menu, `Ctrl+P` previews a file, `Ctrl+Enter`
+opens its folder, `Ctrl+C` copies its path, `>settings` opens the panel.
 
 Nothing is registered in the administrator's account: the entry goes into
 your own session — a Task Scheduler task or `HKCU` run value on Windows, a
