@@ -1111,6 +1111,84 @@ jobs:
         shell: pwsh
         run: ./scripts/test-publish-release.ps1
 
+  # The per-user Windows MSI. It is ONE extra asset, not a second installer
+  # implementation: it consumes the x86_64-windows archive that the release
+  # matrix already built, so the binaries inside it are byte-identical to
+  # the zip. Keeping it out of that matrix means no new sidecars, no new
+  # twin pair and no new EGM contract for the twelve archives.
+  msi:
+    name: the per-user Windows MSI
+    if: github.event_name != 'pull_request' || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
+    timeout-minutes: 45
+    runs-on: windows-2022
+    needs: [release]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # The release matrix keeps its Windows archive as an artifact named
+      # rgy-x86_64-windows. Downloading it here is what guarantees the MSI
+      # packages the same bytes the archive was smoke-tested with.
+      - name: the Windows archive built by the release matrix
+        uses: actions/download-artifact@v4
+        with:
+          name: rgy-x86_64-windows
+          path: .dist-artifact
+      - name: build the MSI
+        shell: pwsh
+        env:
+          # WiX 7 requires accepting the OSMF EULA once per machine. The
+          # owner explicitly authorised it; wix eula accept wix7 is a
+          # no-op when it has already been accepted.
+          WIX_OSMF_ACCEPT: '1'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = & "$PWD/scripts/lib/version.ps1"
+          if (-not $version) { throw 'the tree carries no release version' }
+          $archive = Get-ChildItem .dist-artifact/rgy-v*-x86_64-windows.zip | Select-Object -First 1
+          if (-not $archive) { throw 'the release matrix produced no Windows archive' }
+          ./packaging/msi/build-msi.ps1 -Version $version -Archive $archive.FullName
+          # The MSI is also an asset of the release page. Its name is added
+          # to the assets marker only when the tag is already out: on a
+          # plain push there is no release yet, and the publish step is
+          # what cuts it. Keeping the marker alone here avoids a page that
+          # names an asset the release does not carry.
+          $msi = Get-ChildItem .dist/rgy-*.msi | Select-Object -First 1
+          if (-not $msi) { throw 'wix build produced no MSI' }
+          $sum = (Get-FileHash $msi.FullName -Algorithm SHA256).Hash.ToLower()
+          "$sum  $($msi.Name)" | Out-File -Encoding ascii .dist/$($msi.Name).sha256
+          "MSI_NAME=$($msi.Name)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "MSI_SHA256=$sum" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      # A per-user MSI can be installed and removed with no elevation, so
+      # the runner can prove it end to end. STARTDAEMON=0 keeps the build
+      # runner from indexing its own home directory; the daemon-launch path
+      # is proven on the owner's machine (see packaging/msi/README.md).
+      - name: install and remove the MSI silently (no UAC)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $msi = (Resolve-Path ".dist/$env:MSI_NAME").Path
+          $log = Join-Path $env:RUNNER_TEMP 'msi-install.log'
+          $install = Start-Process msiexec.exe -ArgumentList '/i',"`"$msi`"",'STARTDAEMON=0','/qn','/norestart','/L*v',"`"$log`"" -Wait -PassThru
+          if ($install.ExitCode -ne 0) { Get-Content $log -Tail 40; throw "the MSI install failed with $($install.ExitCode)" }
+          $dir = Join-Path $env:LOCALAPPDATA 'Programs\rgy'
+          foreach ($f in @('searchctl.exe','searchd.exe','rgy-autostart.exe','rgxy.exe','rgy.exe','post-install.ps1','README.md')) {
+            if (-not (Test-Path (Join-Path $dir $f))) { throw "the MSI did not install $f" }
+          }
+          $unlog = Join-Path $env:RUNNER_TEMP 'msi-uninstall.log'
+          $remove = Start-Process msiexec.exe -ArgumentList '/x',"`"$msi`"",'/qn','/norestart','/L*v',"`"$unlog`"" -Wait -PassThru
+          if ($remove.ExitCode -ne 0) { Get-Content $unlog -Tail 40; throw "the MSI uninstall failed with $($remove.ExitCode)" }
+          if (Test-Path $dir) { throw 'the uninstall left the install directory behind' }
+          Write-Host "the MSI installed and removed cleanly; sha256 $env:MSI_SHA256"
+      - name: the MSI is kept for the release
+        uses: actions/upload-artifact@v4
+        with:
+          name: rgy-msi
+          path: |
+            .dist/*.msi
+            .dist/*.msi.sha256
+          if-no-files-found: error
+
 
   clippy:
     name: the workspace stays formatted and warning-free

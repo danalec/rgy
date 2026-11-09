@@ -1,0 +1,172 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The rgy per-user MSI. See README.md in this directory for the why.
+
+  The package installs the five binaries and the seven documents of the
+  Windows release archive, prepends the install directory to the USER's
+  PATH, and then, unless the user unticks the box on the Advanced screen
+  registers and STARTS the search daemon. It never elevates.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+
+  <?foreach STAGE in $(var.Stage)?>
+
+  <!-- Stable across every release: MajorUpgrade uses it to find and remove
+       the previous per-user package. NEVER change this GUID. -->
+  <?define UpgradeCode = "B6F1A2C4-7D3E-4A19-9C58-2E0B6D4F8A31"?>
+
+
+  <Package Name="rgy"
+           Manufacturer="dan alec"
+           Version="$(var.MsiVersion)"
+           UpgradeCode="$(var.UpgradeCode)"
+           ProductCode="$(var.ProductCode)"
+           Scope="perUser"
+           Compressed="yes"
+           InstallerVersion="500"
+           Codepage="UTF-8">
+
+    <!-- A per-user package with no elevated custom actions needs no UAC.
+         MSIInstallPerUser is what makes the ARP entry and the install
+         context belong to the user. -->
+    <Property Id="MSIINSTALLPERUSER" Value="1" />
+    <Property Id="ALLUSERS" Value="2" />
+
+    <MajorUpgrade DowngradeErrorMessage="A newer rgy is already installed. Uninstall it first."
+                  Schedule="afterInstallInitialize" />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- The default: start the daemon. Unticking the Advanced checkbox sets
+         STARTDAEMON=0; the custom actions below are conditioned on = 1. -->
+    <Property Id="STARTDAEMON" Value="1" Secure="yes" />
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+
+    <ui:WixUI Id="WixUI_InstallDir" />
+
+    <!-- The warning the owner asked for: the daemon WILL be started and the
+         first index build can use about 4 GB of RAM. It is shown BEFORE the
+         install starts, on the Advanced dialog, next to the opt-out. -->
+    <UI>
+      <Dialog Id="RgyDaemonDlg" Width="370" Height="270" Title="rgy - search daemon">
+        <Control Id="Banner" Type="Bitmap" X="0" Y="0" Width="370" Height="44" Text="WixUI_Bmp_Banner" />
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="340" Height="18" Transparent="yes"
+                 Text="{\WixUI_Font_Title}Search daemon and first index" />
+        <Control Id="Description" Type="Text" X="25" Y="58" Width="320" Height="96" NoPrefix="yes"
+                 Text="rgy installs the launcher (rgxy) and the search daemon (searchd).&#xD;&#xD;After the install, the daemon starts NOW and builds the index of your home folder. This can temporarily use about 4 GB of RAM; rgxy connects when the index is ready.&#xD;&#xD;It also registers to start at your next logon. No elevation, no Windows Service." />
+        <Control Id="SkipLabel" Type="Text" X="25" Y="162" Width="320" Height="16" NoPrefix="yes"
+                 Text="Advanced: untick to install the files WITHOUT starting the daemon." />
+        <Control Id="StartDaemon" Type="CheckBox" X="25" Y="182" Width="320" Height="18"
+                 Property="STARTDAEMON" CheckBoxValue="1"
+                 Text="Start the search daemon automatically (recommended)" />
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="&amp;Back">
+          <Publish Event="NewDialog" Value="InstallDirDlg" />
+        </Control>
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="&amp;Next">
+          <Publish Event="NewDialog" Value="VerifyReadyDlg" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="Cancel">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+      </Dialog>
+
+      <!-- Insert our dialog between the Advanced (feature) screen and the
+           ready-to-install screen, in both directions. -->
+      <Publish Dialog="InstallDirDlg" Control="Next" Event="NewDialog" Value="RgyDaemonDlg" Order="5" />
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="RgyDaemonDlg" Order="5" />
+    </UI>
+
+    <!-- The install directory is the same one install.ps1 uses. LocalAppData
+         is a per-user folder, so no admin rights are needed. -->
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="ProgramsFolder" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="rgy" />
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="RgyMenuFolder" Name="rgy" />
+    </StandardDirectory>
+
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="Binaries" Guid="7C1E5A90-3B8D-4F62-9A71-0D5C8E4B2F16">
+        <File Id="searchctl.exe" Source="$(var.Stage)\searchctl.exe" />
+        <File Id="searchd.exe" Source="$(var.Stage)\searchd.exe" />
+        <File Id="rgy_autostart.exe" Name="rgy-autostart.exe" Source="$(var.Stage)\rgy-autostart.exe" />
+        <File Id="rgxy.exe" Source="$(var.Stage)\rgxy.exe" />
+        <File Id="rgy.exe" Source="$(var.Stage)\rgy.exe" />
+        <!-- post-install.ps1 ships with the product, so the UNINSTALL can
+             call it too; a script fetched at install time would be gone. -->
+        <File Id="post_install.ps1" Name="post-install.ps1" Source="$(var.MsiDir)\post-install.ps1" />
+        <RegistryValue Root="HKCU" Key="Software\danalec\rgy" Name="BinariesInstalled" Type="integer" Value="1" KeyPath="yes" />
+        <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
+        <RemoveFolder Id="RemoveProgramsFolder" Directory="ProgramsFolder" On="uninstall" />
+      </Component>
+      <Component Id="Documents" Guid="2A9D4F18-6C70-4B53-8E25-1F3A7C9D0B84">
+        <File Id="README.md" Source="$(var.Stage)\README.md" />
+        <File Id="MANUAL.md" Source="$(var.Stage)\MANUAL.md" />
+        <File Id="FORMATS.md" Source="$(var.Stage)\FORMATS.md" />
+        <File Id="COPYING" Source="$(var.Stage)\COPYING" />
+        <File Id="NOTICE" Source="$(var.Stage)\NOTICE" />
+        <File Id="LICENSE_APACHE" Name="LICENSE-APACHE" Source="$(var.Stage)\LICENSE-APACHE" />
+        <File Id="LICENSE_MIT" Name="LICENSE-MIT" Source="$(var.Stage)\LICENSE-MIT" />
+        <RegistryValue Root="HKCU" Key="Software\danalec\rgy" Name="DocumentsInstalled" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <!-- The per-user PATH entry. Environment/@Part="first" prepends; a
+           per-user package writes it to HKCU\Environment, not the machine
+           environment, so no elevation. -->
+      <Component Id="UserPath" Guid="9E3B7C25-4A81-4D60-B3F7-5C2E8A1D6F49">
+        <Environment Id="RgyPath" Name="PATH" Value="[INSTALLFOLDER]" Permanent="no"
+                     Part="first" Action="set" System="no" />
+        <RegistryValue Root="HKCU" Key="Software\danalec\rgy" Name="PathInstalled" Type="integer"
+                       Value="1" />
+      </Component>
+    </DirectoryRef>
+
+    <DirectoryRef Id="RgyMenuFolder">
+      <Component Id="StartMenuShortcut" Guid="4D8A1F63-2E5C-4B97-8A30-6F1D9C4B7E02">
+        <Shortcut Id="RgxyShortcut" Name="rgy launcher" Description="Search your files"
+                  Target="[INSTALLFOLDER]rgxy.exe" WorkingDirectory="INSTALLFOLDER" />
+        <RegistryValue Root="HKCU" Key="Software\danalec\rgy" Name="ShortcutInstalled" Type="integer"
+                       Value="1" KeyPath="yes" />
+        <RemoveFolder Id="RemoveRgyMenu" On="uninstall" />
+      </Component>
+    </DirectoryRef>
+
+    <Feature Id="Main" Title="rgy" Level="1" ConfigurableDirectory="INSTALLFOLDER">
+      <ComponentRef Id="Binaries" />
+      <ComponentRef Id="Documents" />
+      <ComponentRef Id="UserPath" />
+      <ComponentRef Id="StartMenuShortcut" />
+    </Feature>
+
+    <!-- The daemon step. It is a deferred, impersonated custom action (the
+         default for a per-user package), so it runs AS THE USER and the
+         Task Scheduler task / HKCU Run value belong to that user.
+         Condition: install (not a repair/removal) AND STARTDAEMON=1. -->
+    <CustomAction Id="RgyRegisterDaemon"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand="powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]post-install.ps1&quot;"
+                  Execute="deferred" Impersonate="yes" Return="ignore" HideTarget="no" />
+
+    <!-- Uninstall reverses it. -Uninstall removes the login entries; MSI
+         removes the files, PATH entry, shortcut and ARP entry. -->
+    <CustomAction Id="RgyUnregisterDaemon"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand="powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]post-install.ps1&quot; -Uninstall"
+                  Execute="deferred" Impersonate="yes" Return="ignore" HideTarget="no" />
+
+    <InstallExecuteSequence>
+      <Custom Action="RgyRegisterDaemon" After="InstallFiles"
+              Condition="NOT Installed AND STARTDAEMON = &quot;1&quot;" />
+      <Custom Action="RgyUnregisterDaemon" Before="RemoveFiles"
+              Condition="REMOVE = &quot;ALL&quot;" />
+    </InstallExecuteSequence>
+
+    <Property Id="ARPPRODUCTICON" Value="RgyIcon" />
+    <Icon Id="RgyIcon" SourceFile="$(var.Stage)\rgxy.exe" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/danalec/rgy" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/danalec/rgy" />
+  </Package>
+  <?endforeach?>
+</Wix>

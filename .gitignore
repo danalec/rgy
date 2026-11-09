@@ -87,3 +87,9 @@ crates/rar-codec/**/EGM.md
 # Prototypal release scripts: a PGO build is two cargo runs and a profile merge.
 pgo.sh
 pgo.ps1
+# The WiX tool's extension cache and the MSI build output: both are machine
+# local and must never be committed. The CI installs the extension itself.
+.wix/
+.dist/stage-msi-*/
+.dist/*.msi
+.dist/*.msi.sha256
