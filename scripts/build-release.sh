@@ -263,7 +263,8 @@ case "$variant" in
     portable) rustflags="" ;;
     avx2) rustflags="-C target-cpu=x86-64-v3" ;;
     znver4) rustflags="-C target-cpu=znver4" ;;
-    *) echo "unknown variant: $variant (portable, avx2, znver4)" >&2; exit 2 ;;
+    avx512) rustflags="-C target-cpu=x86-64-v4" ;;
+    *) echo "unknown variant: $variant (portable, avx2, znver4, avx512)" >&2; exit 2 ;;
 esac
 
 # The asset name of a portable build, per target.
@@ -429,8 +430,8 @@ cpu_has_avx512() {
 }
 
 if [ "$target" = "$host" ]; then
-    if [ "$variant" = "znver4" ] && ! cpu_has_avx512; then
-        echo "smoke: skipped (this machine has no AVX-512, and the Zen 4 build asks for it)"
+    if { [ "$variant" = "znver4" ] || [ "$variant" = "avx512" ]; } && ! cpu_has_avx512; then
+        echo "smoke: skipped (this machine has no AVX-512, and the $variant build asks for it)"
     elif [ "$variant" = "avx2" ] && ! cpu_has_avx2; then
         echo "smoke: skipped (this machine has no AVX2, and the AVX2 build asks for it)"
     else

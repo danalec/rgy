@@ -619,6 +619,10 @@ jobs:
             os: windows-2022
             target: x86_64-pc-windows-msvc
             variant: znver4
+          - asset: avx512-windows
+            os: windows-2022
+            target: x86_64-pc-windows-msvc
+            variant: avx512
           - asset: aarch64-windows
             os: windows-11-arm
             target: aarch64-pc-windows-msvc
@@ -637,6 +641,10 @@ jobs:
             os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             variant: znver4
+          - asset: avx512-linux
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            variant: avx512
           - asset: x86_64-linux-musl
             os: ubuntu-24.04
             target: x86_64-unknown-linux-musl
@@ -921,7 +929,13 @@ jobs:
       # the one that names every row's archive -- while this step
       # rewrites the page to name one. The eleven other rows run it.
       - name: the manifests, rewritten (nothing published)
-        if: runner.os != 'Windows' && matrix.vm == null
+        # The generic AVX-512 rows are new build targets for the NEXT
+        # release: the published 0.1.10.2 page names twelve assets and is
+        # not modified here. Skipping the publish rehearsal for these two
+        # rows keeps the page honest (it names what that release carries)
+        # while the CI still builds, smoke-tests and archives the new
+        # variant. They join the page when the next release is cut.
+        if: runner.os != 'Windows' && matrix.vm == null && matrix.variant != 'avx512'
         env:
           RGY_FORGEJO_URL: http://forgejo.invalid
         run: |
@@ -958,7 +972,7 @@ jobs:
           mv "$page.tmp" "$page"
           bash scripts/publish-release.sh --manifests-only --skip-tests --target ${{ matrix.target }} --variant ${{ matrix.variant }}
       - name: the manifests, rewritten (nothing published)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && matrix.variant != 'avx512'
         shell: pwsh
         env:
           RGY_FORGEJO_URL: http://forgejo.invalid

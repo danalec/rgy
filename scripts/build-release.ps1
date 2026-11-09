@@ -276,8 +276,9 @@ switch ($Variant) {
     "portable" { $rustflags = "" }
     "avx2"     { $rustflags = "-C target-cpu=x86-64-v3" }
     "znver4"   { $rustflags = "-C target-cpu=znver4" }
+    "avx512"   { $rustflags = "-C target-cpu=x86-64-v4" }
     default    {
-        [Console]::Error.Write("unknown variant: $Variant (portable, avx2, znver4)`n")
+        [Console]::Error.Write("unknown variant: $Variant (portable, avx2, znver4, avx512)`n")
         exit 2
     }
 }
@@ -460,8 +461,8 @@ function Test-CpuHasAvx512 {
 }
 
 if ($Target -eq $hostTriple) {
-    if ($Variant -eq "znver4" -and -not (Test-CpuHasAvx512)) {
-        [Console]::Out.Write("smoke: skipped (this machine has no AVX-512, and the Zen 4 build asks for it)`n")
+    if (($Variant -eq "znver4" -or $Variant -eq "avx512") -and -not (Test-CpuHasAvx512)) {
+        [Console]::Out.Write("smoke: skipped (this machine has no AVX-512, and the $Variant build asks for it)`n")
     } elseif ($Variant -eq "avx2" -and -not (Test-CpuHasAvx2)) {
         [Console]::Out.Write("smoke: skipped (this machine has no AVX2, and the AVX2 build asks for it)`n")
     } else {
