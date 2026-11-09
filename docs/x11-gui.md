@@ -11,6 +11,17 @@ FreeBSD. Both export the same `Window`, `Event`, `Key`, `View`, `Hook`, `Combo`,
 preview, the usage history and the bounded worker pools are identical on every
 host with a window.
 
+## The settings panel and the hotkey
+
+The panel is `>settings` (or `Ctrl+S` in the terminal interface). Its twelve
+rows are navigated with the arrows and changed with Left/Right; every change is
+written to `settings.tsv` and applied at once. **Changing the shortcut does not
+need a restart**: the driver drops the old grab and installs the new one in the
+same process. Measured under openbox on FreeBSD 15.1: with `combo ctrl+space`
+armed, one Right on the hotkey row rewrote the file to `double alt 400`; the
+old Ctrl+Space then stopped toggling the hidden window and a double tap of Alt
+showed it again.
+
 ## Running it
 
 A bare `rgxy` is the resident launcher. It needs an **X11 display**:

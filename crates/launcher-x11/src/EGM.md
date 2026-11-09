@@ -76,6 +76,7 @@ on drop. Nothing else in the crate knows which kernel it is on.
 - `[geometry.rs:spot_on]` — the window never falls outside the work area; `clamp_anchor` pins an anchor to 0..1000.
 - `[mark.rs:magnifier]` — the lens is a ring and the mark is the accent's blue; the same bytes the Windows tray uses.
 - `[sole.rs:socket_name]` — an abstract name on Linux, a `/tmp` path on FreeBSD; both carry the uid and a hash of `DISPLAY` so two sessions never collide.
+- `[hotkey.rs:Hook::drop]` + `[gui.rs:rearm]` — a settings change drops the armed grab and installs the new one in the same process. Measured under openbox on FreeBSD 15.1: `combo ctrl+space` -> `double alt 400` changed at runtime; the old chord stopped toggling the hidden window and the new double tap showed it.
 - `[hotkey.rs:on_key_press]` — passive root grabs are replayed with `XAllowEvents(ReplayKeyboard)` so the user's Control still works.
 - `[actions.rs:serve_selection_request]` — the launcher owns CLIPBOARD until another client takes it; every request is answered.
 
