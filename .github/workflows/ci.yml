@@ -1160,6 +1160,14 @@ jobs:
           if (-not $msi) { throw 'wix build produced no MSI' }
           $sum = (Get-FileHash $msi.FullName -Algorithm SHA256).Hash.ToLower()
           "$sum  $($msi.Name)" | Out-File -Encoding ascii .dist/$($msi.Name).sha256
+          # Keep the uploadable copy OUT of .dist/: the smoke test below
+          # hands this very .msi to msiexec /x, and Windows Installer is
+          # free to take the package out of its cache. A separate directory
+          # also keeps upload-artifact from matching the twelve archives.
+          $keep = '.dist/msi-artifact'
+          New-Item -ItemType Directory -Force -Path $keep | Out-Null
+          Copy-Item $msi.FullName (Join-Path $keep $msi.Name) -Force
+          Copy-Item ".dist/$($msi.Name).sha256" $keep -Force
           "MSI_NAME=$($msi.Name)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "MSI_SHA256=$sum" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       # A per-user MSI can be installed and removed with no elevation, so
@@ -1188,8 +1196,8 @@ jobs:
         with:
           name: rgy-msi
           path: |
-            .dist/*.msi
-            .dist/*.msi.sha256
+            .dist/msi-artifact/*.msi
+            .dist/msi-artifact/*.msi.sha256
           if-no-files-found: error
 
 
