@@ -1154,11 +1154,29 @@ fn open_index(
     }
     let mut idx = Index::build_with_rules(listings, watermark, now_secs(), root.as_bytes(), &rules);
     match persist::save(&mut idx, &root_path, &index_path) {
-        Ok(saved) => rgy_engine::errln!(
-            "searchd: indexed {} entries → {}",
-            idx.n,
-            saved.index.display()
-        ),
+        Ok(saved) => {
+            rgy_engine::errln!(
+                "searchd: indexed {} entries → {}",
+                idx.n,
+                saved.index.display()
+            );
+            // The blob `build_with_rules` returned is an *anonymous* mmap:
+            // every page it touches is charged to this process's private
+            // memory for its whole life. Now that the same bytes are on
+            // disk, map the file instead. The pages become file-backed, so
+            // the OS can evict them under pressure and re-read them on the
+            // next touch -- the same index, with no private copy. A machine
+            // that cannot map the saved file (a read-only or exotic cache
+            // directory) simply keeps the in-memory one.
+            if let Some(mapped) = Index::load(&saved.index) {
+                // Only take the mapped one when it is the same index: a
+                // truncated or foreign file must not replace the blob we
+                // just built and validated.
+                if mapped.n == idx.n && mapped.bytes() == idx.bytes() {
+                    idx = mapped;
+                }
+            }
+        }
         Err(e) => rgy_engine::errln!(
             "searchd: could not save index to {}: {e}",
             index_path.display()
