@@ -2,11 +2,14 @@
 
 ## Overview
 
-The per-user Windows Installer package for rgy. One MSI, built from the
-published `x86_64-windows` release archive by the `msi` job in
-`.github/workflows/ci.yml`. There is deliberately **no separate EXE**: a
-Burn wrapper would double the release matrix, the sidecars, the twin pairs
-and the signing surface without adding a capability.
+The per-user Windows Installer package for rgy. One MSI, built by the
+`msi` job in `.github/workflows/ci.yml` from an `x86_64-windows` archive
+that the job builds itself with `scripts/build-release.ps1`. The job is
+deliberately independent of the release matrix: a failure downloading a
+FreeBSD VM helper must not stop a Windows installer from being built.
+There is deliberately **no separate EXE**: a Burn wrapper would double
+the release matrix, the sidecars, the twin pairs and the signing surface
+without adding a capability.
 
 Its reason for existing is the one gap `install.ps1` could not close: a
 fresh install registered `searchd` for the next logon but did **not** start
@@ -101,7 +104,7 @@ installer actions.
   and the PATH; silent uninstall removes the directory and the PATH entry.
 - Local: silent install (`STARTDAEMON=1`) starts `searchd` (verified by
   `Win32_Process`) and registers the Run value; uninstall removes them.
-- CI: `msi` job builds from the release matrix's Windows archive, runs the
-  same install/uninstall smoke test on `windows-2022`, and keeps the `.msi`
-  as the `rgy-msi` artifact.
+- CI: `msi` job builds its own Windows archive, runs the same
+  install/uninstall smoke test on `windows-2022`, and keeps the `.msi` plus
+  its `.sha256` as the `rgy-msi` artifact.
 - `cargo test --workspace --no-fail-fast --locked`.

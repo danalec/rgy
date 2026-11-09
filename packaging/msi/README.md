@@ -100,9 +100,11 @@ and the signing surface for no additional capability.
 
 ## CI
 
-The `msi` job in `.github/workflows/ci.yml` runs on `windows-2022` after the
-release matrix. It downloads the `rgy-x86_64-windows` artifact (so the MSI
-packages the very bytes that were smoke-tested), calls `build-msi.ps1`,
+The `msi` job in `.github/workflows/ci.yml` runs on `windows-2022`
+**independently of the release matrix** — a 504 downloading a FreeBSD VM
+helper must not stop a Windows installer from being built. It builds its
+own `x86_64-windows` archive with `scripts/build-release.ps1` (so the MSI
+packages bytes smoke-tested by that same script), calls `build-msi.ps1`,
 installs and removes the MSI silently with `STARTDAEMON=0` as a smoke test,
 and keeps the `.msi` plus its `.sha256` as the `rgy-msi` artifact. The MSI
 is one extra release asset, not a second installer implementation: it adds
@@ -112,12 +114,11 @@ them.
 ## Build
 
 ```powershell
-pwsh -File packaging/msi/build-msi.ps1 -Version 0.1.10.2 -Stage .dist/stage-msi
+pwsh -File packaging/msi/build-msi.ps1 -Version 0.1.10.2 -Archive .dist/rgy-v0.1.10.2-x86_64-windows.zip
 ```
 
-The stage is a directory holding exactly the release archive's contents
-(the five binaries and seven documents). The CI job extracts
-`rgy-v<version>-x86_64-windows.zip` into it before calling the script.
+The script extracts the archive into its own stage directory, checks all
+twelve members, builds the MSI into `.dist/` and validates it.
 
 ## Verify
 

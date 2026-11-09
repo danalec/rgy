@@ -1121,19 +1121,26 @@ jobs:
     if: github.event_name != 'pull_request' || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
     timeout-minutes: 45
     runs-on: windows-2022
-    needs: [release]
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      # The release matrix keeps its Windows archive as an artifact named
-      # rgy-x86_64-windows. Downloading it here is what guarantees the MSI
-      # packages the same bytes the archive was smoke-tested with.
-      - name: the Windows archive built by the release matrix
-        uses: actions/download-artifact@v4
-        with:
-          name: rgy-x86_64-windows
-          path: .dist-artifact
+      # The MSI is independent of the release matrix: a 504 downloading a
+      # FreeBSD VM's helper must not stop a Windows installer from being
+      # built. This job builds its OWN x86_64-windows archive with the very
+      # same script the matrix uses, so the MSI still packages bytes that
+      # were smoke-tested by build-release.ps1 itself.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+      - name: build the Windows release archive (and smoke-test it)
+        shell: pwsh
+        run: ./scripts/build-release.ps1 -SkipTests -Target x86_64-pc-windows-msvc -Variant portable
+      - name: the archive this MSI packages
+        shell: pwsh
+        run: |
+          $archive = Get-ChildItem .dist/rgy-v*-x86_64-windows.zip | Select-Object -First 1
+          if (-not $archive) { throw 'build-release.ps1 produced no Windows archive' }
+          "MSI_ARCHIVE=$($archive.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: build the MSI
         shell: pwsh
         env:
@@ -1145,14 +1152,10 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $version = & "$PWD/scripts/lib/version.ps1"
           if (-not $version) { throw 'the tree carries no release version' }
-          $archive = Get-ChildItem .dist-artifact/rgy-v*-x86_64-windows.zip | Select-Object -First 1
-          if (-not $archive) { throw 'the release matrix produced no Windows archive' }
-          ./packaging/msi/build-msi.ps1 -Version $version -Archive $archive.FullName
-          # The MSI is also an asset of the release page. Its name is added
-          # to the assets marker only when the tag is already out: on a
-          # plain push there is no release yet, and the publish step is
-          # what cuts it. Keeping the marker alone here avoids a page that
-          # names an asset the release does not carry.
+          ./packaging/msi/build-msi.ps1 -Version $version -Archive $env:MSI_ARCHIVE
+          # The MSI is an EXTRA release asset, not one of the twelve
+          # archives the release page's marker names. Its digest gets its
+          # own sidecar; the publish step uploads it beside SHA256SUMS.
           $msi = Get-ChildItem .dist/rgy-*.msi | Select-Object -First 1
           if (-not $msi) { throw 'wix build produced no MSI' }
           $sum = (Get-FileHash $msi.FullName -Algorithm SHA256).Hash.ToLower()
