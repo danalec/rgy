@@ -1183,11 +1183,15 @@ fn apply_opacity(display: *mut c_void, win: u64, alpha: u32) {
     // SAFETY: the handles are the window's own, and the property is the one
     // Xlib is asked to set on the launcher's window.
     unsafe {
-        if alpha >= 255 {
+        // A `View` that has not yet been given a frame has alpha 0; that
+        // means "no setting yet", not "one 255th opaque". Both ends of the
+        // range mean a solid panel: drop the property so the compositor
+        // has nothing to blend.
+        if alpha <= 1 || alpha >= 255 {
             xlib::XDeleteProperty(display, win, atom);
             return;
         }
-        let value: u64 = (alpha.clamp(1, 254) as u64) * 0xffff_ffff / 255;
+        let value: u64 = (alpha as u64) * 0xffff_ffff / 255;
         xlib::XChangeProperty(
             display,
             win,

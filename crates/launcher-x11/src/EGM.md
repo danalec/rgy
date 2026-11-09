@@ -66,6 +66,7 @@ on drop. Nothing else in the crate knows which kernel it is on.
 - `[x.rs:size_of::<XEvent>()]` — `XEvent` is `24 * size_of::<c_ulong>()`; `XSetWindowAttributes` is 112 bytes with `event_mask` at 72 and `override_redirect` at 88 (LP64, both kernels).
 - `[x.rs:size_of::<SockaddrUn>()]` — 110 on Linux, 106 on FreeBSD; each has its own compile-time assertion and struct definition.
 - `[x.rs:set_image_size]` — an `XImage` is reused and re-advertised by writing its first two `int`s; the pixels behind it come from `malloc`, because an image's buffer is Xlib's to free.
+- `[window.rs:apply_opacity]` — the compositor property is dropped at both ends of the range (`alpha <= 1` or `>= 255`): a `View` that no frame has reached has alpha 0 and must mean "solid", not one 255th opaque. Measured under `xcompmgr`: alpha 64 blended to `#c50607` over red, alpha 255 left `#18191c` solid.
 - `[render.rs:Renderer::draw]` — the panel is opaque everywhere inside the rounded shape and transparent at the corners, which is why the fill is drawn one inset row at a time instead of as a rectangle.
 - `[font.rs:face_looks_sane]` — a face is only read once `num_glyphs`, `units_per_EM`, the ascender and the descender all land in ranges a real face uses; a refusal is the bitmap font, never a wrong read.
 - `[icons.rs:decode_png]` — bit depth 8 and no interlacing, and anything else is `None`; the decoder refuses rather than guesses.
