@@ -1,32 +1,28 @@
-# publish-homebrew.ps1 -- open the homebrew-core pull request for a release.
+# publish-homebrew.ps1 -- publish the formula to the personal Homebrew tap.
 #
 #   pwsh -File scripts/publish-homebrew.ps1 [-Version 0.1.0] [-DryRun]
 #
-# Homebrew-core is a git repository like any other: a pull request is a
-# branch, a commit and a merge. This script does the first two and opens
-# the third.
+# The tap is danalec/homebrew-rgy, NOT Homebrew/homebrew-core. The latter is
+# Homebrew's own source repository; a formula submitted there is a pull
+# request to somebody else's project, with their review, their CI and their
+# template. The rgy formula is the rgy project's own, so it lives in a tap
+# the project owns and is pushed straight to its main branch.
 #
 #   1. check that the release the formula names actually exists, and that
 #      its digest is the one the formula carries
-#   2. clone homebrew-core (shallow: it is a big repository)
+#   2. clone the tap (shallow: it is one formula and a README)
 #   3. put the formula -- the one this repository carries, with the url,
-#      the sha256 and the version the release flow just rewrote -- into a
-#      branch
-#   4. commit it and push the branch to the fork
-#   5. open the pull request
+#      the sha256 and the version the release flow just rewrote -- into it
+#   4. commit and push to main
 #
-# What the CI on that pull request runs is `brew audit --new --formula` and
-# `brew readall`, and both need a Mac. The script says so here rather than
-# pretending the pull request is the last step.
-#
-# Requires git, curl and gh (authenticated). The fork is created if it is
-# not there yet.
+# No fork, no pull request, no macOS CI of somebody else's repository. The
+# formula is verified against the published release before it is pushed.
 $ErrorActionPreference = "Stop"
 
 # The options, read by the helper the two twins share: the long spelling
 # and the PowerShell one are the same option, and an option neither of
 # them knows is an error on both platforms -- not a silent "do the real
-# thing", which in this directory means opening a pull request.
+# thing", which in this directory means pushing a release to a tap.
 . (Join-Path $PSScriptRoot "lib/options.ps1")
 $Version = ""
 $Formula = "rgy-search"
@@ -39,8 +35,7 @@ Read-RgyOptions -Switches @{ "dryrun" = "DryRun" } `
 $root = Split-Path $PSScriptRoot -Parent
 Set-Location $root
 
-$coreRepo = "Homebrew/homebrew-core"
-$coreFork = "danalec/homebrew-core"
+$tapRepo = "danalec/homebrew-rgy"
 
 $formulaFile = "Formula/$Formula.rb"
 if (-not (Test-Path $formulaFile)) {
@@ -71,9 +66,9 @@ Write-Host ">> url   $url"
 Write-Host ">> sha256 $sha"
 
 # --- 1. the release has to exist --------------------------------------------
-# A pull request whose formula names a URL that answers with something
-# other than the file is a pull request the CI will fail on, and the
-# failure is slower and less clear than this one.
+# A formula that names a URL that answers with something other than the
+# file is a formula that installs nothing. The check is here, before the
+# tap is touched.
 Write-Host ">> checking the release"
 try {
     $head = Invoke-WebRequest -Uri $url -Method Head -UseBasicParsing
@@ -84,85 +79,34 @@ try {
     exit 1
 }
 
-# --- 2. the fork ------------------------------------------------------------
-gh repo view $coreFork *> $null
-if ($LASTEXITCODE -ne 0) {
-    if ($DryRun) {
-        Write-Host "[dry-run] would create the fork $coreFork"
-    } else {
-        Write-Host ">> forking $coreRepo"
-        gh repo fork $coreRepo --clone=false
-        if ($LASTEXITCODE -ne 0) { throw "the fork could not be created" }
-    }
-}
-
-# --- 3. the branch ----------------------------------------------------------
+# --- 2. the tap -------------------------------------------------------------
 $work = Join-Path ([IO.Path]::GetTempPath()) "rgy-brew-$([Guid]::NewGuid().ToString('N'))"
 New-Item -ItemType Directory -Force -Path $work | Out-Null
-Write-Host ">> cloning $coreRepo"
-git clone --quiet --depth 1 "https://github.com/$coreRepo.git" "$work/core"
+Write-Host ">> cloning $tapRepo"
+git clone --quiet --depth 1 "https://github.com/$tapRepo.git" "$work/tap"
 if ($LASTEXITCODE -ne 0) { throw "the clone failed" }
-$branch = "$Formula-$Version"
-git -C "$work/core" checkout --quiet -b $branch
-Copy-Item $formulaFile "$work/core/$formulaFile" -Force
+Copy-Item $formulaFile "$work/tap/$formulaFile" -Force
 
-# --- 4. the commit ----------------------------------------------------------
-git -C "$work/core" add $formulaFile
-git -C "$work/core" -c user.name="danalec" -c user.email="danalec@gmail.com" commit --quiet -m "$Formula $Version"
-if ($LASTEXITCODE -ne 0) { throw "the commit failed" }
-
-if ($DryRun) {
-    Write-Host "[dry-run] would push $branch to $coreFork and open the pull request"
-    git -C "$work/core" show --stat --oneline HEAD
+# --- 3. the commit ----------------------------------------------------------
+git -C "$work/tap" add $formulaFile
+# A formula whose bytes did not change is a release that was already
+# published to the tap; do not make an empty commit for it.
+git -C "$work/tap" -c user.name="danalec" -c user.email="danalec@gmail.com" commit --quiet -m "$Formula $Version"
+if ($LASTEXITCODE -ne 0) {
+    Write-Host ">> the tap already carries this formula; nothing to publish"
     exit 0
 }
 
-Write-Host ">> pushing $branch to $coreFork"
-git -C "$work/core" push --quiet "https://github.com/$coreFork.git" $branch
+if ($DryRun) {
+    Write-Host "[dry-run] would push $Formula $Version to $tapRepo main"
+    git -C "$work/tap" show --stat --oneline HEAD
+    exit 0
+}
+
+Write-Host ">> pushing $Formula $Version to $tapRepo main"
+git -C "$work/tap" push --quiet "https://github.com/$tapRepo.git" HEAD:main
 if ($LASTEXITCODE -ne 0) { throw "the push failed" }
 
-# --- 5. the pull request ----------------------------------------------------
-# The body answers the questions homebrew-core's template asks, because a
-# pull request that answers them is one review round shorter.
-$body = @"
-$Formula $Version
-
-**What is this tool doing?**
-
-rgy answers two questions about the files on a computer: which file is it,
-and what is inside it. Both in one query. The name half is answered from
-an index of names -- fuzzy, typo-tolerant and ranked -- and the content
-half reads the file.
-
-    searchctl --root ~ "invoice ext:pdf"
-    searchctl --root ~ "invoice grep:tesla"
-
-**Does this pull request change the software that Homebrew installs?**
-
-This is the first release: it adds the formula, so it adds the software.
-There is no previous version in Homebrew to replace.
-
-**Why should this be in Homebrew core?**
-
-It is a command-line tool that installs from a prebuilt, signed-by-digest
-archive, needs no system library beyond what macOS ships, and has a stable
-tagged release. The repository carries the formula, the release script and
-the installers: https://github.com/danalec/rgy
-
-**What does the test do?**
-
-It writes a file and asks the CLI how many files match its name, so the
-test is the product doing its own job.
-
-"@
-$bodyFile = Join-Path $work "pr.md"
-Set-Content $bodyFile $body -NoNewline
-
-Write-Host ">> opening the pull request"
-gh pr create --repo $coreRepo --head "$coreFork`:$branch" --title "$Formula $Version" --body-file $bodyFile
-if ($LASTEXITCODE -ne 0) { throw "the pull request could not be opened" }
-
 Write-Host ""
-Write-Host ">> what happens next: the CI runs 'brew audit --new --formula' and"
-Write-Host ">> 'brew readall'. Both need a Mac; the audit checks the url, the"
-Write-Host ">> digest, the licence, the description and the test."
+Write-Host ">> published to https://github.com/$tapRepo"
+Write-Host ">> install: brew tap danalec/rgy && brew install $Formula"

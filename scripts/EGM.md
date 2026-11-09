@@ -46,16 +46,19 @@ the child `scripts/lib` and are sourced by nearly every script here.
   `[check-drift.sh:upstream_blob()]`, `[check-drift.sh:patch_verdict()]`.
 - The sync copies byte-for-byte from the upstream commit and removes the
   `EXCLUDE` paths; it does not merge — `[sync-rgx-upstream.sh:is_excluded()]`.
-- The publish `variant` is one of `portable|avx2|znver4` —
+- The publish `variant` is one of `portable|avx2|znver4|avx512` —
   `[publish-release.sh:--variant]`.
 
 ## Side Effects
 - `release-linux.sh` pushes the ref to forgejo, runs `ssh`/`scp` against
   `RGY_RELEASE_HOST`, falls back to `git archive | scp`, and writes `.dist/` —
   `[release-linux.sh:RGY_RELEASE_HOST]`.
-- `publish-homebrew.sh` checks the artifact with `curl`, clones
-  `Homebrew/homebrew-core`, commits, pushes and opens a pull request with
-  `gh pr create` — `[publish-homebrew.sh:CORE_REPO]`.
+- `publish-homebrew.sh` checks the artifact with `curl`, clones the personal
+  tap `danalec/homebrew-rgy`, commits and pushes the formula straight to its
+  `main` branch — `[publish-homebrew.sh:TAP_REPO]`. It deliberately does NOT
+  clone `Homebrew/homebrew-core` or open a pull request: that repository is
+  Homebrew's own source code, and the rgy formula belongs to a tap the rgy
+  project owns.
 - `publish-crates.sh` runs `cargo publish -p <name> --locked` and needs
   `CARGO_REGISTRY_TOKEN` — `[publish-crates.sh:cargo publish]`.
 - `publish-release.sh` reads forgejo credentials via `git credential fill`,

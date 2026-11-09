@@ -12,7 +12,9 @@
 # CI runners. The URLs and the digests below name and pin those real files.
 # scripts/publish-release.sh rewrites them from the combined SHA256SUMS in
 # .dist/, so a formula that names one release and pins another's digest
-# cannot be published.
+# cannot be published. scripts/publish-homebrew.sh (.ps1 on Windows) copies
+# this file to the danalec/homebrew-rgy tap on release day; the tap is a
+# distribution point, not a second source of truth.
 class RgySearch < Formula
   desc "Whole-filesystem name search and content search in one stack"
   homepage "https://github.com/danalec/rgy"
