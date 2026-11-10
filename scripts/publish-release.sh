@@ -87,8 +87,8 @@ rgy_read_options "skiptests=skip_tests dryrun=dry_run private=private manifestso
 # would come out of a second script, and the two twins have to answer
 # the same way. The sentence and the exit code are the build's own.
 case "$variant" in
-    portable|avx2|znver4) ;;
-    *) echo "unknown variant: $variant (portable, avx2, znver4)" >&2; exit 2 ;;
+    portable|avx2|znver4|avx512) ;;
+    *) echo "unknown variant: $variant (portable, avx2, znver4, avx512)" >&2; exit 2 ;;
 esac
 
 [ -n "$version" ] || version=$(sed -n 's/^version = "\(.*\)"/\1/p' bins/searchctl/Cargo.toml | head -1)

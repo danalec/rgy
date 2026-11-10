@@ -87,11 +87,11 @@ $SkipBuild = $false
 # one for the host and drop it into .dist/ beside the others.
 $Target = ""
 # The flavour the release is built for. The vocabulary is the build
-# script's -- portable, avx2, znver4 -- and the publish script does not
-# invent a second one: a release that names a flavour the build does
-# not know is a release nobody can build. The default is the portable
-# one, so a caller that says nothing gets what it got before this
-# option existed.
+# script's -- portable, avx2, znver4, avx512 -- and the publish script
+# does not invent a second one: a release that names a flavour the build
+# does not know is a release nobody can build. The default is the
+# portable one, so a caller that says nothing gets what it got before
+# this option existed.
 $Variant = "portable"
 Read-RgyOptions -Switches @{ "skiptests" = "SkipTests"; "dryrun" = "DryRun";
                              "private" = "Private"; "manifestsonly" = "ManifestsOnly";
@@ -109,11 +109,11 @@ Read-RgyOptions -Switches @{ "skiptests" = "SkipTests"; "dryrun" = "DryRun";
 # The comparison is the case-sensitive one (-cne): the unix twin's case
 # statement is case-sensitive too, and "AVX2" is a flavour the build
 # does not know.
-if ($Variant -cne "portable" -and $Variant -cne "avx2" -and $Variant -cne "znver4") {
+if ($Variant -cne "portable" -and $Variant -cne "avx2" -and $Variant -cne "znver4" -and $Variant -cne "avx512") {
     # The newline the shell writes, and not the one the host would: the
     # two scripts are compared byte for byte, and a CRLF here is a byte
     # the bash twin does not write.
-    [Console]::Error.Write("unknown variant: $Variant (portable, avx2, znver4)`n")
+    [Console]::Error.Write("unknown variant: $Variant (portable, avx2, znver4, avx512)`n")
     exit 2
 }
 
