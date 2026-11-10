@@ -26,19 +26,19 @@
       assets = {
         x86_64-linux = {
           file = "rgy-v${version}-x86_64-linux.tar.gz";
-          hash = "sha256-n5F9mYCTGf4o1jRnqY9WgffORTzY2pScDAJBEeJRdQE=";
+          hash = "sha256-MCuiwGzDlug5Ho2prY5Kr+EAfGsnfCGcPW0ZswHLivM=";
         };
         aarch64-linux = {
           file = "rgy-v${version}-aarch64-linux.tar.gz";
-          hash = "sha256-W91hNWhXJC0SvLLI2Jhbjd/KPiwCMSRfc0Qt8cCuWcY=";
+          hash = "sha256-5T0/onvn2iLBXn9pGYSHgwu/bn5R2Z0bGPgPcXXWUxo=";
         };
         x86_64-darwin = {
           file = "rgy-v${version}-x86_64-apple-darwin.tar.gz";
-          hash = "sha256-Lrt52vGcMwwth+IhPaOv/yYytXA+WHlZlp+/j9HeA+s=";
+          hash = "sha256-qMnu5Jol1aCVmaXmiSQINQc1di09kGVcMbJnZXM/OFg=";
         };
         aarch64-darwin = {
           file = "rgy-v${version}-aarch64-apple-darwin.tar.gz";
-          hash = "sha256-xEqUcL55ojrlq4Jjf/X/ENmciQ3ULS/wyuu9TF4p3Ds=";
+          hash = "sha256-uMnG0q3fDMrPgcfjq9dxMGLMcS8xTlOzXfiE4KT6jdQ=";
         };
       };
 
@@ -48,11 +48,11 @@
         x86_64-linux = {
           rgy-search-avx2 = {
             file = "rgy-v${version}-avx2-linux.tar.gz";
-            hash = "sha256-NMZ1t9VRPVO4G+iHNAZU/Dg6DZpzdYzEcVyWhAPxM6U=";
+            hash = "sha256-Z7nhyR+LuqucVQtdRmmW4QmjjU7CyDwCOy9dnCYXEX4=";
           };
           rgy-search-znver4 = {
             file = "rgy-v${version}-znver4-linux.tar.gz";
-            hash = "sha256-C5UrPjPlFrRURZtp+iE8iVQ+aO7KvdwCx+IXDu0HXfM=";
+            hash = "sha256-Y5FNIrwvoj/52lnUwXfC0iRQbl60AWqDgIM+oguHW8M=";
           };
         };
       };
