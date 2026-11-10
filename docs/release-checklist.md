@@ -150,3 +150,10 @@ Everything here is **prepared, not published**.
 - `docs/release-0.1.10.2.md` stays in the tree as the historical page. Do
   not edit it: it travelled inside the published 0.1.10.2 archives and its
   digest is in their sidecars.
+- `build-release.ps1` checks every relative Markdown link in every document
+  the archive carries, resolved against that document's own folder. A link
+  in `docs/release-X.md` to `docs/release-Y.md` resolves to
+  `docs/docs/release-Y.md` and stops the build. Check the links before
+  step 1: `pwsh -File scripts/build-release.ps1 -SkipTests -Target
+  x86_64-pc-windows-msvc -Variant portable` runs the real guard locally.
+  It also confirms the sidecar row count (18 for 0.1.10.3).

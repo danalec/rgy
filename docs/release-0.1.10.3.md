@@ -124,8 +124,8 @@ The crates stay at **0.1.10** — the registry takes three numbers, the fourth
 is the fix count of the line. This release adds two archives, one Windows
 installer, a Homebrew tap, a machine-readable licence and an explicit
 boundary around files you do not trust. The X11 window, the settings panel,
-the themes and the FreeBSD work shipped in 0.1.10.3; its page is
-[docs/release-0.1.10.3.md](docs/release-0.1.10.3.md).
+the themes and the FreeBSD work shipped in 0.1.10.2; that release's page
+lives in the repository, not inside this archive.
 
 - **Fourteen archives: a generic AVX-512 build.** The `znver4` archives are
   tuned to AMD Zen 4 and enable its Zen-specific instructions
