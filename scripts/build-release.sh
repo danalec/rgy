@@ -607,9 +607,30 @@ done
 
 archive_name="rgy-v$version-$asset.tar.gz"
 archive="$out/$archive_name"
-files="searchctl searchd rgy-autostart rgxy rgy README.md MANUAL.md FORMATS.md COPYING NOTICE LICENSE-APACHE LICENSE-MIT"
+# The member list is derived from $documents, the same list the copy loop
+# and the sidecar read. A hardcoded second list drifted once: LICENSE was
+# added to $documents (copied into the stage, named in the sidecar) but not
+# here, so nine .tar.gz archives shipped without it while their sidecars
+# said it was there. One list, and the drift cannot happen again.
+files="searchctl searchd rgy-autostart rgxy rgy"
+files="$files $documents"
 files="$files $media"
 files="$files benchmark $release_page"
+
+# Every document the release promises is a member of the archive. The
+# sidecar names $documents, so a member list that dropped one of them
+# would publish a sidecar claiming a file the archive does not carry.
+# This is the drift that once left LICENSE out of nine .tar.gz files.
+for doc in $documents; do
+    found=no
+    for member in $files; do
+        if [ "$member" = "$doc" ]; then found=yes; break; fi
+    done
+    if [ "$found" != "yes" ]; then
+        echo "the document $doc is not in the archive's member list: the sidecar would name a file the archive does not carry" >&2
+        exit 1
+    fi
+done
 
 # Every member of the list is in the stage, or the archive is packed
 # without it -- and tar's complaint is not a sentence the reader can act on.

@@ -157,3 +157,9 @@ Everything here is **prepared, not published**.
   step 1: `pwsh -File scripts/build-release.ps1 -SkipTests -Target
   x86_64-pc-windows-msvc -Variant portable` runs the real guard locally.
   It also confirms the sidecar row count (18 for 0.1.10.3).
+- The archive's **member list** and the **sidecar's document list** must be
+  the same list. `build-release.ps1` derives `$files` from `$documents`;
+  `build-release.sh` must do the same, and both now refuse when a document
+  is missing from the member list. A hardcoded second list once left
+  `LICENSE` out of nine `.tar.gz` archives while their sidecars named it.
+  After step 3, check all fourteen: every archive must contain `LICENSE`.

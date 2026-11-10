@@ -678,6 +678,17 @@ $archive = Join-Path $out $archiveName
 $files = @("searchctl.exe", "searchd.exe", "rgy-autostart.exe", "rgxy.exe", "rgy.exe")
 $files += $documents
 $files += $media
+# Every document the release promises is a member of the archive. The
+# sidecar names $documents, so a member list that dropped one of them
+# would publish a sidecar claiming a file the archive does not carry.
+# This is the drift that once left LICENSE out of nine .tar.gz files.
+foreach ($doc in $documents) {
+    if ($files -notcontains $doc) {
+        [Console]::Error.WriteLine("the document $doc is not in the archive's member list: the sidecar would name a file the archive does not carry")
+        exit 1
+    }
+}
+
 $files += @("benchmark", $releasePage)
 foreach ($member in $files) {
     $inStage = Join-Path $stage ($member -replace '/', '\')
