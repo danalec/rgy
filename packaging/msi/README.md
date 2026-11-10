@@ -43,7 +43,7 @@ the MSI then installs the binaries, documents, PATH and shortcut but does
 property:
 
 ```powershell
-msiexec /i rgy-0.1.10.2.msi STARTDAEMON=0 /qn
+msiexec /i rgy-0.1.10.3.msi STARTDAEMON=0 /qn
 ```
 
 The `RgyRegisterDaemon` custom action is conditioned on
@@ -67,7 +67,7 @@ silently do nothing. The MSI therefore maps the release's fix count into
 the third field:
 
 ```
-release  0.1.10.2   ->   ProductVersion 0.1.102
+release  0.1.10.3   ->   ProductVersion 0.1.103
 release  0.1.10.1   ->   ProductVersion 0.1.101
 release  0.1.10.0   ->   ProductVersion 0.1.100
 ```
@@ -114,7 +114,7 @@ them.
 ## Build
 
 ```powershell
-pwsh -File packaging/msi/build-msi.ps1 -Version 0.1.10.2 -Archive .dist/rgy-v0.1.10.2-x86_64-windows.zip
+pwsh -File packaging/msi/build-msi.ps1 -Version 0.1.10.3 -Archive .dist/rgy-v0.1.10.3-x86_64-windows.zip
 ```
 
 The script extracts the archive into its own stage directory, checks all
@@ -122,7 +122,7 @@ twelve members, builds the MSI into `.dist/` and validates it.
 
 ## Verify
 
-`msiexec /i rgy-0.1.10.2.msi /L*v install.log` installs without a UAC
+`msiexec /i rgy-0.1.10.3.msi /L*v install.log` installs without a UAC
 prompt; `rgy-autostart doctor` then reports the daemon up; `msiexec /x`
 removes it and `doctor` reports nothing registered. The CI job also runs
 `wix msi validate` on the built package.

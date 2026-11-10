@@ -1,6 +1,6 @@
 # build-msi.ps1 -- build the per-user rgy MSI from a release archive.
 #
-#   pwsh -File packaging/msi/build-msi.ps1 -Version 0.1.10.2 -Archive .dist/rgy-v0.1.10.2-x86_64-windows.zip
+#   pwsh -File packaging/msi/build-msi.ps1 -Version 0.1.10.3 -Archive .dist/rgy-v0.1.10.3-x86_64-windows.zip
 #
 # The archive is the published Windows release. Its contents are extracted
 # into a stage directory; the MSI takes the five binaries and seven

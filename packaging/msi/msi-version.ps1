@@ -8,7 +8,7 @@
 #
 #   0.1.10.0 -> 0.1.100
 #   0.1.10.1 -> 0.1.101
-#   0.1.10.2 -> 0.1.102
+#   0.1.10.3 -> 0.1.103
 #   0.1.11.0 -> 0.1.110
 #
 # The third field is patch*10 + fix, which keeps the ordering of releases

@@ -929,13 +929,12 @@ jobs:
       # the one that names every row's archive -- while this step
       # rewrites the page to name one. The eleven other rows run it.
       - name: the manifests, rewritten (nothing published)
-        # The generic AVX-512 rows are new build targets for the NEXT
-        # release: the published 0.1.10.2 page names twelve assets and is
-        # not modified here. Skipping the publish rehearsal for these two
-        # rows keeps the page honest (it names what that release carries)
-        # while the CI still builds, smoke-tests and archives the new
-        # variant. They join the page when the next release is cut.
-        if: runner.os != 'Windows' && matrix.vm == null && matrix.variant != 'avx512'
+        # Every row of the fourteen-asset release runs the publish
+        # rehearsal, the generic AVX-512 rows included: the page names
+        # their archives now. When those rows were new and the published
+        # page named only twelve, skipping this step kept that page
+        # honest; there is no reason to skip it any more.
+        if: runner.os != 'Windows' && matrix.vm == null
         env:
           RGY_FORGEJO_URL: http://forgejo.invalid
         run: |
@@ -972,7 +971,7 @@ jobs:
           mv "$page.tmp" "$page"
           bash scripts/publish-release.sh --manifests-only --skip-tests --target ${{ matrix.target }} --variant ${{ matrix.variant }}
       - name: the manifests, rewritten (nothing published)
-        if: runner.os == 'Windows' && matrix.variant != 'avx512'
+        if: runner.os == 'Windows'
         shell: pwsh
         env:
           RGY_FORGEJO_URL: http://forgejo.invalid

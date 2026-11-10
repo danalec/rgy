@@ -31,7 +31,7 @@ installer actions.
 - `[build-msi.ps1]` — `-Version`, `-Archive`, `-Out`, `-SkipToolInstall`;
   extracts the archive, verifies all twelve members, computes the
   ProductVersion and ProductCode, runs `wix build`, then `wix msi validate`.
-- `[msi-version.ps1]` — `0.1.10.2` -> `0.1.102`.
+- `[msi-version.ps1]` — `0.1.10.3` -> `0.1.103`.
 - `[msi-product-code.ps1]` — a stable UUIDv5 ProductCode per
   release, from the UpgradeCode namespace and the version string.
 - `[Product.wxs]` — the package. `[post-install.ps1]` — the daemon step.

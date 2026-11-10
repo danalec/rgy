@@ -9,7 +9,7 @@
       nixpkgs,
     }:
     let
-      version = "0.1.10.2";
+      version = "0.1.10.3";
       base = "https://github.com/danalec/rgy/releases/download/rgy-v${version}";
 
       systems = [
@@ -20,9 +20,12 @@
       ];
 
       # One release asset per platform. The digests are the SHA-256 of the
-      # archive itself, in SRI form, from the 0.1.10.2 release's
-      # SHA256SUMS; `nix flake check` verifies them against the real
-      # downloads.
+      # archive itself, in SRI form. They are rewritten from the combined
+      # SHA256SUMS on publish day, together with the installer pins:
+      # until the 0.1.10.3 archives exist, the values below are still the
+      # 0.1.10.2 ones and `nix flake check` will (correctly) refuse them.
+      # `nix flake check` verifies them against the real downloads once
+      # the release is published.
       assets = {
         x86_64-linux = {
           file = "rgy-v${version}-x86_64-linux.tar.gz";
