@@ -100,6 +100,26 @@ Everything here is **prepared, not published**.
       MSI is **not** one of the fourteen archives, is not named by the page's
       assets marker and is not in `SHA256SUMS` — say so if you attach it.
 
+      **Done for 0.1.10.3 (2026-11-10), by hand, after the release was cut.**
+      The `rgy-msi` artifact of the final CI run (42878182033) supplied
+      `rgy-0.1.10.3-x86_64.msi` (7 233 536 bytes, SHA256
+      `68491853433f3fdca0ec5c5502a34e927a187ad07103daab745a4af859cbb8da`)
+      and its `.sha256` sidecar; both were uploaded to the GitHub release
+      with `gh release upload --clobber` and to the Forgejo release with
+      `POST /releases/<id>/assets?name=…` (Basic auth from
+      `git credential fill`). Both releases went from 15 to **17** assets,
+      and the published `.msi` was downloaded back from each forge and
+      matched the sidecar.
+
+      The two places below that say "15 assets" describe what
+      `publish-release.ps1` uploads on its own; they are correct for the
+      publisher and do not count the manual pair. Nothing rewrites the
+      page's assets marker, so a later re-run of the publisher neither
+      deletes nor re-attaches the MSI: its name has no `v` and misses the
+      `rgy-v<version>-*` glob. **For the next release, do not forget this
+      step** — or make it automatic by adding the MSI to the marker, the
+      member list and `SHA256SUMS`, which would also change every pin.
+
 ## 6. The repositories outside this tree
 
 - [ ] **AUR** (on the CachyOS box, `/home/danalec/aur-rgy/*`): replace each
