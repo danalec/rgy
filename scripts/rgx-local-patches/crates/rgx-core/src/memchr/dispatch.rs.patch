@@ -1,0 +1,926 @@
+--- a/crates/rgx-core/src/memchr/dispatch.rs
++++ b/crates/rgx-core/src/memchr/dispatch.rs
+@@ -9,10 +9,17 @@
+ //! with `std` and the build without it reach the same kernel and produce
+ //! comparable numbers.
+ //!
+-//! Where this crate has no kernel of its own to offer, the upstream crate's
+-//! search is used unchanged: on a CPU without AVX2 the upstream crate picks
+-//! SSE2, and on aarch64 it picks NEON, both at compile time and both without
+-//! a probe.
++//! **Both kernels are this crate's own.** The vector one is written out with
++//! `core::arch` intrinsics -- the same shape the upstream crate's own
++//! searchers have: a 32-byte block, one comparison per needle, the
++//! comparisons ORed into one mask, and the mask's bits are the candidates.
++//! The portable one is a word-at-a-time scan: a `usize` word at a time, with
++//! the tail byte by byte. Neither of them needs a crate from outside the
++//! tree, and neither of them needs `std`.
++//!
++//! The two answer the same question the same way, and the tests hold both of
++//! them to a naive byte-at-a-time scan, because an oracle that shares a line
++//! with the code it judges proves nothing.
+ 
+ use core::fmt;
+ use core::iter::Rev;
+@@ -29,7 +36,7 @@
+             return unsafe { x86_64::one_find(needle, haystack) };
+         }
+     }
+-    ::memchr::memchr(needle, haystack)
++    portable::one_find(needle, haystack)
+ }
+ 
+ /// Search for the last occurrence of `needle` in `haystack`.
+@@ -44,7 +51,7 @@
+             return unsafe { x86_64::one_rfind(needle, haystack) };
+         }
+     }
+-    ::memchr::memrchr(needle, haystack)
++    portable::one_rfind(needle, haystack)
+ }
+ 
+ /// Search for the first occurrence of either `needle1` or `needle2`.
+@@ -59,7 +66,7 @@
+             return unsafe { x86_64::two_find(needle1, needle2, haystack) };
+         }
+     }
+-    ::memchr::memchr2(needle1, needle2, haystack)
++    portable::two_find(needle1, needle2, haystack)
+ }
+ 
+ /// Search for the last occurrence of either `needle1` or `needle2`.
+@@ -74,7 +81,7 @@
+             return unsafe { x86_64::two_rfind(needle1, needle2, haystack) };
+         }
+     }
+-    ::memchr::memrchr2(needle1, needle2, haystack)
++    portable::two_rfind(needle1, needle2, haystack)
+ }
+ 
+ /// Search for the first occurrence of any of the three needles.
+@@ -89,7 +96,7 @@
+             return unsafe { x86_64::three_find(needle1, needle2, needle3, haystack) };
+         }
+     }
+-    ::memchr::memchr3(needle1, needle2, needle3, haystack)
++    portable::three_find(needle1, needle2, needle3, haystack)
+ }
+ 
+ /// Search for the last occurrence of any of the three needles.
+@@ -104,7 +111,7 @@
+             return unsafe { x86_64::three_rfind(needle1, needle2, needle3, haystack) };
+         }
+     }
+-    ::memchr::memrchr3(needle1, needle2, needle3, haystack)
++    portable::three_rfind(needle1, needle2, needle3, haystack)
+ }
+ 
+ /// Count the occurrences of `needle` in `haystack`.
+@@ -124,7 +131,7 @@
+             return unsafe { x86_64::one_count(needle, haystack) };
+         }
+     }
+-    ::memchr::memchr_iter(needle, haystack).count()
++    portable::count(needle, haystack)
+ }
+ 
+ /// Returns an iterator over all occurrences of the needle in a haystack.
+@@ -171,115 +178,300 @@
+     Memchr3::new(needle1, needle2, needle3, haystack).rev()
+ }
+ 
+-/// The AVX2 kernels of the upstream `memchr` crate, reached through its own
+-/// public architecture module.
++/// The portable scan: a word at a time, with the tail byte by byte.
+ ///
+-/// The upstream crate publishes these behind an `unsafe` constructor whose
+-/// contract is exactly the question [`crate::detect`] answers. The
+-/// `#[target_feature]` on each function is what lets the upstream searcher
++/// **The word is read little-endian whatever the host's byte order is**, so
++/// the offset the mask reports is an offset in the haystack and not an
++/// offset in the machine's own representation of it. A scan that read the
++/// word in the host's order would report the right byte on a little-endian
++/// machine and the wrong one on a big-endian one, and the difference would
++/// only show up where nobody looks.
++mod portable {
++    /// The number of bytes one word of the scan covers.
++    const WORD: usize = core::mem::size_of::<usize>();
++
++    /// `0x0101..01`: one in every byte.
++    const LO: usize = usize::MAX / 255;
++    /// `0x8080..80`: the high bit of every byte.
++    const HI: usize = LO * 128;
++    /// `0x7f7f..7f`: the low seven bits of every byte.
++    const LOW7: usize = LO * 127;
++
++    /// The byte `b` in every position of a word.
++    #[inline]
++    fn splat(b: u8) -> usize {
++        LO * (b as usize)
++    }
++
++    /// The high bit of every byte of `word` that holds `needle`.
++    ///
++    /// **The test is `(x & 0x7f) + 0x7f`, and not the usual `x - 0x01..01`.**
++    /// The usual one borrows from the byte above, and a borrow shows up as a
++    /// false positive in the byte *above* the one that matched: harmless when
++    /// the scan wants the first match, and wrong when it wants the last one,
++    /// because the false positive is the higher of the two addresses. This
++    /// one cannot carry out of a byte -- `0x7f + 0x7f` is `0xfe` -- so no
++    /// byte can lend to the one above it, and every bit the mask sets is a
++    /// byte that really matched.
++    #[inline]
++    fn hits_mask(word: usize, needle: u8) -> usize {
++        let x = word ^ splat(needle);
++        let low = (x & LOW7).wrapping_add(LOW7);
++        !(low | x) & HI
++    }
++
++    /// The word at the start of `chunk`, read little-endian.
++    #[inline]
++    fn word_le(chunk: &[u8]) -> usize {
++        let mut buf = [0u8; WORD];
++        buf.copy_from_slice(chunk);
++        usize::from_le_bytes(buf)
++    }
++
++    /// The scans, one per needle count.
++    ///
++    /// The body is the same for all three; only the number of needles
++    /// differs, and the mask is the union of the needles' masks, so a byte
++    /// that matches either of two needles is a candidate for both.
++    macro_rules! scans {
++        ($($find:ident $rfind:ident [$($n:ident),+];)+) => {
++            $(
++                /// The first byte that matches one of the needles.
++                pub(super) fn $find($($n: u8),+, haystack: &[u8]) -> Option<usize> {
++                    let needles = [$($n),+];
++                    let len = haystack.len();
++                    let mut base = 0usize;
++                    while base + WORD <= len {
++                        let word = word_le(&haystack[base..base + WORD]);
++                        let mut hits = 0usize;
++                        $( hits |= hits_mask(word, $n); )+
++                        if hits != 0 {
++                            return Some(base + (hits.trailing_zeros() / 8) as usize);
++                        }
++                        base += WORD;
++                    }
++                    for (i, &b) in haystack[base..].iter().enumerate() {
++                        if needles.contains(&b) {
++                            return Some(base + i);
++                        }
++                    }
++                    None
++                }
++
++                /// The last byte that matches one of the needles.
++                pub(super) fn $rfind($($n: u8),+, haystack: &[u8]) -> Option<usize> {
++                    let needles = [$($n),+];
++                    let mut end = haystack.len();
++                    while end >= WORD {
++                        let start = end - WORD;
++                        let word = word_le(&haystack[start..end]);
++                        let mut hits = 0usize;
++                        $( hits |= hits_mask(word, $n); )+
++                        if hits != 0 {
++                            let byte =
++                                ((usize::BITS as usize) - 1 - hits.leading_zeros() as usize) / 8;
++                            return Some(start + byte);
++                        }
++                        end = start;
++                    }
++                    for i in (0..end).rev() {
++                        if needles.contains(&haystack[i]) {
++                            return Some(i);
++                        }
++                    }
++                    None
++                }
++            )+
++        };
++    }
++
++    scans! {
++        one_find  one_rfind  [needle];
++        two_find  two_rfind  [needle1, needle2];
++        three_find three_rfind [needle1, needle2, needle3];
++    }
++
++    /// How many bytes of `haystack` hold `needle`.
++    pub(super) fn count(needle: u8, haystack: &[u8]) -> usize {
++        let len = haystack.len();
++        let mut total = 0usize;
++        let mut base = 0usize;
++        while base + WORD <= len {
++            let word = word_le(&haystack[base..base + WORD]);
++            total += hits_mask(word, needle).count_ones() as usize;
++            base += WORD;
++        }
++        for &b in &haystack[base..] {
++            if b == needle {
++                total += 1;
++            }
++        }
++        total
++    }
++}
++
++/// The AVX2 kernels, written out with `core::arch`.
++///
++/// The block is 32 bytes: one unaligned load, one comparison per needle,
++/// the comparisons ORed into one mask, and the mask's bits are the
++/// candidates. A block with a candidate is answered from the mask alone --
++/// the lowest bit for a forward search, the highest for a backward one --
++/// because the answer is the *first* (or the *last*) match and not merely a
++/// match.
++///
++/// The `#[target_feature]` on each function is what lets the vector code
+ /// inline into it: without it, the AVX2 code would be a separate call per
+ /// search, and the whole point of the exercise is that it is not.
+ #[cfg(target_arch = "x86_64")]
+ mod x86_64 {
+-    // The leading `::` names the upstream crate, not this crate's own
+-    // `memchr` module -- the two are both called `memchr`, and a `use`
+-    // path that starts with the bare name would be ambiguous.
+-    use ::memchr::arch::x86_64::avx2::memchr::{One, Three, Two};
+-
+-    /// # Safety
+-    ///
+-    /// The caller must have established that this CPU can run the AVX2
+-    /// instructions.
+-    #[target_feature(enable = "sse2", enable = "avx2")]
+-    pub(super) unsafe fn one_find(needle: u8, haystack: &[u8]) -> Option<usize> {
+-        // SAFETY: the caller established AVX2, which is the whole of the
+-        // unchecked constructor's contract; the searcher does not outlive
+-        // this call.
+-        One::new_unchecked(needle).find(haystack)
+-    }
+-
+-    /// # Safety
+-    ///
+-    /// The caller must have established that this CPU can run the AVX2
+-    /// instructions.
+-    #[target_feature(enable = "sse2", enable = "avx2")]
+-    pub(super) unsafe fn one_rfind(needle: u8, haystack: &[u8]) -> Option<usize> {
+-        // SAFETY: the caller established AVX2, which is the whole of the
+-        // unchecked constructor's contract; the searcher does not outlive
+-        // this call.
+-        One::new_unchecked(needle).rfind(haystack)
+-    }
+-
++    use core::arch::x86_64::{
++        __m256i, _mm256_cmpeq_epi8, _mm256_loadu_si256, _mm256_movemask_epi8, _mm256_or_si256,
++        _mm256_set1_epi8, _mm256_setzero_si256,
++    };
++
++    /// The number of bytes one block covers.
++    const BLOCK: usize = 32;
++
++    /// The vector kernels, one per needle count.
++    ///
++    /// The haystack is walked in blocks from the front (or from the back),
++    /// and the last block is the same 32 bytes loaded at the end of the
++    /// haystack with the lanes the blocks already covered masked off. That
++    /// is what keeps the answer exact at the boundary: a load that ran past
++    /// the end of the haystack would be reading somebody else's memory.
++    macro_rules! kernels {
++        ($($find:ident $rfind:ident [$($n:ident => $v:ident),+];)+) => {
++            $(
++                /// # Safety
++                ///
++                /// The caller must have established that this CPU can run the
++                /// AVX2 instructions.
++                #[target_feature(enable = "sse2", enable = "avx2")]
++                pub(super) unsafe fn $find($($n: u8),+, haystack: &[u8]) -> Option<usize> {
++                    let len = haystack.len();
++                    if len < BLOCK {
++                        return super::portable::$find($($n),+, haystack);
++                    }
++                    let ptr = haystack.as_ptr();
++                    $( let $v = _mm256_set1_epi8($n as i8); )+
++                    let mut at = 0usize;
++                    while at + BLOCK <= len {
++                        // SAFETY: `at + BLOCK <= len`, so the load is inside the
++                        // haystack.
++                        let chunk = _mm256_loadu_si256(ptr.add(at) as *const __m256i);
++                        let mut hits = _mm256_setzero_si256();
++                        $( hits = _mm256_or_si256(hits, _mm256_cmpeq_epi8(chunk, $v)); )+
++                        let mask = _mm256_movemask_epi8(hits) as u32;
++                        if mask != 0 {
++                            return Some(at + mask.trailing_zeros() as usize);
++                        }
++                        at += BLOCK;
++                    }
++                    if at == len {
++                        return None;
++                    }
++                    // The tail: the last 32 bytes of the haystack, with the
++                    // lanes the blocks already covered masked off.
++                    let last = len - BLOCK;
++                    // SAFETY: `len >= BLOCK`, so the load is inside the
++                    // haystack.
++                    let chunk = _mm256_loadu_si256(ptr.add(last) as *const __m256i);
++                    let mut hits = _mm256_setzero_si256();
++                    $( hits = _mm256_or_si256(hits, _mm256_cmpeq_epi8(chunk, $v)); )+
++                    let mut mask = _mm256_movemask_epi8(hits) as u32;
++                    mask &= u32::MAX << (at - last);
++                    if mask != 0 {
++                        return Some(last + mask.trailing_zeros() as usize);
++                    }
++                    None
++                }
++
++                /// # Safety
++                ///
++                /// The caller must have established that this CPU can run the
++                /// AVX2 instructions.
++                #[target_feature(enable = "sse2", enable = "avx2")]
++                pub(super) unsafe fn $rfind($($n: u8),+, haystack: &[u8]) -> Option<usize> {
++                    let len = haystack.len();
++                    if len < BLOCK {
++                        return super::portable::$rfind($($n),+, haystack);
++                    }
++                    let ptr = haystack.as_ptr();
++                    $( let $v = _mm256_set1_epi8($n as i8); )+
++                    let mut end = len;
++                    while end >= BLOCK {
++                        let at = end - BLOCK;
++                        // SAFETY: `end >= BLOCK`, so the load is inside the
++                        // haystack.
++                        let chunk = _mm256_loadu_si256(ptr.add(at) as *const __m256i);
++                        let mut hits = _mm256_setzero_si256();
++                        $( hits = _mm256_or_si256(hits, _mm256_cmpeq_epi8(chunk, $v)); )+
++                        let mask = _mm256_movemask_epi8(hits) as u32;
++                        if mask != 0 {
++                            return Some(at + (31 - mask.leading_zeros() as usize));
++                        }
++                        end = at;
++                    }
++                    // The tail: the first `end` bytes, which are the ones the
++                    // blocks did not cover.
++                    // SAFETY: `len >= BLOCK`, so the load is inside the
++                    // haystack.
++                    let chunk = _mm256_loadu_si256(ptr as *const __m256i);
++                    let mut hits = _mm256_setzero_si256();
++                    $( hits = _mm256_or_si256(hits, _mm256_cmpeq_epi8(chunk, $v)); )+
++                    let mut mask = _mm256_movemask_epi8(hits) as u32;
++                    mask &= (1u32 << end) - 1;
++                    if mask != 0 {
++                        return Some(31 - mask.leading_zeros() as usize);
++                    }
++                    None
++                }
++            )+
++        };
++    }
++
++    kernels! {
++        one_find one_rfind [needle => vneedle];
++        two_find two_rfind [needle1 => vneedle1, needle2 => vneedle2];
++        three_find three_rfind [needle1 => vneedle1, needle2 => vneedle2, needle3 => vneedle3];
++    }
++
++    /// How many bytes of `haystack` hold `needle`.
++    ///
++    /// The count is the mask's bits popped out of it: one pass over the
++    /// haystack, where an iterator that restarts the scan at every hit pays
++    /// a call per hit.
++    ///
+     /// # Safety
+     ///
+     /// The caller must have established that this CPU can run the AVX2
+     /// instructions.
+     #[target_feature(enable = "sse2", enable = "avx2")]
+     pub(super) unsafe fn one_count(needle: u8, haystack: &[u8]) -> usize {
+-        let one = One::new_unchecked(needle);
+-        let start = haystack.as_ptr();
+-        // SAFETY: both pointers are derived from the haystack slice, and
+-        // their distance is the slice's length, which cannot overflow an
+-        // `isize` because a slice's length cannot.
+-        one.count_raw(start, start.wrapping_add(haystack.len()))
+-    }
+-
+-    /// # Safety
+-    ///
+-    /// The caller must have established that this CPU can run the AVX2
+-    /// instructions.
+-    #[target_feature(enable = "sse2", enable = "avx2")]
+-    pub(super) unsafe fn two_find(needle1: u8, needle2: u8, haystack: &[u8]) -> Option<usize> {
+-        // SAFETY: the caller established AVX2, which is the whole of the
+-        // unchecked constructor's contract; the searcher does not outlive
+-        // this call.
+-        Two::new_unchecked(needle1, needle2).find(haystack)
+-    }
+-
+-    /// # Safety
+-    ///
+-    /// The caller must have established that this CPU can run the AVX2
+-    /// instructions.
+-    #[target_feature(enable = "sse2", enable = "avx2")]
+-    pub(super) unsafe fn two_rfind(needle1: u8, needle2: u8, haystack: &[u8]) -> Option<usize> {
+-        // SAFETY: the caller established AVX2, which is the whole of the
+-        // unchecked constructor's contract; the searcher does not outlive
+-        // this call.
+-        Two::new_unchecked(needle1, needle2).rfind(haystack)
+-    }
+-
+-    /// # Safety
+-    ///
+-    /// The caller must have established that this CPU can run the AVX2
+-    /// instructions.
+-    #[target_feature(enable = "sse2", enable = "avx2")]
+-    pub(super) unsafe fn three_find(
+-        needle1: u8,
+-        needle2: u8,
+-        needle3: u8,
+-        haystack: &[u8],
+-    ) -> Option<usize> {
+-        // SAFETY: the caller established AVX2, which is the whole of the
+-        // unchecked constructor's contract; the searcher does not outlive
+-        // this call.
+-        Three::new_unchecked(needle1, needle2, needle3).find(haystack)
+-    }
+-
+-    /// # Safety
+-    ///
+-    /// The caller must have established that this CPU can run the AVX2
+-    /// instructions.
+-    #[target_feature(enable = "sse2", enable = "avx2")]
+-    pub(super) unsafe fn three_rfind(
+-        needle1: u8,
+-        needle2: u8,
+-        needle3: u8,
+-        haystack: &[u8],
+-    ) -> Option<usize> {
+-        // SAFETY: the caller established AVX2, which is the whole of the
+-        // unchecked constructor's contract; the searcher does not outlive
+-        // this call.
+-        Three::new_unchecked(needle1, needle2, needle3).rfind(haystack)
++        let len = haystack.len();
++        if len < BLOCK {
++            return super::portable::count(needle, haystack);
++        }
++        let ptr = haystack.as_ptr();
++        let vneedle = _mm256_set1_epi8(needle as i8);
++        let mut total = 0usize;
++        let mut at = 0usize;
++        while at + BLOCK <= len {
++            // SAFETY: `at + BLOCK <= len`, so the load is inside the haystack.
++            let chunk = _mm256_loadu_si256(ptr.add(at) as *const __m256i);
++            let mask = _mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, vneedle)) as u32;
++            total += mask.count_ones() as usize;
++            at += BLOCK;
++        }
++        if at == len {
++            return total;
++        }
++        let last = len - BLOCK;
++        // SAFETY: `len >= BLOCK`, so the load is inside the haystack.
++        let chunk = _mm256_loadu_si256(ptr.add(last) as *const __m256i);
++        let mask = _mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, vneedle)) as u32;
++        total += (mask & (u32::MAX << (at - last))).count_ones() as usize;
++        total
+     }
+ }
+ 
+@@ -396,9 +588,10 @@
+     let mut n = 0usize;
+     let mut front = 0usize;
+     while front < haystack.len() {
+-        let at = match needles.len() {
+-            2 => memchr2(needles[0], needles[1], &haystack[front..]),
+-            _ => memchr3(needles[0], needles[1], needles[2], &haystack[front..]),
++        let at = match needles {
++            [a, b] => memchr2(*a, *b, &haystack[front..]),
++            [a, b, c] => memchr3(*a, *b, *c, &haystack[front..]),
++            _ => break,
+         };
+         match at {
+             Some(at) => {
+@@ -462,105 +655,376 @@
+ mod tests {
+     use alloc::vec::Vec;
+ 
+-    /// The dispatch and the upstream crate must agree, byte for byte.
+-    ///
+-    /// The upstream crate's own dispatch is the answer this crate is
+-    /// measured against: the two are asked the same question about the same
+-    /// bytes, and a build that takes the AVX2 path where the other does not
+-    /// is a build whose answers are not comparable. The check is a
+-    /// differential against the upstream functions over a corpus that
+-    /// includes the empty haystack, the single byte, the vector boundary and
+-    /// a haystack long enough to exercise the wide kernels.
++    /// The number of bytes one word of the portable scan covers.
++    const WORD: usize = core::mem::size_of::<usize>();
++
++    /// The oracle: a byte at a time.
++    ///
++    /// It is three lines and it is obviously right, and that is the whole
++    /// point of an oracle -- it must not share a single line with the code
++    /// it judges. The upstream crate cannot be the oracle any more: it is
++    /// the thing this module replaces, and an oracle that *is* the
++    /// implementation proves only that the implementation agrees with
++    /// itself.
++    fn naive_find(needle: u8, haystack: &[u8]) -> Option<usize> {
++        haystack.iter().position(|&b| b == needle)
++    }
++
++    /// The oracle for the last occurrence.
++    fn naive_rfind(needle: u8, haystack: &[u8]) -> Option<usize> {
++        haystack.iter().rposition(|&b| b == needle)
++    }
++
++    /// The oracle for two needles.
++    fn naive_find2(needle1: u8, needle2: u8, haystack: &[u8]) -> Option<usize> {
++        haystack.iter().position(|&b| b == needle1 || b == needle2)
++    }
++
++    /// The oracle for two needles, backwards.
++    fn naive_rfind2(needle1: u8, needle2: u8, haystack: &[u8]) -> Option<usize> {
++        haystack.iter().rposition(|&b| b == needle1 || b == needle2)
++    }
++
++    /// The oracle for three needles.
++    fn naive_find3(needle1: u8, needle2: u8, needle3: u8, haystack: &[u8]) -> Option<usize> {
++        haystack
++            .iter()
++            .position(|&b| b == needle1 || b == needle2 || b == needle3)
++    }
++
++    /// The oracle for three needles, backwards.
++    fn naive_rfind3(needle1: u8, needle2: u8, needle3: u8, haystack: &[u8]) -> Option<usize> {
++        haystack
++            .iter()
++            .rposition(|&b| b == needle1 || b == needle2 || b == needle3)
++    }
++
++    /// The oracle for the iterator: every offset, from the front.
++    fn naive_iter(needle: u8, haystack: &[u8]) -> Vec<usize> {
++        haystack
++            .iter()
++            .enumerate()
++            .filter(|(_, &b)| b == needle)
++            .map(|(at, _)| at)
++            .collect()
++    }
++
++    /// The oracle for the reverse iterator: every offset, from the back.
++    fn naive_riter(needle: u8, haystack: &[u8]) -> Vec<usize> {
++        let mut at: Vec<usize> = naive_iter(needle, haystack);
++        at.reverse();
++        at
++    }
++
++    /// The oracle for the two-needle iterator.
++    fn naive_iter2(needle1: u8, needle2: u8, haystack: &[u8]) -> Vec<usize> {
++        haystack
++            .iter()
++            .enumerate()
++            .filter(|(_, &b)| b == needle1 || b == needle2)
++            .map(|(at, _)| at)
++            .collect()
++    }
++
++    /// The oracle for the two-needle iterator, backwards.
++    fn naive_riter2(needle1: u8, needle2: u8, haystack: &[u8]) -> Vec<usize> {
++        let mut at: Vec<usize> = naive_iter2(needle1, needle2, haystack);
++        at.reverse();
++        at
++    }
++
++    /// The oracle for the three-needle iterator.
++    fn naive_iter3(needle1: u8, needle2: u8, needle3: u8, haystack: &[u8]) -> Vec<usize> {
++        haystack
++            .iter()
++            .enumerate()
++            .filter(|(_, &b)| b == needle1 || b == needle2 || b == needle3)
++            .map(|(at, _)| at)
++            .collect()
++    }
++
++    /// The oracle for the three-needle iterator, backwards.
++    fn naive_riter3(needle1: u8, needle2: u8, needle3: u8, haystack: &[u8]) -> Vec<usize> {
++        let mut at: Vec<usize> = naive_iter3(needle1, needle2, needle3, haystack);
++        at.reverse();
++        at
++    }
++
++    /// The haystacks every path is checked against.
++    ///
++    /// The shapes are the ones that break a scanner: the empty haystack, the
++    /// single byte, the needle at the start, at the end and in the middle,
++    /// the needle that is not there at all, the needle that is the zero
++    /// byte, the haystack shorter than a word, the haystack exactly a word
++    /// long, the haystack one byte over a word, and the vector block's own
++    /// boundaries.
++    fn corpus() -> Vec<Vec<u8>> {
++        vec![
++            Vec::new(),
++            vec![b'a'],
++            vec![b'x'],
++            // The needle at the start, at the end, and in the middle.
++            b"a needle in a haystack".to_vec(),
++            b"a haystack with a needle".to_vec(),
++            b"a haystack with a needle in it".to_vec(),
++            // The needle that is not there at all.
++            b"nothing to see here".to_vec(),
++            // The zero byte, alone and inside.
++            vec![0],
++            b"a\0b\0c".to_vec(),
++            // Around the word's own boundaries.
++            vec![b'x'; WORD - 1],
++            vec![b'x'; WORD],
++            vec![b'x'; WORD + 1],
++            // Around the vector block's own boundaries.
++            vec![b'x'; 31],
++            vec![b'x'; 32],
++            vec![b'x'; 33],
++            vec![b'x'; 64],
++            vec![b'x'; 65],
++            // A haystack that is entirely the needle.
++            vec![b'a'; 40],
++        ]
++    }
++
++    /// The portable scan and the naive one must answer the same question the
++    /// same way.
++    ///
++    /// The portable scan is the one every CPU without AVX2 runs, and it is
++    /// the one the vector path is checked against, so it is the one that has
++    /// to be right on its own.
+     #[test]
+-    fn the_dispatch_agrees_with_the_upstream_crate() {
+-        let haystacks: &[&[u8]] = &[
+-            b"",
+-            b"a",
+-            b"aa",
+-            b"aaaaaaaaaaaaaaaa",
+-            b"abcdefghijklmnopqrstuvwxyz",
+-            &[b'x'; 31],
+-            &[b'x'; 32],
+-            &[b'x'; 33],
+-            &[b'x'; 64],
+-            &[b'x'; 65],
+-        ];
+-        for hay in haystacks {
++    fn the_portable_scan_agrees_with_the_naive_one() {
++        for hay in corpus() {
+             for &needle in &[b'a', b'x', b'z', 0] {
+                 assert_eq!(
+-                    super::memchr(needle, hay),
+-                    ::memchr::memchr(needle, hay),
++                    super::portable::one_find(needle, &hay),
++                    naive_find(needle, &hay),
++                    "find({needle:?}) over {} bytes",
++                    hay.len()
++                );
++                assert_eq!(
++                    super::portable::one_rfind(needle, &hay),
++                    naive_rfind(needle, &hay),
++                    "rfind({needle:?}) over {} bytes",
++                    hay.len()
++                );
++                assert_eq!(
++                    super::portable::count(needle, &hay),
++                    naive_iter(needle, &hay).len(),
++                    "count({needle:?}) over {} bytes",
++                    hay.len()
++                );
++            }
++            for &(n1, n2) in &[(b'a', b'x'), (b'a', b'a'), (b'z', 0u8)] {
++                assert_eq!(
++                    super::portable::two_find(n1, n2, &hay),
++                    naive_find2(n1, n2, &hay),
++                    "find2({n1:?}, {n2:?}) over {} bytes",
++                    hay.len()
++                );
++                assert_eq!(
++                    super::portable::two_rfind(n1, n2, &hay),
++                    naive_rfind2(n1, n2, &hay),
++                    "rfind2({n1:?}, {n2:?}) over {} bytes",
++                    hay.len()
++                );
++            }
++            for &(n1, n2, n3) in &[(b'a', b'x', b'z'), (b'a', b'a', b'a'), (b'a', b'x', b'a')] {
++                assert_eq!(
++                    super::portable::three_find(n1, n2, n3, &hay),
++                    naive_find3(n1, n2, n3, &hay),
++                    "find3({n1:?}, {n2:?}, {n3:?}) over {} bytes",
++                    hay.len()
++                );
++                assert_eq!(
++                    super::portable::three_rfind(n1, n2, n3, &hay),
++                    naive_rfind3(n1, n2, n3, &hay),
++                    "rfind3({n1:?}, {n2:?}, {n3:?}) over {} bytes",
++                    hay.len()
++                );
++            }
++        }
++    }
++
++    /// The vector scan and the naive one must answer the same question the
++    /// same way.
++    ///
++    /// The vector path only runs on a CPU that has AVX2, so the check runs
++    /// only there: on a machine without it the portable path is the whole
++    /// answer, and the oracle holds it to that alone.
++    #[cfg(target_arch = "x86_64")]
++    #[test]
++    fn the_vector_scan_agrees_with_the_naive_one() {
++        if !crate::detect::avx2() {
++            return;
++        }
++        for hay in corpus() {
++            for &needle in &[b'a', b'x', b'z', 0] {
++                // SAFETY: the probe above established that this CPU can run
++                // the AVX2 instructions.
++                unsafe {
++                    assert_eq!(
++                        super::x86_64::one_find(needle, &hay),
++                        naive_find(needle, &hay),
++                        "one_find({needle:?}) over {} bytes",
++                        hay.len()
++                    );
++                    assert_eq!(
++                        super::x86_64::one_rfind(needle, &hay),
++                        naive_rfind(needle, &hay),
++                        "one_rfind({needle:?}) over {} bytes",
++                        hay.len()
++                    );
++                    assert_eq!(
++                        super::x86_64::one_count(needle, &hay),
++                        naive_iter(needle, &hay).len(),
++                        "one_count({needle:?}) over {} bytes",
++                        hay.len()
++                    );
++                }
++            }
++            for &(n1, n2) in &[(b'a', b'x'), (b'a', b'a'), (b'z', 0u8)] {
++                // SAFETY: the probe above established that this CPU can run
++                // the AVX2 instructions.
++                unsafe {
++                    assert_eq!(
++                        super::x86_64::two_find(n1, n2, &hay),
++                        naive_find2(n1, n2, &hay),
++                        "two_find({n1:?}, {n2:?}) over {} bytes",
++                        hay.len()
++                    );
++                    assert_eq!(
++                        super::x86_64::two_rfind(n1, n2, &hay),
++                        naive_rfind2(n1, n2, &hay),
++                        "two_rfind({n1:?}, {n2:?}) over {} bytes",
++                        hay.len()
++                    );
++                }
++            }
++            for &(n1, n2, n3) in &[(b'a', b'x', b'z'), (b'a', b'a', b'a'), (b'a', b'x', b'a')] {
++                // SAFETY: the probe above established that this CPU can run
++                // the AVX2 instructions.
++                unsafe {
++                    assert_eq!(
++                        super::x86_64::three_find(n1, n2, n3, &hay),
++                        naive_find3(n1, n2, n3, &hay),
++                        "three_find({n1:?}, {n2:?}, {n3:?}) over {} bytes",
++                        hay.len()
++                    );
++                    assert_eq!(
++                        super::x86_64::three_rfind(n1, n2, n3, &hay),
++                        naive_rfind3(n1, n2, n3, &hay),
++                        "three_rfind({n1:?}, {n2:?}, {n3:?}) over {} bytes",
++                        hay.len()
++                    );
++                }
++            }
++        }
++    }
++
++    /// The dispatch and the naive one must answer the same question the same
++    /// way.
++    ///
++    /// This is the check that covers whichever kernel the machine running the
++    /// test has, so it is the one that holds the whole module to the oracle
++    /// on every machine.
++    #[test]
++    fn the_dispatch_agrees_with_the_naive_one() {
++        for hay in corpus() {
++            for &needle in &[b'a', b'x', b'z', 0] {
++                assert_eq!(
++                    super::memchr(needle, &hay),
++                    naive_find(needle, &hay),
+                     "memchr({needle:?}) over {} bytes",
+                     hay.len()
+                 );
+                 assert_eq!(
+-                    super::memrchr(needle, hay),
+-                    ::memchr::memrchr(needle, hay),
++                    super::memrchr(needle, &hay),
++                    naive_rfind(needle, &hay),
+                     "memrchr({needle:?}) over {} bytes",
+                     hay.len()
+                 );
+                 assert_eq!(
+-                    super::memchr_iter(needle, hay).collect::<Vec<_>>(),
+-                    ::memchr::memchr_iter(needle, hay).collect::<Vec<_>>(),
++                    super::memchr_iter(needle, &hay).collect::<Vec<_>>(),
++                    naive_iter(needle, &hay),
+                     "memchr_iter({needle:?}) over {} bytes",
+                     hay.len()
+                 );
+                 assert_eq!(
+-                    super::memchr_iter(needle, hay).count(),
+-                    ::memchr::memchr_iter(needle, hay).count(),
++                    super::memchr_iter(needle, &hay).count(),
++                    naive_iter(needle, &hay).len(),
+                     "memchr_iter({needle:?}).count() over {} bytes",
+                     hay.len()
+                 );
+                 assert_eq!(
+-                    super::memrchr_iter(needle, hay).collect::<Vec<_>>(),
+-                    ::memchr::memrchr_iter(needle, hay).collect::<Vec<_>>(),
++                    super::memrchr_iter(needle, &hay).collect::<Vec<_>>(),
++                    naive_riter(needle, &hay),
+                     "memrchr_iter({needle:?}) over {} bytes",
+                     hay.len()
+                 );
+             }
+             for &(n1, n2) in &[(b'a', b'x'), (b'a', b'a'), (b'z', 0u8)] {
+                 assert_eq!(
+-                    super::memchr2(n1, n2, hay),
+-                    ::memchr::memchr2(n1, n2, hay),
++                    super::memchr2(n1, n2, &hay),
++                    naive_find2(n1, n2, &hay),
+                     "memchr2({n1:?}, {n2:?}) over {} bytes",
+                     hay.len()
+                 );
+                 assert_eq!(
+-                    super::memrchr2(n1, n2, hay),
+-                    ::memchr::memrchr2(n1, n2, hay),
++                    super::memrchr2(n1, n2, &hay),
++                    naive_rfind2(n1, n2, &hay),
+                     "memrchr2({n1:?}, {n2:?}) over {} bytes",
+                     hay.len()
+                 );
+                 assert_eq!(
+-                    super::memchr2_iter(n1, n2, hay).collect::<Vec<_>>(),
+-                    ::memchr::memchr2_iter(n1, n2, hay).collect::<Vec<_>>(),
++                    super::memchr2_iter(n1, n2, &hay).collect::<Vec<_>>(),
++                    naive_iter2(n1, n2, &hay),
+                     "memchr2_iter({n1:?}, {n2:?}) over {} bytes",
+                     hay.len()
+                 );
+                 assert_eq!(
+-                    super::memrchr2_iter(n1, n2, hay).collect::<Vec<_>>(),
+-                    ::memchr::memrchr2_iter(n1, n2, hay).collect::<Vec<_>>(),
++                    super::memchr2_iter(n1, n2, &hay).count(),
++                    naive_iter2(n1, n2, &hay).len(),
++                    "memchr2_iter({n1:?}, {n2:?}).count() over {} bytes",
++                    hay.len()
++                );
++                assert_eq!(
++                    super::memrchr2_iter(n1, n2, &hay).collect::<Vec<_>>(),
++                    naive_riter2(n1, n2, &hay),
+                     "memrchr2_iter({n1:?}, {n2:?}) over {} bytes",
+                     hay.len()
+                 );
+             }
+-            for &(n1, n2, n3) in &[(b'a', b'x', b'z'), (b'a', b'a', b'a')] {
+-                assert_eq!(
+-                    super::memchr3(n1, n2, n3, hay),
+-                    ::memchr::memchr3(n1, n2, n3, hay),
++            for &(n1, n2, n3) in &[(b'a', b'x', b'z'), (b'a', b'a', b'a'), (b'a', b'x', b'a')] {
++                assert_eq!(
++                    super::memchr3(n1, n2, n3, &hay),
++                    naive_find3(n1, n2, n3, &hay),
+                     "memchr3({n1:?}, {n2:?}, {n3:?}) over {} bytes",
+                     hay.len()
+                 );
+                 assert_eq!(
+-                    super::memrchr3(n1, n2, n3, hay),
+-                    ::memchr::memrchr3(n1, n2, n3, hay),
++                    super::memrchr3(n1, n2, n3, &hay),
++                    naive_rfind3(n1, n2, n3, &hay),
+                     "memrchr3({n1:?}, {n2:?}, {n3:?}) over {} bytes",
+                     hay.len()
+                 );
+                 assert_eq!(
+-                    super::memchr3_iter(n1, n2, n3, hay).collect::<Vec<_>>(),
+-                    ::memchr::memchr3_iter(n1, n2, n3, hay).collect::<Vec<_>>(),
++                    super::memchr3_iter(n1, n2, n3, &hay).collect::<Vec<_>>(),
++                    naive_iter3(n1, n2, n3, &hay),
+                     "memchr3_iter({n1:?}, {n2:?}, {n3:?}) over {} bytes",
++                    hay.len()
++                );
++                assert_eq!(
++                    super::memchr3_iter(n1, n2, n3, &hay).count(),
++                    naive_iter3(n1, n2, n3, &hay).len(),
++                    "memchr3_iter({n1:?}, {n2:?}, {n3:?}).count() over {} bytes",
++                    hay.len()
++                );
++                assert_eq!(
++                    super::memrchr3_iter(n1, n2, n3, &hay).collect::<Vec<_>>(),
++                    naive_riter3(n1, n2, n3, &hay),
++                    "memrchr3_iter({n1:?}, {n2:?}, {n3:?}) over {} bytes",
+                     hay.len()
+                 );
+             }

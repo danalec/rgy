@@ -1,0 +1,45 @@
+[package]
+name = "rgy-search"
+version = "0.1.10"
+edition = "2024"
+rust-version = "1.89"
+authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
+description = "The merged name-search CLI (name tokens + zen-rs filters)"
+license = "Apache-2.0"
+repository = "https://github.com/danalec/rgy"
+homepage = "https://github.com/danalec/rgy"
+documentation = "https://docs.rs/rgy-search"
+keywords = ["search", "cli", "filesystem"]
+categories = ["command-line-utilities"]
+readme = "../../README.md"
+
+
+# The EGM.md contracts are tracked working documents, not source. A
+# tracked file under this crate would otherwise be carried into the
+# published crate by cargo package (see tests/egm_packaging.rs).
+exclude = ["**/EGM.md"]
+
+[[bin]]
+name = "searchctl"
+path = "src/main.rs"
+
+[dependencies]
+rgy-discovery = { path = "../../crates/discovery", version = "0.1.10" }
+# The format adapters, as the content path's reader: a PDF's words are
+# words, and a `grep:` that cannot read them misses the file.
+rgy-adapters = { path = "../../crates/adapters", version = "0.1.10" }
+# The platform walk selector.
+rgy-discovery-dispatch = { path = "../../crates/discovery-dispatch", version = "0.1.10" }
+# The console's UTF-8 code page.
+rgy-engine = { path = "../../crates/engine", version = "0.1.10" }
+rgy-name-core = { path = "../../crates/name-core", version = "0.1.10" }
+# The parallelism's width: the user picks it, the environment can override
+# it, and every parallel path in the process agrees on it.
+rgy-par = { path = "../../crates/par", version = "0.1.10" }
+# The picker: the results handed to an external fzf.
+rgy-pick = { path = "../../crates/pick", version = "0.1.10" }
+# The JSON escaper the daemon uses, so a path or a grep line reaches the
+# wire the same way whichever side wrote it.
+rgy-proto = { path = "../../crates/proto", version = "0.1.10" }
+# One allocator story (plan 4.4).
+mimalloc = { version = "0.1", default-features = false }

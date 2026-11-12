@@ -1,0 +1,47 @@
+--- a/crates/rgx-adapters-llm/Cargo.toml
++++ b/crates/rgx-adapters-llm/Cargo.toml
+@@ -1,6 +1,6 @@
+ [package]
+-name = "rgx-adapters-llm"
+-version = "0.1.9"
++name = "rgy-vendored-adapters-llm"
++version = "0.1.10"
+ edition = "2021"
+ authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
+ description = "rgx adapters for machine-learning model files (GGUF, safetensors, NumPy, protobuf, tiktoken vocabularies)"
+@@ -8,7 +8,7 @@
+ readme = "README.md"
+ keywords = ["gguf", "safetensors", "npy", "protobuf"]
+ categories = ["parser-implementations", "science"]
+-repository = "https://github.com/danalec/rgx"
++repository = "https://github.com/danalec/rgy"
+ # What the published crate carries. The test corpus is the repository's:
+ # the fixtures under `testdata/` are what this crate's own tests read, and
+ # a user of the crate has no use for them. The examples are one-off
+@@ -27,6 +27,13 @@
+     "/LICENSE-APACHE",
+     "/NOTICE",
+ ]
++
++# The package carries the rgy's own name on the registry, and the upstream's
++# name in the code: the crate a dependant sees is the crate the upstream
++# wrote, under the name its own code says (`rgx_adapters_llm::`). The sources are
++# the upstream's byte for byte, and the name in the code is part of that.
++[lib]
++name = "rgx_adapters_llm"
+ 
+ [features]
+ # One feature per adapter, in the order `adapters()` returns them. The
+@@ -47,10 +54,10 @@
+ torch = ["dep:rgx-adapters-archive", "rgx-adapters-archive/std", "rgx-core/zip"]
+ pickle = []
+ [dependencies]
+-rgx-core = { path = "../rgx-core", version = "0.1.9", default-features = false, features = ["std", "sha256-hw"] }
++rgx-core = { path = "../rgx-core", version = "0.1.10", default-features = false, features = ["std", "sha256-hw"], package = "rgy-vendored-core" }
+ # The zip reader in `extra.rs` spends the same producer budget as the
+ # archive crate's own zip adapter (`budget::MemberSink`), so a `.keras` /
+ # `.pt` zip is capped by `-M` / RGX_MAX_MEMBER_BYTES like every other
+ # container. Optional: only the keras and torch families spend that
+ # budget, and it switches off with them.
+-rgx-adapters-archive = { path = "../rgx-adapters-archive", version = "0.1.9", default-features = false, optional = true }
++rgx-adapters-archive = { path = "../rgx-adapters-archive", version = "0.1.10", default-features = false, optional = true, package = "rgy-vendored-adapters-archive" }

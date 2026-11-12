@@ -1,0 +1,43 @@
+--- a/crates/rgx-core/src/memmap2/mmap_mut.rs
++++ b/crates/rgx-core/src/memmap2/mmap_mut.rs
+@@ -14,6 +14,8 @@
+ use crate::memmap2::advice::Advice;
+ #[cfg(unix)]
+ use crate::memmap2::advice::UncheckedAdvice;
++#[cfg(unix)]
++use core::ffi::c_int;
+ 
+ pub struct MmapMut {
+     inner: MmapInner,
+@@ -69,19 +71,17 @@
+ 
+     #[cfg(unix)]
+     pub fn advise(&self, advice: Advice) -> io::Result<()> {
+-        self.inner
+-            .advise(advice as libc::c_int, 0, self.inner.len())
++        self.inner.advise(advice as c_int, 0, self.inner.len())
+     }
+ 
+     #[cfg(unix)]
+     pub unsafe fn unchecked_advise(&self, advice: UncheckedAdvice) -> io::Result<()> {
+-        self.inner
+-            .advise(advice as libc::c_int, 0, self.inner.len())
++        self.inner.advise(advice as c_int, 0, self.inner.len())
+     }
+ 
+     #[cfg(unix)]
+     pub fn advise_range(&self, advice: Advice, offset: usize, len: usize) -> io::Result<()> {
+-        self.inner.advise(advice as libc::c_int, offset, len)
++        self.inner.advise(advice as c_int, offset, len)
+     }
+ 
+     #[cfg(unix)]
+@@ -91,7 +91,7 @@
+         offset: usize,
+         len: usize,
+     ) -> io::Result<()> {
+-        self.inner.advise(advice as libc::c_int, offset, len)
++        self.inner.advise(advice as c_int, offset, len)
+     }
+ 
+     #[cfg(unix)]

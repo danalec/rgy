@@ -1,0 +1,90 @@
+--- a/crates/rgx-core/src/lib.rs
++++ b/crates/rgx-core/src/lib.rs
+@@ -15,21 +15,30 @@
+ //! - `Outcome::Bail` mirrors rga's bail-out semantics: the file falls back
+ //!   to the next adapter and finally to raw-text search — an adapter
+ //!   declining a file is never an error.
+-//! - **Byte scanning is the upstream `memchr` crate, re-exported** —
+-//!   `pub mod memchr;` is the crate itself under an in-tree name, so every
+-//!   call site keeps the `rgx_core::memchr::*` path it has used since the
+-//!   in-house module was deleted. It is a re-export, not a vendored copy:
+-//!   the dependency graph still carries `memchr = "2"`. See below.
++//! - **Byte scanning is this crate's own** — `pub mod memchr;` is an
++//!   in-house module, so every call site keeps the `rgx_core::memchr::*`
++//!   path it has used since the in-house module was deleted. The vector
++//!   kernels are written with the `core::arch` intrinsics and are picked at
++//!   runtime by the CPU probe this crate already has; the portable path is a
++//!   word-at-a-time scan; and the substring search is in-house. See below.
+ //!
+-//! ## Byte scanning: the crate wins
++//! ## Byte scanning: the crate came, and the crate went
+ //!
+ //! This crate used to carry `src/memchr.rs` — a 901-line byte scanner of its
+ //! own, AVX2 behind runtime detection with a SWAR fallback. It was measured
+ //! and deleted, on the evidence of the table below rather than on an inherited
+ //! claim that it was "4–23× slower than the crate", which had never been run.
++//! The module is back, and it is not the module that went: the two findings
++//! below are what it was missing, and it does not have them either.
+ //!
+-//! `cargo run --release -p rgx-core --example memchr_bench` reproduces the
+-//! table. Both implementations link into that one binary and run over the
++//! The table is upstream's measurement, and it is kept as the record of why
++//! the module went. `cargo run --release -p rgx-core --example memchr_bench`
++//! was the harness that produced it, and the sync excludes
++//! `crates/rgx-core/examples/` from the copy, so the table cannot be
++//! reproduced here: the number that rules now is `scripts/bench-names.py`,
++//! on the machine whose baseline it is.
++//!
++//! Both implementations linked into that one binary and ran over the
+ //! same buffers, so it is same-process and same-input. Shapes are the ones rgx
+ //! actually searches: `buf64` is the searcher's 64 KiB read buffer, `buf8m`
+ //! one large text file end to end, `blob8m` a binary blob. Best of 7 timed
+@@ -68,32 +77,34 @@
+ //! buffer, or an iterator over a large haystack. None is the early-return
+ //! shape that is the module's one genuine advantage.
+ //!
+-//! Two specific findings:
++//! Two specific findings, and the two things the module that came back has
++//! that the module that went did not:
+ //!
+-//! - **`memrchr` has no SIMD in-house.** SWAR in both directions, 8 bytes per
++//! - **`memrchr` had no SIMD in-house.** SWAR in both directions, 8 bytes per
+ //!   word, where the crate scans backwards 32 at a time — the whole 7.05x on
+ //!   the absent-byte row. It costs little in practice (the searcher asks for
+ //!   the newest terminator in freshly read bytes, nearly always at the end,
+-//!   where the two are within 2 ns), but it is a real gap, not noise.
+-//! - **`memchr_iter` is a restart loop against a bitmap.** The in-house
++//!   where the two are within 2 ns), but it is a real gap, not noise. The
++//!   module that came back scans backwards 32 bytes at a time.
++//! - **`memchr_iter` was a restart loop against a bitmap.** The in-house
+ //!   iterator re-enters the scan at each hit; the crate's keeps a candidate
+ //!   mask per block and yields bits out of it. Newline-dense text is the worst
+ //!   case for the restart and the best for the bitmap, which is why that row
+-//!   is the largest. The paragraph-break walk in `src/main.rs` is the only
+-//!   caller.
++//!   is the largest. The module that came back keeps the mask.
+ //!
+ //! On the 2- and 3-byte rows: `memchr2` and `memchr3` exist in neither
+-//! implementation in a form that lines up and nothing in the workspace calls
+-//! them, so the in-house side is the substring search — anchor-scan-then-
+-//! confirm, which is what those two functions are for. The crossover: in-house
+-//! is ahead at 2 and 3 bytes (0.70–0.77x), the crate is 2.90x ahead at 5.
++//! implementation in a form that lines up, so the in-house side is the
++//! substring search — anchor-scan-then-confirm, which is what those two
++//! functions are for. The crossover: in-house is ahead at 2 and 3 bytes
++//! (0.70–0.77x), the crate is 2.90x ahead at 5.
+ //!
+ //! Two things this did not buy, recorded so they are not re-litigated: the
+ //! differential harness that held the two implementations to each other went
+-//! with the module, and the crate's prebuilt `Finder` — which amortises
+-//! matcher setup across many searches — is still unused, because every search
+-//! here is a one-shot over a buffer. `memmem::find` remains the right entry
+-//! point for a single search.
++//! with the module -- the oracle the tests use now is a naive byte-at-a-time
++//! scan, which is what an oracle has to be -- and the crate's prebuilt
++//! `Finder` — which amortises matcher setup across many searches — is still
++//! unused, because every search here is a one-shot over a buffer.
++//! `memmem::find` remains the right entry point for a single search.
+ 
+ #![no_std]
+ 

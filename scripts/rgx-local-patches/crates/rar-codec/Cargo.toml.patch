@@ -1,0 +1,34 @@
+--- a/crates/rar-codec/Cargo.toml
++++ b/crates/rar-codec/Cargo.toml
+@@ -1,6 +1,6 @@
+ [package]
+-name = "rar-codec"
+-version = "0.1.9"
++name = "rgy-vendored-rar-codec"
++version = "0.1.10"
+ edition = "2021"
+ authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
+ description = "Pure-Rust, no_std RAR codec: RAR4/RAR5 parsing, LZ+Huffman and PPMd decode (solid, multivolume, VM filters), RAR5 store encode. Zero dependencies."
+@@ -11,7 +11,7 @@
+ readme = "README.md"
+ keywords = ["rar", "codec", "archive", "compression"]
+ categories = ["encoding", "compression"]
+-repository = "https://github.com/danalec/rgx"
++repository = "https://github.com/danalec/rgy"
+ 
+ # What the published crate carries. The test corpus is the repository's:
+ # the fixtures under `testdata/` are what this crate's own tests read, and
+@@ -31,6 +31,13 @@
+     "/NOTICE",
+ ]
+ 
++# The package carries the rgy's own name on the registry, and the upstream's
++# name in the code: the crate a dependant sees is the crate the upstream
++# wrote, under the name its own code says (`rar_codec::`). The sources are
++# the upstream's byte for byte, and the name in the code is part of that.
++[lib]
++name = "rar_codec"
++
+ [features]
+ default = []
+ # `std` only relaxes nothing critical today; reserved for future IO adapters.

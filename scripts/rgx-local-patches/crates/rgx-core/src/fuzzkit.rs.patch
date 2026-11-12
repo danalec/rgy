@@ -1,0 +1,64 @@
+--- a/crates/rgx-core/src/fuzzkit.rs
++++ b/crates/rgx-core/src/fuzzkit.rs
+@@ -120,8 +120,20 @@
+ /// make the same round take longer. It is generous for that reason, and
+ /// a round that overruns it is a hang worth failing on: the parser is
+ /// either looping or allocating without end.
++///
++/// The budget follows the build, because a debug build is not the speed
++/// of a release one: the same round that takes a millisecond in release
++/// takes tens of them in debug, and the budget upstream's CI was
++/// calibrated on is a release build's. This tree is verified in debug,
++/// on a guest under KVM, and the round that overran the release budget
++/// there was not a hang -- it was a slow round on a slow machine, and it
++/// took the whole test binary down with it.
+ #[cfg(feature = "std")]
+-pub const ROUND_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
++pub const ROUND_BUDGET: std::time::Duration = if cfg!(debug_assertions) {
++    std::time::Duration::from_secs(60)
++} else {
++    std::time::Duration::from_secs(10)
++};
+ 
+ /// The code the process leaves with when a round hangs.
+ ///
+@@ -208,13 +220,37 @@
+                     // The worker is stuck and Rust cannot kill it. The only
+                     // way to keep the invariant that no thread outlives
+                     // the test is to take the process down with it -- and
+-                    // the repro is printed first, because a hang is where
++                    // the repro is written down first, because a hang is where
+                     // the repro matters most.
+-                    std::eprintln!(
++                    //
++                    // The report goes to a FILE and not only to the output,
++                    // and that is the whole point of the file: the test
++                    // harness captures what the test prints and prints it
++                    // only when the test fails, and a process that exits
++                    // takes the captured output with it. The hang left the
++                    // suite with a target that died saying nothing at all
++                    // -- no round, no seed, no repro -- and a red run that
++                    // says nothing about the tree is worse than no run.
++                    //
++                    // It is printed from a thread of its own as well, and
++                    // that is not a trick: the harness captures the output
++                    // of the thread the test runs on, and a thread that
++                    // starts here has no capture, so what it prints is the
++                    // real stderr -- the one the CI log keeps.
++                    let report = format!(
+                         "{name}: hung on round {round} (seed '{seed_name}')\n\
+                          repro hex: {}\n",
+                         repro_hex(&input)
+                     );
++                    let path = std::env::temp_dir().join(format!("rgy-fuzz-hang-{name}.hex"));
++                    let _ = std::fs::write(&path, &report);
++                    let printed = report.clone();
++                    let where_it_is = path.clone();
++                    let said = std::thread::spawn(move || {
++                        std::eprint!("{printed}");
++                        std::eprintln!("the report was written to {}", where_it_is.display());
++                    });
++                    let _ = said.join();
+                     std::process::exit(HANG_EXIT_CODE);
+                 }
+             }

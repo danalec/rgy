@@ -1,0 +1,104 @@
+--- a/crates/rgx-core/Cargo.toml
++++ b/crates/rgx-core/Cargo.toml
+@@ -1,6 +1,6 @@
+ [package]
+-name = "rgx-core"
+-version = "0.1.9"
++name = "rgy-vendored-core"
++version = "0.1.10"
+ edition = "2021"
+ authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
+ description = "rgx's engine: the adapter contract, the byte-search kernels, the JSON arena and the pack store -- no_std + alloc, with an opt-in std feature"
+@@ -11,7 +11,7 @@
+ readme = "README.md"
+ keywords = ["search", "regex", "engine", "ripgrep"]
+ categories = ["text-processing", "command-line-utilities"]
+-repository = "https://github.com/danalec/rgx"
++repository = "https://github.com/danalec/rgy"
+ # What the published crate carries. The test corpus is the repository's:
+ # the fixtures under `testdata/` are what this crate's own tests read, and
+ # a user of the crate has no use for them. The examples are one-off
+@@ -31,6 +31,13 @@
+     "/NOTICE",
+ ]
+ 
++# The package carries the rgy's own name on the registry, and the upstream's
++# name in the code: the crate a dependant sees is the crate the upstream
++# wrote, under the name its own code says (`rgx_core::`). The sources are
++# the upstream's byte for byte, and the name in the code is part of that.
++[lib]
++name = "rgx_core"
++
+ [features]
+ # rgx-core is `#![no_std]` + `alloc`; this feature decides what else it may
+ # use. It used to claim the opposite -- "always std" -- while carrying a
+@@ -45,7 +52,7 @@
+ # flag, a core atomic, stays; and the JSON float parser becomes this crate's
+ # own, since `f64::from_str` is std-only.
+ default = ["std", "sha256-hw", "gzip", "zlib", "deflate", "bzip2", "lzma", "xz", "zstd", "snappy", "lz4", "blosc", "zip"]
+-std = ["dep:libc", "memchr/std"]
++std = []
+ # The Tesla Valve pack store's codec, query vocabulary and planner. The
+ # algorithmic half of `crates/rgx-tv`, held here so it can be `no_std` and so
+ # `rgx` can take it without taking the thread pool with it. `rgx-tv` turns
+@@ -92,7 +99,7 @@
+ # that does not read a pack store should not link its format tables. The
+ # engine alone, with no pack store, is `--no-default-features --features std`
+ # (AVX2/SWAR + regex core).
+-tv-runtime = ["tv", "std", "dep:ignore"]
++tv-runtime = ["tv", "std"]
+ # SHA-256 hardware acceleration. It is in `default` above, and the path it
+ # turns on replaces the scalar one rather than answering differently. One
+ # backend is wired: SHA-NI on x86_64, detected at runtime by this crate's own
+@@ -119,32 +126,31 @@
+ # still loaded by the archive adapter's test suite.
+ 
+ [dependencies]
+-# The `libc` constants and `mmap(2)` / `msync(2)` / `madvise(2)` syscall
+-# FFI the vendored `memmap2` module's Unix side uses. Gated on `std`
+-# because the module is -- `RawFd` and `mmap(2)` are `std`-only by
+-# Rust's design, and the `no_std` build does not compile the file at
+-# all. The dep is `no_std` itself, so this stays a no_std crate when
+-# `std` is off.
+-libc = { version = "0.2", default-features = false, optional = true }
+-# Byte scanning. `pub mod memchr;` in `lib.rs` re-exports the crate as
+-# an in-tree module so every call site keeps the same
+-# `rgx_core::memchr::*` path it has used since the in-house module
+-# was deleted. `default-features = false` keeps `rgx-core`
+-# `no_std + alloc` when the `std` feature is off, and `memchr/std` is
+-# what the `std` feature turns on.
+-#
+-# The dispatch inside memchr is chosen at COMPILE time -- its SSE2 and
+-# AVX2 paths are `target_feature` gates, and it carries no runtime CPU
+-# probe -- so the feature buys the std-linked build of the dependency,
+-# not a runtime detection that this crate would have to pay for.
+-memchr = { version = "2", default-features = false }
++# The `memmap2` module's Unix side used to take its `mmap(2)` /
++# `msync(2)` / `madvise(2)` calls, and their `PROT_*` / `MAP_*` / `MS_*` /
++# `MADV_*` constants, from `libc`. They are declared by hand now, in the
++# module itself (`src/memmap2/platform`), so the crate carries no
++# dependency to make a syscall with.
++# Byte scanning. The searches are this crate's own: `pub mod memchr;` is
++# an in-house module, not a re-export of a crate, and every call site keeps
++# the `rgx_core::memchr::*` path it has used all along. The vector kernels
++# are written with the `core::arch` intrinsics and are picked at RUNTIME by
++# the CPU probe this crate already has (`src/detect.rs`), so the `std` build
++# and the `no_std` build reach the same kernel on the same machine; the
++# portable path is a word-at-a-time scan; and the substring search is
++# Boyer-Moore-Horspool with this crate's own rare-byte prefilter.
+ # Filesystem walker for the pack-store builder. Gated on the
+ # `tv-runtime` feature because the builder is the only consumer and
+ # the builder is std-bound. `default-features = false` keeps the
+ # rest of the crate no_std when tv-runtime is off.
+-ignore = { version = "0.4", default-features = false, optional = true }
+ 
+ [dev-dependencies]
++# The `ignore` crate was the walker of the pack store, and it is still the
++# oracle the tree's own walker is held to: the tests walk the same trees
++# through both and compare the entries. A dev-dependency does not enter
++# the crate a user installs.
++ignore = { version = "0.4", default-features = false }
++
+ # The oracle for the syntax and replacement tests, for the same reason and
+ # with the same rule: the `(?-u)` flag acceptance, the translated-glob
+ # fixtures and every shape of `$`-template are differential against what
