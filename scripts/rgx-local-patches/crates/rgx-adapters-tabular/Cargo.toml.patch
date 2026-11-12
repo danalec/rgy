@@ -1,0 +1,73 @@
+--- a/crates/rgx-adapters-tabular/Cargo.toml
++++ b/crates/rgx-adapters-tabular/Cargo.toml
+@@ -1,6 +1,6 @@
+ [package]
+-name = "rgx-adapters-tabular"
+-version = "0.1.9"
++name = "rgy-vendored-adapters-tabular"
++version = "0.1.10"
+ edition = "2021"
+ authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
+ description = "rgx adapters for tabular & geospatial data (SQLite, DBF, Shapefile)"
+@@ -8,7 +8,7 @@
+ readme = "README.md"
+ keywords = ["sqlite", "netcdf", "hdf5", "dbf", "parquet"]
+ categories = ["parser-implementations", "database-implementations"]
+-repository = "https://github.com/danalec/rgx"
++repository = "https://github.com/danalec/rgy"
+ # What the published crate carries. The test corpus is the repository's:
+ # the fixtures under `testdata/` are what this crate's own tests read, and
+ # a user of the crate has no use for them. The examples are one-off
+@@ -28,14 +28,22 @@
+     "/NOTICE",
+ ]
+ 
++# The package carries the rgy's own name on the registry, and the upstream's
++# name in the code: the crate a dependant sees is the crate the upstream
++# wrote, under the name its own code says (`rgx_adapters_tabular::`). The sources are
++# the upstream's byte for byte, and the name in the code is part of that.
++[lib]
++name = "rgx_adapters_tabular"
++
+ [features]
+ # One feature per format, in the order `adapters()` lists them, so a
+ # binary can name the formats it reads and leave the rest out.
+ #
+-# The SQLite adapter drives rusqlite (which is std-only) and the DuckDB
++# The SQLite adapter reads the file format itself -- bytes in, bytes out
++# -- so it needs no filesystem and no standard library: it stays no_std +
++# alloc, like the hand-rolled readers for the other formats. The DuckDB
+ # and Zarr readers write into a `Vec<u8>` or walk the filesystem, so
+-# those three need `std`. The hand-rolled readers for the other formats
+-# are pure byte slicing and stay no_std + alloc.
++# those two need `std`.
+ #
+ # `default` turns every format on, so the default build still reads every
+ # format this crate knows.
+@@ -63,8 +71,8 @@
+     "leveldb",
+     "zarr",
+ ]
+-std = ["dep:rusqlite"]
+-sqlite = ["std"]
++std = []
++sqlite = []
+ duckdb = ["std"]
+ foxpro = []
+ dbf = []
+@@ -88,8 +96,13 @@
+ leveldb = ["rgx-core/snappy"]
+ zarr = ["std", "rgx-core/blosc", "rgx-core/bzip2", "rgx-core/gzip", "rgx-core/zlib", "rgx-core/zstd"]
+ [dependencies]
+-rgx-core = { path = "../rgx-core", version = "0.1.9", default-features = false, features = ["std", "sha256-hw"] }
+-rusqlite = { version = "0.40", features = ["bundled", "serialize"], optional = true }
++rgx-core = { path = "../rgx-core", version = "0.1.10", default-features = false, features = ["std", "sha256-hw"], package = "rgy-vendored-core" }
++[dev-dependencies]
++# SQLite itself, as the oracle the in-house reader is held to: the
++# differential test reads a corpus of real databases through both and
++# compares what they answer. A dev-dependency does not enter the
++# shipped crate -- the reader that ships is the one this crate wrote.
++rusqlite = { version = "0.40", features = ["bundled", "serialize"] }
+ 
+ # Parquet is covered by a hand-rolled Thrift-compact footer reader above —
+ # no arrow/parquet stack, keeping with the "fast and extremely light" rule.

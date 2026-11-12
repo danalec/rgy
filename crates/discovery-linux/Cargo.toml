@@ -1,0 +1,30 @@
+[package]
+name = "rgy-discovery-linux"
+version = "0.1.10"
+edition = "2024"
+rust-version = "1.89"
+authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
+description = "Linux discovery backend: getdents64 bulk walk + recursive inotify"
+license = "Apache-2.0"
+repository = "https://github.com/danalec/rgy"
+homepage = "https://github.com/danalec/rgy"
+documentation = "https://docs.rs/rgy-discovery-linux"
+keywords = ["filesystem", "search", "inotify"]
+categories = ["filesystem"]
+readme = "../../README.md"
+
+
+# The EGM.md contracts are tracked working documents, not source. A
+# tracked file under this crate would otherwise be carried into the
+# published crate by cargo package (see tests/egm_packaging.rs).
+exclude = ["**/EGM.md"]
+
+[dependencies]
+# The backend is `no_std`: the seam comes in without its `std` feature, so
+# nothing here can drag the standard library in through the door.
+rgy-discovery = { path = "../discovery", version = "0.1.10", default-features = false }
+
+# The backend has no dependency of its own: the kernel is asked through
+# the calls declared by hand in `src/walk.rs` and `src/watch.rs`, and the
+# metadata of an entry is asked of the seam (`rgy_discovery::dir`), which
+# is where the platform's `stat` layout lives.

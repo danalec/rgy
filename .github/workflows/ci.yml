@@ -1,0 +1,1242 @@
+# The gates.
+#
+# Two layers for FreeBSD: the floor is a cross-check that needs no VM (catches
+# cfg and dependency breakage for the FreeBSD target on every push), and the
+# bar is the full suite on a real FreeBSD kernel. The vehicles for the bar are
+# vmactions/freebsd-vm, a Gitea runner, or a local one, and this workflow covers
+# the first two wherever a Docker-capable runner exists. The recorded local-VM
+# run (15.1-RELEASE, 2026-10-14) is filed with the tree's working notes;
+# this keeps it from being a one-off.
+#
+# The e2e harness resolves bins by path, so every job builds first
+# (tests/harness.rs: `cargo test --workspace` alone is not a build-first).
+#
+# **Every checkout drops the token it was handed**
+# (`persist-credentials: false`). No step in this workflow pushes, opens
+# a pull request or reads the token, so a credential left behind in the
+# runner's git config is a credential nothing needs -- and the runner is
+# the one place where a third-party action could pick it up.
+#
+# **The runners are named, not `-latest`.** `windows-latest` is Windows
+# Server 2025 and `macos-latest` is macOS 26 on Apple Silicon: both moved
+# under the label without a line of this repository changing, and a build
+# that breaks on the day the image moves is a build nobody can bisect. The
+# names here are the images this project is verified against -- Windows
+# Server 2022, macOS 15 on arm64, Ubuntu 24.04 -- and the `macos-15` runner
+# being arm64 is the point: it is the only place the NEON scorer and the
+# macOS discovery backend ever run. The upstream rgx moved to the same
+# labels for the same reason, and this tree vendors its crates verbatim, so
+# a runner that cannot build them cannot build this either.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A new push ends the run it supersedes. The gates are minutes long and
+# the matrices are wide, so a queue of stale runs spends the owner's
+# minutes on code that is already superseded. The group is per workflow
+# and per ref: a pull request's ref is `refs/pull/<n>/merge` and never
+# collides with the branch's own.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# The baseline: the repository is read, and nothing in this file writes
+# to it. The release job builds archives and exercises the publish
+# scripts, but it publishes nothing -- so no job here needs more than
+# this, and a job that ever did would have to ask for it on that job
+# alone, where the grant is visible.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bench-table:
+    name: the bench table is what the baseline renders
+    # The gate runs for the owner and for the collaborators, and for nobody
+    # else. The repository is public, so the pull requests come from
+    # strangers, and every one of them would spend the owner's minutes on
+    # code the owner never asked for. The repository's settings hold such a
+    # pull request for approval; this is the half that survives an
+    # approval given by accident.
+    #
+    # The other half is the runner: these jobs run on GitHub's own
+    # machines, the workflow asks for a read-only token, and every checkout
+    # drops the one it was handed -- so a stranger's code that reached them
+    # would find no credential to take. The gate in this file is not the
+    # only thing between a fork and the owner's minutes; it is the part
+    # of the answer that an approval given by accident does not undo.
+    #
+    # `author_association` says who opened the pull request. OWNER, MEMBER
+    # and COLLABORATOR are the ones with a key to the tree; CONTRIBUTOR,
+    # FIRST_TIME_CONTRIBUTOR and NONE are the strangers. A push is not
+    # gated: only someone with write access can push, and that someone is a
+    # collaborator by definition.
+    #
+    # The expression is on one line on purpose: a YAML folded scalar does
+    # not fold a line that is indented further than the first, and a
+    # newline inside an expression is not an expression the runner reads.
+    if: github.event_name != 'pull_request' || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
+    timeout-minutes: 10
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # The table in the write-up is generated from the CSV, and a table
+      # that is not what its source renders is a table that reads better
+      # than it is.
+      #
+      # What this does NOT do is run the perf gate itself. The gate compares
+      # a measurement against a baseline recorded on a named host, and a
+      # shared runner is neither that host nor quiet enough to decide a 20%
+      # threshold -- the measurement says UNDECIDABLE and the job would
+      # fail on noise. A perf gate belongs on a host that can be named.
+      - run: python3 scripts/bench-names.py render --csv benchmark/baseline-names.csv --check
+
+  vendoring:
+    name: the vendoring rules hold on ${{ matrix.os }}
+    # The same gate as the first job: the owner and the collaborators,
+    # and nobody else.
+    if: github.event_name != 'pull_request' || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # The vendoring rules are the shape of the tree, not a build: rgx
+      # copies code out of upstream and never depends on it, every
+      # dependency on a vendored crate names it by path, and every vendored
+      # tree names its source in a provenance header. A check that only runs
+      # when somebody remembers it is a note, not a gate, and these were
+      # notes until this job existed.
+      #
+      # The two scripts are twins -- the same text on the same input -- so
+      # running the native one on each OS exercises both of them.
+      - name: the vendoring rules (unix)
+        if: runner.os != 'Windows'
+        run: bash scripts/check-vendoring.sh
+      - name: the vendoring rules (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/check-vendoring.ps1
+
+  twins:
+    name: "the twins say the same thing"
+    # The same gate as the first job: the owner and the collaborators,
+    # and nobody else.
+    if: github.event_name != 'pull_request' || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
+    # The tree's rule is that every .ps1 has a .sh beside it and the two are
+    # twins: the same text, on the same input, with the same exit code. The
+    # test for that is to run BOTH and diff the result.
+    #
+    # The CI runs each twin on its own runner, which exercises both of them
+    # and compares neither. One pair is compared -- the publish twins, whose
+    # escaped release body is asserted to be the same bytes on the two
+    # runners, in scripts/test-publish-release.sh -- and the other ten are
+    # not. A drift between those ten is invisible until somebody publishes a
+    # release with it, and a release is published by one of the twins.
+    #
+    # So this job is the comparison, and it runs where both interpreters live:
+    # bash natively on the ubuntu runner, and pwsh beside it -- the GitHub
+    # images ship PowerShell 7. The input is an option no script knows, so
+    # every script must refuse it with exit 2, and the refusal must be the
+    # SAME refusal.
+    timeout-minutes: 20
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: bash scripts/check-twins.sh
+
+  egm-contracts:
+    name: the EGM contracts describe the tree
+    # The same gate as the first job: the owner and the collaborators,
+    # and nobody else.
+    if: github.event_name != 'pull_request' || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
+    # The EGM.md contracts are tracked, so this is the same full check the
+    # local gate runs on the same inputs: sections, resolvable links,
+    # derived coverage, .egmrc against .gitignore and the CI test line,
+    # the tracked pair table, the drift status and the contract index.
+    # There is one checker, in Python, with thin .sh/.ps1 twins, so the
+    # pair cannot disagree about what a valid contract is. --self-test
+    # builds throwaway trees and proves every rule still fires.
+    # --generated-check additionally derives the structural skeleton of
+    # every contract from the tree and holds the tracked set to it, so a
+    # directory rename or a new crate cannot land without a contract.
+    # --fix / -Fix is an explicit, developer-only opt-in that regenerates
+    # CONTRACTS.index and re-validates; the gate never uses it, so CI never
+    # modifies a file. A stale index is a red gate, not one CI repairs.
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: EGM contracts (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File scripts/check-egm-contracts.ps1
+          pwsh -NoProfile -File scripts/check-egm-contracts.ps1 -SelfTest
+      - name: EGM contracts (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          bash scripts/check-egm-contracts.sh
+          bash scripts/check-egm-contracts.sh --self-test
+      - name: EGM generated structure (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/check-egm-contracts.ps1 --generated-check
+      - name: EGM generated structure (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: bash scripts/check-egm-contracts.sh --generated-check
+
+  tv-runtime:
+    name: the pack-store builder compiles
+    # The same gate as the first job: the owner and the collaborators,
+    # and nobody else.
+    if: github.event_name != 'pull_request' || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
+    # The same work as the `suite` job -- a whole-workspace build, a
+    # whole-workspace lint and a whole-workspace test -- so it gets the
+    # same budget. A timeout that fires on a slow runner is a red run
+    # that says nothing about the tree.
+    timeout-minutes: 90
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: swatinem/rust-cache@v2
+      # The pack-store builder lives behind rgx-core's `tv-runtime`
+      # feature, and the `rgx-tv` binary that carries it asks for the
+      # feature.
+      #
+      # The default build compiles it. `rgy-engine`'s own `std` feature --
+      # its default -- asks for `rgx-core/tv-runtime`, so every workspace
+      # build carries the builder and builds the binary. (The notes said
+      # otherwise until 2026-10-30: the manifest is the truth, and it says
+      # this. A gate that is described by a claim about the tree is a gate
+      # whose description can go stale without anybody noticing.)
+      #
+      # So the commands below are the tree's own build, with no feature
+      # named on the command line. A command that names the feature is on
+      # for it whatever the manifest says, and a gate that names what it
+      # is checking is not checking it: with `--features
+      # rgx-core/tv-runtime` on every line, a link cut in the engine's
+      # manifest left this job green while a plain build of the tree went
+      # red. The commands below are the build the tree does, so the link
+      # in the manifest is what decides whether the builder is in them.
+      #
+      # What the `suite` job is for: it builds the tree and runs its
+      # tests on each of the three operating systems the product targets,
+      # and it is the gate that the tree works there. This job is the
+      # gate that the pack-store builder is IN the tree -- and the step
+      # at the end is the one that looks for it, because a job that
+      # compiles the tree and never looks for the binary it is named
+      # after cannot fail for the reason it exists.
+      #
+      # The half of the pack store that no build carries is the `no_std`
+      # one -- `rgx-core/tv` without `tv-runtime` -- and the bare-metal
+      # job below is where that one is compiled.
+      - run: cargo build --workspace --locked
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --no-fail-fast --locked
+      # The builder, by name. The build above is the tree's own, so the
+      # binary is there because the tree's manifests put it there -- and
+      # this step is what says so, instead of the job's name claiming it.
+      - name: the pack-store builder is there
+        run: |
+          set -eu
+          if [ ! -x target/debug/rgx-tv ]; then
+            echo "the pack-store builder was not built: target/debug/rgx-tv is not there" >&2
+            exit 1
+          fi
+          echo "the pack-store builder: target/debug/rgx-tv"
+
+  freebsd-check:
+    name: "floor: cargo check for FreeBSD"
+    # The same gate as the first job: the owner and the collaborators,
+    # and nobody else.
+    if: github.event_name != 'pull_request' || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
+    # Two whole-workspace compiles for a target this runner cannot run:
+    # the check and the lint of every crate in the tree, twice over.
+    timeout-minutes: 60
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-freebsd
+      - uses: swatinem/rust-cache@v2
+      - run: cargo check --workspace --target x86_64-unknown-freebsd --locked
+      # The lint of the FreeBSD half of the tree. The clippy job runs on
+      # ubuntu, where the FreeBSD backend is `#![cfg(target_os = "freebsd")]`
+      # and compiles empty: a lint in it, and in the FreeBSD blocks of the
+      # crates that are shared, is invisible to every gate there is. The
+      # target is installed here for the check above, and clippy reads the
+      # target's code the same way it reads the host's -- it does not link,
+      # so a FreeBSD binary is never needed.
+      - run: cargo clippy --workspace --target x86_64-unknown-freebsd --all-targets --locked -- -D warnings
+
+  no-std:
+    name: "the engine builds without std"
+    # The same gate as the first job: the owner and the collaborators,
+    # and nobody else.
+    if: github.event_name != 'pull_request' || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
+    # A release build and a release lint of fourteen crates, for a
+    # target with no operating system under it: two full passes over
+    # the tree, in the profile that compiles slowest.
+    timeout-minutes: 60
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-none
+      - uses: swatinem/rust-cache@v2
+      # The engine is `no_std`: the index, the query parser, the ranking and
+      # the fold are `alloc` and nothing else, and that is a claim a build
+      # can check and a document cannot.
+      #
+      # The target is `x86_64-unknown-none`, a bare-metal one with no
+      # operating system at all: nothing in the chain can quietly reach for
+      # a file, a thread or a clock, because there is nothing here to reach
+      # for. The smaller Cortex-M targets would do the same, except that
+      # rgx-core keeps a 64-bit atomic in its instruction cache and those
+      # cores do not have one -- a limit of the upstream tree, not of this
+      # one.
+      #
+      # `--release`: the debug profile writes debug information for a
+      # target that has no debugger attached to it, and rustc's writer for
+      # that crashes on some hosts. The library is what is being checked
+      # here, and the release profile checks it just as well.
+      #
+      # The list is every crate this repository owns, and it is the whole
+      # list on purpose: a tree is `no_std` when the last crate in it is,
+      # and a list that stops at the crates that were easy would stop
+      # exactly where the work gets interesting. The platform backends are
+      # in the list too -- they compile empty on a bare-metal target
+      # (their bodies are `cfg(target_os)`), so what this job proves for
+      # them is the shape of their tree; what proves their bodies is the
+      # suite job, which builds each one for its own OS, where the
+      # `#![no_std]` at the root of the crate is the proof: a `std::` path
+      # in the body does not compile.
+      #
+      # Three crates are not in the list, and each one says why.
+      #
+      # `rgy-vendored-adapters-docs` is the upstream's crate, transported
+      # verbatim, and it spawns processes (soffice, tesseract), which is `std`
+      # by definition.
+      #
+      # `rgy-adapters` is this repository's, and for the same reason one
+      # step further: it orders the ten upstream families, and every
+      # format those families decode turns `std` on with it.
+      #
+      # `rgy-search-ui` is this repository's too: the terminal interface,
+      # which is a terminal. It reads the console and the files, and a
+      # terminal is a machine: `std` by definition. The calls it needs
+      # are declared by hand, in `src/term.rs`, the way the clock and the
+      # filesystem are -- so what is left of the crate is the machine, not
+      # a dependency on one.
+      #
+      # `--features rgx-core/tv` is the pack store's `no_std` half: the
+      # query engine and the reader, without the `std` half on top of it
+      # (`tv-runtime`). Without the feature, `rgx-core` enters this job
+      # with no features at all and the `tv` module is not even compiled
+      # -- so the half of the pack store that can be linked into an
+      # embedded search box was in no build in the tree. With it, that
+      # half is compiled on a target that has no filesystem to reach for.
+      #
+      # The flag says `rgx-core` and the package is `rgy-vendored-core`: the
+      # key the tree writes is the upstream's, and the package the registry
+      # knows is this repository's. Cargo resolves `package/feature` on the
+      # command line by the name the dependency is REFERRED TO -- the key --
+      # and the two differ here, since the vendored crates go out under this
+      # repository's names and the key stayed the upstream's. A flag that
+      # names the package where the key is spelled differently fails with
+      # "the package 'rgy-engine' does not contain this feature:
+      # rgy-vendored-core/tv" -- a failure that reads like a missing
+      # feature and is a misspelled name. Measured on 2026-11-03: the flag
+      # below builds, the package's spelling does not.
+      - run: cargo build --release --locked --no-default-features -p rgy-par -p rgy-discovery -p rgy-name-core -p rgy-proto -p rgy-engine -p rgy-discovery-dispatch -p rgy-autostart -p rgy-discovery-linux -p rgy-discovery-freebsd -p rgy-discovery-windows -p rgy-discovery-macos -p rgy-launcher -p rgy-pick -p rgy-launcher-windows -p rgy-launcher-x11 --features rgx-core/tv --target x86_64-unknown-none
+      # The lint of the same tree. A build that prints a warning is a
+      # warning somebody has to read, and the code that only exists
+      # without `std` -- the `not(feature = "std")` arms of `par`,
+      # `name-core` and `rgx-core` -- is compiled by no other gate at
+      # all: the host build has `std`, and the lint that runs there never
+      # sees those arms. Clippy reads a target's code the way it reads
+      # the host's -- it does not link, so a bare-metal binary is never
+      # needed.
+      - run: cargo clippy --release --locked --no-default-features -p rgy-par -p rgy-discovery -p rgy-name-core -p rgy-proto -p rgy-engine -p rgy-discovery-dispatch -p rgy-autostart -p rgy-discovery-linux -p rgy-discovery-freebsd -p rgy-discovery-windows -p rgy-discovery-macos -p rgy-launcher -p rgy-pick -p rgy-launcher-windows -p rgy-launcher-x11 --features rgx-core/tv --target x86_64-unknown-none -- -D warnings
+      # The other half of the same claim: the crates' TESTS compile
+      # without an operating system too.
+      #
+      # The target above proves the crates COMPILE without one, and it
+      # cannot prove the same of their tests: a build and a lint without
+      # `--all-targets` never compile a test configuration at all, and on
+      # `x86_64-unknown-none` the `test` crate does not exist --
+      # `--all-targets` there fails with "can't find crate for 'test'".
+      # So the test half has to be asked on a target that has the `test`
+      # crate, which is the host's -- with the `std` feature off, which is
+      # what makes it the same claim.
+      #
+      # This is not a hole nobody opened: crates/engine/src/console.rs
+      # carried a test of a `std`-only function, and the crate's own
+      # `no_std` test build did not compile -- and the CI was green,
+      # because the CI never compiled it.
+      #
+      # The same fifteen crates, the same list, in the same job: the two
+      # halves are one claim, and a list that lives in two places is a
+      # list that drifts.
+      - name: the tests compile without std too
+        run: cargo clippy --locked --no-default-features -p rgy-par -p rgy-discovery -p rgy-name-core -p rgy-proto -p rgy-engine -p rgy-discovery-dispatch -p rgy-autostart -p rgy-discovery-linux -p rgy-discovery-freebsd -p rgy-discovery-windows -p rgy-discovery-macos -p rgy-launcher -p rgy-pick -p rgy-launcher-windows -p rgy-launcher-x11 --features rgx-core/tv --all-targets -- -D warnings
+
+  msrv:
+    name: "the oldest rustc the tree promises still builds it"
+    # The same gate as the first job: the owner and the collaborators,
+    # and nobody else.
+    if: github.event_name != 'pull_request' || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
+    # One whole-workspace compile with the exact rustc the README names.
+    # The promise is a sentence in a document, and a document does not
+    # fail when the code moves under it -- this job is what makes the
+    # sentence true, and it is why the sentence can be trusted.
+    #
+    # It is also the gate that would have caught the promise this one
+    # replaced: the README said 1.85, the tree needed 1.89, and a reader
+    # on 1.85 got seventy-four errors out of a crate they had never
+    # heard of.
+    timeout-minutes: 60
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # Pinned, and not `stable`: a job on `stable` proves the tree builds
+      # today and says nothing about the floor the README promises. The
+      # floor is 1.89 -- the release in which the AVX-512 target features
+      # stabilised, and the tree's SIMD kernels use them.
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: swatinem/rust-cache@v2
+      - run: cargo check --workspace --all-targets --locked
+
+  freebsd-suite:
+    name: "bar: full suite on a FreeBSD kernel"
+    # The same gate as the first job: the owner and the collaborators,
+    # and nobody else.
+    if: github.event_name != 'pull_request' || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
+    timeout-minutes: 90
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          release: "15.1"
+          prepare: pkg install -y rust git
+          # `--locked` here too. The Rust inside the VM is the one the
+          # distribution ships, and a lockfile this repository's
+          # toolchain wrote is not a promise that an old cargo can read
+          # -- but a cargo that cannot read it says so, and it says so
+          # before the build starts. A suite that quietly resolved a
+          # different tree would test something the repository does not
+          # describe, and the floor job above would be the only gate
+          # left holding the lockfile.
+          #
+          # And the build's own directory is **not a result to bring
+          # back**. The action copies the whole work directory back into
+          # the runner with rsync, and this VM has just built a target/ of
+          # gigabytes: measured on 2026-11-04, the copyback of this job
+          # moved 2,155,940,845 bytes, the connection to the VM closed in
+          # the middle, and the job failed with `rsync ... code 255` after
+          # the suite had already passed. The target goes before the
+          # copyback, and it goes even when the suite failed: a job that
+          # fails in the copyback fails with the wrong reason, and the
+          # reason the suite gave is the one the reader needs.
+          run: |
+            set -eu
+            cargo build --workspace --locked
+            status=0
+            cargo test --workspace --no-fail-fast --locked || status=$?
+            rm -rf target
+            exit "$status"
+
+  terminal-paste:
+    name: the terminal paste path on ${{ matrix.os }}
+    # The same gate as the first job: the owner and the collaborators,
+    # and nobody else.
+    if: github.event_name != 'pull_request' || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
+    # One of the paste checks can be a gate rather than a procedure: on a
+    # unix terminal the bytes are the terminal's, so a pseudo-terminal is
+    # the whole setup. `tools/vtprobe_pty.py` opens one, spawns the probe
+    # on its slave side, writes the bracketed burst into the master and
+    # reads the log back; its exit code is the verdict. No clipboard, no
+    # keyboard, no window, and nobody watching -- which is why the Windows
+    # halves of the same question are NOT here: they need a real console
+    # and a real paste, and are recorded with their measurements in
+    # .egm/2026-11-07_DRIFT_REPORT.md instead.
+    #
+    # The burst goes through `poll`, `read` and the shared decoder, so a
+    # poll that stopped seeing decoded keys would half-deliver it and the
+    # job would fail. That is the defect the live console test found, and
+    # this is its regression gate. macOS is in the matrix because it is a
+    # unix terminal too, and the runner has an SDK -- so unlike the
+    # cross-check this one actually links and runs there.
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+      - name: build the probe
+        run: cargo build --locked --example vtprobe -p rgy-search-ui
+      - name: a pasted line break is a character, not the enter key
+        run: python3 tools/vtprobe_pty.py target/debug/examples/vtprobe
+
+  suite:
+    name: suite on ${{ matrix.os }}
+    # The same gate as the first job: the owner and the collaborators,
+    # and nobody else.
+    if: github.event_name != 'pull_request' || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        # The ARM64 Linux runner is in this matrix because the release
+        # carries an aarch64-linux archive: a binary the tree ships and
+        # nothing tests is a binary nobody knows anything about. It found
+        # its own defect the first time it ran -- the release-archive row
+        # builds and smokes the aarch64 binary on this runner, and that
+        # smoke answered with nothing while every other row answered with
+        # eight. The other platforms in this matrix are the tree's
+        # targets; this one is the tree's target on another CPU.
+        os: [ubuntu-24.04, ubuntu-24.04-arm, windows-2022, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # `lld-link` has to be findable by name. The Windows images carry LLVM
+      # but do not put its bin directory on the PATH, and a toolchain that
+      # reaches for the linker by name then fails to find it -- on the
+      # runner, not in the code. The upstream rgx does the same, for the
+      # same reason.
+      - name: Ensure lld-link is on PATH (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (Test-Path "C:\Program Files\LLVM\bin") {
+            Add-Content $env:GITHUB_PATH "C:\Program Files\LLVM\bin"
+          }
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: swatinem/rust-cache@v2
+      # `--locked`: the lockfile is what the tree says it builds with. A
+      # build that silently updates it is a build of something the
+      # repository does not describe.
+      - run: cargo build --workspace --locked
+      - run: cargo test --workspace --no-fail-fast --locked
+      # The lint of the half of the tree this runner is the only one to
+      # see. The clippy job runs on ubuntu, where the Windows and the
+      # macOS backends are `#![cfg(...)]` and compile empty: a lint in
+      # them, and in the platform blocks of the crates that are shared,
+      # was reported by nobody. The same command on the runner that has
+      # the platform is the same gate -- it just runs where the code is.
+      # Linux is left out: the clippy job is that runner.
+      - name: the Windows and macOS halves are linted on their own runner
+        if: runner.os != 'Linux'
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  release:
+    name: the release archive for ${{ matrix.asset }}
+    # The same gate as the first job: the owner and the collaborators,
+    # and nobody else.
+    if: github.event_name != 'pull_request' || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
+    # A release build of the whole workspace, a whole-workspace lint and
+    # the packaging -- per asset, eleven of them, each on its own
+    # runner. The release profile compiles slowest, and a timeout that
+    # fires halfway through an archive is a release nobody can bisect.
+    #
+    # Every asset is started on the runner that built it, with one
+    # exception: the Intel Mac's, which the matrix has no Intel Mac to
+    # start, because GitHub has no x86_64 macOS runner left. The musl
+    # asset is a cross build too, and it is started anyway -- the musl
+    # target is statically linked, and a static binary starts on any
+    # Linux kernel.
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        # Every row is in the release. The archive a row builds is kept as
+        # an artifact, collected into .dist/ before the release is
+        # published, and the release page is held to the whole list, row by
+        # row, in the step below -- a page that names an archive the
+        # release does not carry, or a row whose archive the page does not
+        # name, stops the run.
+        include:
+          # --- Windows ---
+          - asset: x86_64-windows
+            os: windows-2022
+            target: x86_64-pc-windows-msvc
+            variant: portable
+          - asset: avx2-windows
+            os: windows-2022
+            target: x86_64-pc-windows-msvc
+            variant: avx2
+          - asset: znver4-windows
+            os: windows-2022
+            target: x86_64-pc-windows-msvc
+            variant: znver4
+          - asset: avx512-windows
+            os: windows-2022
+            target: x86_64-pc-windows-msvc
+            variant: avx512
+          - asset: aarch64-windows
+            os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            variant: portable
+
+          # --- Linux ---
+          - asset: x86_64-linux
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            variant: portable
+          - asset: avx2-linux
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            variant: avx2
+          - asset: znver4-linux
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            variant: znver4
+          - asset: avx512-linux
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            variant: avx512
+          - asset: x86_64-linux-musl
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            variant: portable
+          - asset: aarch64-linux
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            variant: portable
+
+          # --- FreeBSD ---
+          # The one target with no runner of its own: the build runs inside a
+          # FreeBSD VM on an ubuntu runner, the way the bar job's suite does.
+          # `vm` marks the row, and the build step that reads it is the one
+          # that runs inside the VM.
+          - asset: x86_64-freebsd
+            os: ubuntu-24.04
+            target: x86_64-unknown-freebsd
+            variant: portable
+            vm: freebsd
+
+          # --- macOS ---
+          - asset: aarch64-apple-darwin
+            os: macos-15
+            target: aarch64-apple-darwin
+            variant: portable
+          # The Intel Mac. The runner here is an arm64 Mac, so this
+          # binary cannot start here, and the matrix has no Intel Mac to
+          # start it on: GitHub has no x86_64 macOS runner left. The
+          # asset is built and shipped, and the step below holds it to
+          # what it is -- a Mach-O for the x86_64 -- which is what this
+          # row can be held to. What it does not get is a run.
+          - asset: x86_64-apple-darwin
+            os: macos-15
+            target: x86_64-apple-darwin
+            variant: portable
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Ensure lld-link is on PATH (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (Test-Path "C:\Program Files\LLVM\bin") {
+            Add-Content $env:GITHUB_PATH "C:\Program Files\LLVM\bin"
+          }
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: swatinem/rust-cache@v2
+      # The musl build links against musl, and the C compiler the crates
+      # with a C part ask for is musl-gcc on that target.
+      - name: Install musl tools (Linux musl)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      # The archive the release publishes, built and smoked on this OS.
+      # The test suite is the suite job's business; this one checks the
+      # packaging: that the binaries build, that they answer a real
+      # query, and that the archive carries what it must. The two scripts
+      # are twins -- the same log, the same exit code, the same file list
+      # inside -- and this job is where that is checked on three systems.
+      - name: build the archive (unix)
+        if: runner.os != 'Windows' && matrix.vm == null
+        run: bash scripts/build-release.sh --skip-tests --target ${{ matrix.target }} --variant ${{ matrix.variant }}
+      - name: build the archive (windows)
+        if: runner.os == 'Windows' && matrix.vm == null
+        shell: pwsh
+        run: ./scripts/build-release.ps1 -SkipTests -Target ${{ matrix.target }} -Variant ${{ matrix.variant }}
+      # The FreeBSD build, inside a FreeBSD VM on an ubuntu runner: there is no
+      # FreeBSD runner, and a cross-link to a libc the runner does not have is a
+      # binary nobody can vouch for. The VM is the one the bar job's suite runs
+      # (15.1), with the distribution's rust and the base system's cc.
+      #
+      # The build script packs the archive into .dist/ -- where the checks
+      # below read it -- and the target directory is dropped before the VM
+      # stops: the archive is what comes back through the workspace sync, and a
+      # target directory of gigabytes is not.
+      - name: build the archive (FreeBSD, in a FreeBSD VM)
+        if: matrix.vm == 'freebsd'
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          release: "15.1"
+          # bash is not in the FreeBSD base system, and the build script is
+          # this tree's bash twin: a `bash` the VM does not have is exit 127
+          # from the ssh that runs it, which reads like a script that is not
+          # there.
+          prepare: pkg install -y rust git bash
+          run: |
+            set -eu
+            bash scripts/build-release.sh --skip-tests
+            rm -rf target
+      # The archive is a .tar.gz on the unix runners and a .zip on the
+      # Windows one, and each platform reads its own with the tool it
+      # has: tar reads the tarball, and the Windows side reads the zip
+      # with the zip library. One step for both would name two formats in
+      # the glob -- and only one of them is ever in .dist/, so `ls` fails
+      # on every runner, and the runner's bash (-eo pipefail) turns that
+      # into a step that dies before it prints a word. It would also ask
+      # Git Bash's tar -- GNU tar -- to read a zip, which it cannot do.
+      - name: the archive carries the binaries and the documents (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -eu
+          archive=$(ls .dist/rgy-v*.tar.gz 2>/dev/null | head -1 || true)
+          if [ -z "$archive" ]; then
+            echo "no archive in .dist/"
+            ls -l .dist/ || true
+            exit 1
+          fi
+          echo "archive: $archive"
+          # The listing is captured once, and the checks below read the
+          # capture. A reader that closes the pipe early -- and `grep -q`
+          # closes it at the first match -- kills the tar that writes the
+          # listing with EPIPE, and the runner's shell (-eo pipefail)
+          # makes the PIPELINE's status the status of the dead tar: the
+          # check would then refuse an archive for a file the listing
+          # printed two lines above.
+          listing=$(mktemp)
+          tar -tf "$archive" | tee "$listing"
+          # The page of the release and the benchmark folder travel with the
+          # archive: the README points at them by a relative path, and a link
+          # that resolves on the forge and not in the archive is a link
+          # broken exactly where the reader is offline.
+          for f in searchctl searchd rgy-autostart rgxy README.md MANUAL.md FORMATS.md COPYING NOTICE LICENSE-APACHE docs/release- benchmark/; do
+            if ! grep -q "$f" "$listing"; then
+              echo "the archive does not carry $f"
+              exit 1
+            fi
+          done
+          # The command the project is named after travels with the
+          # release: a link to the one searchctl, and a link is what the
+          # unix archive carries.
+          verbose=$(mktemp)
+          tar -tvf "$archive" > "$verbose"
+          if ! grep -q 'rgy -> searchctl' "$verbose"; then
+            echo "the archive does not carry the rgy link to searchctl"
+            exit 1
+          fi
+          # The digest file is what the release publishes beside the
+          # archives: an asset without its digest is an asset nobody can
+          # check.
+          grep -q "$(basename "$archive")" .dist/SHA256SUMS
+      - name: the archive carries the binaries and the documents (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = Get-ChildItem .dist/rgy-v*.zip | Select-Object -First 1
+          if (-not $archive) {
+            Write-Host "no archive in .dist/"
+            Get-ChildItem .dist
+            exit 1
+          }
+          Write-Host "archive: $($archive.Name)"
+          # The zip is read with the zip library, not with tar: Git Bash's
+          # tar is GNU tar, and GNU tar does not read a zip.
+          $zip = [System.IO.Compression.ZipFile]::OpenRead($archive.FullName)
+          try {
+            $names = $zip.Entries | ForEach-Object { $_.FullName }
+          } finally {
+            $zip.Dispose()
+          }
+          $names | ForEach-Object { Write-Host $_ }
+          # The page of the release and the benchmark folder travel with the
+          # archive: the README points at them by a relative path, and a link
+          # that resolves on the forge and not in the archive is a link
+          # broken exactly where the reader is offline.
+          foreach ($f in @('searchctl', 'searchd', 'rgy-autostart', 'rgxy.exe', 'rgy.exe', 'README.md', 'MANUAL.md', 'FORMATS.md', 'COPYING', 'NOTICE', 'LICENSE-APACHE', 'docs/release-', 'benchmark/')) {
+            if (-not ($names | Where-Object { $_ -like "*$f*" })) {
+              Write-Host "the archive does not carry $f"
+              exit 1
+            }
+          }
+          # The digest file is what the release publishes beside the
+          # archives: an asset without its digest is an asset nobody can
+          # check.
+          if (-not (Select-String -Path .dist/SHA256SUMS -SimpleMatch -Quiet -Pattern $archive.Name)) {
+            Write-Host "the digest file does not carry $($archive.Name)"
+            exit 1
+          }
+      # The musl asset is a cross build -- the runner's own libc is
+      # glibc's -- and it starts here anyway. The musl target is
+      # statically linked by default (`crt-static` is on for
+      # `x86_64-unknown-linux-musl`), so the libc is inside the binary
+      # and the runner's glibc is never involved: `ldd` on it says
+      # "statically linked", and a static binary starts on any Linux
+      # kernel. The build script's own smoke is for the host's build, so
+      # this step is the one that starts this asset.
+      #
+      # The smoke is the one the other rows get: the search binary, asked
+      # two questions -- one by name, one by content -- over the
+      # repository's own sources. The daemon, the login item and the
+      # launcher are not started here: a daemon does not stop, the login
+      # item would write to the runner's own account, and the launcher
+      # wants a display.
+      - name: the musl binaries start on this glibc runner
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          set -eu
+          dir=target/x86_64-unknown-linux-musl/release
+          smoke_dir=target/release-smoke-musl
+          mkdir -p "$smoke_dir"
+          smoke() {
+            label="$1"; query="$2"
+            out=$("$dir/searchctl" --root crates --index "$smoke_dir/rgy.idx" --count "$query" 2>/dev/null) || {
+              echo "the musl smoke: $label failed (exit $?)" >&2
+              exit 1
+            }
+            count=$(printf '%s' "$out" | tr -dc '0-9')
+            if [ -z "$count" ] || [ "$count" -eq 0 ]; then
+              echo "the musl smoke: $label answered with no hits" >&2
+              exit 1
+            fi
+            echo "the musl smoke: $label -> $count hits"
+          }
+          smoke "name query over crates/" "walk ext:rs"
+          smoke "content query over crates/" "grep:Listing"
+      # The Intel Mac's asset, held to what it is: a Mach-O for the
+      # x86_64. It cannot be started here -- the runner is an arm64 Mac
+      # and the matrix has no Intel Mac to start it on -- so this is the
+      # check the row can carry.
+      - name: the Intel Mac's binary is an Intel Mac's binary
+        if: matrix.target == 'x86_64-apple-darwin'
+        run: |
+          set -eu
+          for exe in searchctl searchd rgy-autostart rgxy; do
+            archs=$(lipo -archs "target/x86_64-apple-darwin/release/$exe")
+            echo "$exe: $archs"
+            if [ "$archs" != "x86_64" ]; then
+              echo "the Intel Mac's $exe is not an x86_64 binary"
+              exit 1
+            fi
+          done
+      # The archive this row built, kept for the release. The release carries
+      # every row's archive now, and the release is published from one
+      # machine, so the runner that built an archive is where the release's
+      # copy comes from: scripts/fetch-ci-assets.sh (scripts/fetch-ci-assets.ps1
+      # on Windows) brings a run's artifacts into .dist/ before the publish
+      # step runs. It is not a job in this workflow: the release is cut by hand
+      # from the run that built it, and the collector is the step between the
+      # two.
+      - name: the archive is kept for the release
+        uses: actions/upload-artifact@v4
+        with:
+          name: rgy-${{ matrix.asset }}
+          path: |
+            .dist/rgy-v*
+            .dist/documents/rgy-v*
+          if-no-files-found: error
+          include-hidden-files: true
+      # The publish scripts, exercised on every push: they rewrite the
+      # manifests and the installer pins from the artifacts in .dist/ and
+      # publish nothing. A script that breaks should break here, not on
+      # the day of the release.
+      #
+      # The scripts want the forgejo's address, and that address is not in
+      # this repository on purpose: a public repository that names a
+      # private network is a map of that network. The manifests-only mode
+      # never calls the API -- it only rewrites the links -- so a
+      # placeholder is enough, and the checkout that runs here is thrown
+      # away.
+      #
+      # The publish script compares the release page's assets marker with
+      # the files in .dist/, and the comparison is RELEASE-WIDE: the page
+      # names every archive the release carries. A matrix row builds ONE
+      # archive, so the row's .dist/ is never the release's whole asset
+      # list, and the comparison refuses a tree that is perfectly right.
+      #
+      # So the step asks two questions, one per row. The tree's own page is
+      # held to the asset this row built -- every row is in the release, so
+      # the page must name it -- and the page the script reads is the page
+      # of this row: the marker is rewritten to name the archive this row
+      # built and the digests file beside it, and the script compares a page
+      # with the .dist/ that goes with it. The checkout that runs here is
+      # thrown away when the job ends.
+      # The row whose archive the VM built does not run this step: the
+      # publish compares an archive's own copy of the release page with
+      # the tree's, and the VM packed the page the release publishes --
+      # the one that names every row's archive -- while this step
+      # rewrites the page to name one. The eleven other rows run it.
+      - name: the manifests, rewritten (nothing published)
+        # Every row of the fourteen-asset release runs the publish
+        # rehearsal, the generic AVX-512 rows included: the page names
+        # their archives now. When those rows were new and the published
+        # page named only twelve, skipping this step kept that page
+        # honest; there is no reason to skip it any more.
+        if: runner.os != 'Windows' && matrix.vm == null
+        env:
+          RGY_FORGEJO_URL: http://forgejo.invalid
+        run: |
+          set -eu
+          # The page of the release being cut: its name is the version's,
+          # because a page named for one release and read for another is a
+          # page published saying one thing and written saying another. The
+          # version is the one the tree carries, read by the helper the build
+          # and publish scripts source: the manifests hold three numbers and
+          # the release may carry a fourth, so a reader of the manifest alone
+          # asks for a page the release does not carry.
+          version=$(bash scripts/lib/version.sh) || exit 1
+          page="docs/release-$version.md"
+          archive=$(ls .dist/rgy-v*.tar.gz 2>/dev/null | head -1 || true)
+          if [ -z "$archive" ]; then
+            echo "no archive in .dist/"
+            exit 1
+          fi
+          name=$(basename "$archive")
+          # The page's assets marker: the files the release carries.
+          marker=$(sed -n 's|^<!-- assets: \(.*\) -->$|\1|p' "$page")
+          named=no
+          case " $marker " in
+            *" $name "*) named=yes ;;
+          esac
+          if [ "$named" != "yes" ]; then
+            echo "the release page does not name the archive this row built ($name): the page names the assets the release carries, and every row's archive is one of them"
+            exit 1
+          fi
+          # The page of this row. The marker names the archive this row
+          # built and the digests file beside it, and the rest of the page
+          # is the page of the release.
+          sed "s|^<!-- assets: .* -->$|<!-- assets: $name SHA256SUMS -->|" "$page" > "$page.tmp"
+          mv "$page.tmp" "$page"
+          bash scripts/publish-release.sh --manifests-only --skip-tests --target ${{ matrix.target }} --variant ${{ matrix.variant }}
+      - name: the manifests, rewritten (nothing published)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          RGY_FORGEJO_URL: http://forgejo.invalid
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # The page of the release being cut: its name is the version's,
+          # because a page named for one release and read for another is a
+          # page published saying one thing and written saying another. The
+          # version is the one the tree carries, read by the helper the build
+          # and publish scripts source: the manifests hold three numbers and
+          # the release may carry a fourth, so a reader of the manifest alone
+          # asks for a page the release does not carry.
+          $version = & "$PWD/scripts/lib/version.ps1"
+          if (-not $version) { exit 1 }
+          $page = "docs/release-$version.md"
+          $archive = Get-ChildItem .dist/rgy-v*.zip | Select-Object -First 1
+          if (-not $archive) {
+            Write-Host "no archive in .dist/"
+            exit 1
+          }
+          $name = $archive.Name
+          # The page's assets marker: the files the release carries.
+          $text = [IO.File]::ReadAllText($page)
+          $found = [regex]::Match($text, '(?m)^<!-- assets: (.*) -->(\r?)$')
+          $marker = $found.Groups[1].Value
+          $named = 'no'
+          if ($marker -split '\s+' -contains $name) { $named = 'yes' }
+          if ($named -ne 'yes') {
+            [Console]::Error.Write("the release page does not name the archive this row built (${name}): the page names the assets the release carries, and every row's archive is one of them`n")
+            exit 1
+          }
+          # The page of this row. The marker names the archive this row
+          # built and the digests file beside it, and the rest of the page
+          # is the page of the release.
+          $markerLine = "<!-- assets: $name SHA256SUMS -->"
+          $new = [regex]::Replace($text, '(?m)^<!-- assets: .* -->(\r?)$', ($markerLine + "`$1"))
+          [IO.File]::WriteAllText($page, $new, [Text.UTF8Encoding]::new($false))
+          # No row on this runner is a VM, so the publish rebuilds the
+          # archive from the page this step rewrote -- which is what makes
+          # the archive and the tree agree on the page it carries.
+          ./scripts/publish-release.ps1 -ManifestsOnly -SkipTests -Target ${{ matrix.target }} -Variant ${{ matrix.variant }}
+      # A script that ignores an option it does not understand does the real
+      # thing when the caller asked for a dry run, and in this directory the
+      # real thing is a release: a tag, an archive, a release page on two
+      # forges. It happened -- `--dry-run` is not a PowerShell parameter, it
+      # landed in $args, and 0.1.1 was published with the dry run the caller
+      # had asked for. So the refusal is a gate, not a habit.
+      #
+      # Every standalone shell script in scripts/ is in this list -- the
+      # thirteen the gate covers, and the eleven of them that have a .ps1
+      # twin (release-linux.sh and sync-rgx-upstream.sh are the two
+      # without; check-twins.sh is the one left out, because it is the gate
+      # that runs the twins) --
+      # and not only the ones that publish: a gate that ignores an option
+      # it does not know is a gate that ran something else, and the drift
+      # check and the vendoring check are gates too. A script that takes
+      # no options refuses every argument with the same words.
+      #
+      # The files under scripts/lib/ are not in the list because they are
+      # not standalone: options.sh and options.ps1 parse the options and
+      # hand the answer back, digest.sh and digest.ps1 answer with a
+      # SHA256, and the four are sourced by the scripts above them --
+      # none of them has an entry point of its own.
+      #
+      # The installers at the root of the repository are in the list too.
+      # They are outside scripts/, and they are the one thing a download
+      # runs: an installer that ignores an option it does not know
+      # installs when the caller asked for a dry run. Their refusal is
+      # the tree's own -- the same sentence and the same exit code as the
+      # scripts above.
+      - name: the scripts refuse an option they do not know (unix)
+        if: runner.os != 'Windows'
+        run: |
+          refuse() {
+            script="$1"
+            # A script that does not parse cannot refuse anything, and the
+            # refusal below would report the parse error as a wrong answer.
+            bash -n "$script" || exit 1
+            rc=0
+            out=$(bash "$script" --rgy-nonsense 2>&1) || rc=$?
+            if [ "$rc" -ne 2 ]; then
+              echo "$script ignored the option it does not know (exit $rc)"
+              exit 1
+            fi
+            if [ "$out" != "unknown option: --rgy-nonsense" ]; then
+              echo "$script said: $out"
+              exit 1
+            fi
+          }
+          for script in publish-release build-release publish-crates publish-homebrew apply-vendored-edits \
+                        check-drift check-vendoring fetch-ci-assets rgy-name-protocol smoke-serve \
+                        test-publish-release release-linux sync-rgx-upstream; do
+            refuse "scripts/$script.sh"
+          done
+          refuse install.sh
+      - name: the scripts refuse an option they do not know (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # The runner runs this step with $ErrorActionPreference = 'stop',
+          # and its PowerShell turns a native command's non-zero exit into
+          # an error record. Every script in this list refuses on purpose,
+          # and the refusal IS the exit code 2 this gate reads -- so the
+          # record turned the first script's refusal into a terminating
+          # error and the step died on it, saying nothing about which
+          # script it was. The exit code of a native command is a fact to
+          # read here, not an error to raise: the step says so.
+          $PSNativeCommandUseErrorActionPreference = $false
+          foreach ($script in @('scripts/publish-release.ps1','scripts/build-release.ps1','scripts/publish-crates.ps1',
+                                 'scripts/publish-homebrew.ps1','scripts/apply-vendored-edits.ps1','scripts/check-drift.ps1',
+                                 'scripts/check-vendoring.ps1','scripts/fetch-ci-assets.ps1',
+                                 'scripts/rgy-name-protocol.ps1','scripts/smoke-serve.ps1',
+                                 'scripts/test-publish-release.ps1','install.ps1')) {
+            $out = & pwsh -NoProfile -File $script --rgy-nonsense 2>&1
+            $rc = $LASTEXITCODE
+            if ($rc -ne 2) {
+              Write-Host "$script ignored the option it does not know (exit $rc)"
+              exit 1
+            }
+            $text = ($out | Out-String).Trim()
+            if ($text -ne 'unknown option: --rgy-nonsense') {
+              Write-Host "$script said: $text"
+              exit 1
+            }
+          }
+          # The step's own verdict, and not the exit code of the last
+          # script it ran: every one of them refused on purpose, and a
+          # refusal is an exit code 2.
+          exit 0
+      # The escaped release body, on both twins. The publish scripts escape
+      # a multi-line body before anything is sent, and the escape is where
+      # the release went wrong: a body that is not JSON is a body the forge
+      # refuses, and the refusal comes after the tag and the push. The
+      # check that would have caught it only ran when somebody published,
+      # so it is run here, before anything is published: each twin escapes
+      # a multi-line body, parses the result with a real JSON parser, and
+      # asserts that both twins produce the SAME bytes.
+      #
+      # The two halves are two steps, and that is where the interpreters
+      # are. This job's matrix has no runner that is both a unix runner and
+      # a windows one, and the refusal steps above are split the same way:
+      # the unix half runs where bash is the shell, the windows half where
+      # pwsh is. Each half asserts the same expected bytes, so the two
+      # together are the agreement.
+      - name: the escaped release body is the same bytes on both twins (unix)
+        if: runner.os != 'Windows'
+        run: bash scripts/test-publish-release.sh
+      - name: the escaped release body is the same bytes on both twins (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/test-publish-release.ps1
+
+  # The per-user Windows MSI. It is ONE extra asset, not a second installer
+  # implementation: it consumes the x86_64-windows archive that the release
+  # matrix already built, so the binaries inside it are byte-identical to
+  # the zip. Keeping it out of that matrix means no new sidecars, no new
+  # twin pair and no new EGM contract for the twelve archives.
+  msi:
+    name: the per-user Windows MSI
+    if: github.event_name != 'pull_request' || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
+    timeout-minutes: 45
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # The MSI is independent of the release matrix: a 504 downloading a
+      # FreeBSD VM's helper must not stop a Windows installer from being
+      # built. This job builds its OWN x86_64-windows archive with the very
+      # same script the matrix uses, so the MSI still packages bytes that
+      # were smoke-tested by build-release.ps1 itself.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+      - name: build the Windows release archive (and smoke-test it)
+        shell: pwsh
+        run: ./scripts/build-release.ps1 -SkipTests -Target x86_64-pc-windows-msvc -Variant portable
+      - name: the archive this MSI packages
+        shell: pwsh
+        run: |
+          $archive = Get-ChildItem .dist/rgy-v*-x86_64-windows.zip | Select-Object -First 1
+          if (-not $archive) { throw 'build-release.ps1 produced no Windows archive' }
+          "MSI_ARCHIVE=$($archive.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: build the MSI
+        shell: pwsh
+        env:
+          # WiX 7 requires accepting the OSMF EULA once per machine. The
+          # owner explicitly authorised it; wix eula accept wix7 is a
+          # no-op when it has already been accepted.
+          WIX_OSMF_ACCEPT: '1'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = & "$PWD/scripts/lib/version.ps1"
+          if (-not $version) { throw 'the tree carries no release version' }
+          ./packaging/msi/build-msi.ps1 -Version $version -Archive $env:MSI_ARCHIVE
+          # The MSI is an EXTRA release asset, not one of the twelve
+          # archives the release page's marker names. Its digest gets its
+          # own sidecar; the publish step uploads it beside SHA256SUMS.
+          $msi = Get-ChildItem .dist/rgy-*.msi | Select-Object -First 1
+          if (-not $msi) { throw 'wix build produced no MSI' }
+          $sum = (Get-FileHash $msi.FullName -Algorithm SHA256).Hash.ToLower()
+          "$sum  $($msi.Name)" | Out-File -Encoding ascii .dist/$($msi.Name).sha256
+          # Keep the uploadable copy OUT of .dist/: the smoke test below
+          # hands this very .msi to msiexec /x, and Windows Installer is
+          # free to take the package out of its cache. A separate directory
+          # also keeps upload-artifact from matching the twelve archives.
+          $keep = '.dist/msi-artifact'
+          New-Item -ItemType Directory -Force -Path $keep | Out-Null
+          Copy-Item $msi.FullName (Join-Path $keep $msi.Name) -Force
+          Copy-Item ".dist/$($msi.Name).sha256" $keep -Force
+          "MSI_NAME=$($msi.Name)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "MSI_SHA256=$sum" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      # A per-user MSI can be installed and removed with no elevation, so
+      # the runner can prove it end to end. STARTDAEMON=0 keeps the build
+      # runner from indexing its own home directory; the daemon-launch path
+      # is proven on the owner's machine (see packaging/msi/README.md).
+      - name: install and remove the MSI silently (no UAC)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $msi = (Resolve-Path ".dist/$env:MSI_NAME").Path
+          $log = Join-Path $env:RUNNER_TEMP 'msi-install.log'
+          $install = Start-Process msiexec.exe -ArgumentList '/i',"`"$msi`"",'STARTDAEMON=0','/qn','/norestart','/L*v',"`"$log`"" -Wait -PassThru
+          if ($install.ExitCode -ne 0) { Get-Content $log -Tail 40; throw "the MSI install failed with $($install.ExitCode)" }
+          $dir = Join-Path $env:LOCALAPPDATA 'Programs\rgy'
+          foreach ($f in @('searchctl.exe','searchd.exe','rgy-autostart.exe','rgxy.exe','rgy.exe','post-install.ps1','README.md')) {
+            if (-not (Test-Path (Join-Path $dir $f))) { throw "the MSI did not install $f" }
+          }
+          $unlog = Join-Path $env:RUNNER_TEMP 'msi-uninstall.log'
+          $remove = Start-Process msiexec.exe -ArgumentList '/x',"`"$msi`"",'/qn','/norestart','/L*v',"`"$unlog`"" -Wait -PassThru
+          if ($remove.ExitCode -ne 0) { Get-Content $unlog -Tail 40; throw "the MSI uninstall failed with $($remove.ExitCode)" }
+          if (Test-Path $dir) { throw 'the uninstall left the install directory behind' }
+          Write-Host "the MSI installed and removed cleanly; sha256 $env:MSI_SHA256"
+      - name: the MSI is kept for the release
+        uses: actions/upload-artifact@v4
+        with:
+          name: rgy-msi
+          path: |
+            .dist/msi-artifact/*.msi
+            .dist/msi-artifact/*.msi.sha256
+          if-no-files-found: error
+
+
+  clippy:
+    name: the workspace stays formatted and warning-free
+    # The same gate as the first job: the owner and the collaborators,
+    # and nobody else.
+    if: github.event_name != 'pull_request' || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
+    # One whole-workspace lint, in the profile the tree is developed in,
+    # and the formatter. The `suite` job gives the same lint -- plus a
+    # build and a test -- twice this budget.
+    timeout-minutes: 45
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: swatinem/rust-cache@v2
+      # Formatting is a gate here for the same reason clippy is: a diff that
+      # nobody can read is a diff nobody wrote. The upstream rgx has the
+      # same check.
+      - run: cargo fmt --all -- --check
+      # The release gate's first half (scripts/build-release.sh runs it
+      # too): any warning fails, because a warning in a release is a
+      # thing nobody has read.
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings

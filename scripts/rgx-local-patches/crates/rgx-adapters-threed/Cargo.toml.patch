@@ -1,0 +1,38 @@
+--- a/crates/rgx-adapters-threed/Cargo.toml
++++ b/crates/rgx-adapters-threed/Cargo.toml
+@@ -1,6 +1,6 @@
+ [package]
+-name = "rgx-adapters-threed"
+-version = "0.1.9"
++name = "rgy-vendored-adapters-threed"
++version = "0.1.10"
+ edition = "2021"
+ authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
+ description = "rgx adapters: 3D model formats (glb, stl, ply, fbx, pcd, las, vtk, obj)"
+@@ -8,7 +8,7 @@
+ readme = "README.md"
+ keywords = ["las", "laz", "gltf", "ply", "stl"]
+ categories = ["parser-implementations", "encoding"]
+-repository = "https://github.com/danalec/rgx"
++repository = "https://github.com/danalec/rgy"
+ # What the published crate carries. The test corpus is the repository's:
+ # the fixtures under `testdata/` are what this crate's own tests read, and
+ # a user of the crate has no use for them. The examples are one-off
+@@ -28,9 +28,15 @@
+     "/NOTICE",
+ ]
+ 
++# The package carries the rgy's own name on the registry, and the upstream's
++# name in the code: the crate a dependant sees is the crate the upstream
++# wrote, under the name its own code says (`rgx_adapters_threed::`). The sources are
++# the upstream's byte for byte, and the name in the code is part of that.
++[lib]
++name = "rgx_adapters_threed"
++
+ [dependencies]
+-rgx-core = { path = "../rgx-core", version = "0.1.9", default-features = false, features = ["std", "sha256-hw"] }
+-
++rgx-core = { path = "../rgx-core", version = "0.1.10", default-features = false, features = ["std", "sha256-hw"], package = "rgy-vendored-core" }
+ [features]
+ # One feature per adapter, in the order `adapters()` returns them. The
+ # default is the whole crate: a binary that names the formats it needs

@@ -1,0 +1,265 @@
+--- a/crates/rgx-core/src/memmap2/platform/macos.rs
++++ b/crates/rgx-core/src/memmap2/platform/macos.rs
+@@ -2,14 +2,12 @@
+ 
+ //! Independent reimplementation of memmap2-rs macOS side.
+ 
++use core::ffi::c_int;
+ use std::io;
+ use std::os::unix::io::RawFd;
+ use std::ptr;
+ 
+ use crate::memmap2::error::{to_io_error, Error};
+-
+-const MAP_POPULATE: libc::c_int = 0;
+-const MAP_STACK: libc::c_int = 0;
+ 
+ pub struct MmapInner {
+     ptr: *mut u8,
+@@ -23,7 +21,7 @@
+     fn drop(&mut self) {
+         let (aligned_ptr, aligned_len) = self.unaligned_to_aligned();
+         unsafe {
+-            libc::munmap(aligned_ptr.cast(), aligned_len);
++            super::unix::munmap(aligned_ptr.cast(), aligned_len);
+         }
+     }
+ }
+@@ -41,8 +39,8 @@
+ 
+     fn new_inner(
+         len: usize,
+-        prot: libc::c_int,
+-        flags: libc::c_int,
++        prot: c_int,
++        flags: c_int,
+         fd: RawFd,
+         offset: u64,
+     ) -> io::Result<MmapInner> {
+@@ -57,16 +55,16 @@
+             .ok_or_else(|| to_io_error(Error::LengthOverflow))?;
+         let map_len = map_len.max(1);
+         let raw = unsafe {
+-            libc::mmap(
++            super::unix::mmap(
+                 ptr::null_mut(),
+-                map_len as libc::size_t,
++                map_len as usize,
+                 prot,
+                 flags,
+                 fd,
+-                aligned_offset as libc::off_t,
+-            )
+-        };
+-        if raw == libc::MAP_FAILED {
++                aligned_offset as i64,
++            )
++        };
++        if raw == super::unix::MAP_FAILED {
+             return Err(io::Error::last_os_error());
+         }
+         let ptr = unsafe { (raw as *mut u8).add(alignment as usize) };
+@@ -74,14 +72,20 @@
+     }
+ 
+     pub fn map(len: usize, fd: RawFd, offset: u64, _populate: bool) -> io::Result<MmapInner> {
+-        MmapInner::new_inner(len, libc::PROT_READ, libc::MAP_SHARED, fd, offset)
++        MmapInner::new_inner(
++            len,
++            super::unix::PROT_READ,
++            super::unix::MAP_SHARED,
++            fd,
++            offset,
++        )
+     }
+ 
+     pub fn map_exec(len: usize, fd: RawFd, offset: u64, _populate: bool) -> io::Result<MmapInner> {
+         MmapInner::new_inner(
+             len,
+-            libc::PROT_READ | libc::PROT_EXEC,
+-            libc::MAP_SHARED,
++            super::unix::PROT_READ | super::unix::PROT_EXEC,
++            super::unix::MAP_SHARED,
+             fd,
+             offset,
+         )
+@@ -90,8 +94,8 @@
+     pub fn map_mut(len: usize, fd: RawFd, offset: u64, _populate: bool) -> io::Result<MmapInner> {
+         MmapInner::new_inner(
+             len,
+-            libc::PROT_READ | libc::PROT_WRITE,
+-            libc::MAP_SHARED,
++            super::unix::PROT_READ | super::unix::PROT_WRITE,
++            super::unix::MAP_SHARED,
+             fd,
+             offset,
+         )
+@@ -100,8 +104,8 @@
+     pub fn map_copy(len: usize, fd: RawFd, offset: u64, _populate: bool) -> io::Result<MmapInner> {
+         MmapInner::new_inner(
+             len,
+-            libc::PROT_READ | libc::PROT_WRITE,
+-            libc::MAP_PRIVATE,
++            super::unix::PROT_READ | super::unix::PROT_WRITE,
++            super::unix::MAP_PRIVATE,
+             fd,
+             offset,
+         )
+@@ -113,7 +117,13 @@
+         offset: u64,
+         _populate: bool,
+     ) -> io::Result<MmapInner> {
+-        MmapInner::new_inner(len, libc::PROT_READ, libc::MAP_PRIVATE, fd, offset)
++        MmapInner::new_inner(
++            len,
++            super::unix::PROT_READ,
++            super::unix::MAP_PRIVATE,
++            fd,
++            offset,
++        )
+     }
+ 
+     pub fn map_anon(len: usize, _stack: bool, _populate: bool) -> io::Result<MmapInner> {
+@@ -122,16 +132,16 @@
+         }
+         let map_len = len.max(1);
+         let raw = unsafe {
+-            libc::mmap(
++            super::unix::mmap(
+                 ptr::null_mut(),
+-                map_len as libc::size_t,
+-                libc::PROT_READ | libc::PROT_WRITE,
+-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
++                map_len as usize,
++                super::unix::PROT_READ | super::unix::PROT_WRITE,
++                super::unix::MAP_PRIVATE | super::unix::MAP_ANONYMOUS,
+                 -1,
+                 0,
+             )
+         };
+-        if raw == libc::MAP_FAILED {
++        if raw == super::unix::MAP_FAILED {
+             return Err(io::Error::last_os_error());
+         }
+         Ok(MmapInner {
+@@ -142,10 +152,10 @@
+ 
+     pub fn flush(&self, offset: usize, len: usize) -> io::Result<()> {
+         let r = unsafe {
+-            libc::msync(
+-                self.ptr.add(offset) as *mut libc::c_void,
+-                len as libc::size_t,
+-                libc::MS_SYNC,
++            super::unix::msync(
++                self.ptr.add(offset) as *mut core::ffi::c_void,
++                len as usize,
++                super::unix::MS_SYNC,
+             )
+         };
+         if r == 0 {
+@@ -157,10 +167,10 @@
+ 
+     pub fn flush_async(&self, offset: usize, len: usize) -> io::Result<()> {
+         let r = unsafe {
+-            libc::msync(
+-                self.ptr.add(offset) as *mut libc::c_void,
+-                len as libc::size_t,
+-                libc::MS_ASYNC,
++            super::unix::msync(
++                self.ptr.add(offset) as *mut core::ffi::c_void,
++                len as usize,
++                super::unix::MS_ASYNC,
+             )
+         };
+         if r == 0 {
+@@ -173,10 +183,10 @@
+     pub fn make_read_only(&mut self) -> io::Result<()> {
+         let (ptr, len) = self.unaligned_to_aligned();
+         let r = unsafe {
+-            libc::mprotect(
+-                ptr as *mut libc::c_void,
+-                len as libc::size_t,
+-                libc::PROT_READ,
++            super::unix::mprotect(
++                ptr as *mut core::ffi::c_void,
++                len as usize,
++                super::unix::PROT_READ,
+             )
+         };
+         if r == 0 {
+@@ -189,10 +199,10 @@
+     pub fn make_exec(&mut self) -> io::Result<()> {
+         let (ptr, len) = self.unaligned_to_aligned();
+         let r = unsafe {
+-            libc::mprotect(
+-                ptr as *mut libc::c_void,
+-                len as libc::size_t,
+-                libc::PROT_READ | libc::PROT_EXEC,
++            super::unix::mprotect(
++                ptr as *mut core::ffi::c_void,
++                len as usize,
++                super::unix::PROT_READ | super::unix::PROT_EXEC,
+             )
+         };
+         if r == 0 {
+@@ -205,25 +215,25 @@
+     pub fn make_mut(&mut self) -> io::Result<()> {
+         let (ptr, len) = self.unaligned_to_aligned();
+         let r = unsafe {
+-            libc::mprotect(
+-                ptr as *mut libc::c_void,
+-                len as libc::size_t,
+-                libc::PROT_READ | libc::PROT_WRITE,
+-            )
+-        };
+-        if r == 0 {
+-            Ok(())
+-        } else {
+-            Err(io::Error::last_os_error())
+-        }
+-    }
+-
+-    pub fn advise(&self, advice: libc::c_int, offset: usize, len: usize) -> io::Result<()> {
++            super::unix::mprotect(
++                ptr as *mut core::ffi::c_void,
++                len as usize,
++                super::unix::PROT_READ | super::unix::PROT_WRITE,
++            )
++        };
++        if r == 0 {
++            Ok(())
++        } else {
++            Err(io::Error::last_os_error())
++        }
++    }
++
++    pub fn advise(&self, advice: c_int, offset: usize, len: usize) -> io::Result<()> {
+         super::refuse_unavailable(advice)?;
+         let r = unsafe {
+-            libc::madvise(
+-                self.ptr.add(offset) as *mut libc::c_void,
+-                len as libc::size_t,
++            super::unix::madvise(
++                self.ptr.add(offset) as *mut core::ffi::c_void,
++                len as usize,
+                 advice,
+             )
+         };
+@@ -236,7 +246,7 @@
+ 
+     pub fn lock(&self) -> io::Result<()> {
+         let (_ptr, len) = self.unaligned_to_aligned();
+-        let r = unsafe { libc::mlock(_ptr as *const libc::c_void, len as libc::size_t) };
++        let r = unsafe { super::unix::mlock(_ptr as *const core::ffi::c_void, len as usize) };
+         if r == 0 {
+             Ok(())
+         } else {
+@@ -246,7 +256,7 @@
+ 
+     pub fn unlock(&self) -> io::Result<()> {
+         let (_ptr, len) = self.unaligned_to_aligned();
+-        let r = unsafe { libc::munlock(_ptr as *const libc::c_void, len as libc::size_t) };
++        let r = unsafe { super::unix::munlock(_ptr as *const core::ffi::c_void, len as usize) };
+         if r == 0 {
+             Ok(())
+         } else {

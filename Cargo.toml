@@ -1,0 +1,59 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/par",
+    "crates/discovery",
+    "crates/name-core",
+    "crates/discovery-windows",
+    "crates/discovery-linux",
+    "crates/discovery-macos",
+    "crates/discovery-freebsd",
+    "crates/discovery-dispatch",
+    "crates/engine",
+    "crates/proto",
+    "crates/pick",
+    "crates/adapters",
+    "crates/launcher",
+    "crates/launcher-windows",
+    "crates/launcher-x11",
+    "crates/autostart",
+    "crates/rgx-core",
+    "crates/rar-codec",
+    "crates/rgx-adapters-archive",
+    "crates/rgx-adapters-office",
+    "crates/rgx-adapters-threed",
+    "crates/rgx-adapters-llm",
+    "crates/rgx-adapters-media",
+    "crates/rgx-adapters-tabular",
+    "crates/rgx-adapters-docs",
+    "crates/rgx-adapters-mail",
+    "crates/rgx-adapters-inspect",
+    "crates/rgx-adapters-pdf",
+    "bins/zen-rs",
+    "bins/searchctl",
+    "bins/searchd",
+    "bins/search-ui",
+    "bins/rgxy",
+    # e2e harnesses over the user-facing bins (tests/cli.rs, tests/serve.rs).
+    # The workspace root is virtual, so this lives as its own member crate.
+    "tests",
+]
+
+# One workspace, thin bins, one protocol.
+# crates/rgx-* are transported verbatim from ../rgx; name-core and
+# discovery-windows hold the zen-rs code with the RE-audit fixes.
+#
+# The whole workspace is Apache-2.0. See COPYING — the licence a reader
+# gets is Apache-2.0, and the files carried from other projects keep their
+# own terms, with their notices in NOTICE.
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+
+[profile.release]
+# rgx's measured release shape: fat LTO + one
+# codegen unit; a local PGO build adds the trained profile on top.
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true

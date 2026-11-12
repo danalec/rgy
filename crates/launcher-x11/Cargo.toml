@@ -1,0 +1,25 @@
+[package]
+name = "rgy-launcher-x11"
+version = "0.1.10"
+edition = "2024"
+rust-version = "1.89"
+authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
+description = "The launcher's window on X11 (Linux and FreeBSD): a floating overlay and a system-tray icon, drawn in pure Rust"
+license = "Apache-2.0"
+repository = "https://github.com/danalec/rgy"
+homepage = "https://github.com/danalec/rgy"
+documentation = "https://docs.rs/rgy-launcher-x11"
+keywords = ["x11", "launcher", "gui", "search"]
+categories = ["gui", "os::unix-apis"]
+readme = "../../README.md"
+
+
+# The EGM.md contracts are tracked working documents, not source. A
+# tracked file under this crate would otherwise be carried into the
+# published crate by cargo package (see tests/egm_packaging.rs).
+exclude = ["**/EGM.md"]
+
+[dependencies]
+# The launcher's model: the query, the rows, the geometry, the hotkey's
+# state machine. The window here is the machine that draws it.
+rgy-launcher = { path = "../launcher", version = "0.1.10" }

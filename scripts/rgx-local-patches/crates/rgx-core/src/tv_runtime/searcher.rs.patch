@@ -1,0 +1,17 @@
+--- a/crates/rgx-core/src/tv_runtime/searcher.rs
++++ b/crates/rgx-core/src/tv_runtime/searcher.rs
+@@ -1959,7 +1959,13 @@
+             s1.total_files_pruned
+         );
+ 
+-        let _guard = crate::ABLATE_EXTENTS_LOCK.lock().unwrap();
++        // The lock the ablation's writers hold, taken here too: the switch
++        // is process-global, and the acquisition tolerates a poisoned lock
++        // — a panic in another test must not turn this one into a
++        // poisoning error and hide the failure it is about.
++        let _guard = crate::ABLATE_EXTENTS_LOCK
++            .lock()
++            .unwrap_or_else(|e| e.into_inner());
+         crate::set_ablate_extents(true);
+         let (m2, s2) = search_store(&store, "needle", &cfg).unwrap();
+         crate::set_ablate_extents(false);
