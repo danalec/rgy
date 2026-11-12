@@ -111,6 +111,48 @@ Everything here is **prepared, not published**.
       and the published `.msi` was downloaded back from each forge and
       matched the sidecar.
 
+      **Re-attached on 2026-11-12, after the GitHub repository was made
+      again.** The repository had been deleted and was recreated by
+      `.git/flat-mirror.py upload`, and **the recreate took the manual
+      pair with it**: the run 42878182033 is gone with the old runs
+      (404), and the GitHub release was carrying the fourteen assets the
+      page names and nothing else.
+
+      The MSI now comes from the run that built the PUBLISHED archives
+      (**43148965141**), so it is built from the same Windows archive the
+      release carries: `rgy-0.1.10.3-x86_64.msi`, **7 233 536 bytes**,
+      SHA256
+      **`9294b166aeaf2214fe7daf03977c339dfd520574059edd80dd8a3dccf9e86466`**,
+      with its `.sha256` sidecar. The digest differs from the one first
+      published and the size does not: two builds of the same tree are not
+      the same bytes.
+
+      **The two forges had drifted apart and now agree.** Measured on
+      2026-11-12: the GitHub release carried the new MSI (digest
+      `9294b166…`, matching its sidecar) while the Forgejo release still
+      carried the first publication's (`68491853…`, not matching it). The
+      Forgejo's pair was deleted and re-uploaded from the same two files;
+      both releases now carry 17 assets, and the MSI downloaded back from
+      each forge has the digest `9294b166…` — the same one the sidecar
+      names.
+
+      **The delete route needs the release's id.** The upload is
+      `POST /api/v1/repos/<owner>/<repo>/releases/<release-id>/assets?name=…`
+      and the delete is
+      `DELETE /api/v1/repos/<owner>/<repo>/releases/<release-id>/assets/<asset-id>`:
+      without the release's id the delete answers **404** and the old
+      asset stays. Measured on 2026-11-12.
+
+      **The release page does not name the MSI, and that is deliberate.**
+      `docs/release-0.1.10.3.md` travels INSIDE every published archive
+      (measured: `docs/release-0.1.10.3.md` is a member of
+      `rgy-v0.1.10.3-x86_64-windows.zip`), so a sentence added to it would
+      make the tree's page differ from the page inside the published
+      archives and stale every document digest that covers it. The page's
+      assets marker stays as it is, and the truth about the manual pair
+      lives here — in a file that is not in the archives and does not
+      match the release-page glob.
+
       The two places below that say "15 assets" describe what
       `publish-release.ps1` uploads on its own; they are correct for the
       publisher and do not count the manual pair. Nothing rewrites the
