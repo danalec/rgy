@@ -41,7 +41,7 @@
 # harnesses and its fuzzing crate, which rgy does not run. The
 # exclusion is in the sync script, so the paths cannot come back.
 
-# The upstream commit the copy was taken from: 8c32dc09b048c93bfff0579a7386307a39719e5e
+# The upstream commit the copy was taken from: bb61e01d91bbf433be7ce0326ea4d94e49e2ed91
 
 # The paths the copy does not carry, one per line. The sync removes
 # them from this repository on every run, so a path that is here is
@@ -56,53 +56,54 @@
 # exclude: crates/rgx-core/fuzz/
 # exclude: crates/rgx-adapters-archive/examples/
 # exclude: crates/rar-codec/examples/
+# exclude: EGM.md
 
-crates/rgx-core	crates/rgx-core	8c32dc09b048c93bfff0579a7386307a39719e5e	tree	upstream rgx's crate: the copy of it less the paths the copy excludes, with the patches below on top
-crates/rar-codec	crates/rar-codec	8c32dc09b048c93bfff0579a7386307a39719e5e	tree	upstream rgx's crate: the copy of it less the paths the copy excludes, with the patches below on top
-crates/rgx-adapters-archive	crates/rgx-adapters-archive	8c32dc09b048c93bfff0579a7386307a39719e5e	tree	upstream rgx's crate: the copy of it less the paths the copy excludes, with the patches below on top
-crates/rgx-adapters-docs	crates/rgx-adapters-docs	8c32dc09b048c93bfff0579a7386307a39719e5e	tree	upstream rgx's crate: the copy of it, with the patches below on top
-crates/rgx-adapters-inspect	crates/rgx-adapters-inspect	8c32dc09b048c93bfff0579a7386307a39719e5e	tree	upstream rgx's crate: the copy of it, with the patches below on top
-crates/rgx-adapters-llm	crates/rgx-adapters-llm	8c32dc09b048c93bfff0579a7386307a39719e5e	tree	upstream rgx's crate: the copy of it, with the patches below on top
-crates/rgx-adapters-mail	crates/rgx-adapters-mail	8c32dc09b048c93bfff0579a7386307a39719e5e	tree	upstream rgx's crate: the copy of it, with the patches below on top
-crates/rgx-adapters-media	crates/rgx-adapters-media	8c32dc09b048c93bfff0579a7386307a39719e5e	tree	upstream rgx's crate: the copy of it, with the patches below on top
-crates/rgx-adapters-office	crates/rgx-adapters-office	8c32dc09b048c93bfff0579a7386307a39719e5e	tree	upstream rgx's crate: the copy of it, with the patches below on top
-crates/rgx-adapters-pdf	crates/rgx-adapters-pdf	8c32dc09b048c93bfff0579a7386307a39719e5e	tree	upstream rgx's crate: the copy of it, with the patches below on top
-crates/rgx-adapters-tabular	crates/rgx-adapters-tabular	8c32dc09b048c93bfff0579a7386307a39719e5e	tree	upstream rgx's crate: the copy of it, with the patches below on top
-crates/rgx-adapters-threed	crates/rgx-adapters-threed	8c32dc09b048c93bfff0579a7386307a39719e5e	tree	upstream rgx's crate: the copy of it, with the patches below on top
-scripts/rgx-local-patches/crates/rar-codec/Cargo.toml.patch	crates/rar-codec/Cargo.toml	8c32dc09b048c93bfff0579a7386307a39719e5e	patch	a divergence from upstream: the patch is applied on top of the copy
-scripts/rgx-local-patches/crates/rgx-adapters-archive/Cargo.toml.patch	crates/rgx-adapters-archive/Cargo.toml	8c32dc09b048c93bfff0579a7386307a39719e5e	patch	a divergence from upstream: the patch is applied on top of the copy
-scripts/rgx-local-patches/crates/rgx-adapters-archive/README.md.patch	crates/rgx-adapters-archive/README.md	8c32dc09b048c93bfff0579a7386307a39719e5e	patch	a divergence from upstream: the patch is applied on top of the copy
-scripts/rgx-local-patches/crates/rgx-adapters-archive/src/lib.rs.patch	crates/rgx-adapters-archive/src/lib.rs	8c32dc09b048c93bfff0579a7386307a39719e5e	patch	a divergence from upstream: the patch is applied on top of the copy
-scripts/rgx-local-patches/crates/rgx-adapters-docs/Cargo.toml.patch	crates/rgx-adapters-docs/Cargo.toml	8c32dc09b048c93bfff0579a7386307a39719e5e	patch	a divergence from upstream: the patch is applied on top of the copy
-scripts/rgx-local-patches/crates/rgx-adapters-inspect/Cargo.toml.patch	crates/rgx-adapters-inspect/Cargo.toml	8c32dc09b048c93bfff0579a7386307a39719e5e	patch	a divergence from upstream: the patch is applied on top of the copy
-scripts/rgx-local-patches/crates/rgx-adapters-llm/Cargo.toml.patch	crates/rgx-adapters-llm/Cargo.toml	8c32dc09b048c93bfff0579a7386307a39719e5e	patch	a divergence from upstream: the patch is applied on top of the copy
-scripts/rgx-local-patches/crates/rgx-adapters-mail/Cargo.toml.patch	crates/rgx-adapters-mail/Cargo.toml	8c32dc09b048c93bfff0579a7386307a39719e5e	patch	a divergence from upstream: the patch is applied on top of the copy
-scripts/rgx-local-patches/crates/rgx-adapters-media/Cargo.toml.patch	crates/rgx-adapters-media/Cargo.toml	8c32dc09b048c93bfff0579a7386307a39719e5e	patch	a divergence from upstream: the patch is applied on top of the copy
-scripts/rgx-local-patches/crates/rgx-adapters-office/Cargo.toml.patch	crates/rgx-adapters-office/Cargo.toml	8c32dc09b048c93bfff0579a7386307a39719e5e	patch	a divergence from upstream: the patch is applied on top of the copy
-scripts/rgx-local-patches/crates/rgx-adapters-pdf/Cargo.toml.patch	crates/rgx-adapters-pdf/Cargo.toml	8c32dc09b048c93bfff0579a7386307a39719e5e	patch	a divergence from upstream: the patch is applied on top of the copy
-scripts/rgx-local-patches/crates/rgx-adapters-tabular/Cargo.toml.patch	crates/rgx-adapters-tabular/Cargo.toml	8c32dc09b048c93bfff0579a7386307a39719e5e	patch	a divergence from upstream: the patch is applied on top of the copy
-scripts/rgx-local-patches/crates/rgx-adapters-tabular/src/lib.rs.patch	crates/rgx-adapters-tabular/src/lib.rs	8c32dc09b048c93bfff0579a7386307a39719e5e	patch	a divergence from upstream: the patch is applied on top of the copy
-scripts/rgx-local-patches/crates/rgx-adapters-tabular/src/sqlite.rs.patch	crates/rgx-adapters-tabular/src/sqlite.rs	8c32dc09b048c93bfff0579a7386307a39719e5e	patch	a divergence from upstream: the patch creates the file, upstream has no such path
-scripts/rgx-local-patches/crates/rgx-adapters-tabular/src/sqlite_oracle.rs.patch	crates/rgx-adapters-tabular/src/sqlite_oracle.rs	8c32dc09b048c93bfff0579a7386307a39719e5e	patch	a divergence from upstream: the patch creates the file, upstream has no such path
-scripts/rgx-local-patches/crates/rgx-adapters-threed/Cargo.toml.patch	crates/rgx-adapters-threed/Cargo.toml	8c32dc09b048c93bfff0579a7386307a39719e5e	patch	a divergence from upstream: the patch is applied on top of the copy
-scripts/rgx-local-patches/crates/rgx-core/Cargo.toml.patch	crates/rgx-core/Cargo.toml	8c32dc09b048c93bfff0579a7386307a39719e5e	patch	a divergence from upstream: the patch is applied on top of the copy
-scripts/rgx-local-patches/crates/rgx-core/src/djson/intern.rs.patch	crates/rgx-core/src/djson/intern.rs	8c32dc09b048c93bfff0579a7386307a39719e5e	patch	a divergence from upstream: the patch is applied on top of the copy
-scripts/rgx-local-patches/crates/rgx-core/src/fuzzkit.rs.patch	crates/rgx-core/src/fuzzkit.rs	8c32dc09b048c93bfff0579a7386307a39719e5e	patch	a divergence from upstream: the patch is applied on top of the copy
-scripts/rgx-local-patches/crates/rgx-core/src/lib.rs.patch	crates/rgx-core/src/lib.rs	8c32dc09b048c93bfff0579a7386307a39719e5e	patch	a divergence from upstream: the patch is applied on top of the copy
-scripts/rgx-local-patches/crates/rgx-core/src/memchr.rs.patch	crates/rgx-core/src/memchr.rs	8c32dc09b048c93bfff0579a7386307a39719e5e	patch	a divergence from upstream: the patch is applied on top of the copy
-scripts/rgx-local-patches/crates/rgx-core/src/memchr/dispatch.rs.patch	crates/rgx-core/src/memchr/dispatch.rs	8c32dc09b048c93bfff0579a7386307a39719e5e	patch	a divergence from upstream: the patch is applied on top of the copy
-scripts/rgx-local-patches/crates/rgx-core/src/memchr/memmem.rs.patch	crates/rgx-core/src/memchr/memmem.rs	8c32dc09b048c93bfff0579a7386307a39719e5e	patch	a divergence from upstream: the patch is applied on top of the copy
-scripts/rgx-local-patches/crates/rgx-core/src/memmap2/advice.rs.patch	crates/rgx-core/src/memmap2/advice.rs	8c32dc09b048c93bfff0579a7386307a39719e5e	patch	a divergence from upstream: the patch is applied on top of the copy
-scripts/rgx-local-patches/crates/rgx-core/src/memmap2/mmap.rs.patch	crates/rgx-core/src/memmap2/mmap.rs	8c32dc09b048c93bfff0579a7386307a39719e5e	patch	a divergence from upstream: the patch is applied on top of the copy
-scripts/rgx-local-patches/crates/rgx-core/src/memmap2/mmap_mut.rs.patch	crates/rgx-core/src/memmap2/mmap_mut.rs	8c32dc09b048c93bfff0579a7386307a39719e5e	patch	a divergence from upstream: the patch is applied on top of the copy
-scripts/rgx-local-patches/crates/rgx-core/src/memmap2/platform/freebsd.rs.patch	crates/rgx-core/src/memmap2/platform/freebsd.rs	8c32dc09b048c93bfff0579a7386307a39719e5e	patch	a divergence from upstream: the patch is applied on top of the copy
-scripts/rgx-local-patches/crates/rgx-core/src/memmap2/platform/linux.rs.patch	crates/rgx-core/src/memmap2/platform/linux.rs	8c32dc09b048c93bfff0579a7386307a39719e5e	patch	a divergence from upstream: the patch is applied on top of the copy
-scripts/rgx-local-patches/crates/rgx-core/src/memmap2/platform/macos.rs.patch	crates/rgx-core/src/memmap2/platform/macos.rs	8c32dc09b048c93bfff0579a7386307a39719e5e	patch	a divergence from upstream: the patch is applied on top of the copy
-scripts/rgx-local-patches/crates/rgx-core/src/memmap2/platform/mod.rs.patch	crates/rgx-core/src/memmap2/platform/mod.rs	8c32dc09b048c93bfff0579a7386307a39719e5e	patch	a divergence from upstream: the patch is applied on top of the copy
-scripts/rgx-local-patches/crates/rgx-core/src/tv/plan.rs.patch	crates/rgx-core/src/tv/plan.rs	8c32dc09b048c93bfff0579a7386307a39719e5e	patch	a divergence from upstream: the patch is applied on top of the copy
-scripts/rgx-local-patches/crates/rgx-core/src/tv_runtime/builder.rs.patch	crates/rgx-core/src/tv_runtime/builder.rs	8c32dc09b048c93bfff0579a7386307a39719e5e	patch	a divergence from upstream: the patch is applied on top of the copy
-scripts/rgx-local-patches/crates/rgx-core/src/tv_runtime/mod.rs.patch	crates/rgx-core/src/tv_runtime/mod.rs	8c32dc09b048c93bfff0579a7386307a39719e5e	patch	a divergence from upstream: the patch is applied on top of the copy
-scripts/rgx-local-patches/crates/rgx-core/src/tv_runtime/searcher.rs.patch	crates/rgx-core/src/tv_runtime/searcher.rs	8c32dc09b048c93bfff0579a7386307a39719e5e	patch	a divergence from upstream: the patch is applied on top of the copy
-scripts/rgx-local-patches/crates/rgx-core/src/tv_runtime/update.rs.patch	crates/rgx-core/src/tv_runtime/update.rs	8c32dc09b048c93bfff0579a7386307a39719e5e	patch	a divergence from upstream: the patch is applied on top of the copy
-scripts/rgx-local-patches/crates/rgx-core/src/tv_runtime/walk.rs.patch	crates/rgx-core/src/tv_runtime/walk.rs	8c32dc09b048c93bfff0579a7386307a39719e5e	patch	a divergence from upstream: the patch creates the file, upstream has no such path
-scripts/rgx-local-patches/crates/rgx-core/src/tv_runtime/walk_oracle.rs.patch	crates/rgx-core/src/tv_runtime/walk_oracle.rs	8c32dc09b048c93bfff0579a7386307a39719e5e	patch	a divergence from upstream: the patch creates the file, upstream has no such path
+crates/rgx-core	crates/rgx-core	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	tree	upstream rgx's crate: the copy of it less the paths the copy excludes, with the patches below on top
+crates/rar-codec	crates/rar-codec	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	tree	upstream rgx's crate: the copy of it less the paths the copy excludes, with the patches below on top
+crates/rgx-adapters-archive	crates/rgx-adapters-archive	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	tree	upstream rgx's crate: the copy of it less the paths the copy excludes, with the patches below on top
+crates/rgx-adapters-docs	crates/rgx-adapters-docs	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	tree	upstream rgx's crate: the copy of it, with the patches below on top
+crates/rgx-adapters-inspect	crates/rgx-adapters-inspect	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	tree	upstream rgx's crate: the copy of it, with the patches below on top
+crates/rgx-adapters-llm	crates/rgx-adapters-llm	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	tree	upstream rgx's crate: the copy of it, with the patches below on top
+crates/rgx-adapters-mail	crates/rgx-adapters-mail	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	tree	upstream rgx's crate: the copy of it, with the patches below on top
+crates/rgx-adapters-media	crates/rgx-adapters-media	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	tree	upstream rgx's crate: the copy of it, with the patches below on top
+crates/rgx-adapters-office	crates/rgx-adapters-office	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	tree	upstream rgx's crate: the copy of it, with the patches below on top
+crates/rgx-adapters-pdf	crates/rgx-adapters-pdf	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	tree	upstream rgx's crate: the copy of it, with the patches below on top
+crates/rgx-adapters-tabular	crates/rgx-adapters-tabular	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	tree	upstream rgx's crate: the copy of it, with the patches below on top
+crates/rgx-adapters-threed	crates/rgx-adapters-threed	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	tree	upstream rgx's crate: the copy of it, with the patches below on top
+scripts/rgx-local-patches/crates/rar-codec/Cargo.toml.patch	crates/rar-codec/Cargo.toml	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-adapters-archive/Cargo.toml.patch	crates/rgx-adapters-archive/Cargo.toml	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-adapters-archive/README.md.patch	crates/rgx-adapters-archive/README.md	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-adapters-archive/src/lib.rs.patch	crates/rgx-adapters-archive/src/lib.rs	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-adapters-docs/Cargo.toml.patch	crates/rgx-adapters-docs/Cargo.toml	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-adapters-inspect/Cargo.toml.patch	crates/rgx-adapters-inspect/Cargo.toml	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-adapters-llm/Cargo.toml.patch	crates/rgx-adapters-llm/Cargo.toml	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-adapters-mail/Cargo.toml.patch	crates/rgx-adapters-mail/Cargo.toml	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-adapters-media/Cargo.toml.patch	crates/rgx-adapters-media/Cargo.toml	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-adapters-office/Cargo.toml.patch	crates/rgx-adapters-office/Cargo.toml	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-adapters-pdf/Cargo.toml.patch	crates/rgx-adapters-pdf/Cargo.toml	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-adapters-tabular/Cargo.toml.patch	crates/rgx-adapters-tabular/Cargo.toml	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-adapters-tabular/src/lib.rs.patch	crates/rgx-adapters-tabular/src/lib.rs	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-adapters-tabular/src/sqlite.rs.patch	crates/rgx-adapters-tabular/src/sqlite.rs	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	patch	a divergence from upstream: the patch creates the file, upstream has no such path
+scripts/rgx-local-patches/crates/rgx-adapters-tabular/src/sqlite_oracle.rs.patch	crates/rgx-adapters-tabular/src/sqlite_oracle.rs	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	patch	a divergence from upstream: the patch creates the file, upstream has no such path
+scripts/rgx-local-patches/crates/rgx-adapters-threed/Cargo.toml.patch	crates/rgx-adapters-threed/Cargo.toml	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-core/Cargo.toml.patch	crates/rgx-core/Cargo.toml	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-core/src/djson/intern.rs.patch	crates/rgx-core/src/djson/intern.rs	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-core/src/fuzzkit.rs.patch	crates/rgx-core/src/fuzzkit.rs	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-core/src/lib.rs.patch	crates/rgx-core/src/lib.rs	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-core/src/memchr.rs.patch	crates/rgx-core/src/memchr.rs	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-core/src/memchr/dispatch.rs.patch	crates/rgx-core/src/memchr/dispatch.rs	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-core/src/memchr/memmem.rs.patch	crates/rgx-core/src/memchr/memmem.rs	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-core/src/memmap2/advice.rs.patch	crates/rgx-core/src/memmap2/advice.rs	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-core/src/memmap2/mmap.rs.patch	crates/rgx-core/src/memmap2/mmap.rs	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-core/src/memmap2/mmap_mut.rs.patch	crates/rgx-core/src/memmap2/mmap_mut.rs	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-core/src/memmap2/platform/freebsd.rs.patch	crates/rgx-core/src/memmap2/platform/freebsd.rs	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-core/src/memmap2/platform/linux.rs.patch	crates/rgx-core/src/memmap2/platform/linux.rs	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-core/src/memmap2/platform/macos.rs.patch	crates/rgx-core/src/memmap2/platform/macos.rs	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-core/src/memmap2/platform/mod.rs.patch	crates/rgx-core/src/memmap2/platform/mod.rs	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-core/src/tv/plan.rs.patch	crates/rgx-core/src/tv/plan.rs	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-core/src/tv_runtime/builder.rs.patch	crates/rgx-core/src/tv_runtime/builder.rs	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-core/src/tv_runtime/mod.rs.patch	crates/rgx-core/src/tv_runtime/mod.rs	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-core/src/tv_runtime/searcher.rs.patch	crates/rgx-core/src/tv_runtime/searcher.rs	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-core/src/tv_runtime/update.rs.patch	crates/rgx-core/src/tv_runtime/update.rs	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	patch	a divergence from upstream: the patch is applied on top of the copy
+scripts/rgx-local-patches/crates/rgx-core/src/tv_runtime/walk.rs.patch	crates/rgx-core/src/tv_runtime/walk.rs	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	patch	a divergence from upstream: the patch creates the file, upstream has no such path
+scripts/rgx-local-patches/crates/rgx-core/src/tv_runtime/walk_oracle.rs.patch	crates/rgx-core/src/tv_runtime/walk_oracle.rs	bb61e01d91bbf433be7ce0326ea4d94e49e2ed91	patch	a divergence from upstream: the patch creates the file, upstream has no such path

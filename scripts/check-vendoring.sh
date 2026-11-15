@@ -173,8 +173,43 @@ walk_sort() {
 # not descend into it, and the rule is still relative to the root: a
 # directory called .git BELOW the root is skipped, and the root's own
 # ancestors never enter the question.
+# A directory with a `.git` of its OWN is another checkout, and another
+# checkout is not this tree. A linked worktree keeps its `.git` as a FILE
+# rather than a directory, so the name rule above does not see it: the walk
+# descended into `.agents/worktrees/<branch>` and read that branch's
+# manifests against this branch's known-remaining list, reporting four
+# external dependencies this tree does not have. The bump script learned the
+# same lesson (it skips a directory with a `.git` of its own), and this is
+# that rule here: a gate that reads a copy of the tree cannot tell the copy
+# from the tree.
+#
+# The nested checkouts are found ONCE and kept: asking `test -e {}/.git` of
+# every directory is a fork per directory, and on this host's MSYS2 that is
+# ~11 ms each -- 697 directories made one walk 7.7 s and the gate 58 s. One
+# walk for the markers and a prefix filter per name is the same answer for
+# a tenth of the cost.
+#
+# Every `.git` below the root, of either kind: a directory is a clone, a
+# file is a linked worktree. `-print -prune` names it and does not descend
+# into it, so a clone's objects are never walked. `-mindepth 2` keeps the
+# root's own `.git` out of the list -- the root is this tree, not a nested
+# one, and pruning it would prune the whole walk.
+#
+# This runs ONCE, at the top level. `find_files` is called through process
+# substitution, which is a subshell: a cache set inside it would not survive
+# the call, and every one of the seven walks would pay for the marker walk
+# again -- measured, 3.7 s each, 26 s of the gate's 40.
+nested_checkouts="$(find . -mindepth 2 -type d -name target -prune -o -name .git -print -prune 2>/dev/null \
+    | sed 's|^\./||; s|/\.git$||' | LC_ALL=C sort)"
+
 find_files() {
-    find . -type d \( -name target -o -name .git \) -prune -o -type f -name "$1" -print | sed 's|^\./||'
+    find . -type d \( -name target -o -name .git \) -prune -o -type f -name "$1" -print \
+        | sed 's|^\./||' \
+        | awk -v nested="$nested_checkouts" '
+            BEGIN { n = split(nested, a, "\n"); m = 0
+                    for (i = 1; i <= n; i++) if (a[i] != "") pre[++m] = a[i] "/" }
+            { for (i = 1; i <= m; i++) if (index($0, pre[i]) == 1) next; print }
+        '
 }
 
 manifests=()
@@ -848,11 +883,33 @@ $rel
     # The paths the manifest excludes are upstream's files this repository
     # does not carry. The sync removes them on every run, so one that is
     # here is a divergence from the rule the manifest states.
+    #
+    # An entry with a `/` is a path, and the path is the question. An entry
+    # without one is a file NAME, and its scope is the VENDORED TREES only:
+    # the exclusion is about upstream's files, and rgy's own contract of the
+    # same name -- the root EGM.md is this repository's -- is not the copy's
+    # business. Asking the whole tree about a name rule would report the
+    # repository's own contract as a violation of a rule about somebody
+    # else's.
     while IFS= read -r ex; do
         [ -n "$ex" ] || continue
-        if [ -e "$repo_root/$ex" ]; then
-            manifest_fault "scripts/vendored-sources.tsv excludes $ex, and the tree has it"
-        fi
+        case "$ex" in
+            */*)
+                if [ -e "$repo_root/$ex" ]; then
+                    manifest_fault "scripts/vendored-sources.tsv excludes $ex, and the tree has it"
+                fi
+                ;;
+            *)
+                while IFS= read -r vt; do
+                    [ -n "$vt" ] || continue
+                    [ -d "$repo_root/$vt" ] || continue
+                    if [ -n "$(find "$repo_root/$vt" -type f -name "$ex" 2>/dev/null)" ]; then
+                        manifest_fault "scripts/vendored-sources.tsv excludes $ex, and the tree has it"
+                        break
+                    fi
+                done <<< "$manifest_trees"
+                ;;
+        esac
     done < <(awk '/^# exclude: / { sub(/\r$/, ""); print substr($0, 12) }' "$manifest")
 fi
 

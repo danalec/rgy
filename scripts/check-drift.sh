@@ -392,8 +392,11 @@ patch_verdict() {
 #
 #   * the excluded paths. They are upstream's files that this repository
 #     does not carry, so their absence is the rule and not a difference.
-#     The ones of them that the index holds are reported on their own:
-#     the sync removes them, so one that is here is a divergence.
+#     An entry with a `/` is a path prefix; an entry without one is a file
+#     NAME, matched at any depth -- the shape the sync's own list uses, so
+#     the copy and the gate agree about what is carried. The ones of them
+#     that the index holds are reported on their own: the sync removes
+#     them, so one that is here is a divergence.
 #
 # Prints one line per difference:
 #   missing: <path>   upstream has it, the copy does not
@@ -418,9 +421,12 @@ tree_problems() {
     problems="$(awk -F'\t' \
         -v exclfile="$excludes" -v patfile="$patch_paths" \
         -v upfile="$up_pairs" -v ourfile="$our_pairs" '
-        function is_excluded(path,   i) {
+        function is_excluded(path,   i, n, parts) {
             for (i = 1; i <= ne; i++) {
-                if (index(path, excl[i]) == 1) { return 1 }
+                if (index(excl[i], "/") == 0) {
+                    n = split(path, parts, "/")
+                    if (parts[n] == excl[i]) { return 1 }
+                } else if (index(path, excl[i]) == 1) { return 1 }
             }
             return 0
         }

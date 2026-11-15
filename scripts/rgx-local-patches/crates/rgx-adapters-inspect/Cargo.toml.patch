@@ -3,7 +3,7 @@
 @@ -1,6 +1,6 @@
  [package]
 -name = "rgx-adapters-inspect"
--version = "0.1.9"
+-version = "0.1.11"
 +name = "rgy-vendored-adapters-inspect"
 +version = "0.1.10"
  edition = "2021"
@@ -30,7 +30,7 @@
 +name = "rgx_adapters_inspect"
 +
  [dependencies]
--rgx-core = { path = "../rgx-core", version = "0.1.9", default-features = false, features = ["std", "sha256-hw"] }
+-rgx-core = { path = "../rgx-core", version = "0.1.11", default-features = false, features = ["std", "sha256-hw"] }
 -
 +rgx-core = { path = "../rgx-core", version = "0.1.10", default-features = false, features = ["std", "sha256-hw"], package = "rgy-vendored-core" }
  [features]

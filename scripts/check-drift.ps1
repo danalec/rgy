@@ -455,10 +455,21 @@ function Get-GitLines([string[]]$GitArgs) {
     return $out
 }
 
-# Is the path under one of the excluded prefixes?
+# Is the path excluded -- under a prefix, or named by a name rule?
+#
+# An entry with a `/` is a path prefix; an entry without one is a file
+# NAME, matched at any depth. The shapes are the sync's own, so the copy
+# and the gate agree about what this repository carries.
 function Test-Excluded([string]$path, [string[]]$excluded) {
     foreach ($e in $excluded) {
-        if ($e -and $path.StartsWith($e)) { return $true }
+        if (-not $e) { continue }
+        if ($e.Contains('/')) {
+            if ($path.StartsWith($e)) { return $true }
+        } else {
+            $slash = $path.LastIndexOf('/')
+            $leaf = if ($slash -lt 0) { $path } else { $path.Substring($slash + 1) }
+            if ($leaf -eq $e) { return $true }
+        }
     }
     return $false
 }
@@ -480,8 +491,11 @@ function Test-Excluded([string]$path, [string[]]$excluded) {
 #
 #   * the excluded paths. They are upstream's files that this repository
 #     does not carry, so their absence is the rule and not a difference.
-#     The ones of them that the index holds are reported on their own:
-#     the sync removes them, so one that is here is a divergence.
+#     An entry with a `/` is a path prefix; an entry without one is a file
+#     NAME, matched at any depth -- the shape the sync's own list uses, so
+#     the copy and the gate agree about what is carried. The ones of them
+#     that the index holds are reported on their own: the sync removes
+#     them, so one that is here is a divergence.
 #
 # Returns the lines:
 #   missing: <path>   upstream has it, the copy does not

@@ -322,8 +322,12 @@ pub struct NameKey {
 
 /// The scored-name result one `Searcher` pass leaves in the cache.
 pub struct Scored {
+    // The field is read by `NameCache::trim_if_idle`, which is `std`-only,
+    // so it is dead exactly when `std` is off -- the conditional allow is
+    // the whole truth. A second, unconditional `allow(dead_code)` beside
+    // it said the same thing twice, and clippy 1.100's
+    // `duplicated_attributes` refuses that under `-D warnings`.
     #[cfg_attr(not(feature = "std"), allow(dead_code))]
-    #[allow(dead_code)]
     at: u64,
     #[allow(dead_code)]
     key: NameKey,

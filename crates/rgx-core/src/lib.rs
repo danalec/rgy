@@ -107,6 +107,18 @@
 //! `memmem::find` remains the right entry point for a single search.
 
 #![no_std]
+// The SIMD kernels enable SSE2/AVX2 with `#[target_feature]` and are
+// reached only behind the crate's runtime CPU probe (`detect.rs`). On a
+// soft-float target -- `x86_64-unknown-none`, the no_std proof -- rustc
+// 1.100 began denying that combination (`x86_softfloat_sse`, rust-lang
+// #117938): the ABI passes no SSE registers, so the compiler will not
+// vouch for the feature. The vouching here is the probe's instead: a
+// kernel is never called on a CPU that lacks it, and long-mode x86_64
+// hardware has SSE2 whether or not the ABI uses it. The allow restores
+// what every earlier toolchain accepted; `unknown_lints` keeps the name
+// harmless on a toolchain that does not know it.
+#![allow(unknown_lints)]
+#![allow(x86_softfloat_sse)]
 
 // macro_use brings vec!/format!/write! into every submodule, which a
 // no_std crate needs and the std prelude used to provide for free.

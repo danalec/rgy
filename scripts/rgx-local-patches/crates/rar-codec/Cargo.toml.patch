@@ -3,7 +3,7 @@
 @@ -1,6 +1,6 @@
  [package]
 -name = "rar-codec"
--version = "0.1.9"
+-version = "0.1.11"
 +name = "rgy-vendored-rar-codec"
 +version = "0.1.10"
  edition = "2021"

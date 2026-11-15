@@ -116,15 +116,33 @@ function Test-RgyInTree([string]$fullName) {
 }
 
 # The walk the shell twin performs with find's -prune. Get-ChildItem
-# -Recurse has no prune, so the tree is walked a top-level directory at a
-# time and the repository's own metadata is left out of it; a .git nested
-# deeper in the tree is caught by the filter above.
+# -Recurse has no prune, so the tree is walked a directory at a time and
+# the repository's own metadata is left out of it; a .git nested deeper in
+# the tree is caught by the filter above.
+#
+# A directory with a `.git` of its OWN is another checkout, and another
+# checkout is not this tree. A linked worktree keeps its `.git` as a FILE
+# rather than a directory, so the name rule does not see it: the walk
+# descended into `.agents/worktrees/<branch>` and read that branch's
+# manifests against this branch's known-remaining list, reporting four
+# external dependencies this tree does not have. The shell twin prunes the
+# same directories with `test -e {}/.git`, and the two answer the same.
+function Add-RgyFilesIn([string]$dir, [string]$name, $files) {
+    foreach ($f in Get-ChildItem -Path $dir -Filter $name -File -ErrorAction SilentlyContinue) { $files.Add($f) }
+    foreach ($d in Get-ChildItem -Path $dir -Directory -ErrorAction SilentlyContinue) {
+        if ($d.Name -eq 'target' -or $d.Name -eq '.git') { continue }
+        if (Test-Path (Join-Path $d.FullName '.git')) { continue }
+        Add-RgyFilesIn $d.FullName $name $files
+    }
+}
+
 function Get-RgyTreeFiles([string]$name) {
     $files = New-Object System.Collections.Generic.List[System.IO.FileInfo]
     foreach ($f in Get-ChildItem -Path . -Filter $name -File) { $files.Add($f) }
     foreach ($d in Get-ChildItem -Path . -Directory) {
         if ($d.Name -eq 'target' -or $d.Name -eq '.git') { continue }
-        foreach ($f in Get-ChildItem -Path $d.FullName -Filter $name -Recurse -File) { $files.Add($f) }
+        if (Test-Path (Join-Path $d.FullName '.git')) { continue }
+        Add-RgyFilesIn $d.FullName $name $files
     }
     return $files
 }
@@ -604,11 +622,31 @@ if (-not (Test-Path $manifestFile)) {
     # The paths the manifest excludes are upstream's files this repository
     # does not carry. The sync removes them on every run, so one that is
     # here is a divergence from the rule the manifest states.
+    #
+    # An entry with a `/` is a path, and the path is the question. An entry
+    # without one is a file NAME, and its scope is the VENDORED TREES only:
+    # the exclusion is about upstream's files, and rgy's own contract of the
+    # same name -- the root EGM.md is this repository's -- is not the copy's
+    # business. Asking the whole tree about a name rule would report the
+    # repository's own contract as a violation of a rule about somebody
+    # else's.
     foreach ($line in $manifestLines) {
         if ($line -match '^# exclude: (.+)$') {
             $ex = $matches[1].Trim()
-            if (Test-Path (Join-Path $repoRoot $ex)) {
-                $manifestFails.Add("scripts/vendored-sources.tsv excludes $ex, and the tree has it")
+            if ($ex.Contains('/')) {
+                if (Test-Path (Join-Path $repoRoot $ex)) {
+                    $manifestFails.Add("scripts/vendored-sources.tsv excludes $ex, and the tree has it")
+                }
+            } else {
+                foreach ($vt in $manifestTrees) {
+                    $vtPath = Join-Path $repoRoot $vt
+                    if (-not (Test-Path $vtPath -PathType Container)) { continue }
+                    $hit = @(Get-ChildItem -Path $vtPath -Recurse -File -Filter $ex -ErrorAction SilentlyContinue)
+                    if ($hit.Count -gt 0) {
+                        $manifestFails.Add("scripts/vendored-sources.tsv excludes $ex, and the tree has it")
+                        break
+                    }
+                }
             }
         }
     }

@@ -87,4 +87,4 @@
 +//! `memmem::find` remains the right entry point for a single search.
  
  #![no_std]
- 
+ // The SIMD kernels enable SSE2/AVX2 with `#[target_feature]` and are

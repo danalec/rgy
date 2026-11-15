@@ -20,19 +20,38 @@ use std::process::{Command, Stdio};
 /// does **not** rebuild them — it will happily exercise a stale exe and report
 /// green. Refuse that: if the binary is older than its own sources, say so
 /// instead of testing yesterday's code.
+///
+/// The test executable's own directory is not a fixed thing. Cargo used to
+/// put it in `target/<profile>/deps/`, one level below the profile directory
+/// where the workspace bins land; cargo 1.100 puts it in
+/// `target/<profile>/build/<pkg>/<hash>/out/`, four levels below. Measured on
+/// 2026-11-15: the one-level walk resolved `…/out/searchctl.exe`, which does
+/// not exist, and all 77 e2e tests failed with "The system cannot find the
+/// file specified" — a harness that could not find the product, on a tree
+/// whose product was built and sitting in the profile directory. So the walk
+/// goes UP until an ancestor holds the bin, which answers for both layouts
+/// and for the next one, and a bin that is nowhere is a panic that says so.
 pub fn bin(name: &str) -> PathBuf {
     let key = format!("CARGO_BIN_EXE_{name}");
     if let Some(p) = std::env::var_os(&key) {
         return PathBuf::from(p);
     }
+    let file = format!("{name}{}", std::env::consts::EXE_SUFFIX);
     let mut dir = std::env::current_exe().expect("current_exe");
-    dir.pop(); // …/deps/<harness>
-    if dir.file_name().and_then(|s| s.to_str()) == Some("deps") {
-        dir.pop(); // …/<profile>
+    dir.pop(); // the directory the test executable lives in
+    loop {
+        let exe = dir.join(&file);
+        if exe.is_file() {
+            assert_up_to_date(name, &exe);
+            return exe;
+        }
+        if !dir.pop() {
+            panic!(
+                "the harness cannot find {name}: no ancestor of the test executable holds {file}. \
+                 Build the workspace first (cargo build --workspace)."
+            );
+        }
     }
-    let exe = dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
-    assert_up_to_date(name, &exe);
-    exe
 }
 
 /// Panics when `exe` predates the sources it is built from.

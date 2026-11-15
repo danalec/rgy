@@ -46,6 +46,21 @@ the child `scripts/lib` and are sourced by nearly every script here.
   `[check-drift.sh:upstream_blob()]`, `[check-drift.sh:patch_verdict()]`.
 - The sync copies byte-for-byte from the upstream commit and removes the
   `EXCLUDE` paths; it does not merge — `[sync-rgx-upstream.sh:is_excluded()]`.
+  An `EXCLUDE` entry has one of two shapes: with a `/` it is a path prefix,
+  without one it is a file NAME matched at any depth inside the vendored
+  crates. The name rule is how upstream's `EGM.md` contracts stay out — rgy
+  has its own EGM system and `.gitignore` keeps those contracts untracked, so
+  the copy, the drift gate and the vendoring gate all read the same decision
+  from the manifest's `# exclude:` lines. A name rule's scope is the vendored
+  trees only: the repository's own root `EGM.md` is not the copy's business —
+  `[check-vendoring.sh:find_files()]`, `[check-drift.sh:tree_problems()]`.
+- The vendoring walk does not descend into a nested checkout: a directory
+  with a `.git` of its own — a clone's directory or a linked worktree's file
+  — is another tree, and reading its manifests against this tree's rules
+  reports violations this tree does not have. The markers are found once at
+  the top level, because `find_files` runs in a subshell and a cache set
+  inside it would not survive the call —
+  `[check-vendoring.sh:find_files()]`, `[check-vendoring.ps1:Get-RgyTreeFiles]`.
 - The publish `variant` is one of `portable|avx2|znver4|avx512` —
   `[publish-release.sh:--variant]`.
 

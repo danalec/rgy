@@ -120,8 +120,8 @@ impl ByteSet {
     /// The complement over all 256 byte values.
     pub fn negate(&self) -> Self {
         let mut out = *self;
-        for i in 0..4 {
-            out.bits[i] = !out.bits[i];
+        for b in &mut out.bits {
+            *b = !*b;
         }
         out
     }

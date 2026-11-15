@@ -97,16 +97,31 @@ rgx-adapters-office rgx-adapters-pdf rgx-adapters-tabular rgx-adapters-threed"
 # licence and nothing else.
 KEEP=""
 
-# Files upstream has that this tree does not carry. Each entry is a
-# repo-relative path prefix, and the copy skips it.
+# Files upstream has that this tree does not carry. The copy skips them.
 #
-# These are rgx's own measurement and fuzzing harnesses: the example
-# programs that produce its benchmark tables, and the cargo-fuzz crate
-# that fuzzes its parsers. rgy has its own benches --
+# An entry has one of two shapes, and the shape is the rule:
+#
+#   * it contains a `/` -- a repo-relative path PREFIX, and every path
+#     under it is skipped;
+#   * it contains no `/` -- a file NAME, and every file with that name is
+#     skipped, at any depth, inside the vendored crates.
+#
+# The prefixes are rgx's own measurement and fuzzing harnesses: the
+# example programs that produce its benchmark tables, and the cargo-fuzz
+# crate that fuzzes its parsers. rgy has its own benches --
 # crates/name-core/examples and crates/engine/examples -- and its own gate,
 # and nothing in rgy runs any of these. They are upstream's tools, in
 # upstream's repository, and carrying them here would be carrying a tool
 # nobody in this repository can reach.
+#
+# The name is upstream's EGM contracts. rgy has its own EGM system, its
+# own checker and its own scope, and `.egmrc` leaves the vendored trees
+# out of it; `.gitignore` keeps `crates/rgx-*/**/EGM.md` untracked for the
+# same reason, because a tracked contract there would be a fork the next
+# sync deletes. The exclusion is the same decision in the place the copy
+# and the drift gate both read: without it the gate compares upstream's
+# tracked contracts against an index that deliberately does not hold them
+# and reports every one as `missing:` -- a difference that is the rule.
 #
 # The tree is therefore upstream's, minus what rgy does not carry. The
 # manifest says so on the rows of the crates this touches, and a sync
@@ -115,23 +130,30 @@ EXCLUDE="
 crates/rgx-core/examples/
 crates/rgx-core/fuzz/
 crates/rgx-adapters-archive/examples/
-crates/rar-codec/examples/"
+crates/rar-codec/examples/
+EGM.md"
 
 # The excluded paths as one pattern, for the filter that takes them out
-# of the file list. The prefixes hold no regular-expression characters,
-# so they are the pattern as they are.
+# of the file list. A prefix holds no regular-expression characters, so
+# it is the pattern as it is; a name is matched as a whole path component,
+# and its dot is escaped so `EGM.md` cannot match `EGMxmd`.
 exclude_pattern=""
 for prefix in $EXCLUDE; do
     [ -n "$exclude_pattern" ] && exclude_pattern="$exclude_pattern|"
-    exclude_pattern="$exclude_pattern^$prefix"
+    case "$prefix" in
+        */*) exclude_pattern="$exclude_pattern^$prefix" ;;
+        *)   exclude_pattern="$exclude_pattern(^|/)$(printf '%s' "$prefix" | sed 's/\./\\./g')\$" ;;
+    esac
 done
 
-# Is this repo-relative path under one of the excluded prefixes?
+# Is this repo-relative path excluded -- under a prefix, or named by a
+# name rule?
 is_excluded() {
     local rel="$1" prefix
     for prefix in $EXCLUDE; do
-        case "$rel" in
-            "$prefix"*) return 0 ;;
+        case "$prefix" in
+            */*) case "$rel" in "$prefix"*) return 0 ;; esac ;;
+            *)   [ "${rel##*/}" = "$prefix" ] && return 0 ;;
         esac
     done
     return 1
@@ -504,15 +526,41 @@ done
 # holds is what the copy says it holds.
 excluded_count=0
 for prefix in $EXCLUDE; do
-    target="$repo_root/$prefix"
-    [ -e "$target" ] || continue
-    excluded_count=$((excluded_count + 1))
-    if [ "$DRY_RUN" = 1 ]; then
-        echo "  excluded $prefix (not carried)"
-    else
-        rm -rf "$target"
-        echo "  excluded $prefix (removed)"
-    fi
+    case "$prefix" in
+        */*)
+            target="$repo_root/$prefix"
+            [ -e "$target" ] || continue
+            excluded_count=$((excluded_count + 1))
+            if [ "$DRY_RUN" = 1 ]; then
+                echo "  excluded $prefix (not carried)"
+            else
+                rm -rf "$target"
+                echo "  excluded $prefix (removed)"
+            fi
+            ;;
+        *)
+            # A name rule: every file with that name inside the vendored
+            # crates, at any depth. One line for the rule, and the count
+            # is the files it names -- the summary counts paths, the way
+            # `added` and `updated` do.
+            name_hits="$(for crate in $CRATES; do
+                [ -d "$repo_root/crates/$crate" ] || continue
+                find "$repo_root/crates/$crate" -type f -name "$prefix"
+            done | LC_ALL=C sort)"
+            [ -n "$name_hits" ] || continue
+            n_hits="$(printf '%s\n' "$name_hits" | grep -c .)"
+            excluded_count=$((excluded_count + n_hits))
+            if [ "$DRY_RUN" = 1 ]; then
+                echo "  excluded $prefix ($n_hits file(s), not carried)"
+            else
+                printf '%s\n' "$name_hits" | while IFS= read -r target; do
+                    [ -n "$target" ] || continue
+                    rm -f "$target"
+                done
+                echo "  excluded $prefix ($n_hits file(s), removed)"
+            fi
+            ;;
+    esac
 done
 
 stale_count=0
