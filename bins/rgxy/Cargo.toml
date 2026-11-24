@@ -40,6 +40,13 @@ rgy-engine = { path = "../../crates/engine", version = "0.1.10" }
 # The picker: the results handed to the user's own fzf, the same way
 # `searchctl` hands them over.
 rgy-pick = { path = "../../crates/pick", version = "0.1.10" }
+# The local fallback for the name layer when there is no daemon at all: the
+# same index, query and ranking the daemon answers with, and the platform
+# walk selector that builds it once. Nothing new is crawled by hand.
+rgy-name-core = { path = "../../crates/name-core", version = "0.1.10" }
+rgy-discovery-dispatch = { path = "../../crates/discovery-dispatch", version = "0.1.10" }
+# The entry kinds the index spells folders with.
+rgy-discovery = { path = "../../crates/discovery", version = "0.1.10" }
 
 # The window is a platform thing, and it only exists on the platforms that
 # have one. The binary is the same everywhere: the launcher falls back to

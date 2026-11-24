@@ -54,6 +54,7 @@ use crate::platform::backend::window::{Compositor, Control, Event, Key, View, Wi
 
 use crate::Options;
 use crate::daemon::{DaemonSource, Status};
+use crate::local::Phase;
 use crate::mru;
 use crate::preview;
 use crate::rgx;
@@ -271,6 +272,10 @@ enum Reply {
         /// The status the answer left behind.
         status: Status,
     },
+    /// The local index is about to do blocking work for the question in
+    /// flight. It arrives **before** the answer to that question, on the
+    /// same channel, and is not an answer: it settles nothing.
+    Progress(Phase),
 }
 
 /// What the thread that asks the daemon does.
@@ -298,6 +303,12 @@ trait Worker {
     fn wake(&self) -> Option<usize> {
         None
     }
+
+    /// The channel the worker may send an intermediate [`Reply::Progress`]
+    /// on while `answer` is still blocked. Handed over once, inside the
+    /// worker's thread, before the first question; the thread wakes the
+    /// window after the worker has sent. The default sends nothing.
+    fn attach(&mut self, _replies: Sender<Reply>) {}
 }
 
 /// The worker that asks the daemon.
@@ -312,9 +323,15 @@ struct DaemonWorker {
     /// The handle is carried as a number: a window handle is the
     /// platform's own, and the thread that asks holds no window.
     wake: Option<usize>,
+    /// Where the local index's progress goes, once the thread attached it.
+    replies: Option<Sender<Reply>>,
 }
 
 impl Worker for DaemonWorker {
+    fn attach(&mut self, replies: Sender<Reply>) {
+        self.replies = Some(replies);
+    }
+
     fn answer(&mut self, request: Request) -> Option<Reply> {
         match request {
             Request::Who => Some(Reply::Who {
@@ -325,11 +342,29 @@ impl Worker for DaemonWorker {
                 query,
                 limit,
                 generation,
-            } => Some(Reply::Search {
-                generation,
-                answer: self.source.search(&query, limit),
-                status: self.source.snapshot(),
-            }),
+            } => {
+                // The local index blocks the thread for the scan, so it says
+                // what it is about to do first: the progress is sent and the
+                // window woken from inside the search, and only a question
+                // that really opens the index says anything.
+                if let Some(replies) = self.replies.clone() {
+                    let wake = self.wake;
+                    self.source.set_progress(Some(Box::new(move |phase: Phase| {
+                        if replies.send(Reply::Progress(phase)).is_ok()
+                            && let Some(hwnd) = wake
+                        {
+                            crate::platform::backend::window::wake(hwnd);
+                        }
+                    })));
+                }
+                let answer = self.source.search(&query, limit);
+                self.source.set_progress(None);
+                Some(Reply::Search {
+                    generation,
+                    answer,
+                    status: self.source.snapshot(),
+                })
+            }
             Request::Session(id) => {
                 self.source.set_session(id);
                 None
@@ -366,6 +401,7 @@ where
     let (answers, inbox) = channel::<Reply>();
     let body: ThreadBody = Box::new(move || {
         let mut worker = make();
+        worker.attach(answers.clone());
         while let Ok(request) = requests.recv() {
             let Some(reply) = worker.answer(request) else {
                 continue;
@@ -441,9 +477,15 @@ impl Daemon {
         let rgx = source.rgx().map(str::to_string);
         let window = source.window();
         let lang = source.lang();
+        // The fallback is part of the description: the worker's source is
+        // built here from it, and the one index the fallback keeps lives
+        // in that source — one per launcher, searched in memory per key.
+        let fallback = source.fallback().clone();
         let (outbox, inbox, started) = spawn_worker(move || DaemonWorker {
-            source: DaemonSource::with_window(endpoint, rgx, window, lang),
+            source: DaemonSource::with_window(endpoint, rgx, window, lang)
+                .with_fallback(fallback),
             wake,
+            replies: None,
         });
         (Daemon { outbox, inbox }, started)
     }
@@ -579,6 +621,12 @@ struct State {
     /// its way does not start a second question, and the answer that
     /// comes back is the answer to the question that was asked.
     in_flight: bool,
+    /// What the local index is doing for the question in flight, when it
+    /// said so. Only meaningful while `in_flight`: the answer, a dropped
+    /// answer and a dead worker all clear it, so it can never outlive the
+    /// question it describes. It is not a timing: the meter keeps only the
+    /// query's own time.
+    index_phase: Option<Phase>,
     /// The question the launcher is on.
     ///
     /// The number goes up every time the query changes, and the answer
@@ -849,6 +897,7 @@ pub fn run(
         waiting: Waiting::Idle,
         ask_daemon: true,
         in_flight: false,
+        index_phase: None,
         generation: 0,
         retry: 0,
         rows_query: None,
@@ -1091,8 +1140,10 @@ fn on_key(state: &mut State, key: Key) -> Control {
     // the launcher's own settings. Measured on 2026-11-04: with the daemon
     // down, the `>` was refused like any other character, and the panel —
     // the one thing that needs no daemon — could not be reached.
-    if state.status.asked
-        && !state.status.connected
+    //
+    // A daemon that is not there but whose names are searched locally is
+    // not a missing answer: the keyboard stays open.
+    if state.status.daemon_missing()
         && adds_to_the_query(key)
         && !the_line_is_a_command(state, key)
     {
@@ -1796,12 +1847,40 @@ fn said_once(said: &mut Vec<String>, messages: &[String]) -> Option<Vec<String>>
 /// has moved on from is dropped, and the question that is on the screen
 /// is asked again on the next tick.
 fn apply_reply(state: &mut State) -> bool {
-    let Some(reply) = state.source.take() else {
-        return false;
-    };
+    // Every reply that is waiting, in order: a progress notice and the
+    // answer behind it can both be in the channel by the time the window
+    // wakes, and the notice must not hold the answer back a tick.
+    let mut applied = false;
+    while let Some(reply) = state.source.take() {
+        applied |= apply_one(state, reply);
+    }
+    applied
+}
+
+/// One reply, on the screen. See [`apply_reply`].
+fn apply_one(state: &mut State, reply: Reply) -> bool {
     match reply {
+        Reply::Progress(phase) => {
+            // Only the question that is in flight has a build to describe.
+            // A notice with nothing in flight is a leftover of a question
+            // that has already been settled or given up: it is dropped, and
+            // the line never says "Building" over an idle launcher. The
+            // generation is deliberately not compared: the scan is real
+            // work in progress even if the user has typed on since, and the
+            // answer behind it is still filtered by generation.
+            if !state.in_flight {
+                return false;
+            }
+            // The index work is over: the query runs next, and the line is
+            // the plain "Searching…" again.
+            state.index_phase = match phase {
+                Phase::Searching => None,
+                other => Some(other),
+            };
+        }
         Reply::Who { messages, status } => {
             state.in_flight = false;
+            state.index_phase = None;
             state.status = status;
             // The daemon answered: from here the retry is the launcher's
             // next question and not a try at a daemon that is not there.
@@ -1833,6 +1912,7 @@ fn apply_reply(state: &mut State) -> bool {
             status,
         } => {
             state.in_flight = false;
+            state.index_phase = None;
             if generation != state.generation {
                 // The answer is for a question the user has moved on
                 // from: it is dropped rather than shown as the answer
@@ -1934,6 +2014,7 @@ const RETRY_TICKS: u64 = 8;
 /// cannot tell from a frozen one.
 fn worker_gone(state: &mut State) -> Control {
     state.in_flight = false;
+    state.index_phase = None;
     state.waiting = Waiting::Idle;
     state.note = Some(Text::for_lang(state.lang).worker_died.to_string());
     paint(state)
@@ -2051,14 +2132,38 @@ fn status_line(state: &State) -> String {
         // user cannot tell from a frozen one.
         parts.push(words.menu_has_the_keyboard.to_string());
     }
-    if state.waiting != Waiting::Idle {
+    // The local index is being opened for the question in flight: the line
+    // says which work it is, first, in place of the generic "searching…".
+    // It stands while the window is up and the question is in flight, so a
+    // window hidden and reopened during the scan still says it. The query's
+    // badge is untouched: it is the answer's own time and appears once the
+    // answer is in.
+    let opening = state
+        .index_phase
+        .filter(|_| state.in_flight)
+        .map(|phase| match phase {
+            Phase::Preparing => words.local_preparing,
+            Phase::Building => words.local_building,
+            Phase::Searching => words.searching,
+        });
+    if let Some(opening) = opening {
+        parts.push(opening.to_string());
+    } else if state.waiting != Waiting::Idle {
         // The answer is on its way, and the line says so: a launcher that
         // is quiet while it waits is a launcher that looks stuck.
         parts.push(words.searching.to_string());
     }
-    if status.asked && !status.connected {
-        // The daemon was asked and it is not there. The line does not
-        // say that about a daemon nobody has asked about yet.
+    // How long the local index took to open, short and near the front where
+    // an edge-cut line keeps it; the long warning does not repeat it. It is
+    // the build or the cache read, never the query's time.
+    if let Some(label) = status.local.as_ref().and_then(|l| l.took_label.as_ref()) {
+        parts.push(label.clone());
+    }
+    if status.daemon_missing() {
+        // The daemon was asked and it is not there, and nothing answers in
+        // its place. The line does not say that about a daemon nobody has
+        // asked about yet, nor about a launcher whose names are searched
+        // locally: the notice under the field says where and how old.
         parts.push(rgy_launcher::text::no_daemon(state.lang).to_string());
     }
     // The count, the layer, the backend and the time belong to the
@@ -2238,6 +2343,7 @@ mod tests {
             waiting: Waiting::Idle,
             ask_daemon: false,
             in_flight: false,
+            index_phase: None,
             generation: 0,
             retry: 0,
             rows_query: None,
@@ -2775,6 +2881,299 @@ mod tests {
         let _ = handle(&mut state, Event::Tick);
         let _ = handle(&mut state, Event::Tick);
         assert!(view(&state).latency.is_empty());
+    }
+
+    /// A source whose replies the test queues by hand, in the order the
+    /// worker would send them, and that remembers how it was asked.
+    struct Scripted {
+        queue: Rc<RefCell<Vec<Reply>>>,
+        asked: Rc<RefCell<Vec<u64>>>,
+        who: Rc<Cell<u32>>,
+    }
+
+    impl WindowSource for Scripted {
+        fn set_session(&mut self, _id: u64) {}
+
+        fn ask_who(&mut self) -> bool {
+            self.who.set(self.who.get() + 1);
+            true
+        }
+
+        fn ask(&mut self, _query: &str, _limit: usize, generation: u64) -> bool {
+            self.asked.borrow_mut().push(generation);
+            true
+        }
+
+        fn take(&mut self) -> Option<Reply> {
+            let mut queue = self.queue.borrow_mut();
+            if queue.is_empty() {
+                None
+            } else {
+                Some(queue.remove(0))
+            }
+        }
+    }
+
+    type Queue = Rc<RefCell<Vec<Reply>>>;
+
+    /// A state fed by hand: the replies, the generations it asked for and
+    /// how many times the daemon was asked who it is.
+    fn scripted() -> (State, Queue, Rc<RefCell<Vec<u64>>>, Rc<Cell<u32>>) {
+        let (mut state, _) = recording();
+        let queue: Queue = Rc::new(RefCell::new(Vec::new()));
+        let asked = Rc::new(RefCell::new(Vec::new()));
+        let who = Rc::new(Cell::new(0));
+        state.source = Box::new(Scripted {
+            queue: Rc::clone(&queue),
+            asked: Rc::clone(&asked),
+            who: Rc::clone(&who),
+        });
+        (state, queue, asked, who)
+    }
+
+    /// The answer to the question of `generation`, with a query time.
+    fn search_reply(generation: u64, took_us: u64) -> Reply {
+        let status = Status {
+            took_us,
+            ..Status::default()
+        };
+        Reply::Search {
+            generation,
+            answer: answer_with("C:/a/notas.txt"),
+            status,
+        }
+    }
+
+    /// While the index is built the line says so, first and in the user's
+    /// language, and the query's own meter is not touched by it.
+    #[test]
+    fn the_line_says_the_index_is_being_built_and_the_meter_keeps_the_query() {
+        let (mut state, queue, _, _) = scripted();
+        let _ = on_key(&mut state, Key::Char('i'));
+        let _ = handle(&mut state, Event::Tick);
+        assert!(state.in_flight);
+        let line = status_line(&state);
+        assert!(line.contains("searching"), "{line}");
+
+        queue.borrow_mut().push(Reply::Progress(Phase::Preparing));
+        let _ = handle(&mut state, Event::Resize);
+        let line = status_line(&state);
+        assert!(line.starts_with("Preparing local index"), "{line}");
+        assert!(!line.contains("searching"), "{line}");
+
+        queue.borrow_mut().push(Reply::Progress(Phase::Building));
+        let _ = handle(&mut state, Event::Resize);
+        let line = status_line(&state);
+        assert!(line.starts_with("Building local index"), "{line}");
+        assert!(state.in_flight, "a notice is not an answer");
+        assert!(view(&state).latency.is_empty(), "no query has been timed yet");
+
+        state.lang = Lang::Portuguese;
+        assert!(
+            status_line(&state).starts_with("Construindo o índice local"),
+            "{}",
+            status_line(&state)
+        );
+        state.lang = Lang::English;
+
+        // The index work is over and the query runs: back to "searching…".
+        queue.borrow_mut().push(Reply::Progress(Phase::Searching));
+        let _ = handle(&mut state, Event::Resize);
+        assert_eq!(state.index_phase, None);
+        assert!(state.in_flight, "the query is still running");
+        let line = status_line(&state);
+        assert!(line.contains("searching"), "{line}");
+        assert!(!line.contains("local index"), "{line}");
+
+        // The short build fragment leads the answer's own parts, once.
+        state.in_flight = false;
+        state.status.local = Some(crate::local::LocalStatus {
+            scope: "home".to_string(),
+            snapshot: "index built, <1m old, 3 entries".to_string(),
+            entries: Some(3),
+            opened_in: Some(std::time::Duration::from_millis(42)),
+            took_label: Some("built in 42 ms".to_string()),
+            done: true,
+        });
+        let line = status_line(&state);
+        assert_eq!(line.matches("42 ms").count(), 1, "{line}");
+        state.in_flight = true;
+
+        // The answer: the line goes back to normal and the meter holds the
+        // query's time alone.
+        queue.borrow_mut().push(search_reply(state.generation, 1_000));
+        let _ = handle(&mut state, Event::Resize);
+        assert!(!state.in_flight);
+        assert_eq!(state.index_phase, None);
+        let line = status_line(&state);
+        assert!(!line.contains("local index"), "{line}");
+        assert_eq!(view(&state).latency.last_us, Some(1_000));
+        assert_eq!(state.app.results().len(), 1);
+    }
+
+    /// A notice with nothing in flight — a healthy daemon never sends one,
+    /// and one that arrives after its answer is a leftover — says nothing.
+    #[test]
+    fn a_progress_notice_with_no_question_in_flight_is_dropped() {
+        let (mut state, queue, _, _) = scripted();
+        queue.borrow_mut().push(Reply::Progress(Phase::Building));
+        assert!(!apply_reply(&mut state), "nothing was applied");
+        assert_eq!(state.index_phase, None);
+        assert!(!status_line(&state).contains("local index"));
+
+        // After the answer, a late notice is dropped too.
+        let _ = on_key(&mut state, Key::Char('i'));
+        let _ = handle(&mut state, Event::Tick);
+        queue.borrow_mut().push(search_reply(state.generation, 500));
+        let _ = handle(&mut state, Event::Resize);
+        queue.borrow_mut().push(Reply::Progress(Phase::Building));
+        let _ = handle(&mut state, Event::Resize);
+        assert_eq!(state.index_phase, None);
+        assert!(!status_line(&state).contains("local index"));
+    }
+
+    /// A question that is answered by the daemon (or by an open index) has
+    /// no notice in its replies: the line shows only "searching…".
+    #[test]
+    fn an_answer_with_no_notice_never_says_building() {
+        let (mut state, _) = recording();
+        let _ = on_key(&mut state, Key::Char('i'));
+        let _ = handle(&mut state, Event::Tick);
+        let line = status_line(&state);
+        assert!(line.contains("searching"), "{line}");
+        assert!(!line.contains("local index"), "{line}");
+        let _ = handle(&mut state, Event::Tick);
+        assert!(!status_line(&state).contains("local index"));
+    }
+
+    /// The answer of a question the user left is dropped, and takes the
+    /// notice with it; the question on the screen is asked again.
+    #[test]
+    fn a_stale_answer_clears_the_notice_and_the_new_question_is_asked() {
+        let (mut state, queue, asked, _) = scripted();
+        let _ = on_key(&mut state, Key::Char('i'));
+        let _ = handle(&mut state, Event::Tick);
+        let first = state.generation;
+        queue.borrow_mut().push(Reply::Progress(Phase::Building));
+        let _ = handle(&mut state, Event::Resize);
+
+        // The user types on while the scan runs: no second question, and
+        // the scan that is really running is still said.
+        let _ = on_key(&mut state, Key::Char('n'));
+        assert_eq!(asked.borrow().len(), 1);
+        assert!(status_line(&state).starts_with("Building local index"));
+
+        queue.borrow_mut().push(search_reply(first, 7_000));
+        let _ = handle(&mut state, Event::Resize);
+        assert!(!state.in_flight);
+        assert_eq!(state.index_phase, None);
+        assert!(state.app.results().is_empty(), "the stale rows are not shown");
+        assert!(view(&state).latency.is_empty(), "a stale time is not measured");
+        assert!(!status_line(&state).contains("local index"));
+
+        let _ = handle(&mut state, Event::Tick);
+        assert_eq!(*asked.borrow(), vec![first, state.generation]);
+    }
+
+    /// Hiding and reopening the window during the scan keeps the in-flight
+    /// question, says the build again, asks nothing new, and still applies
+    /// the answer.
+    #[test]
+    fn hiding_and_reopening_during_the_scan_keeps_the_notice_and_the_answer() {
+        let (mut state, queue, asked, who) = scripted();
+        let _ = handle(&mut state, Event::Show);
+        let _ = on_key(&mut state, Key::Char('i'));
+        let _ = handle(&mut state, Event::Tick);
+        queue.borrow_mut().push(Reply::Progress(Phase::Building));
+        let _ = handle(&mut state, Event::Resize);
+
+        let _ = handle(&mut state, Event::Toggle);
+        assert!(!state.app.is_visible());
+        assert!(state.in_flight, "the scan is still running");
+        let _ = handle(&mut state, Event::Toggle);
+        assert!(state.app.is_visible());
+        assert!(status_line(&state).starts_with("Building local index"));
+
+        // Nothing is asked while the first question is on its way: neither
+        // the query again (a second scan) nor the daemon's own question.
+        let _ = handle(&mut state, Event::Tick);
+        let _ = handle(&mut state, Event::Tick);
+        assert_eq!(asked.borrow().len(), 1);
+        assert_eq!(who.get(), 0);
+
+        queue.borrow_mut().push(search_reply(state.generation, 900));
+        let _ = handle(&mut state, Event::Resize);
+        assert!(!state.in_flight);
+        assert_eq!(state.app.results().len(), 1);
+        assert!(!status_line(&state).contains("local index"));
+    }
+
+    /// A worker that is dead leaves no notice behind.
+    #[test]
+    fn a_dead_worker_clears_the_notice() {
+        let (mut state, queue, _, _) = scripted();
+        let _ = on_key(&mut state, Key::Char('i'));
+        let _ = handle(&mut state, Event::Tick);
+        queue.borrow_mut().push(Reply::Progress(Phase::Building));
+        let _ = handle(&mut state, Event::Resize);
+        let _ = worker_gone(&mut state);
+        assert_eq!(state.index_phase, None);
+        assert!(!status_line(&state).contains("local index"));
+    }
+
+    /// The notice a worker sends from inside a slow question arrives on the
+    /// channel before the question's answer is ready.
+    #[test]
+    fn a_worker_notice_arrives_before_its_slow_answer() {
+        struct Building {
+            replies: Option<Sender<Reply>>,
+        }
+        impl Worker for Building {
+            fn attach(&mut self, replies: Sender<Reply>) {
+                self.replies = Some(replies);
+            }
+            fn answer(&mut self, request: Request) -> Option<Reply> {
+                let Request::Search { generation, .. } = request else {
+                    return None;
+                };
+                let replies = self.replies.as_ref().expect("the thread attached the channel");
+                replies.send(Reply::Progress(Phase::Building)).expect("the window is there");
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                Some(Reply::Search {
+                    generation,
+                    answer: Answer::empty(),
+                    status: Status::default(),
+                })
+            }
+        }
+
+        let mut daemon = Daemon::with_worker(|| Building { replies: None });
+        assert!(daemon.ask("i", LIMIT, 1));
+        let mut first = None;
+        for _ in 0..200 {
+            first = daemon.take();
+            if first.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            matches!(first, Some(Reply::Progress(Phase::Building))),
+            "the notice comes first"
+        );
+        assert!(daemon.take().is_none(), "the answer is still being made");
+        let mut second = None;
+        for _ in 0..600 {
+            second = daemon.take();
+            if second.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            matches!(second, Some(Reply::Search { generation: 1, .. })),
+            "the answer follows"
+        );
     }
 
     /// A keystroke does not wait for the daemon.

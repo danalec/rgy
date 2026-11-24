@@ -51,6 +51,14 @@ fn english() -> String {
          The launcher is a client: the index is in the daemon (searchd), and a\n\
          keystroke is a question sent down a pipe.\n\
          \n\
+         With no daemon at all (the pipe or socket is not there), the name\n\
+         search falls back to a local index of your home folder\n\
+         (USERPROFILE on Windows; the current folder only when there is no\n\
+         home), read from the cache or scanned once; the line under the\n\
+         field says so. A daemon that is slow, refuses, or answers badly is\n\
+         never replaced, and an explicit --endpoint never falls back. The\n\
+         content layer (grep:) still needs the daemon.\n\
+         \n\
          With --pick, the results go to a picker and the choice comes out on\n\
          stdout, one path per line — the same contract as --query.\n\
          \n\
@@ -103,6 +111,14 @@ fn portuguese() -> String {
          \n\
          O lançador é um cliente: o índice está no daemon (searchd), e uma\n\
          tecla é uma pergunta enviada por um pipe.\n\
+         \n\
+         Sem daemon nenhum (o pipe ou o socket não existe), a busca de nomes\n\
+         recorre a um índice local da sua pasta pessoal (USERPROFILE no\n\
+         Windows; a pasta atual só quando não há pasta pessoal), lido da\n\
+         cache ou varrido uma vez; a linha sob o campo diz isso. Um daemon\n\
+         lento, que recusa ou que responde mal nunca é substituído, e um\n\
+         --endpoint explícito nunca recorre ao índice local. A camada de\n\
+         conteúdo (grep:) continua a precisar do daemon.\n\
          \n\
          Com --pick, os resultados vão para um picker e a escolha sai na\n\
          stdout, um caminho por linha — o mesmo contrato de --query.\n\

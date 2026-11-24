@@ -28,6 +28,8 @@ mod daemon;
 // The language the launcher speaks: read once, at start-up, and handed
 // down to everything that has a word to say.
 mod lang;
+// The names, searched in this process when there is no daemon at all.
+mod local;
 // The memory of what the user used. The window is the only thing that
 // records a use; on a host with neither window the module is compiled —
 // and tested — with nothing calling it yet.
@@ -232,19 +234,36 @@ fn run(argv: &[String], lang: Lang) -> Result<ExitCode, String> {
             .ok_or_else(|| Text::for_lang(lang).daemon_address_unknown.to_string())?,
     };
     let rgx = tools::rgx();
+    let fallback = fallback_for(&options, local::default_root());
 
     if let Some(query) = &options.query {
         // The command line waits as long as the client always did.
-        let source = command_source(endpoint, rgx, lang);
+        let source = command_source(endpoint, rgx, lang).with_fallback(fallback);
         if options.pick {
             return pick(source, query, options.limit, &options, lang);
         }
         return one_shot(source, query, options.limit, lang);
     }
     if options.tui {
-        return run_tui(DaemonSource::new(endpoint, rgx, lang), None, lang);
+        return run_tui(
+            DaemonSource::new(endpoint, rgx, lang).with_fallback(fallback),
+            None,
+            lang,
+        );
     }
-    run_window(endpoint, rgx, &options, lang)
+    run_window(endpoint, rgx, fallback, &options, lang)
+}
+
+/// What the name layer does when the daemon is not there.
+///
+/// An explicit `--endpoint` is strict: the user named a daemon, and an
+/// answer from the home folder under that name would be the wrong tree
+/// said silently. Otherwise the names fall back to `root`, when there is one.
+fn fallback_for(options: &Options, root: Option<std::path::PathBuf>) -> local::Fallback {
+    match (&options.endpoint, root) {
+        (None, Some(root)) => local::Fallback::Local(root),
+        _ => local::Fallback::Strict,
+    }
 }
 
 /// The source for the command line.
@@ -605,10 +624,16 @@ fn wait_for_daemon(source: &mut DaemonSource, query: &str, limit: usize) -> Answ
         source.set_window(left.min(window));
         let answer = source.search(query, limit);
         source.set_window(window);
-        let connected = source.status().borrow().connected;
+        let (connected, local) = {
+            let status = source.status();
+            let status = status.borrow();
+            (status.connected, status.local_answered())
+        };
         // An answer is an answer, whatever produced it: the `rgx` fallback
-        // answers the content layer with the daemon away.
-        if connected || !answer.is_empty() || Instant::now() >= deadline {
+        // answers the content layer with the daemon away, and a settled
+        // local index answers the names — an empty answer included, which
+        // is "no match" and not "not ready" and ends the wait at once.
+        if connected || local || !answer.is_empty() || Instant::now() >= deadline {
             return answer;
         }
         std::thread::sleep(Duration::from_millis(100));
@@ -698,6 +723,7 @@ fn notices(source: &mut DaemonSource, reason: Option<&str>, terminal: bool) -> V
 fn run_window(
     endpoint: Endpoint,
     rgx: Option<String>,
+    fallback: local::Fallback,
     options: &Options,
     lang: Lang,
 ) -> Result<ExitCode, String> {
@@ -706,7 +732,7 @@ fn run_window(
     if !backend::session_available() {
         // No desktop: the terminal is the fallback, and it says so.
         return run_tui(
-            DaemonSource::new(endpoint, rgx, lang),
+            DaemonSource::new(endpoint, rgx, lang).with_fallback(fallback),
             Some(Text::for_lang(lang).no_graphical_screen),
             lang,
         );
@@ -760,7 +786,7 @@ fn run_window(
         (None, settings) => settings,
     };
     gui::run(
-        DaemonSource::new(endpoint, rgx, lang),
+        DaemonSource::new(endpoint, rgx, lang).with_fallback(fallback),
         options,
         &settings,
         settings_note,
@@ -780,11 +806,12 @@ fn run_window(
 fn run_window(
     endpoint: Endpoint,
     rgx: Option<String>,
+    fallback: local::Fallback,
     _options: &Options,
     lang: Lang,
 ) -> Result<ExitCode, String> {
     run_tui(
-        DaemonSource::new(endpoint, rgx, lang),
+        DaemonSource::new(endpoint, rgx, lang).with_fallback(fallback),
         Some(Text::for_lang(lang).no_window_backend),
         lang,
     )
@@ -1266,5 +1293,83 @@ mod tests {
             r"C:\Users\dana\notas.txt",
             "the path is the path: {text:?}"
         );
+    }
+
+    /// An explicit `--endpoint` is strict; the default falls back to a home.
+    #[test]
+    fn only_the_default_endpoint_may_fall_back() {
+        let home = Some(std::path::PathBuf::from("home"));
+        let default = Options::default();
+        assert_eq!(
+            fallback_for(&default, home.clone()),
+            local::Fallback::Local(std::path::PathBuf::from("home"))
+        );
+        let named = Options {
+            endpoint: Some("stdio".to_string()),
+            ..Options::default()
+        };
+        assert_eq!(fallback_for(&named, home), local::Fallback::Strict);
+        // No scope to search is no fallback.
+        assert_eq!(fallback_for(&default, None), local::Fallback::Strict);
+    }
+
+    /// A home with one file in it, and an endpoint nobody listens on.
+    fn a_home_and_no_daemon(tag: &str) -> (std::path::PathBuf, Endpoint) {
+        let base = std::env::temp_dir().join(format!("rgxy-main-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let home = base.join("home");
+        std::fs::create_dir_all(&home).expect("the folder is made");
+        std::fs::write(home.join("invoice-march.txt"), b"x").expect("a file");
+        #[cfg(windows)]
+        let endpoint = Endpoint::Pipe(format!("rgy-rgxy-main-{tag}-{}", std::process::id()));
+        #[cfg(not(windows))]
+        let endpoint = Endpoint::Socket(base.join("none.sock"));
+        (home, endpoint)
+    }
+
+    /// A local answer ends the wait at once, an empty one included.
+    ///
+    /// The wait is for a daemon that is still starting. A settled local
+    /// index is the answer, and "no match" is not "not ready": waiting out
+    /// the two seconds for it delays the exit status for nothing.
+    #[test]
+    fn a_local_answer_ends_the_wait_at_once() {
+        let (home, endpoint) = a_home_and_no_daemon("wait");
+        for (query, found) in [("invoice", true), ("zzzqqqxxx", false)] {
+            let mut source = DaemonSource::new(endpoint.clone(), None, Lang::English)
+                .with_fallback(local::Fallback::Local(home.clone()));
+            let started = Instant::now();
+            let answer = wait_for_daemon(&mut source, query, 10);
+            assert_eq!(!answer.is_empty(), found, "{query}: {:?}", answer.paths);
+            assert!(
+                started.elapsed() < DAEMON_WAIT,
+                "{query}: the wait ran out: {:?}",
+                started.elapsed()
+            );
+            assert!(source.status().borrow().local_answered());
+        }
+        let _ = std::fs::remove_dir_all(home.parent().unwrap());
+    }
+
+    /// A strict source still waits for a daemon that is not there.
+    #[test]
+    fn a_strict_source_still_waits_out_the_daemon() {
+        let (home, endpoint) = a_home_and_no_daemon("strict");
+        let mut source = DaemonSource::new(endpoint, None, Lang::English);
+        let started = Instant::now();
+        let answer = wait_for_daemon(&mut source, "invoice", 10);
+        assert!(answer.is_empty());
+        assert!(started.elapsed() >= DAEMON_WAIT, "{:?}", started.elapsed());
+        let _ = std::fs::remove_dir_all(home.parent().unwrap());
+    }
+
+    /// The help says what the fallback is, and what it is not.
+    #[test]
+    fn the_help_describes_the_local_fallback() {
+        let text = usage(Lang::English);
+        assert!(text.contains("local index of your home folder"), "{text}");
+        assert!(text.contains("never falls back"), "{text}");
+        let text = usage(Lang::Portuguese);
+        assert!(text.contains("índice local"), "{text}");
     }
 }

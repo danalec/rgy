@@ -35,6 +35,8 @@ use rgy_launcher::{Answer, Layer, Query, Source};
 use rgy_proto::client::Client;
 use rgy_proto::endpoint::Endpoint;
 
+use crate::local::{self, Fallback, Local, LocalStatus, Phase};
+
 /// How many names the content layer reads.
 ///
 /// The scope is a cap, not a promise: the content layer reads the files
@@ -105,6 +107,40 @@ pub struct Status {
     pub indexed: Option<usize>,
     /// How many results there are.
     pub matches: usize,
+    /// The local index that is answering the names in the daemon's place.
+    ///
+    /// `None` whenever the daemon is the one answering, or when nothing has
+    /// fallen back: the line that says "no connection to the daemon" is
+    /// only silent about a daemon that is missing when this says what is
+    /// searched instead.
+    pub local: Option<LocalStatus>,
+}
+
+impl Status {
+    /// Whether the daemon was asked, is not there, and nothing answers in
+    /// its place.
+    ///
+    /// The window refuses the keyboard and the line says "no connection to
+    /// the daemon" only then: a local index that answers is not a launcher
+    /// without an answer.
+    ///
+    /// Only the window reads it; the terminal has no keyboard gate.
+    #[cfg_attr(
+        not(any(windows, target_os = "linux", target_os = "freebsd")),
+        allow(dead_code)
+    )]
+    pub fn daemon_missing(&self) -> bool {
+        self.asked && !self.connected && self.local.is_none()
+    }
+
+    /// Whether the local index has given its answer, an empty one included.
+    ///
+    /// The one-shot's wait for a daemon that is still starting ends here: a
+    /// settled local answer is the answer, and waiting for a daemon that
+    /// may never come only delays it.
+    pub fn local_answered(&self) -> bool {
+        self.local.as_ref().is_some_and(|local| local.done)
+    }
 }
 
 /// Whether the daemon is there.
@@ -264,6 +300,21 @@ pub struct DaemonSource {
     /// The source says sentences — to the window and to the terminal — and
     /// a sentence is said in the language the user reads.
     lang: Lang,
+    /// What happens to the name layer when the daemon is gone.
+    fallback: Fallback,
+    /// The one local index of this source, opened on the first name
+    /// question that needs it and kept for the life of the source.
+    local: Option<Local>,
+    /// Whether the last failure proved the daemon is not there.
+    ///
+    /// Only a daemon that could not be **reached** is gone: slow, refusing
+    /// and badly answering daemons are up, and an index in this process
+    /// would answer over their heads.
+    daemon_gone: bool,
+    /// Told what the local index is doing before it blocks (the window's
+    /// worker uses it to say "Building local index…" while the scan runs).
+    /// Never called while the daemon answers, nor for an open index.
+    progress: Option<Box<dyn FnMut(Phase)>>,
 }
 
 impl DaemonSource {
@@ -299,7 +350,42 @@ impl DaemonSource {
             rgx,
             window,
             lang,
+            fallback: Fallback::Strict,
+            local: None,
+            daemon_gone: false,
+            progress: None,
         }
+    }
+
+    /// Where the local index says what it is about to do, or `None`.
+    #[cfg_attr(
+        not(any(windows, target_os = "linux", target_os = "freebsd", test)),
+        allow(dead_code)
+    )]
+    pub fn set_progress(&mut self, progress: Option<Box<dyn FnMut(Phase)>>) {
+        self.progress = progress;
+    }
+
+    /// The same source, with a fallback for the name layer.
+    ///
+    /// Sources are strict until told otherwise: a source built from an
+    /// explicit `--endpoint` must never answer from another tree.
+    pub fn with_fallback(mut self, fallback: Fallback) -> DaemonSource {
+        self.fallback = fallback;
+        self
+    }
+
+    /// What the launcher does when the daemon is not there.
+    ///
+    /// The window's worker builds a source of its own from the description
+    /// of this one, and the fallback is part of the description: a worker
+    /// that did not carry it would be strict whatever the command line said.
+    #[cfg_attr(
+        not(any(windows, target_os = "linux", target_os = "freebsd", test)),
+        allow(dead_code)
+    )]
+    pub fn fallback(&self) -> &Fallback {
+        &self.fallback
     }
 
     /// The language the launcher is speaking.
@@ -413,6 +499,10 @@ impl DaemonSource {
                 let mut st = self.status.borrow_mut();
                 st.asked = true;
                 st.connected = true;
+                // The daemon answers again: nothing is searched in its
+                // place any more.
+                st.local = None;
+                self.daemon_gone = false;
                 st.tv = status.tv;
                 // The count is the daemon's own: how many entries its
                 // index holds. The terminal's header shows it, and the
@@ -492,6 +582,10 @@ impl DaemonSource {
         } else {
             presence(e)
         };
+        // Proven gone is narrower than the sentence: a transport this
+        // platform cannot open is said as "no daemon", but it proves
+        // nothing about a daemon, so nothing falls back over it.
+        self.daemon_gone = presence == Presence::Gone && e.kind() != std::io::ErrorKind::Unsupported;
         let mut st = self.status.borrow_mut();
         st.asked = true;
         st.connected = presence != Presence::Gone;
@@ -515,9 +609,102 @@ impl DaemonSource {
     pub fn ask_the_daemon(&mut self) -> Vec<String> {
         if self.connect() {
             self.status.borrow().warnings.clone()
+        } else if self.may_fall_back().is_some() {
+            // The daemon is proven gone and the names are searched here:
+            // the sentence says where, and how old the index is. Nothing
+            // is scanned to say it. The warnings about the last local
+            // answer (a cut list, a filter that did not parse) are kept:
+            // the window asks again every second, and a notice that wiped
+            // them would take them off the line a moment after they came.
+            let kept: Vec<String> = {
+                let st = self.status.borrow();
+                if st.local.is_some() {
+                    st.warnings.iter().skip(1).cloned().collect()
+                } else {
+                    Vec::new()
+                }
+            };
+            let mut said: Vec<String> = self.announce_local(kept.clone()).into_iter().collect();
+            said.extend(kept);
+            said
         } else {
             vec![self.no_daemon_message()]
         }
+    }
+
+    /// Whether the names may be searched in this process now.
+    ///
+    /// Only when the daemon is **proven** gone, and only when the caller
+    /// allowed it: an explicit `--endpoint` is strict.
+    fn may_fall_back(&self) -> Option<std::path::PathBuf> {
+        match &self.fallback {
+            Fallback::Local(root) if self.daemon_gone => Some(root.clone()),
+            _ => None,
+        }
+    }
+
+    /// Say what is searched in the daemon's place, and return the sentence.
+    ///
+    /// `None` when nothing falls back. The sentence is the notice the
+    /// window and the terminal already show for a missing daemon, now
+    /// saying the scope and the snapshot; `extra` are the warnings about
+    /// the answer itself.
+    fn announce_local(&mut self, extra: Vec<String>) -> Option<String> {
+        let root = self.may_fall_back()?;
+        let local = self.local.get_or_insert_with(|| Local::new(&root));
+        let shown = local.status(self.lang);
+        let sentence = local::sentence(&self.endpoint.describe(), &shown, self.lang);
+        let mut st = self.status.borrow_mut();
+        st.asked = true;
+        st.connected = false;
+        st.indexed = shown.entries;
+        let mut warnings = vec![sentence.clone()];
+        warnings.extend(extra);
+        st.warnings = warnings;
+        st.local = Some(shown);
+        Some(sentence)
+    }
+
+    /// The names, from the index in this process.
+    ///
+    /// The index is opened by the first real question and never again: an
+    /// empty field is not a question and scans nothing. The content layer's
+    /// scope is **not** touched — a local name result is not a scope the
+    /// daemon chose.
+    fn local_names(&mut self, query: &str, limit: usize) -> Answer {
+        let Some(root) = self.may_fall_back() else {
+            return Answer::empty();
+        };
+        let asked = !query.trim().is_empty();
+        let ready = {
+            let local = self.local.get_or_insert_with(|| Local::new(&root));
+            let progress = &mut self.progress;
+            asked
+                && local.ensure_with(&mut |phase| {
+                    if let Some(say) = progress.as_mut() {
+                        say(phase);
+                    }
+                })
+        };
+        // The query's own time starts here: opening the index is the build,
+        // reported apart in the local status, and never in the meter.
+        let started = Instant::now();
+        let (answer, notes) = match (&self.local, ready) {
+            (Some(local), true) => local.answer(query, limit),
+            _ => (Answer::empty(), Vec::new()),
+        };
+        let took_us = started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+        // The screen is local now, and the content layer's scope is the
+        // daemon's alone.
+        self.last_scope.clear();
+        self.last = answer.clone();
+        self.announce_local(notes);
+        let mut st = self.status.borrow_mut();
+        st.took_us = took_us;
+        st.layer = Some(Layer::Names);
+        st.backend.clear();
+        st.matches = answer.len();
+        answer
     }
 
     /// The window, for the searches that follow.
@@ -560,6 +747,8 @@ impl DaemonSource {
             let mut st = self.status.borrow_mut();
             st.asked = true;
             st.connected = true;
+            st.local = None;
+            self.daemon_gone = false;
         }
         self.client.as_mut()
     }
@@ -577,6 +766,9 @@ impl DaemonSource {
     /// A daemon that answered badly cannot be a fact a connect knows: it
     /// never got to answer.
     fn report_connect_failure(&mut self, e: &std::io::Error) {
+        // Proven gone: the pipe or the socket is not there, or nobody is
+        // listening on it. Not a timeout, not a refusal, not a bad answer.
+        self.daemon_gone = presence(e) == Presence::Gone;
         let mut st = self.status.borrow_mut();
         st.asked = true;
         let slow = e.kind() == std::io::ErrorKind::TimedOut;
@@ -642,6 +834,7 @@ impl DaemonSource {
     /// last answer still belong to the line.
     fn fail(&mut self, failure: &Failure) {
         self.client = None;
+        self.daemon_gone = failure.presence == Presence::Gone;
         let mut st = self.status.borrow_mut();
         st.asked = true;
         // A daemon that answered badly is there: only the one that
@@ -727,7 +920,10 @@ impl DaemonSource {
         // stops answering for longer than the window it was given.
         let deadline = Instant::now() + window;
         let Some(client) = self.client_within(Some(deadline)) else {
-            return Answer::empty();
+            // The daemon could not be reached. Only a daemon proven gone
+            // hands the names to the local index; a slow or refusing one
+            // keeps the empty answer and its own sentence.
+            return self.local_names(query, limit);
         };
         match client.search_within(query, limit, left(deadline)) {
             Ok(outcome) => {
@@ -751,6 +947,7 @@ impl DaemonSource {
                     st.took_us = outcome.took_us;
                     st.layer = Some(Layer::Names);
                     st.matches = answer.len();
+                    st.local = None;
                 }
                 // The scope the fallback will use if the daemon goes away.
                 self.last_scope = answer.paths.clone();
@@ -762,7 +959,9 @@ impl DaemonSource {
                     Text::for_lang(self.lang).name_search_failed,
                     &e,
                 ));
-                Answer::empty()
+                // A daemon that went away in the middle of the question is
+                // gone (`fail` says so); one that answered badly is not.
+                self.local_names(query, limit)
             }
         }
     }
@@ -2311,5 +2510,260 @@ mod tests {
             st.warnings
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- the local name fallback ------------------------------------------
+
+    /// An endpoint nobody listens on: the daemon is proven gone.
+    fn gone_endpoint() -> Endpoint {
+        #[cfg(windows)]
+        let endpoint = Endpoint::Pipe(unique());
+        #[cfg(not(windows))]
+        let endpoint = Endpoint::Socket(std::env::temp_dir().join(format!("{}.sock", unique())));
+        endpoint
+    }
+
+    /// A folder standing in for the user's home.
+    fn a_home(tag: &str) -> std::path::PathBuf {
+        let base = std::env::temp_dir().join(format!("{}-{tag}", unique()));
+        let _ = std::fs::remove_dir_all(&base);
+        let home = base.join("home");
+        std::fs::create_dir_all(home.join("docs")).expect("the folder is made");
+        std::fs::write(home.join("docs").join("invoice-march.txt"), b"x").expect("a file");
+        home
+    }
+
+    fn local_source(endpoint: Endpoint, home: &std::path::Path) -> DaemonSource {
+        DaemonSource::new(endpoint, None, Lang::English)
+            .with_fallback(Fallback::Local(home.to_path_buf()))
+    }
+
+    /// With no daemon at all the names are found in the user's folder, and
+    /// the line says where, instead of "no connection to the daemon".
+    #[test]
+    fn with_no_daemon_the_names_are_found_in_the_local_scope() {
+        let home = a_home("hit");
+        let mut source = local_source(gone_endpoint(), &home);
+        let answer = source.search("invoice", 10);
+        assert_eq!(answer.paths.len(), 1, "{:?}", answer.paths);
+        assert!(answer.paths[0].ends_with("invoice-march.txt"), "{:?}", answer.paths);
+        let st = source.snapshot();
+        assert!(!st.connected, "the daemon is still not there");
+        assert!(!st.daemon_missing(), "something answers in its place");
+        assert!(st.local_answered());
+        assert_eq!(st.layer, Some(Layer::Names));
+        assert_eq!(st.matches, 1);
+        // docs and invoice-march.txt: the root is not an entry.
+        assert_eq!(st.indexed, Some(2), "{:?}", st.indexed);
+        let said = st.warnings.join(" | ");
+        assert!(said.contains("names are searched locally ("), "{said}");
+        assert!(said.contains("index built,"), "{said}");
+        assert!(!said.contains(" ms"), "the duration is the status fragment's: {said}");
+        assert!(said.contains("content search needs the daemon"), "{said}");
+        // The build time is its own figure; the query's time is the answer's.
+        let opened = st.local.as_ref().and_then(|l| l.opened_in);
+        assert!(opened.is_some(), "{:?}", st.local);
+        // A local name result is not a scope the daemon chose.
+        assert!(source.last_scope.is_empty(), "{:?}", source.last_scope);
+        let _ = std::fs::remove_dir_all(home.parent().unwrap());
+    }
+
+    /// No hit is an answer of a settled index, and says so; it is not "no
+    /// daemon" and it ends the one-shot's wait.
+    #[test]
+    fn with_no_daemon_a_name_that_is_not_there_is_no_match_and_not_no_daemon() {
+        let home = a_home("miss");
+        let mut source = local_source(gone_endpoint(), &home);
+        let answer = source.search("zzzqqqxxx", 10);
+        assert!(answer.is_empty());
+        let st = source.snapshot();
+        assert!(st.local_answered(), "an empty answer of a settled index");
+        assert!(!st.daemon_missing());
+        assert_eq!(st.matches, 0);
+        assert!(st.warnings[0].contains("names are searched locally ("), "{:?}", st.warnings);
+        let _ = std::fs::remove_dir_all(home.parent().unwrap());
+    }
+
+    /// The Portuguese sentence is the same fact in the user's language.
+    #[test]
+    fn the_local_scope_is_said_in_portuguese_too() {
+        let home = a_home("pt");
+        let mut source = DaemonSource::new(gone_endpoint(), None, Lang::Portuguese)
+            .with_fallback(Fallback::Local(home.clone()));
+        let _ = source.search("invoice", 10);
+        let said = source.snapshot().warnings.join(" | ");
+        assert!(said.contains("buscados localmente ("), "{said}");
+        assert!(said.contains("índice construído,"), "{said}");
+        let _ = std::fs::remove_dir_all(home.parent().unwrap());
+    }
+
+    /// The local index says what it is doing, once, before it blocks; the
+    /// daemon that answers never makes it say anything.
+    #[test]
+    fn the_scan_is_announced_once_and_a_healthy_daemon_announces_nothing() {
+        let phases = Rc::new(RefCell::new(Vec::new()));
+        let sink = |p: &Rc<RefCell<Vec<Phase>>>| {
+            let p = Rc::clone(p);
+            Some(Box::new(move |phase: Phase| p.borrow_mut().push(phase)) as Box<dyn FnMut(Phase)>)
+        };
+
+        let home = a_home("progress");
+        let mut source = local_source(gone_endpoint(), &home);
+        source.set_progress(sink(&phases));
+        assert_eq!(source.search("invoice", 10).len(), 1);
+        assert_eq!(
+            *phases.borrow(),
+            vec![Phase::Preparing, Phase::Building, Phase::Searching]
+        );
+        // The index is open: the next keystroke announces nothing.
+        phases.borrow_mut().clear();
+        assert_eq!(source.search("invoice", 10).len(), 1);
+        assert!(phases.borrow().is_empty(), "{:?}", phases.borrow());
+        // The query's time is the search's own and is still reported.
+        assert_eq!(source.snapshot().layer, Some(Layer::Names));
+        let _ = std::fs::remove_dir_all(home.parent().unwrap());
+
+        let home = a_home("progress-daemon");
+        let daemon = serve(answers_with_no_names);
+        let mut source = local_source(daemon.endpoint.clone(), &home);
+        source.set_progress(sink(&phases));
+        phases.borrow_mut().clear();
+        let _ = source.search("invoice", 10);
+        assert!(phases.borrow().is_empty(), "a healthy daemon: {:?}", phases.borrow());
+        drop(source);
+        daemon.join();
+        let _ = std::fs::remove_dir_all(home.parent().unwrap());
+    }
+
+    /// One index per source, opened by the first real question: an empty
+    /// field, the notice and a second keystroke never scan again.
+    #[test]
+    fn the_local_index_is_opened_by_the_first_question_and_kept() {
+        let home = a_home("once");
+        let mut source = local_source(gone_endpoint(), &home);
+        // The notice names the scope and scans nothing.
+        let notice = source.ask_the_daemon();
+        assert_eq!(notice.len(), 1, "{notice:?}");
+        assert!(notice[0].contains("not scanned yet"), "{notice:?}");
+        assert!(!source.local.as_ref().is_some_and(Local::is_open));
+        // An empty field is not a question.
+        assert!(source.search("", 10).is_empty());
+        assert!(!source.local.as_ref().is_some_and(Local::is_open));
+        // The first name question opens it, the next ones reuse it.
+        assert_eq!(source.search("invoice", 10).len(), 1);
+        assert!(source.local.as_ref().is_some_and(Local::is_open));
+        std::fs::write(home.join("invoice-april.txt"), b"x").expect("a file");
+        assert_eq!(
+            source.search("invoice", 10).len(),
+            1,
+            "the snapshot is kept, not scanned per keystroke"
+        );
+        let _ = std::fs::remove_dir_all(home.parent().unwrap());
+    }
+
+    /// An explicit `--endpoint` is strict: nothing is searched in its place.
+    #[test]
+    fn a_strict_source_never_falls_back() {
+        let home = a_home("strict");
+        let mut source = DaemonSource::new(gone_endpoint(), None, Lang::English);
+        assert_eq!(source.fallback(), &Fallback::Strict);
+        assert!(source.search("invoice", 10).is_empty());
+        let st = source.snapshot();
+        assert!(st.local.is_none());
+        assert!(source.local.is_none(), "no index was even made");
+        assert!(st.daemon_missing());
+        assert!(
+            st.warnings.iter().any(|w| w.contains("no connection to the daemon")),
+            "{:?}",
+            st.warnings
+        );
+        assert_eq!(source.ask_the_daemon(), vec![source.no_daemon_message()]);
+        let _ = std::fs::remove_dir_all(home.parent().unwrap());
+    }
+
+    /// A daemon that is there is asked, and its answer is the answer — an
+    /// empty one included.
+    #[test]
+    fn a_daemon_that_is_there_is_preferred_even_when_it_answers_nothing() {
+        let home = a_home("prefer");
+        let daemon = serve(answers_with_no_names);
+        let mut source = local_source(daemon.endpoint.clone(), &home);
+        let answer = source.search("invoice", 10);
+        assert!(answer.is_empty(), "the daemon's empty answer is the answer");
+        let st = source.snapshot();
+        assert!(st.connected);
+        assert!(st.local.is_none());
+        assert!(source.local.is_none(), "the local index was never made");
+        drop(source);
+        daemon.join();
+
+        let daemon = serve(move |peer| {
+            records_the_requests(peer, std::sync::Arc::new(std::sync::Mutex::new(Vec::new())))
+        });
+        let mut source = local_source(daemon.endpoint.clone(), &home);
+        let answer = source.search("invoice", 10);
+        assert_eq!(answer.paths, vec!["/a/notes.txt".to_string()]);
+        assert!(source.local.is_none());
+        drop(source);
+        daemon.join();
+        let _ = std::fs::remove_dir_all(home.parent().unwrap());
+    }
+
+    /// A daemon that is slow, or that answers badly, is up: nothing falls
+    /// back over it.
+    #[test]
+    fn a_slow_or_badly_answering_daemon_is_not_replaced() {
+        let home = a_home("up");
+        for script in [says_nothing as fn(Peer), says_an_error as fn(Peer)] {
+            let daemon = serve(script);
+            let mut source = DaemonSource::with_window(
+                daemon.endpoint.clone(),
+                None,
+                std::time::Duration::from_millis(300),
+                Lang::English,
+            )
+            .with_fallback(Fallback::Local(home.clone()));
+            assert!(source.search("invoice", 10).is_empty());
+            let st = source.snapshot();
+            assert!(st.connected, "the daemon is there");
+            assert!(st.local.is_none(), "{:?}", st.local);
+            assert!(source.local.is_none(), "no local index was made");
+            drop(source);
+            daemon.join();
+        }
+        let _ = std::fs::remove_dir_all(home.parent().unwrap());
+    }
+
+    /// The daemon comes back: it is asked again and the local notice goes.
+    #[test]
+    fn the_daemon_that_comes_back_replaces_the_local_notice() {
+        let home = a_home("back");
+        let mut source = local_source(gone_endpoint(), &home);
+        let _ = source.search("invoice", 10);
+        assert!(source.snapshot().local.is_some());
+        // The same source, pointed at a daemon that is there.
+        let daemon = serve(answers_with_no_names);
+        source.endpoint = daemon.endpoint.clone();
+        assert!(source.search("invoice", 10).is_empty());
+        let st = source.snapshot();
+        assert!(st.connected);
+        assert!(st.local.is_none());
+        drop(source);
+        daemon.join();
+        let _ = std::fs::remove_dir_all(home.parent().unwrap());
+    }
+
+    /// The content layer is not given the local names as a scope.
+    #[test]
+    fn the_content_layer_does_not_take_the_local_names_as_its_scope() {
+        let home = a_home("scope");
+        let mut source = local_source(gone_endpoint(), &home);
+        assert_eq!(source.search("invoice", 10).len(), 1);
+        let answer = source.search("invoice grep:x", 10);
+        assert!(answer.is_empty(), "the content layer needs the daemon");
+        let st = source.snapshot();
+        assert_eq!(st.layer, Some(Layer::Content));
+        assert!(st.backend.is_empty(), "{:?}", st.backend);
+        let _ = std::fs::remove_dir_all(home.parent().unwrap());
     }
 }
