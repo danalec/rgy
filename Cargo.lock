@@ -368,10 +368,13 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 name = "rgxy"
 version = "0.1.10"
 dependencies = [
+ "rgy-discovery",
+ "rgy-discovery-dispatch",
  "rgy-engine",
  "rgy-launcher",
  "rgy-launcher-windows",
  "rgy-launcher-x11",
+ "rgy-name-core",
  "rgy-pick",
  "rgy-proto",
  "rgy-search-ui",

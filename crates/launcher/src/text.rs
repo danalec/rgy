@@ -126,7 +126,30 @@ vocabulary! {
     daemon_slow => "the daemon did not answer in time: {e}", "o daemon não respondeu a tempo: {e}";
     daemon_bad => "the daemon answered badly: {e}", "o daemon respondeu mal: {e}";
     no_daemon_in => "no daemon in {}; {}", "sem daemon em {}; {}";
-    tree_not_followed => "the tree is no longer followed by the daemon",
+    // The local fallback: with no daemon at all, the names are searched in an
+    // index of the user's own folder, and the line says where and how old.
+    // The words that matter come first and the folder last: a long path must
+    // not push the state of the index off a line that is cut at the edge.
+    local_names_in => "names are searched locally ({}); content search needs the daemon; scope: {}",
+        "os nomes são buscados localmente ({}); a busca de conteúdo precisa do daemon; escopo: {}";
+    // {} = its age, {} = entries. The duration is not here: the window says it
+    // once, up front, in the short fragments below.
+    local_cached => "index read from disk, {} old, {} entries",
+        "índice lido do disco, com {}, {} entradas";
+    // {} = age, {} = entries.
+    local_scanned => "index built, {} old, {} entries",
+        "índice construído, com {}, {} entradas";
+    // The short status fragments, near the front of the window's line.
+    // {} = how long the build / the cache read took (never the query's time).
+    local_built_short => "built in {}", "construído em {}";
+    local_read_short => "cache read in {}", "cache lido em {}";
+    // What the line says while the first search is not answered yet.
+    local_preparing => "Preparing local index…", "Preparando o índice local…";
+    local_building => "Building local index…", "Construindo o índice local…";
+    local_unread => "not scanned yet: the first search builds it",
+        "ainda não varrido: a primeira busca constrói-o";
+    local_scan_failed => "the scan failed: {}", "a varredura falhou: {}";
+    tree_not_followed =>"the tree is no longer followed by the daemon",
         "a árvore já não é seguida pelo daemon";
     tree_never_followed => "the daemon does not follow this tree: the index is a snapshot",
         "o daemon não segue esta árvore: o índice é uma fotografia";
