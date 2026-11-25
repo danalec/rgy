@@ -6,8 +6,9 @@ Homebrew package for the `rgy` binaries. The package is named `rgy-search`
 because `rgy` is taken on crates.io; the binaries keep the names they have
 everywhere else (`searchctl`, `searchd`, `rgy-autostart`, `rgxy`). The formula
 names the 0.1.10.4 macOS archives by `url` and pins their `sha256`
-digests — placeholders until `scripts/publish-release.sh` rewrites them
-from the combined SHA256SUMS of the CI release run.
+digests: the placeholders until `scripts/publish-release.sh` rewrites them
+from the combined SHA256SUMS of the CI release run, and the real digests
+afterwards.
 
 ## Interface
 - `RgySearch` (`< Formula`) — the formula class, carrying `desc`, `homepage`,
@@ -23,10 +24,11 @@ from the combined SHA256SUMS of the CI release run.
 ## Invariants
 - The formula is named `rgy-search`, not `rgy`, and its version is pinned to
   `"0.1.10.4"` — `[rgy-search.rb:RgySearch]`, `[rgy-search.rb:version]`.
-- The `sha256` values are the all-zero placeholders until the publish step
-  rewrites them from the combined SHA256SUMS in `.dist/`: a digest of an
-  archive this release does not carry yet would refuse every download —
-  `[rgy-search.rb:sha256]`.
+- The `sha256` values carry the digests of the two macOS archives this
+  release ships, and the publish step rewrites them from the combined
+  SHA256SUMS in `.dist/`; before the release is cut they are the all-zero
+  placeholders, because a digest of an archive this release does not carry
+  yet would refuse every download — `[rgy-search.rb:sha256]`.
 - `rgy` is installed as a symlink to `searchctl`, not a copy —
   `[rgy-search.rb:install]`.
 - The formula declares `license "Apache-2.0"` and carries an
