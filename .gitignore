@@ -1,0 +1,96 @@
+# Build outputs.
+/target/
+/.dist/
+/.cache/
+
+# Generated corpora, downloaded tool bundles, reference checkouts, pack stores.
+/tests/golden/
+/tests/.rgx-*/
+/benchmark/target/
+/benchmark/ripgrep-15/
+/benchmark/.rgx-*/
+/benchmark/tv/
+/benchmark/diffrig/.rg*.err
+/benchmark/diffrig/in.txt
+/benchmark/diffrig/t1.txt
+/benchmark/diffrig/t2.txt
+**/.rgx-tv/
+
+# Logs and editor leftovers.
+*.log
+*.bak
+*.ugi
+.vscode/
+.idea/
+
+# Agent harnesses: their own directories, their own instruction files, their
+# own scratch. They are tools, not the project.
+.claude/
+.codex/
+.qwen/
+.zcode/
+.kimi/
+.cursor/
+.gemini/
+.serena/
+.cline/
+.agent/
+.agents/
+.memory/
+.opencode/
+.openclaw/
+.antigravity/
+.aider/
+.aider.conf.yml
+.aiderignore
+.continue/
+.clinerules
+.roo/
+.roorules
+.windsurf/
+.windsurfrules
+CLAUDE.md
+GEMINI.md
+.mcp.json
+mcp.json
+
+# Python bytecode.
+__pycache__/
+*.pyc
+*.py[cod]
+
+# Agent scratch: the decisions these record belong in the code they describe.
+/.remember/
+/.egm/*
+!/.egm/*_DRIFT_REPORT.md
+!/.egm/DRIFT_STATUS.md
+!/.egm/CONTRACTS.index
+!/.egm/PAIRS.md
+/.dev/
+/docs/designs/
+/build/
+/.worktrees/
+
+# The EGM.md contracts are tracked: a fresh CI checkout must hold the same
+# inputs as a working tree, and the contract gate reads them. Only the
+# contracts inside the vendored upstream trees stay out -- AGENTS.md §1
+# leaves those trees to the sync, and a tracked EGM.md there would be a
+# fork that the next sync deletes. The checker's config check fails if a
+# bare EGM.md rule comes back and empties CI again.
+crates/rgx-*/**/EGM.md
+crates/rar-codec/**/EGM.md
+
+# The working notes of this repository: the owner's and the agent's own file,
+# on the machine, out of the tree and out of every upload.
+/AGENTS.md
+
+# Prototypal release scripts: a PGO build is two cargo runs and a profile merge.
+pgo.sh
+pgo.ps1
+# The WiX tool's extension cache and the MSI build output: both are machine
+# local and must never be committed. The CI installs the extension itself.
+.wix/
+.dist/stage-msi-*/
+.dist/*.msi
+.dist/*.msi.sha256
+.dist/msi-artifact/

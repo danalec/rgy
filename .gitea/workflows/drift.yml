@@ -1,0 +1,114 @@
+# The drift check: has the vendored code fallen behind their upstream?
+#
+# It lives here and not in .github/workflows/ci.yml because of where the
+# upstream is. rgx is on the LAN, on the forgejo, and a runner that cannot
+# reach the forgejo cannot clone it. A drift check that could not reach the
+# upstream would fail on every push, and a check that fails on every push
+# teaches everybody to ignore it.
+#
+# Gitea reads .gitea/workflows/; GitHub reads .github/workflows/ and never
+# sees this file. So this job waits for a runner on the LAN, and the
+# GitHub workflow is unaffected.
+#
+# What this file cannot provide is the runner itself. Register a
+# self-hosted runner on the forgejo and this runs; the runner needs the
+# forgejo's git credential for the upstream in its own credential store --
+# the way a developer's machine has it -- so the clone below is not a
+# prompt waiting for a keypress.
+#
+# The vendoring rules are checked in .github/workflows/ci.yml, which Gitea
+# reads as well: they need nothing but the tree, so they gate everywhere.
+#
+# This workflow runs on a push to main and on nothing else. The job below
+# says why -- it is the one that has to answer for the runner's
+# credential.
+name: drift
+
+on:
+  push:
+    branches: [main]
+
+# The same directives the GitHub workflow carries, for the same reasons:
+# the baseline is a read-only token, and nothing here writes to the
+# repository.
+permissions:
+  contents: read
+
+# A push supersedes the run it replaces, and the run it replaces is
+# minutes of the owner's LAN.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  drift:
+    name: the vendored trees have not fallen behind their upstream
+    # No pull request reaches this job, and the reason is not a gate
+    # written in this file: a pull request runs this workflow from the
+    # pull request's own merge commit, so the check that would keep it
+    # out would have to live in the file the pull request controls -- and
+    # a stranger's fork can edit that check away. A defence that can be
+    # edited away is not a defence.
+    #
+    # What is on the other side of that gate is not a token but a
+    # machine: this job runs the tree's own scripts/check-drift.sh on the
+    # owner's LAN runner, and that runner holds the forgejo credential
+    # for the upstream in its own credential store. A fork that reached
+    # it would put a fork's code and a fork's script on a runner that can
+    # reach the upstream.
+    #
+    # So the design is that no pull request reaches the job at all: the
+    # only trigger is a push to main.
+    #
+    # What is lost: the drift check no longer runs on pull requests. That
+    # is the right trade -- the upstream is on the LAN, and the question
+    # the check answers is "has the vendored tree fallen behind", which
+    # is a question about the merged tree. The alternative, running it on
+    # a stranger's branch, would put a fork's code and a fork's script on
+    # a credentialed runner to answer a question about a branch nobody
+    # merged.
+    #
+    # The LAN runner. This job needs the upstream, and the upstream is on
+    # the forgejo, on the LAN.
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The checkout's token is not used by anything here: the upstream
+          # is cloned with the runner's own credential, in the step below.
+          # A token left in the checkout is a token a later step can read.
+          persist-credentials: false
+      - name: the upstream, and the drift against it
+        run: |
+          set -eu
+          # The upstream's URL. The forgejo that hosts rgx is on the LAN, and
+          # its address is not in this repository: a public repository that
+          # names somebody's private network is a map of that network. The
+          # upstream lives on the same forgejo as this repository, so the URL
+          # is derived from where this checkout came from -- and a runner
+          # that wants another upstream sets RGX_UPSTREAM_URL in its own
+          # environment, and that wins.
+          upstream_url="${RGX_UPSTREAM_URL:-}"
+          if [ -z "$upstream_url" ]; then
+            origin="$(git remote get-url origin 2>/dev/null || true)"
+            case "${origin##*/}" in
+              rgy.git|rgy) upstream_url="${origin%/*}/rgx.git" ;;
+              *)
+                echo "cannot derive the upstream URL from origin '$origin'" >&2
+                echo "set RGX_UPSTREAM_URL in the runner's environment" >&2
+                exit 1
+                ;;
+            esac
+          fi
+          echo "upstream: $upstream_url"
+          # No terminal prompt: a missing credential has to fail here, with
+          # git's own message, and not hang the job waiting for a keypress.
+          export GIT_TERMINAL_PROMPT=0
+          upstream="${RUNNER_TEMP:-/tmp}/rgx-upstream"
+          rm -rf "$upstream"
+          # The full history, not a shallow one: the check asks what upstream
+          # did since the pin, and a shallow clone has no answer to that.
+          git clone "$upstream_url" "$upstream"
+          git -C "$upstream" log --oneline -1
+          bash scripts/check-drift.sh --upstream "$upstream"

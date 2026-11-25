@@ -1,0 +1,12 @@
+--- a/crates/rgx-adapters-archive/README.md
++++ b/crates/rgx-adapters-archive/README.md
+@@ -103,7 +103,8 @@
+ ## Feature flags
+ 
+ - `std` (default) — pulls in `rar-codec/std`; the `decompress` feature is
+-  the one that pulls in `zstd`.
++  the one that pulls in `rgx-core/zstd`, the decoder that lives in
++  rgx-core. No crate of its own: the frames are read by rgx's own code.
+ - `isa-huffman` — routes the vendored 7z deflate encoder through a
+   wrapper over this crate's own encoder. rgx searches inside compressed
+   archives; it does not write them.

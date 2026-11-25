@@ -1,0 +1,56 @@
+--- a/crates/rgx-core/src/tv_runtime/builder.rs
++++ b/crates/rgx-core/src/tv_runtime/builder.rs
+@@ -13,13 +13,12 @@
+ use alloc::format;
+ use alloc::string::{String, ToString};
+ use alloc::vec::Vec;
+-use ignore::overrides::OverrideBuilder;
+-use ignore::{Walk, WalkBuilder};
+ use std::eprintln;
+ 
+ use crate::compress::crc32::crc32;
+ 
+ use super::format::{FileRecord, Manifest, PackHeader, PackRecord, DEFAULT_PACK_SIZE};
++use super::walk::{OverrideBuilder, Walk, WalkBuilder};
+ 
+ /// Configuration options for building aggregated packs.
+ #[derive(Debug, Clone)]
+@@ -27,19 +26,24 @@
+     pub target_pack_size: u64,
+     pub follow_symlinks: bool,
+     /// Search hidden files, which is what rgx's `--hidden` means. The
+-    /// opposite of `ignore::WalkBuilder::hidden`, which reads `true` as
++    /// opposite of what the walker calls `hidden`, which reads `true` as
+     /// "skip them" -- the walkers translate.
+     pub hidden: bool,
+     pub gitignore: bool,
+     /// `--no-ignore` reaches the ignore files of the directories ABOVE the
+-    /// search root, which `ignore` honours by default. rgx's direct walker
+-    /// binds both to the same flag, so the store has to as well.
++    /// search root, which the walker honours by default. rgx's direct
++    /// walker binds both to the same flag, so the store has to as well.
+     pub parents: bool,
+     /// `--max-depth`. The direct walker applies it; a build that did not
+     /// would ingest the whole tree under a flag that says otherwise.
+     pub max_depth: Option<usize>,
+-    /// `-g` globs, gitignore-style: a pattern that does not start with `!`
+-    /// excludes, and one that does is a whitelist.
++    /// `-g` globs, the way the pack store reads them: a pattern that does
++    /// not start with `!` is a whitelist -- only the files it matches are
++    /// in the corpus -- and one that does start with `!` excludes.
++    ///
++    /// The polarity is the opposite of what "gitignore-style" suggests,
++    /// and it is deliberate: an override says what to keep, so a pattern
++    /// that does not negate keeps, and one that does negate drops.
+     pub globs: Vec<String>,
+     /// Compact the store after a successful update, reclaiming the payloads
+     /// that append-only updates supersede.
+@@ -155,7 +159,7 @@
+     });
+ 
+     if !config.globs.is_empty() {
+-        let mut ob = OverrideBuilder::new(".");
++        let mut ob = OverrideBuilder::new(Path::new("."));
+         for g in &config.globs {
+             ob.add(g).map_err(|e| {
+                 io::Error::new(

@@ -1,0 +1,59 @@
+[package]
+name = "rgy-discovery-dispatch"
+version = "0.1.10"
+edition = "2024"
+rust-version = "1.89"
+authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
+description = "The Source selector: the native walk per platform by cfg, the portable walk elsewhere"
+license = "Apache-2.0"
+repository = "https://github.com/danalec/rgy"
+homepage = "https://github.com/danalec/rgy"
+documentation = "https://docs.rs/rgy-discovery-dispatch"
+keywords = ["filesystem", "search", "dispatch"]
+categories = ["filesystem"]
+readme = "../../README.md"
+
+# The EGM.md contracts are tracked working documents, not source. A
+# tracked file under this crate would otherwise be carried into the
+# published crate by cargo package (see tests/egm_packaging.rs).
+exclude = ["**/EGM.md"]
+
+[features]
+default = ["std"]
+# The threads the parallel walk fans out over, and the environment
+# (`ERS_USE_RECORDS`, on Windows). The portable walk itself needs no
+# `std`: it asks the operating system directly, so the fallback exists
+# in every build.
+std = ["rgy-discovery/std", "rgy-discovery-macos/std"]
+
+[dependencies]
+rgy-discovery = { path = "../discovery", version = "0.1.10", default-features = false }
+# The catch-up rule answers with the wire value the status response carries
+# (`replayed` / `relisted`), so the rule and the spelling cannot drift.
+#
+# The default features are off, and that is the point: what this crate
+# takes from the protocol is the wire value, and the protocol's own
+# `std` half is the sockets and the environment — the machine. A crate
+# that is in the bare-metal gate cannot pull the machine in through a
+# side door, and this dependency is that side door.
+rgy-proto = { path = "../proto", version = "0.1.10", default-features = false }
+
+# The platform walks, pulled in per-target so `source_for` can build the
+# native one on its own OS. Every crate is empty off-target.
+#
+# The default features are off, and that is the point: none of these crates
+# has a feature today, so the flag changes nothing -- and that is why it has
+# to be written down. A backend that grows a `default = ["std"]` would
+# otherwise pull the machine into this crate through a side door, and the
+# bare-metal gate would only find out when it stopped building.
+[target.'cfg(windows)'.dependencies]
+rgy-discovery-windows = { path = "../discovery-windows", version = "0.1.10", default-features = false }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rgy-discovery-linux = { path = "../discovery-linux", version = "0.1.10", default-features = false }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+rgy-discovery-macos = { path = "../discovery-macos", version = "0.1.10", default-features = false }
+
+[target.'cfg(target_os = "freebsd")'.dependencies]
+rgy-discovery-freebsd = { path = "../discovery-freebsd", version = "0.1.10", default-features = false }

@@ -1,0 +1,158 @@
+QUERY "config"
+/Documents/configuration.txt
+/node_modules/config.json
+COUNT 2
+QUERY "'config.json"
+/node_modules/config.json
+COUNT 1
+QUERY "^rep"
+/Archive/report_2019.pdf
+/Documents/report_2024.pdf
+COUNT 2
+QUERY "pdf$"
+/Documents/invoice.pdf
+/Documents/中文.pdf
+/Archive/report_2019.pdf
+/Documents/report_2024.pdf
+COUNT 4
+QUERY "=report"
+/Archive/report_2019.pdf
+/Documents/report_2024.pdf
+COUNT 2
+QUERY "ext:pdf"
+/Archive/report_2019.pdf
+/Documents/invoice.pdf
+/Documents/report_2024.pdf
+/Documents/中文.pdf
+COUNT 4
+QUERY "ext:txt"
+/Documents/configuration.txt
+/Documents/日本語.txt
+COUNT 2
+QUERY "ext:rs"
+/src/lib.rs
+/src/main.rs
+/tests/cli.rs
+/tests/serve.rs
+COUNT 4
+QUERY "dir:Documents"
+/Documents/configuration.txt
+/Documents/invoice.pdf
+/Documents/report_2024.pdf
+/Documents/中文.pdf
+/Documents/日本語.txt
+COUNT 5
+QUERY "dir:src"
+COUNT 0
+QUERY "type:f"
+COUNT 0
+QUERY "type:d"
+COUNT 0
+QUERY "size:>2000"
+/Archive/report_2019.pdf
+/Documents/invoice.pdf
+/Documents/report_2024.pdf
+/src/data.bin
+/src/main.rs
+COUNT 5
+QUERY "size:<200"
+/Archive/dat
+/node_modules/README.md
+/node_modules/f1.dat
+COUNT 3
+QUERY "re:^rep.*pdf$"
+COUNT 0
+QUERY "report|invoice"
+COUNT 0
+QUERY "!pdf"
+/Archive
+/Documents
+/src
+/tests
+/Archive/dat
+/Documents/configuration.txt
+/Documents/日本語.txt
+/src/data.bin
+/src/lib.rs
+/src/main.rs
+/tests/cli.rs
+/tests/serve.rs
+/node_modules
+/node_modules/README.md
+/node_modules/config.json
+/node_modules/f1.dat
+COUNT 16
+QUERY "*.pdf"
+/Archive/report_2019.pdf
+/Documents/invoice.pdf
+/Documents/report_2024.pdf
+/Documents/中文.pdf
+COUNT 4
+QUERY "src/*"
+COUNT 0
+QUERY "README"
+/node_modules/README.md
+COUNT 1
+QUERY "日本語"
+/Documents/日本語.txt
+COUNT 1
+QUERY "nihongo"
+/Documents/日本語.txt
+COUNT 1
+QUERY "中文"
+/Documents/中文.pdf
+COUNT 1
+QUERY "zhongwen"
+/Documents/中文.pdf
+COUNT 1
+QUERY "f1"
+/node_modules/f1.dat
+COUNT 1
+QUERY "file"
+COUNT 0
+QUERY "dat$"
+/Archive/dat
+/node_modules/f1.dat
+COUNT 2
+QUERY "^src"
+/src
+COUNT 1
+QUERY "a"
+/Archive
+/Archive/dat
+/src/data.bin
+/src/main.rs
+/Documents/configuration.txt
+/node_modules/f1.dat
+/node_modules/README.md
+COUNT 7
+QUERY ""
+/Archive
+/Documents
+/src
+/tests
+/Archive/dat
+/Archive/report_2019.pdf
+/Documents/configuration.txt
+/Documents/invoice.pdf
+/Documents/report_2024.pdf
+/Documents/中文.pdf
+/Documents/日本語.txt
+/src/data.bin
+/src/lib.rs
+/src/main.rs
+/tests/cli.rs
+/tests/serve.rs
+/node_modules
+/node_modules/README.md
+/node_modules/config.json
+/node_modules/f1.dat
+COUNT 20
+QUERY "ext:pdf config"
+COUNT 0
+QUERY "ext:pdf !report"
+/Documents/invoice.pdf
+/Documents/中文.pdf
+COUNT 2
+QUERY "not_a_name_at_all"
+COUNT 0

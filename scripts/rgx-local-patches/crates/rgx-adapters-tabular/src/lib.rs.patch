@@ -1,0 +1,273 @@
+--- a/crates/rgx-adapters-tabular/src/lib.rs
++++ b/crates/rgx-adapters-tabular/src/lib.rs
+@@ -15,14 +15,12 @@
+ 
+ #[cfg(any(feature = "parquet", feature = "shp", feature = "sqlite"))]
+ use core::fmt::Write as _;
+-#[cfg(any(feature = "duckdb", feature = "sqlite"))]
++#[cfg(feature = "duckdb")]
+ use std::io::Write as _;
+ 
+ use alloc::boxed::Box;
+ #[cfg(any(feature = "parquet", feature = "sqlite"))]
+ use alloc::string::String;
+-#[cfg(feature = "sqlite")]
+-use alloc::string::ToString;
+ use alloc::vec::Vec;
+ #[cfg(any(feature = "parquet", feature = "shp"))]
+ use rgx_core::bail;
+@@ -34,8 +32,6 @@
+ ))]
+ use rgx_core::decline;
+ use rgx_core::Adapter;
+-#[cfg(feature = "sqlite")]
+-use rgx_core::Context;
+ #[cfg(any(feature = "dbf", feature = "parquet", feature = "sqlite"))]
+ use rgx_core::Field;
+ #[cfg(any(
+@@ -85,6 +81,10 @@
+     feature = "netcdf3"
+ ))]
+ mod scientific;
++#[cfg(feature = "sqlite")]
++mod sqlite;
++#[cfg(all(test, feature = "sqlite"))]
++mod sqlite_oracle;
+ #[cfg(feature = "slk")]
+ mod sylk;
+ #[cfg(feature = "zarr")]
+@@ -166,8 +166,8 @@
+     f64::from_le_bytes(b[o..o + 8].try_into().unwrap())
+ }
+ 
+-/// SQLite: deserialize in-memory via `sqlite3_deserialize` (zero temp file I/O),
+-/// dump `sqlite_master` then every table as TSV.
++/// SQLite: read the file format out of the bytes -- no temp file, no
++/// library, no C -- dump `sqlite_master` then every table as TSV.
+ #[cfg(feature = "sqlite")]
+ pub struct Sqlite;
+ #[cfg(feature = "sqlite")]
+@@ -237,105 +237,90 @@
+     }
+ }
+ 
+-/// Open the database directly in memory and walk it. The previous shape
+-/// wrote the whole buffer to a `temp_dir()` path so rusqlite could
+-/// `open` it as a regular file -- hundreds of database files in a
+-/// corpus caused write amplification, lock contention across workers
+-/// and SSD wear; a multi-hundred-megabyte .db could spend more time
+-/// in `std::fs::write` than in the query.
++/// Read the database out of its bytes and walk it.
+ ///
+-/// The connection is loaded via `sqlite3_deserialize` so SQLite hands
+-/// the bytes straight to its in-memory pager. rusqlite's
+-/// `deserialize_bytes` requires `&'static [u8]` because the FFI call
+-/// retains the pointer; the transmute is sound because `data` lives
+-/// for the duration of the `conn` (the walker is single-threaded
+-/// per-file and the read buffer is borrowed until the adapter
+-/// returns).
++/// The bytes are the whole file: a database is a file, and the parts of a
++/// database that live in other files -- the write-ahead log, the rollback
++/// journal -- are not read here. So a database whose data lives in a log
++/// that has not been checkpointed is refused, rather than read as the
++/// older state the file happens to hold.
++///
++/// The output is the schema and then every table: the schema first,
++/// because it is what says what the tables are, and the tables in the
++/// order the schema holds them.
++///
++/// A virtual table is the one table the dump leaves out: its rows live in
++/// a module, and a reader of the file has no module to run. The schema
++/// still names it, and the shadow tables the module keeps are ordinary
++/// tables, and those are dumped.
+ #[cfg(feature = "sqlite")]
+ fn dump_sqlite_in_memory(data: &[u8]) -> Result<Outcome> {
+-    let mut conn = rusqlite::Connection::open_in_memory()
+-        .map_err(|e| rgx_core::anyhow!("open sqlite (in-memory): {e}"))?;
+-    // SAFETY: see the function comment. The data slice is borrowed
+-    // from the walker's read buffer and is alive for the lifetime
+-    // of `conn` (we never release `conn` before this function
+-    // returns, and the connection owns the deserialized pages).
+-    let static_data: &'static [u8] = unsafe { std::mem::transmute::<&[u8], &'static [u8]>(data) };
+-    conn.deserialize_bytes("main", static_data)
+-        .map_err(|e| rgx_core::anyhow!("sqlite deserialize: {e}"))?;
+-    let mut out: Vec<u8> = Vec::new();
++    let db = sqlite::Db::open(data).map_err(|e| rgx_core::anyhow!("sqlite: {e}"))?;
++    let schema = db.schema().map_err(|e| rgx_core::anyhow!("sqlite: {e}"))?;
++    let tables = db.tables().map_err(|e| rgx_core::anyhow!("sqlite: {e}"))?;
++    let mut out = String::new();
+     writeln!(out, "-- sqlite_master --")?;
+-    {
+-        let mut stmt = conn.prepare("SELECT type, name, tbl_name, sql FROM sqlite_master")?;
+-        let mut rows = stmt.query([])?;
+-        while let Some(r) = rows.next()? {
+-            let t: String = r.get(0)?;
+-            let n: String = r.get(1)?;
+-            let tn: Option<String> = r.get(2)?;
+-            let s: Option<String> = r.get(3)?;
+-            writeln!(
+-                out,
+-                "{}\t{}\t{}\t{}",
+-                t,
+-                n,
+-                tn.as_deref().unwrap_or(""),
+-                s.as_deref().unwrap_or("")
+-            )?;
+-        }
++    for row in &schema {
++        writeln!(
++            out,
++            "{}\t{}\t{}\t{}",
++            row.kind,
++            row.name,
++            row.table_name,
++            row.sql.as_deref().unwrap_or("")
++        )?;
+     }
+     writeln!(out, "-- tables --")?;
+-    let tables: Vec<String> = {
+-        let mut stmt = conn.prepare(
+-            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+-        )?;
+-        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+-        let mut v = Vec::new();
+-        for r in rows {
+-            v.push(r?);
+-        }
+-        v
+-    };
+-    for table in tables {
+-        writeln!(out, "-- table: {table} --")?;
+-        let sql = format!("SELECT * FROM \"{}\"", table.replace('"', "\"\""));
+-        let mut stmt = conn
+-            .prepare(&sql)
+-            .with_context(|| format!("select from {table}"))?;
+-        let ncol = stmt.column_count();
+-        let names: Vec<String> = (0..ncol)
+-            .map(|i| stmt.column_name(i).unwrap_or("").to_string())
+-            .collect();
+-        out.extend_from_slice(names.join("\t").as_bytes());
+-        out.push(b'\n');
+-        let mut rows = stmt.query([])?;
+-        while let Some(r) = rows.next()? {
+-            let mut buf = String::with_capacity(64);
+-            for i in 0..ncol {
+-                if i > 0 {
+-                    buf.push('\t');
++    for table in &tables {
++        if table.virtual_table {
++            // A virtual table keeps its rows in a module, not in the
++            // file: SQLite runs the module to answer a question about
++            // it, and this reader has no module to run. The table is
++            // left out of the dump -- the schema above still names it --
++            // and the shadow tables the module keeps are ordinary
++            // tables, and those are dumped.
++            continue;
++        }
++        writeln!(out, "-- table: {} --", table.name)?;
++        for (index, column) in table.columns.iter().enumerate() {
++            if index > 0 {
++                out.push('\t');
++            }
++            out.push_str(&column.name);
++        }
++        out.push('\n');
++        let rows = db
++            .rows(table)
++            .map_err(|e| rgx_core::anyhow!("sqlite: {}: {e}", table.name))?;
++        for row in &rows {
++            for (index, value) in table.row_values(row).iter().enumerate() {
++                if index > 0 {
++                    out.push('\t');
+                 }
+-                let v: rusqlite::types::ValueRef<'_> = r.get_ref(i)?;
+-                match v {
+-                    rusqlite::types::ValueRef::Null => {}
+-                    rusqlite::types::ValueRef::Integer(n) => {
+-                        let _ = write!(&mut buf, "{n}");
++                match value {
++                    sqlite::Value::Null => {}
++                    sqlite::Value::Integer(n) => {
++                        let _ = write!(out, "{n}");
+                     }
+-                    rusqlite::types::ValueRef::Real(f) => {
+-                        let _ = write!(&mut buf, "{f}");
++                    sqlite::Value::Real(f) => {
++                        let _ = write!(out, "{f}");
+                     }
+-                    rusqlite::types::ValueRef::Text(t) => {
+-                        let s = std::str::from_utf8(t).unwrap_or("");
+-                        let _ = write!(&mut buf, "{s}");
++                    sqlite::Value::Text(text) => {
++                        // The bytes of the text are the text: a value
++                        // that is not UTF-8 has no spelling here.
++                        if let Ok(text) = core::str::from_utf8(text) {
++                            out.push_str(text);
++                        }
+                     }
+-                    rusqlite::types::ValueRef::Blob(b) => {
+-                        let _ = write!(&mut buf, "<{} bytes>", b.len());
++                    sqlite::Value::Blob(blob) => {
++                        let _ = write!(out, "<{} bytes>", blob.len());
+                     }
+                 }
+             }
+-            buf.push('\n');
+-            out.extend_from_slice(buf.as_bytes());
+-        }
+-    }
+-    Ok(Outcome::Text(out))
++            out.push('\n');
++        }
++    }
++    Ok(Outcome::Text(out.into_bytes()))
+ }
+ 
+ /// The tables of a SQLite database and the columns of each one.
+@@ -349,40 +334,17 @@
+ #[cfg(feature = "sqlite")]
+ fn sqlite_facts(data: &[u8]) -> Vec<Field> {
+     let mut facts = Vec::new();
+-    if data.len() < 16 || &data[0..15] != b"SQLite format 3" {
+-        return facts;
+-    }
+-    let Ok(mut conn) = rusqlite::Connection::open_in_memory() else {
++    let Ok(db) = sqlite::Db::open(data) else {
+         return facts;
+     };
+-    // SAFETY: the same transmute the dump does -- the bytes are
+-    // borrowed from the walker's read buffer and outlive the
+-    // connection, which is dropped before this function returns.
+-    let static_data: &'static [u8] = unsafe { std::mem::transmute::<&[u8], &'static [u8]>(data) };
+-    if conn.deserialize_bytes("main", static_data).is_err() {
++    let Ok(tables) = db.tables() else {
+         return facts;
+-    }
+-    let tables: Vec<String> = {
+-        let Ok(mut stmt) = conn.prepare(
+-            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+-        ) else {
+-            return facts;
+-        };
+-        let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) else {
+-            return facts;
+-        };
+-        rows.flatten().collect()
+     };
+     for table in tables {
+-        facts.push(Field::new("table.name", &table));
+-        let sql = format!("SELECT * FROM \"{}\"", table.replace('"', "\"\""));
+-        let Ok(stmt) = conn.prepare(&sql) else {
+-            continue;
+-        };
+-        for i in 0..stmt.column_count() {
+-            let name = stmt.column_name(i).unwrap_or("");
+-            if !name.is_empty() {
+-                facts.push(Field::new("table.column", name));
++        facts.push(Field::new("table.name", &table.name));
++        for column in &table.columns {
++            if !column.name.is_empty() {
++                facts.push(Field::new("table.column", &column.name));
+             }
+         }
+     }

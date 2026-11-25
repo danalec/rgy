@@ -1,0 +1,4 @@
+# The name-core sources are formatted with these settings. Keep them: the
+# gate runs `cargo fmt --all -- --check` on the latest stable rustfmt.
+max_width = 150
+use_small_heuristics = "Max"

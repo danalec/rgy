@@ -1,0 +1,38 @@
+[package]
+name = "rgy-discovery-macos"
+version = "0.1.10"
+edition = "2024"
+rust-version = "1.89"
+authors = ["Dan Alec Yamaguchi <danalec@gmail.com>"]
+description = "macOS discovery backend: getattrlistbulk walk + FSEvents watch"
+license = "Apache-2.0"
+repository = "https://github.com/danalec/rgy"
+homepage = "https://github.com/danalec/rgy"
+documentation = "https://docs.rs/rgy-discovery-macos"
+keywords = ["filesystem", "search", "fsevents"]
+categories = ["filesystem"]
+readme = "../../README.md"
+
+
+# The EGM.md contracts are tracked working documents, not source. A
+# tracked file under this crate would otherwise be carried into the
+# published crate by cargo package (see tests/egm_packaging.rs).
+exclude = ["**/EGM.md"]
+
+[features]
+default = ["std"]
+# The threads the parallel walk fans out over. Without it the same walk
+# runs with one worker, on the calling thread: the shape of the walk does
+# not change, only how many workers share it.
+std = ["rgy-par/std"]
+
+[dependencies]
+rgy-discovery = { path = "../discovery", version = "0.1.10", default-features = false }
+rgy-par = { path = "../par", version = "0.1.10", default-features = false }
+
+[dev-dependencies]
+# The tests build a name index and apply the feed's records to it: the
+# live overlay is the thing under test.
+rgy-name-core = { path = "../name-core", version = "0.1.10" }
+# The portable walk, which the tests use to index a fixture tree.
+rgy-discovery = { path = "../discovery", version = "0.1.10", features = ["std"] }
