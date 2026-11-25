@@ -3033,7 +3033,7 @@ mod tests {
         assert_eq!(source.search("invoice", 10).len(), 1);
         assert_eq!(source.search("invoice", 10).len(), 1);
         assert!(phases.borrow().is_empty(), "{:?}", phases.borrow());
-        let st = source.snapshot();
+        let st = source.status().borrow().clone();
         assert!(st.local_answered());
         // The build time is the warm's own, and the meter holds the query.
         assert!(
@@ -3123,7 +3123,7 @@ mod tests {
             said.contains("preparing the index in the background"),
             "{said}"
         );
-        let st = source.snapshot();
+        let st = source.status().borrow().clone();
         assert!(!st.local_answered(), "an index being made is not an answer");
         // In the user's language too.
         source.lang = Lang::Portuguese;
@@ -3157,7 +3157,7 @@ mod tests {
         let said = source.ask_the_daemon().join(" | ");
         assert!(!said.contains("background"), "{said}");
         assert!(!source.daemon_gone);
-        assert!(source.snapshot().local.is_none());
+        assert!(source.status().borrow().clone().local.is_none());
         drop(source);
         daemon.join();
         let _ = std::fs::remove_dir_all(home.parent().unwrap());
