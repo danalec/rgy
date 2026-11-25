@@ -146,6 +146,27 @@ when the daemon is not there.
   an endpoint is not silently answered from a local index instead. Indexing
   progress and the build time are reported separately from query latency, so
   a slow first answer says which of the two it was.
+- **The window warms that index at start-up, and says that it is doing it.**
+  The desktop launcher opens the fallback index in the background while it is
+  still hidden, so the first question finds it open instead of waiting for a
+  walk. The background task asks first whether the daemon is *proven* absent —
+  a connection, a timeout or a refusal that is not "nobody listens" ends it
+  without a scan — and the walk itself runs on that task's own thread, never
+  in front of a question. A daemon that appears while the index is being
+  built takes the question back. The one-shot and terminal commands stay
+  lazy: only the window warms.
+- **Shift+Enter opens the folder; Enter opens the result.** Control or Alt
+  with Enter does neither: it is not the open and not the folder, so a
+  Ctrl+Enter pressed from habit submits nothing. `Shift+Enter` is a key
+  where the terminal reports Shift on Enter — the Windows console does — and
+  in a POSIX terminal the same carriage return arrives as a plain Enter, so
+  `>folder` is the way there. The menu says which one the terminal has.
+- **The window's cursor is the standard arrow,** and not whatever cursor was
+  last set: a class with no cursor leaves the busy one over the launcher
+  after an index build.
+- **Ctrl+Backspace and Ctrl+Delete delete a word,** forwards and backwards,
+  on Windows and on X11, with the same whitespace convention Ctrl+W already
+  had.
 - **Carried along.** The crates are at **0.1.10** and the registry is not
   republished; `winget` is still awaiting its moderator; the FreeBSD archive
   is still picked by `install.sh` from `uname -s`; the AUR carries three
