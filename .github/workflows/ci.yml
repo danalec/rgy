@@ -32,6 +32,13 @@ name: ci
 on:
   push:
     branches: [main]
+    # A tag named `ci/<anything>` runs the gate against the commit it
+    # points at. The gap it closes: a commit that is not a pull request
+    # and not on `main` -- a branch about to be merged, a commit that
+    # only exists in a fork -- cannot be asked about, because the gate
+    # runs for a pull request only when the author is the owner or a
+    # collaborator. The tag is the only thing to clean up afterwards.
+    tags: ['ci/**']
   pull_request:
 
 # A new push ends the run it supersedes. The gates are minutes long and
