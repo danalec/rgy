@@ -1,57 +1,63 @@
 # Cutting a release — checklist
 
-The ordered steps for the next release, **0.1.10.4**. This file is a
-maintainer's note; it does not travel inside the archives and it is not a
-release page. Its name deliberately does not match `release-<base>.<n>.md`:
-`scripts/lib/version.ps1` picks the highest-numbered release page in
-`docs/`, and a checklist that looked like a page would silently change the
-version the whole tree resolves.
+The ordered steps for a release, and the ones that were actually run for
+**0.1.10.4**, cut on 2026-11-25. This file is a maintainer's note; it does not
+travel inside the archives and it is not a release page. Its name deliberately
+does not match `release-<base>.<n>.md`: `scripts/lib/version.ps1` picks the
+highest-numbered release page in `docs/`, and a checklist that looked like a
+page would silently change the version the whole tree resolves.
 
-The reference is the 0.1.10.3 release, cut on 2026-11-10 (Forgejo release
-`rgy-v0.1.10.3`, GitHub release at the same tag, 15 assets). The steps below
-are the ones that were actually run, adjusted for fourteen archives and for a
-tree whose launcher now answers without a daemon.
+The reference was the 0.1.10.3 release, cut on 2026-11-10 (Forgejo release
+`rgy-v0.1.10.3`, GitHub release at the same tag, 13 assets from the publisher
+and 17 from each forge after the manual MSI pair). The steps below are the
+ones that were actually run, adjusted for fourteen archives and for a tree
+whose launcher now answers without a daemon.
 
-## State of this branch right now
+## The state of this release
 
-Everything here is **prepared, not published**.
+**0.1.10.4 is published.** Both forges carry the release, the installers carry
+its real digests, and the packages outside the tree carry it.
 
 | thing | state |
 |---|---|
-| branch | `release/0.1.10.4` — `main` (the rgx re-pin to `bb61e01`) + PR #1 (`Let rgxy search filenames without searchd`) + the CI tag trigger + the version bump |
-| `forgejo/main` | `3cf5d0a` — still 0.1.10.3, untouched |
-| `github/main` | `6b11914` — flat orphan mirror, still 0.1.10.3, and **two commits behind the Forgejo main** |
-| version helpers | `0.1.10.4` (both `version.ps1` and `version.sh`) |
-| release body | `docs/release-0.1.10.4.md`, one assets marker naming **14** archives + `SHA256SUMS`, one platform marker |
-| crates | stay at `0.1.10`; `bump-version.py --check 0.1.10.4` says *nothing to change* |
-| digest pins | all **10 zeroed**: 5 in `install.sh`, 2 in `install.ps1`, 1 winget `InstallerSha256`, 2 in `Formula/rgy-search.rb` |
-| `flake.nix` | `version = "0.1.10.4"`, but its **6 SRI hashes are still the 0.1.10.3 ones** — the comment says so; the publish script does *not* rewrite them |
-| `.dist/` | stale 0.1.10.3 artefacts only; do not reuse |
-| AUR | three PKGBUILDs to be prepared **on the CachyOS box**, `pkgver=0.1.10.4`, zeroed `sha256sums`, `LICENSE` installed. **Not pushed to AUR.** |
-| Homebrew tap | `danalec/homebrew-rgy` still carries the 0.1.10.3 formula; `publish-homebrew.ps1` pushes to it (not to `Homebrew/homebrew-core`) |
-| Scoop bucket | `danalec/scoop-alts` still at 0.1.10.3; licence already `Apache-2.0` |
-| winget | PR [#474460](https://github.com/microsoft/winget-pkgs/pull/474460) open, awaiting a moderator |
-| licence | root `LICENSE` (verbatim Apache-2.0); GitHub API reports `Apache-2.0` |
+| release commit | `72d1757` — the version bump, the release page and the six SRI hashes |
+| Forgejo | `main` at the pins commit `0c9ec57`; release `rgy-v0.1.10.4` (id 159) with **17 assets** |
+| GitHub | `main` is the flat orphan `ce8fc60` (no parents), whose tree is the Forgejo `main` tree; release `rgy-v0.1.10.4` on that orphan, **17 assets** |
+| the tag | `rgy-v0.1.10.4` on the Forgejo (the release commit) and on the GitHub orphan |
+| the gate | run `45644738032` on the release commit: 35 jobs, all green |
+| the assets | 14 archives + `SHA256SUMS` from the publisher; the MSI pair attached by hand to both forges |
+| the MSI | `rgy-0.1.10.4-x86_64.msi`, 7 659 520 bytes, SHA256 `29a27f37d024a472c5ad92fbcd284c0d5044bda2f30f8904be162e404adb3bb4`, with its `.sha256` sidecar |
+| the digest pins | the **10** rewritten from the release's own `SHA256SUMS`: `install.sh` ×5, `install.ps1` ×2, winget ×1, Homebrew ×2 |
+| `flake.nix` | `version = "0.1.10.4"`, and its **6 SRI hashes** recomputed by hand from the release's `SHA256SUMS` |
+| the crates | stayed at `0.1.10`; `bump-version.py --check 0.1.10.4` says *nothing to change* |
+| the AUR | three packages at **0.1.10.4-1**, built and pushed from the CachyOS box; the digest check passed on the build |
+| Homebrew | `danalec/homebrew-rgy` `main` carries the 0.1.10.4 formula |
+| Scoop | `danalec/scoop-alts` `bucket/rgy.json` at 0.1.10.4, with the x86_64 Windows digest |
+| winget | PR [#474460](https://github.com/microsoft/winget-pkgs/pull/474460) is open; its manifests moved from the 0.1.10.3 folder to the 0.1.10.4 one |
+| the gate's own question | the `ci/gate-0.1.10.4c` tag was deleted after the release: a published release is answered by its own tag |
 
-**Do not touch `main` or the mirror until step 1.** Until then the public
-`install.sh` must still say `version="rgy-v0.1.10.3"` with its real digest.
+**What is not done.** `nix flake check` did not run: Nix is not on the Windows
+host, so the six SRI hashes are verified against the release's own
+`SHA256SUMS` and not by the flake. The Forgejo has no runner alive since
+2026-10-23, so the gate ran on the GitHub only. The crates.io registry was not
+republished, and the winget submission still waits for a moderator.
 
 ## 0. The gate answers about a commit, and a tag is how you ask
 
-- [ ] The gate runs on a push to `main` and on a pull request whose author is
+- [x] The gate runs on a push to `main` and on a pull request whose author is
       the owner or a collaborator. A commit that is neither — a branch about to
       be merged, a commit that only exists in a fork — cannot be asked about
       at all. The workflow now carries a **tag trigger**: a tag named
       `ci/<anything>` runs the whole gate against the commit it points at, on
       every runner the file names, and the tag is the only thing to clean up
       afterwards.
-- [ ] So the release is asked about like this, before anything is published:
-      `git tag ci/gate-0.1.10.4 <commit>` and
-      `git push github ci/gate-0.1.10.4`. The push goes to the **GitHub**
+- [x] So the release is asked about like this, before anything is published:
+      `git tag ci/gate-0.1.10.4c <commit>` and
+      `git push github ci/gate-0.1.10.4c`. The push goes to the **GitHub**
       mirror, which is the only place with runners alive: the Forgejo has
       Actions enabled but no runner has picked up a job since 2026-10-23, so
       a tag there creates a run that never starts.
-- [ ] Read the run before going on: `gh run list -R danalec/rgy`. Every job
+- [x] Read the run before going on: `gh run list -R danalec/rgy`. Every job
       has to close **success**, including the two `no_std` jobs and the four
       `suite` jobs. A red job on `stable` is the tree's, not the runner's:
       the bare-metal build and the vendored crate were red until the rgx
@@ -61,63 +67,69 @@ Everything here is **prepared, not published**.
 
 ## 1. Put the tree on `main`
 
-- [ ] Fast-forward `forgejo/main` to this branch:
+- [x] Fast-forward `forgejo/main` to this branch:
       `git push forgejo HEAD:main`
-- [ ] Rebuild the **flat orphan** GitHub mirror (zero parents) from the final
+- [x] Rebuild the **flat orphan** GitHub mirror (zero parents) from the final
       tree and force-push it. This is what triggers CI:
       `tree=$(git rev-parse 'HEAD^{tree}')`;
       `orphan=$(git commit-tree "$tree" -m 'rgy 0.1.10.4')`;
       `git push -f github "$orphan:refs/heads/main"`.
       Do **not** `git push github main` from the branch: that would replace
       the flat mirror with full history.
+- [x] And again after the pins are rewritten: the public installers and the
+      release have to answer with the same tree, and the pin commit is not in
+      the release's tag.
 
 ## 2. CI
 
-- [ ] Wait for the run to close **success**. The release matrix has **14**
+- [x] Wait for the run to close **success**. The release matrix has **14**
       rows (the two generic AVX-512 ones included); the `msi` job is
       independent of it. `gh run view <run-id> -R danalec/rgy`.
-- [ ] The two `the manifests, rewritten` steps no longer skip
+- [x] The two `the manifests, rewritten` steps no longer skip
       `matrix.variant == 'avx512'`: the page names those archives now, so
       every row runs the publish rehearsal.
 
 ## 3. Bring the archives down
 
-- [ ] `pwsh -File scripts/fetch-ci-assets.ps1 <run-id>`
+- [x] `pwsh -File scripts/fetch-ci-assets.ps1 <run-id>`
       → 14 archives, `SHA256SUMS` and the document sidecars into `.dist/`.
-- [ ] Verify locally: every row of `.dist/SHA256SUMS` matches the file it
+- [x] Verify locally: every row of `.dist/SHA256SUMS` matches the file it
       names, and there are exactly 14 rows.
-- [ ] Download the `rgy-msi` artefact if the MSI is to be attached:
+- [x] Download the `rgy-msi` artefact if the MSI is to be attached:
       `gh run download <run-id> -R danalec/rgy -n rgy-msi`.
       Its `.msi.sha256` sidecar must match the `.msi`.
 
 ## 4. The six SRI hashes (manual — nothing rewrites them)
 
-- [ ] Recompute the six `sha256-…` values in `flake.nix` from the real
+- [x] Recompute the six `sha256-…` values in `flake.nix` from the real
       `.dist/SHA256SUMS`. Each is the base64 of the 32 raw bytes of an
       archive's hex digest (not the base64 of the hex text), for
       `x86_64-linux`, `aarch64-linux`, `avx2-linux`, `znver4-linux`,
       `x86_64-apple-darwin`, `aarch64-apple-darwin`.
-- [ ] Restore the truthful comment: the values now come from the 0.1.10.4
+- [x] Restore the truthful comment: the values now come from the 0.1.10.4
       release's `SHA256SUMS`, and `nix flake check` verifies them.
 - [ ] `nix flake check` if Nix is available (it is not on the Windows host).
 
 ## 5. Publish
 
-- [ ] `RGY_FORGEJO_URL=http://192.168.0.10:3000` and
+- [x] `RGY_FORGEJO_URL=http://192.168.0.10:3000` and
       `pwsh -NoProfile -File scripts/publish-release.ps1 -SkipBuild -DryRun`.
       Read the dry-run: 15 assets (14 archives + `SHA256SUMS`), the body
       hash, and the pin rewrites.
-- [ ] Run it for real: `pwsh -NoProfile -File scripts/publish-release.ps1 -SkipBuild`.
+- [x] Run it for real: `pwsh -NoProfile -File scripts/publish-release.ps1 -SkipBuild`.
       It creates the tag `rgy-v0.1.10.4`, the Forgejo release, uploads the
       15 assets, and rewrites the **10** digest pins from the real
       `SHA256SUMS` (`install.ps1` ×2, `install.sh` ×5, winget ×1,
       Homebrew ×2). It also validates the winget manifests.
-- [ ] Do **not** pass `-WithGithub`: that pushes full history to the mirror.
+- [x] Do **not** pass `-WithGithub`: that pushes full history to the mirror.
       Create the GitHub release by hand instead:
       `gh release create rgy-v0.1.10.4 --target <orphan> --title 'rgy v0.1.10.4' --notes-file docs/release-0.1.10.4.md <15 assets>`,
       then move the tag onto the orphan:
       `git push -f github "<orphan>:refs/tags/rgy-v0.1.10.4"`.
-- [ ] Optional: attach `rgy-0.1.10.4-x86_64.msi` and its `.sha256` to both
+      The body is the tree's page with the `<!-- platform -->` marker
+      replaced by the sentence about the mirror — the same sentence the
+      0.1.10.3 release carries.
+- [x] Optional: attach `rgy-0.1.10.4-x86_64.msi` and its `.sha256` to both
       releases with `gh release upload --clobber` and the Forgejo API. The
       MSI is **not** one of the fourteen archives, is not named by the page's
       assets marker and is not in `SHA256SUMS` — say so if you attach it.
@@ -161,42 +173,43 @@ Everything here is **prepared, not published**.
 
 ## 6. The repositories outside this tree
 
-- [ ] **AUR** (on the CachyOS box, `/home/danalec/aur-rgy/*`): replace each
-      zeroed `sha256sums` with the real digest of its archive from
-      `.dist/SHA256SUMS`, regenerate `.SRCINFO` with
-      `makepkg --printsrcinfo`, build with `makepkg --nodeps --nocheck -f`
-      (the digest check must pass), then commit and push all three.
+- [x] **AUR** (on the CachyOS box): replace each zeroed `sha256sums` with the
+      real digest of its archive from `.dist/SHA256SUMS`, regenerate
+      `.SRCINFO` with `makepkg --printsrcinfo`, build with
+      `makepkg --nodeps --nocheck -f` (the digest check must pass), then
+      commit and push all three.
       Archives: `rgy-search-bin` → `x86_64-linux`,
       `rgy-search-avx2-bin` → `avx2-linux`,
       `rgy-search-znver4-bin` → `znver4-linux`.
-- [ ] **Homebrew tap**: `pwsh -NoProfile -File scripts/publish-homebrew.ps1`.
+- [x] **Homebrew tap**: `pwsh -NoProfile -File scripts/publish-homebrew.ps1`.
       It clones `danalec/homebrew-rgy`, commits the formula whose digests
       step 5 rewrote, and pushes `main`. No fork, no PR, no
       `Homebrew/homebrew-core`.
-- [ ] **Scoop bucket**: bump `danalec/scoop-alts/bucket/rgy.json` to
+- [x] **Scoop bucket**: bump `danalec/scoop-alts/bucket/rgy.json` to
       0.1.10.4 with the real `x86_64-windows.zip` hash. The `post_install`
       prompt (register / register-and-start / do nothing) stays as it is.
-- [ ] **winget**: if PR #474460 is still open, update the manifests there;
-      otherwise note that it is still awaiting a moderator.
+- [x] **winget**: PR #474460 is still open, so its manifests were moved to
+      the 0.1.10.4 folder and its title and body were rewritten; it is still
+      awaiting a moderator.
 
 ## 7. Verify and close
 
-- [ ] Forgejo release: tag, **15** assets, not a draft. The API needs Basic
+- [x] Forgejo release: tag, **17** assets, not a draft. The API needs Basic
       auth from `git credential fill` (an anonymous request answers 404).
-- [ ] GitHub release: 15 assets, tag on the orphan, `raw/install.sh` on
+- [x] GitHub release: 17 assets, tag on the orphan, `raw/install.sh` on
       `main` now serves 0.1.10.4 with a real digest.
-- [ ] Both published `SHA256SUMS` byte-identical to `.dist/SHA256SUMS`.
-- [ ] Download one published archive and compare its SHA256 end to end.
-- [ ] `python scripts/check-egm-contracts.py --reindex` after the pin
+- [x] Both published `SHA256SUMS` byte-identical to `.dist/SHA256SUMS`.
+- [x] Download one published archive and compare its SHA256 end to end.
+- [x] `python scripts/check-egm-contracts.py --reindex` after the pin
       rewrites, then the checker, `--generated-check` and `--self-test`.
-- [ ] Gates: `cargo build --workspace --locked` first, then
+- [x] Gates: `cargo build --workspace --locked` first, then
       `cargo test --workspace --no-fail-fast --locked`, `cargo fmt --all --
       --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`,
-      licence + packaging, and `scripts/check-twins.sh` on the CachyOS mirror.
-- [ ] Commit the pin rewrites and the SRI hashes (the 0.1.10.2 release did
+      licence + packaging, and `scripts/check-twins.sh`.
+- [x] Commit the pin rewrites and the SRI hashes (the 0.1.10.2 release did
       this as `8ef8da4`), push to Forgejo `main`, and refresh the flat mirror
       once more so the public installers and the release agree.
-- [ ] Delete the `ci/gate-0.1.10.4` tag from the mirror when the release is
+- [x] Delete the `ci/gate-0.1.10.4c` tag from the mirror when the release is
       published: the tag is the gate's question, and a published release is
       answered by its own tag.
 
@@ -224,6 +237,34 @@ Everything here is **prepared, not published**.
   is missing from the member list. A hardcoded second list once left
   `LICENSE` out of nine `.tar.gz` archives while their sidecars named it.
   After step 3, check all fourteen: every archive must contain `LICENSE`.
+
+## This release (0.1.10.4, cut on 2026-11-25)
+
+The facts of this release, kept here because they are the ones the next one
+repeats:
+
+- The release carried **15 assets** from the publisher and **17** from each
+  forge after the manual MSI pair: 14 archives plus `SHA256SUMS`, the MSI and
+  its `.sha256` sidecar.
+- The MSI was built from the **published** Windows archive (run
+  `45644738032`, 35 jobs green), so it came from the run that built the
+  archives the release carries: `rgy-0.1.10.4-x86_64.msi`, **7 659 520
+  bytes**, SHA256
+  `29a27f37d024a472c5ad92fbcd284c0d5044bda2f30f8904be162e404adb3bb4`,
+  with its `.sha256` sidecar.
+- The release tag is the **release commit**, not the pins commit: the
+  Forgejo's `rgy-v0.1.10.4` points at `72d1757`, and the GitHub's points at
+  the flat orphan, because a mirror that is flat carries a tree and not a
+  history. The pins live one commit later, in both `main`s.
+- The gate asked about the release through a **tag**, `ci/gate-0.1.10.4c`,
+  and the tag was deleted when the release was published. The tag trigger
+  is the answer to a commit that is neither a push to `main` nor a pull
+  request — and the 0.1.10.4 tree needed it, because the PRs it carried came
+  from a fork.
+- The two PRs that carried the launcher's work were closed rather than
+  merged: the GitHub `main` is a flat orphan with no common ancestor to
+  merge against, and the work was cherry-picked onto the owner's own `main`
+  on the Forgejo. Closing them lost nothing; the commits are there.
 
 ## The previous release (0.1.10.3, cut on 2026-11-10)
 
