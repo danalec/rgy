@@ -5,13 +5,13 @@ One Homebrew formula, `rgy-search.rb`, defining `RgySearch < Formula` — the
 Homebrew package for the `rgy` binaries. The package is named `rgy-search`
 because `rgy` is taken on crates.io; the binaries keep the names they have
 everywhere else (`searchctl`, `searchd`, `rgy-autostart`, `rgxy`). The formula
-names the 0.1.10.3 macOS archives by `url` and pins their real `sha256`
-digests, rewritten by `scripts/publish-release.sh` from the combined
-SHA256SUMS of the CI release run.
+names the 0.1.10.4 macOS archives by `url` and pins their `sha256`
+digests — placeholders until `scripts/publish-release.sh` rewrites them
+from the combined SHA256SUMS of the CI release run.
 
 ## Interface
 - `RgySearch` (`< Formula`) — the formula class, carrying `desc`, `homepage`,
-  `license "Apache-2.0"` and `version "0.1.10.3"` — `[rgy-search.rb:RgySearch]`.
+  `license "Apache-2.0"` and `version "0.1.10.4"` — `[rgy-search.rb:RgySearch]`.
 - `on_arm` / `on_intel` — per-architecture `url` and `sha256` blocks —
   `[rgy-search.rb:on_arm]`, `[rgy-search.rb:on_intel]`.
 - `install` — `bin.install` of `searchctl`, `searchd`, `rgy-autostart`, `rgxy`
@@ -22,10 +22,11 @@ SHA256SUMS of the CI release run.
 
 ## Invariants
 - The formula is named `rgy-search`, not `rgy`, and its version is pinned to
-  `"0.1.10.3"` — `[rgy-search.rb:RgySearch]`, `[rgy-search.rb:version]`.
-- The `sha256` values are real digests of the macOS archives built and smoked
-  on the CI runners; `scripts/publish-release.sh` rewrites them from the
-  combined SHA256SUMS in `.dist/` — `[rgy-search.rb:sha256]`.
+  `"0.1.10.4"` — `[rgy-search.rb:RgySearch]`, `[rgy-search.rb:version]`.
+- The `sha256` values are the all-zero placeholders until the publish step
+  rewrites them from the combined SHA256SUMS in `.dist/`: a digest of an
+  archive this release does not carry yet would refuse every download —
+  `[rgy-search.rb:sha256]`.
 - `rgy` is installed as a symlink to `searchctl`, not a copy —
   `[rgy-search.rb:install]`.
 - The formula declares `license "Apache-2.0"` and carries an

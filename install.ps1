@@ -145,10 +145,10 @@ if ($here -and (Test-Path -LiteralPath (Join-Path $here 'scripts/lib/digest.ps1'
 $InstallDir = "$env:LOCALAPPDATA\Programs\rgy"
 $BaseUrl = 'https://github.com/danalec/rgy/releases/download'
 # The tag of the release that ships the binary archives: the crates carry
-# three numbers (0.1.10) and the release carries a fourth (0.1.10.3), which
+# three numbers (0.1.10) and the release carries a fourth (0.1.10.4), which
 # is the fix count of the line. An installer that names another tag downloads
 # another release's archives and refuses them on the digest pinned below.
-$Version = 'rgy-v0.1.10.3'
+$Version = 'rgy-v0.1.10.4'
 $SkipChecksum = $false
 $NoAutostart = $false
 $NoLauncher = $false
@@ -348,8 +348,8 @@ if ($Activate) {
 # an emulator, and an installer that hands it one installs something that
 # will not start.
 $expected = @{
-    'x86_64-windows.zip' = '889C7A4F2FAD413A4E7E950E9121668BECF88CD98B282DCD013938948BD45BF9'
-    'aarch64-windows.zip' = '6FE25CC453CE2A7DC688A2373A031A48D7DD143A4C277BC3A58416D8F89DD5DC'
+    'x86_64-windows.zip' = '0000000000000000000000000000000000000000000000000000000000000000'
+    'aarch64-windows.zip' = '0000000000000000000000000000000000000000000000000000000000000000'
 }
 
 # The digest of an archive nobody has published yet.
