@@ -37,8 +37,8 @@ pub enum Key {
     PageUp,
     PageDown,
     Enter,
-    /// Ctrl+Enter: open the folder that holds the result.
-    CtrlEnter,
+    /// Shift+Enter: open the folder that holds the result.
+    ShiftEnter,
     /// Ctrl+C: copy the path.
     CtrlC,
     /// Ctrl+V: paste the clipboard's text into the query.
@@ -49,6 +49,10 @@ pub enum Key {
     CtrlK,
     /// Ctrl+W: delete the word.
     CtrlW,
+    /// Ctrl+Backspace: delete the word before the caret, like Ctrl+W.
+    CtrlBackspace,
+    /// Ctrl+Delete: delete the word after the caret.
+    CtrlDelete,
     /// Ctrl+U: clear the query.
     CtrlU,
     Esc,

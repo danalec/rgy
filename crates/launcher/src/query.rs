@@ -276,6 +276,36 @@ impl Query {
         true
     }
 
+    /// Delete the word after the caret.
+    ///
+    /// The mirror of [`Query::delete_word`], with the same whitespace
+    /// convention: the whitespace next to the caret goes with the word
+    /// (`trim_start` here, `trim_end` there) and the word ends at the next
+    /// plain space (`find(' ')` here, `rfind(' ')` there). The caret stays
+    /// where it is, and the text before it does not move.
+    ///
+    /// False when there was nothing to delete.
+    pub fn delete_word_forward(&mut self) -> bool {
+        let start = self.byte_offset(self.caret);
+        let tail = &self.text[start..];
+        let body = tail.trim_start();
+        if body.is_empty() {
+            // Only whitespace, or nothing, after the caret: the
+            // backward deletion treats the same shape as a word-less
+            // head and takes it, but with nothing to reach there is no
+            // word, so the whitespace is the thing that goes.
+            if tail.is_empty() {
+                return false;
+            }
+            self.text.truncate(start);
+            return true;
+        }
+        let lead = tail.len() - body.len();
+        let end = start + lead + body.find(' ').unwrap_or(body.len());
+        self.text.replace_range(start..end, "");
+        true
+    }
+
     /// Empty the query.
     pub fn clear(&mut self) {
         self.text.clear();
@@ -539,6 +569,58 @@ mod tests {
         assert!(q.backspace());
         assert_eq!(q.text(), "");
         assert!(!q.backspace());
+    }
+
+    #[test]
+    fn a_word_is_deleted_forward_in_the_middle_of_the_line() {
+        let mut q = Query::new();
+        q.set_text("one two three".to_string());
+        q.home();
+        q.right();
+        q.right();
+        q.right();
+        assert_eq!(q.caret(), 3);
+        // The space next to the caret goes with the word.
+        assert!(q.delete_word_forward());
+        assert_eq!(q.text(), "one three");
+        assert_eq!(q.caret(), 3, "the caret stays");
+        assert!(q.delete_word_forward());
+        assert_eq!(q.text(), "one");
+        assert_eq!(q.caret(), 3);
+        assert!(!q.delete_word_forward());
+    }
+
+    #[test]
+    fn a_forward_word_delete_starts_inside_a_word() {
+        let mut q = Query::new();
+        q.set_text("hello world".to_string());
+        q.home();
+        q.right();
+        q.right();
+        assert!(q.delete_word_forward());
+        assert_eq!(q.text(), "he world");
+        assert_eq!(q.caret(), 2);
+    }
+
+    #[test]
+    fn a_forward_word_delete_is_unicode_safe() {
+        let mut q = Query::new();
+        q.set_text("a \u{e7}\u{1f600}x b".to_string());
+        q.home();
+        q.right();
+        assert!(q.delete_word_forward());
+        assert_eq!(q.text(), "a b");
+        assert_eq!(q.caret(), 1);
+        // Whitespace only after the caret goes whole, like the backward
+        // deletion does with a head of whitespace only.
+        q.set_text("ab   ".to_string());
+        q.home();
+        q.right();
+        q.right();
+        assert!(q.delete_word_forward());
+        assert_eq!(q.text(), "ab");
+        assert_eq!(q.caret(), 2);
+        assert!(!q.delete_word_forward());
     }
 
     #[test]

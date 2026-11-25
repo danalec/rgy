@@ -17,7 +17,7 @@ implements from the platform backend the window uses:
 | action | key | what it does |
 |---|---|---|
 | open | `Ctrl+O`, `>open` | opens the selected path with the platform's default program; the session stays |
-| open folder | `Ctrl+Enter`, `>folder` | opens the folder that holds it (Explorer selects the file on Windows) |
+| open folder | `Shift+Enter`, `>folder` | opens the folder that holds it (Explorer selects the file on Windows). `Shift+Enter` works only where the terminal reports Shift on Enter (the Windows console does); most POSIX terminals send the same byte as plain `Enter`, so use `>folder` there. `Ctrl+Enter` and `Alt+Enter` do nothing |
 | copy path | `>copy` | puts the path on the clipboard — Win32 clipboard on Windows, OSC 52 to `/dev/tty` on unix |
 | preview | `Ctrl+P`, `>preview` | shows the head of the file over the results |
 | actions menu | `Ctrl+K`, `>menu` | an interactive menu of the actions the selected result offers |

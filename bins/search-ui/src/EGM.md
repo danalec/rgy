@@ -52,6 +52,7 @@ its options match the window's.
 - [ui.rs:fn strip_ansi], [ui.rs:fn display_width], [ui.rs:fn truncate_visible], [ui.rs:fn is_wide] and [ui.rs:fn is_combining] keep the drawn cells within the terminal width.
 - [ui.rs:pub fn run] prints the selected path to stdout after the screen is restored, so the result can be piped onward. `Enter` chooses and prints; [ui.rs:enum Action::Choose] is that one decision, and an action from the menu or a command does not end the session.
 - [ui.rs:fn panel_key] owns the keyboard while the actions menu or the settings panel is open; `Esc` closes the panel before it closes the session, the same order the window uses. The actions offered are `rgy_launcher::Action::for_kind(IconInfo::of(path))`, so a binary or folder never offers a preview.
+- [ui.rs:fn handle_key] reads Enter by its explicit modifiers: plain Enter chooses, Shift+Enter (only where the terminal reports Shift — the Windows console; legacy POSIX bytes are plain Enter, and no extended keyboard protocol is enabled) runs `OpenFolder`, and Control or Alt with Enter is `Action::None`. [ui.rs:fn shortcut] advertises `Shift+Enter` for the folder only on Windows with a runner; elsewhere it says `>folder`.
 - With [runner.rs:pub struct NoRunner], `>copy`, `>folder` and `>settings` keep their descriptive notices exactly as before; with a runner they call the machine and say what it did.
 
 ## Side Effects

@@ -505,6 +505,16 @@ pub type SetWindowCompositionAttributeFn =
 unsafe extern "system" {
     pub fn RegisterClassExW(lpwcx: *const WNDCLASSEXW) -> u16;
 
+    /// Loads a cursor. With a null instance and an `IDC_*` resource the
+    /// result is a shared system cursor: it is never destroyed by the caller.
+    pub fn LoadCursorW(hInstance: HINSTANCE, lpCursorName: *const u16) -> HANDLE;
+
+    pub fn GetClassInfoExW(
+        hInstance: HINSTANCE,
+        lpszClass: *const u16,
+        lpwcx: *mut WNDCLASSEXW,
+    ) -> BOOL;
+
     pub fn CreateWindowExW(
         dwExStyle: DWORD,
         lpClassName: *const u16,
@@ -1057,6 +1067,9 @@ pub const OPEN_EXISTING: DWORD = 3;
 pub const STD_OUTPUT_HANDLE: DWORD = 0xFFFF_FFF5;
 /// The standard error, as the platform numbers it.
 pub const STD_ERROR_HANDLE: DWORD = 0xFFFF_FFF4;
+/// The standard arrow, `MAKEINTRESOURCE(32512)`: a resource id carried in a
+/// pointer-sized argument.
+pub const IDC_ARROW: *const u16 = 32512 as *const u16;
 /// The handle no call answers with on success.
 pub const INVALID_HANDLE_VALUE: HANDLE = -1isize as HANDLE;
 

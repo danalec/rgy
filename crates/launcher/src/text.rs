@@ -146,8 +146,20 @@ vocabulary! {
     // What the line says while the first search is not answered yet.
     local_preparing => "Preparing local index…", "Preparando o índice local…";
     local_building => "Building local index…", "Construindo o índice local…";
+    // Only said when nothing is working on the index in the background: the
+    // launcher that has a background task never promises the first search
+    // will do the work.
     local_unread => "not scanned yet: the first search builds it",
         "ainda não varrido: a primeira busca constrói-o";
+    // The background task, said inside the same sentence as the snapshot:
+    // before it has reached a phase (it is checking for the daemon first),
+    // while it looks for the cache, and while it walks the folder.
+    local_warm_starting => "index starting in the background",
+        "índice a iniciar em segundo plano";
+    local_warm_preparing => "preparing the index in the background",
+        "a preparar o índice em segundo plano";
+    local_warm_building => "building the index in the background",
+        "a construir o índice em segundo plano";
     local_scan_failed => "the scan failed: {}", "a varredura falhou: {}";
     tree_not_followed =>"the tree is no longer followed by the daemon",
         "a árvore já não é seguida pelo daemon";

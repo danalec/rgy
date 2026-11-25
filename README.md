@@ -156,7 +156,7 @@ the launcher says so; set another shortcut in `settings.tsv` there.
 The settings panel (`>settings`, or the tray) can change the shortcut to a
 double tap of Control/Alt/Shift or to another combo; the file spells it as
 `combo alt+space`, `double ctrl 400`, and so on. Inside the window:
-`Ctrl+K` opens the actions menu, `Ctrl+P` previews a file, `Ctrl+Enter`
+`Ctrl+K` opens the actions menu, `Ctrl+P` previews a file, `Shift+Enter`
 opens its folder, `Ctrl+C` copies its path, `>settings` opens the panel.
 
 Nothing is registered in the administrator's account: the entry goes into

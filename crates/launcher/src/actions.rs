@@ -83,7 +83,7 @@ impl Action {
     pub fn shortcut(&self) -> &'static str {
         match self {
             Action::Open => "Enter",
-            Action::OpenFolder => "Ctrl+Enter",
+            Action::OpenFolder => "Shift+Enter",
             Action::CopyPath => "Ctrl+C",
             Action::Preview => "Ctrl+P",
             Action::Menu => "Ctrl+K",

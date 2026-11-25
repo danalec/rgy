@@ -588,19 +588,26 @@ fn describe(action: LauncherAction, lang: Lang, available: bool) -> &'static str
 /// key quits, and a menu that sends the user to the wrong key is a menu
 /// that lies. The copy is the `>copy` command there.
 ///
-/// The folder is the same kind of lie for a different reason. `Ctrl+Enter`
-/// is not a key a terminal sends: in the raw mode a terminal puts the
-/// keyboard in, Control+Enter arrives as the same carriage return as Enter
-/// (some terminals offer a quoted form, and this backend does not decode
-/// one), so a menu that advertised it would send the user to a key that
-/// cannot arrive. The `>folder` command is how the terminal opens the
-/// folder — and the handler for the modifier sequence stays, because a
-/// backend that decoded one would not need the menu to change.
+/// The folder is the same kind of lie for a different reason. `Shift+Enter`
+/// is a key only where the terminal reports Shift on Enter: the Windows
+/// console does, but in the raw mode a POSIX terminal is put in, Shift+Enter
+/// arrives as the same carriage return as Enter (the extended keyboard
+/// protocols are not enabled, and this backend does not decode their
+/// sequences), so a menu that advertised it there would send the user to a
+/// key that cannot arrive. The `>folder` command is how the terminal opens
+/// the folder everywhere — and the handler for the Shift modifier stays,
+/// because a backend that reported it would not need the menu to change.
 fn shortcut(action: LauncherAction, available: bool) -> &'static str {
     if available {
         return match action {
             LauncherAction::Open => "Ctrl+O",
-            LauncherAction::OpenFolder => "Ctrl+Enter",
+            LauncherAction::OpenFolder => {
+                if cfg!(windows) {
+                    "Shift+Enter"
+                } else {
+                    ">folder"
+                }
+            }
             LauncherAction::CopyPath => ">copy",
             LauncherAction::Preview => "Ctrl+P",
             LauncherAction::Menu => "Ctrl+K",
@@ -1730,6 +1737,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Action {
     }
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
 
     let action = match key.code {
         KeyCode::Esc => {
@@ -1774,7 +1782,14 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Action {
                 Action::None
             }
         }
-        KeyCode::Enter if ctrl => Action::Run(LauncherAction::OpenFolder),
+        // Control or Alt with Enter is neither the choice nor the folder:
+        // a terminal that reports `Ctrl+Enter` must not submit by habit.
+        KeyCode::Enter if ctrl || alt => Action::None,
+        // Shift+Enter opens the folder, but only where the terminal
+        // reports Shift on Enter (the Windows console does; a legacy
+        // POSIX terminal sends the same byte as Enter, and that arrives
+        // as plain Enter -- `>folder` is the way there).
+        KeyCode::Enter if shift => Action::Run(LauncherAction::OpenFolder),
         KeyCode::Enter => {
             // A command line runs the command; a result line is the
             // picker's answer — print the selected path and leave.
@@ -3754,12 +3769,46 @@ mod tests {
             Action::Run(LauncherAction::Menu)
         );
         assert_eq!(
-            handle_key(
-                &mut app,
-                KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)
-            ),
+            handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)),
             Action::Run(LauncherAction::OpenFolder)
         );
+    }
+
+    /// Plain Enter chooses, Shift+Enter opens the folder, and Control or
+    /// Alt with Enter does neither: it must not submit or open anything.
+    #[test]
+    fn enter_is_plain_shifted_and_inert_with_control_or_alt() {
+        let mut app = app_new();
+        let enter = |m| KeyEvent::new(KeyCode::Enter, m);
+        assert_eq!(
+            handle_key(&mut app, enter(KeyModifiers::NONE)),
+            Action::Choose
+        );
+        assert_eq!(
+            handle_key(&mut app, enter(KeyModifiers::SHIFT)),
+            Action::Run(LauncherAction::OpenFolder)
+        );
+        for held in [
+            KeyModifiers::CONTROL,
+            KeyModifiers::ALT,
+            KeyModifiers::CONTROL.union(KeyModifiers::SHIFT),
+            KeyModifiers::ALT.union(KeyModifiers::SHIFT),
+        ] {
+            assert_eq!(handle_key(&mut app, enter(held)), Action::None);
+        }
+    }
+
+    /// On a legacy POSIX terminal Shift+Enter is the same carriage return
+    /// as Enter, and the decoder says so: plain Enter, no Shift.
+    #[test]
+    fn a_carriage_return_decodes_as_plain_enter() {
+        match term::decode(b"\r", false) {
+            term::Decoded::Key(key, 1) => {
+                assert_eq!(key.code, KeyCode::Enter);
+                assert_eq!(key.modifiers, KeyModifiers::NONE);
+            }
+            _ => panic!("a carriage return is a key"),
+        }
     }
 
     /// `Control+C` is how a user quits a terminal, so it quits this one.
@@ -3832,16 +3881,17 @@ mod tests {
     }
 
     /// The terminal's menu does not send the user to a key the terminal
-    /// cannot send: in the raw mode a terminal puts the keyboard in,
-    /// Control+Enter arrives as the same carriage return as Enter, so the
+    /// cannot send: in the raw mode a POSIX terminal is put in,
+    /// Shift+Enter arrives as the same carriage return as Enter, so the
     /// folder is the `>folder` command there.
     #[test]
-    fn the_terminal_menu_does_not_advertise_control_enter() {
+    fn the_terminal_menu_does_not_advertise_enter_modifiers() {
         let mut app = app_new();
         assert!(!app.run_action(LauncherAction::Menu));
         let notice = app.notice.as_ref().expect("the notice is there");
         let text = notice.lines.join("\n");
         assert!(!text.contains("Ctrl+Enter"), "{text}");
+        assert!(!text.contains("Shift+Enter"), "{text}");
         assert!(text.contains(">folder"), "{text}");
     }
 
