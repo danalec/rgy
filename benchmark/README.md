@@ -10,6 +10,8 @@ on; a number without those two is a rumour.
 | [baseline-names.csv](baseline-names.csv) | the source of truth for the table above — the Markdown is generated from it, and the gate compares against it |
 | [mmap-vs-read.md](mmap-vs-read.md) | mmap against `read()` for a sequential scan, and the cold and hot verdicts |
 | [rgy-name-transcript.md](rgy-name-transcript.md) | the name-tier protocol transcript, written by `scripts/rgy-name-protocol.*` |
+| [rgxy-windows.md](rgxy-windows.md) | Windows session observations for rgxy queries, a GUI fixture and live changes; not a baseline and not gated |
+| [rgxy-windows-warm.csv](rgxy-windows-warm.csv) | raw warm-query samples for the debug and release tables in the file above |
 
 ## The gate
 
