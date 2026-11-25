@@ -2552,7 +2552,7 @@ mod tests {
             "{:?}",
             answer.paths
         );
-        let st = source.snapshot();
+        let st = source.status().borrow().clone();
         assert!(!st.connected, "the daemon is still not there");
         assert!(!st.daemon_missing(), "something answers in its place");
         assert!(st.local_answered());
@@ -2584,7 +2584,7 @@ mod tests {
         let mut source = local_source(gone_endpoint(), &home);
         let answer = source.search("zzzqqqxxx", 10);
         assert!(answer.is_empty());
-        let st = source.snapshot();
+        let st = source.status().borrow().clone();
         assert!(st.local_answered(), "an empty answer of a settled index");
         assert!(!st.daemon_missing());
         assert_eq!(st.matches, 0);
@@ -2603,7 +2603,7 @@ mod tests {
         let mut source = DaemonSource::new(gone_endpoint(), None, Lang::Portuguese)
             .with_fallback(Fallback::Local(home.clone()));
         let _ = source.search("invoice", 10);
-        let said = source.snapshot().warnings.join(" | ");
+        let said = source.status().borrow().clone().warnings.join(" | ");
         assert!(said.contains("buscados localmente ("), "{said}");
         assert!(said.contains("índice construído,"), "{said}");
         let _ = std::fs::remove_dir_all(home.parent().unwrap());
@@ -2632,7 +2632,7 @@ mod tests {
         assert_eq!(source.search("invoice", 10).len(), 1);
         assert!(phases.borrow().is_empty(), "{:?}", phases.borrow());
         // The query's time is the search's own and is still reported.
-        assert_eq!(source.snapshot().layer, Some(Layer::Names));
+        assert_eq!(source.status().borrow().clone().layer, Some(Layer::Names));
         let _ = std::fs::remove_dir_all(home.parent().unwrap());
 
         let home = a_home("progress-daemon");
@@ -2684,7 +2684,7 @@ mod tests {
         let mut source = DaemonSource::new(gone_endpoint(), None, Lang::English);
         assert_eq!(source.fallback(), &Fallback::Strict);
         assert!(source.search("invoice", 10).is_empty());
-        let st = source.snapshot();
+        let st = source.status().borrow().clone();
         assert!(st.local.is_none());
         assert!(source.local.is_none(), "no index was even made");
         assert!(st.daemon_missing());
@@ -2708,7 +2708,7 @@ mod tests {
         let mut source = local_source(daemon.endpoint.clone(), &home);
         let answer = source.search("invoice", 10);
         assert!(answer.is_empty(), "the daemon's empty answer is the answer");
-        let st = source.snapshot();
+        let st = source.status().borrow().clone();
         assert!(st.connected);
         assert!(st.local.is_none());
         assert!(source.local.is_none(), "the local index was never made");
@@ -2742,7 +2742,7 @@ mod tests {
             )
             .with_fallback(Fallback::Local(home.clone()));
             assert!(source.search("invoice", 10).is_empty());
-            let st = source.snapshot();
+            let st = source.status().borrow().clone();
             assert!(st.connected, "the daemon is there");
             assert!(st.local.is_none(), "{:?}", st.local);
             assert!(source.local.is_none(), "no local index was made");
@@ -2758,12 +2758,12 @@ mod tests {
         let home = a_home("back");
         let mut source = local_source(gone_endpoint(), &home);
         let _ = source.search("invoice", 10);
-        assert!(source.snapshot().local.is_some());
+        assert!(source.status().borrow().clone().local.is_some());
         // The same source, pointed at a daemon that is there.
         let daemon = serve(answers_with_no_names);
         source.endpoint = daemon.endpoint.clone();
         assert!(source.search("invoice", 10).is_empty());
-        let st = source.snapshot();
+        let st = source.status().borrow().clone();
         assert!(st.connected);
         assert!(st.local.is_none());
         drop(source);
@@ -2779,7 +2779,7 @@ mod tests {
         assert_eq!(source.search("invoice", 10).len(), 1);
         let answer = source.search("invoice grep:x", 10);
         assert!(answer.is_empty(), "the content layer needs the daemon");
-        let st = source.snapshot();
+        let st = source.status().borrow().clone();
         assert_eq!(st.layer, Some(Layer::Content));
         assert!(st.backend.is_empty(), "{:?}", st.backend);
         let _ = std::fs::remove_dir_all(home.parent().unwrap());
