@@ -219,7 +219,10 @@ mod tests {
     /// A Latin-1 byte is a character, not a control byte.
     #[test]
     fn a_latin1_letter_survives_the_lookup() {
-        assert_eq!(typed_key(0xe7, false, false, false, &[0xe7]), Some(Key::Char('ç')));
+        assert_eq!(
+            typed_key(0xe7, false, false, false, &[0xe7]),
+            Some(Key::Char('ç'))
+        );
     }
     /// The arrows, Home, End and the pages are the model's own keys.
     #[test]

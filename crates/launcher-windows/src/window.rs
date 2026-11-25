@@ -2786,7 +2786,11 @@ mod tests {
         let mut wc: WNDCLASSEXW = unsafe { core::mem::zeroed() };
         wc.cbSize = core::mem::size_of::<WNDCLASSEXW>() as u32;
         let found = unsafe {
-            GetClassInfoExW(GetModuleHandleW(core::ptr::null()), CLASS_NAME.as_ptr(), &mut wc)
+            GetClassInfoExW(
+                GetModuleHandleW(core::ptr::null()),
+                CLASS_NAME.as_ptr(),
+                &mut wc,
+            )
         };
         assert_ne!(found, 0, "the class is registered");
         assert_eq!(wc.hCursor, arrow, "the class cursor is the shared arrow");

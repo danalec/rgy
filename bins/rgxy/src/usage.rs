@@ -236,7 +236,10 @@ mod tests {
     fn the_help_says_shift_enter_opens_the_folder() {
         let english = english();
         let portuguese = portuguese();
-        assert!(english.contains("Shift+Enter opens the folder"), "{english}");
+        assert!(
+            english.contains("Shift+Enter opens the folder"),
+            "{english}"
+        );
         assert!(english.contains("Ctrl+Enter does nothing"), "{english}");
         assert!(
             portuguese.contains("Shift+Enter abre a pasta"),

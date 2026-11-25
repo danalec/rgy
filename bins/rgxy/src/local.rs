@@ -632,7 +632,10 @@ mod tests {
         let warm = Prewarm::start(move || Local::with_cache(&made, cache), || true)
             .expect("the thread starts");
         let (phases, local) = drain(&warm);
-        assert_eq!(phases, vec![Phase::Preparing, Phase::Building, Phase::Searching]);
+        assert_eq!(
+            phases,
+            vec![Phase::Preparing, Phase::Building, Phase::Searching]
+        );
         let mut local = local.expect("the index is handed over");
         // A file made after the warm is not in the snapshot, and the first
         // question neither scans again nor announces anything.
@@ -665,7 +668,10 @@ mod tests {
         .expect("the thread starts");
         let (phases, local) = drain(&warm);
         assert!(phases.is_empty() && local.is_none());
-        assert!(!built.load(std::sync::atomic::Ordering::SeqCst), "no index was made");
+        assert!(
+            !built.load(std::sync::atomic::Ordering::SeqCst),
+            "no index was made"
+        );
         let _ = std::fs::remove_dir_all(base);
     }
 

@@ -3244,9 +3244,14 @@ mod tests {
         let id = rx
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("start ran with no question and no window");
-        assert_ne!(id, std::thread::current().id(), "not on the window's thread");
+        assert_ne!(
+            id,
+            std::thread::current().id(),
+            "not on the window's thread"
+        );
         assert!(
-            rx.recv_timeout(std::time::Duration::from_millis(100)).is_err(),
+            rx.recv_timeout(std::time::Duration::from_millis(100))
+                .is_err(),
             "start runs once"
         );
     }

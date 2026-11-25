@@ -3003,7 +3003,10 @@ mod tests {
         assert!(daemon_is_gone(&gone_endpoint(), window));
         for script in [says_nothing as fn(Peer), says_an_error as fn(Peer)] {
             let daemon = serve(script);
-            assert!(!daemon_is_gone(&daemon.endpoint, window), "the daemon is there");
+            assert!(
+                !daemon_is_gone(&daemon.endpoint, window),
+                "the daemon is there"
+            );
             daemon.join();
         }
     }
@@ -3016,7 +3019,10 @@ mod tests {
         let home = a_home("prewarm");
         let mut source = local_source(gone_endpoint(), &home);
         source.prewarm();
-        assert!(source.warm.is_some(), "the task started with no window and no question");
+        assert!(
+            source.warm.is_some(),
+            "the task started with no window and no question"
+        );
         settle(&mut source);
         assert!(source.local.as_ref().is_some_and(Local::is_open));
         // A file made after the warm is not in the one snapshot.
@@ -3030,7 +3036,11 @@ mod tests {
         let st = source.snapshot();
         assert!(st.local_answered());
         // The build time is the warm's own, and the meter holds the query.
-        assert!(st.local.as_ref().and_then(|l| l.opened_in).is_some(), "{:?}", st.local);
+        assert!(
+            st.local.as_ref().and_then(|l| l.opened_in).is_some(),
+            "{:?}",
+            st.local
+        );
         assert_eq!(st.layer, Some(Layer::Names));
         let _ = std::fs::remove_dir_all(home.parent().unwrap());
     }
@@ -3070,8 +3080,14 @@ mod tests {
         let mut source = local_source(daemon.endpoint.clone(), &home);
         source.warm = slow_warm(&home, Duration::from_millis(1500), &made);
         let began = Instant::now();
-        assert!(source.await_warm(), "the daemon is there: the question is its");
-        assert!(began.elapsed() < Duration::from_millis(1200), "not the whole warm");
+        assert!(
+            source.await_warm(),
+            "the daemon is there: the question is its"
+        );
+        assert!(
+            began.elapsed() < Duration::from_millis(1200),
+            "not the whole warm"
+        );
         assert!(source.warm.is_some() && source.local.is_none());
         drop(source);
         daemon.join();
@@ -3096,17 +3112,26 @@ mod tests {
         source.warm_phase = Some(Phase::Building);
         for _ in 0..2 {
             let said = source.ask_the_daemon().join(" | ");
-            assert!(said.contains("building the index in the background"), "{said}");
+            assert!(
+                said.contains("building the index in the background"),
+                "{said}"
+            );
         }
         source.warm_phase = Some(Phase::Preparing);
         let said = source.ask_the_daemon().join(" | ");
-        assert!(said.contains("preparing the index in the background"), "{said}");
+        assert!(
+            said.contains("preparing the index in the background"),
+            "{said}"
+        );
         let st = source.snapshot();
         assert!(!st.local_answered(), "an index being made is not an answer");
         // In the user's language too.
         source.lang = Lang::Portuguese;
         let said = source.ask_the_daemon().join(" | ");
-        assert!(said.contains("a preparar o índice em segundo plano"), "{said}");
+        assert!(
+            said.contains("a preparar o índice em segundo plano"),
+            "{said}"
+        );
         // No task, no promise broken: the first question is what builds it.
         let mut plain = local_source(gone_endpoint(), &home);
         let said = plain.ask_the_daemon().join(" | ");
@@ -3152,7 +3177,10 @@ mod tests {
         source.prewarm();
         assert!(source.warm.is_some(), "the probe is the task's own");
         settle(&mut source);
-        assert!(source.local.is_none(), "no index was made over a daemon that is up");
+        assert!(
+            source.local.is_none(),
+            "no index was made over a daemon that is up"
+        );
         drop(source);
         daemon.join();
         let _ = std::fs::remove_dir_all(home.parent().unwrap());
