@@ -509,12 +509,6 @@ unsafe extern "system" {
     /// result is a shared system cursor: it is never destroyed by the caller.
     pub fn LoadCursorW(hInstance: HINSTANCE, lpCursorName: *const u16) -> HANDLE;
 
-    pub fn GetClassInfoExW(
-        hInstance: HINSTANCE,
-        lpszClass: *const u16,
-        lpwcx: *mut WNDCLASSEXW,
-    ) -> BOOL;
-
     pub fn CreateWindowExW(
         dwExStyle: DWORD,
         lpClassName: *const u16,
@@ -788,6 +782,22 @@ unsafe extern "system" {
     ) -> UINT;
     /// Give the menu back.
     pub fn DestroyMenu(hMenu: HMENU) -> BOOL;
+}
+
+// The class's own registration, read back.
+//
+// Only the test that asks whether the registered class carries the
+// standard arrow reads this, and a call with no reader is a warning the
+// gate fails on: so the declaration is here, for the test, and not in the
+// block the library links.
+#[cfg(test)]
+#[link(name = "user32")]
+unsafe extern "system" {
+    pub fn GetClassInfoExW(
+        hInstance: HINSTANCE,
+        lpszClass: *const u16,
+        lpwcx: *mut WNDCLASSEXW,
+    ) -> BOOL;
 }
 
 #[link(name = "gdi32")]
