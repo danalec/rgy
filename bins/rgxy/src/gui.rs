@@ -2375,15 +2375,27 @@ mod tests {
     /// machine. The wait is longer than the write's own deadline: the
     /// write that cannot take the lock gives up when the deadline is
     /// gone, and the note that says so comes after it.
+    ///
+    /// The wait is a **deadline** and not a count of tries, for the reason
+    /// the store's own wait gives (see `mru::wait_a_little`): a count of
+    /// tries of a fixed sleep bounds the sleeping and not the waiting, and
+    /// the two come apart on a machine that is busy. The write waits two
+    /// seconds for the lock, and the worker that starts it can be
+    /// scheduled late on a loaded runner — a three-second count of tries
+    /// gave up before the note was ever sent, and the suite was red for a
+    /// machine that was not slow but busy.
     fn wait_for_note(state: &mut State) -> Option<String> {
-        for _ in 0..300 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
             take_notes(state);
             if let Some(note) = state.note.clone() {
                 return Some(note);
             }
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        None
     }
 
     /// A worker that takes its time.
