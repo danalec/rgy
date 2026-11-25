@@ -585,7 +585,8 @@ impl DaemonSource {
         // Proven gone is narrower than the sentence: a transport this
         // platform cannot open is said as "no daemon", but it proves
         // nothing about a daemon, so nothing falls back over it.
-        self.daemon_gone = presence == Presence::Gone && e.kind() != std::io::ErrorKind::Unsupported;
+        self.daemon_gone =
+            presence == Presence::Gone && e.kind() != std::io::ErrorKind::Unsupported;
         let mut st = self.status.borrow_mut();
         st.asked = true;
         st.connected = presence != Presence::Gone;
@@ -2546,7 +2547,11 @@ mod tests {
         let mut source = local_source(gone_endpoint(), &home);
         let answer = source.search("invoice", 10);
         assert_eq!(answer.paths.len(), 1, "{:?}", answer.paths);
-        assert!(answer.paths[0].ends_with("invoice-march.txt"), "{:?}", answer.paths);
+        assert!(
+            answer.paths[0].ends_with("invoice-march.txt"),
+            "{:?}",
+            answer.paths
+        );
         let st = source.snapshot();
         assert!(!st.connected, "the daemon is still not there");
         assert!(!st.daemon_missing(), "something answers in its place");
@@ -2558,7 +2563,10 @@ mod tests {
         let said = st.warnings.join(" | ");
         assert!(said.contains("names are searched locally ("), "{said}");
         assert!(said.contains("index built,"), "{said}");
-        assert!(!said.contains(" ms"), "the duration is the status fragment's: {said}");
+        assert!(
+            !said.contains(" ms"),
+            "the duration is the status fragment's: {said}"
+        );
         assert!(said.contains("content search needs the daemon"), "{said}");
         // The build time is its own figure; the query's time is the answer's.
         let opened = st.local.as_ref().and_then(|l| l.opened_in);
@@ -2580,7 +2588,11 @@ mod tests {
         assert!(st.local_answered(), "an empty answer of a settled index");
         assert!(!st.daemon_missing());
         assert_eq!(st.matches, 0);
-        assert!(st.warnings[0].contains("names are searched locally ("), "{:?}", st.warnings);
+        assert!(
+            st.warnings[0].contains("names are searched locally ("),
+            "{:?}",
+            st.warnings
+        );
         let _ = std::fs::remove_dir_all(home.parent().unwrap());
     }
 
@@ -2629,7 +2641,11 @@ mod tests {
         source.set_progress(sink(&phases));
         phases.borrow_mut().clear();
         let _ = source.search("invoice", 10);
-        assert!(phases.borrow().is_empty(), "a healthy daemon: {:?}", phases.borrow());
+        assert!(
+            phases.borrow().is_empty(),
+            "a healthy daemon: {:?}",
+            phases.borrow()
+        );
         drop(source);
         daemon.join();
         let _ = std::fs::remove_dir_all(home.parent().unwrap());
@@ -2673,7 +2689,9 @@ mod tests {
         assert!(source.local.is_none(), "no index was even made");
         assert!(st.daemon_missing());
         assert!(
-            st.warnings.iter().any(|w| w.contains("no connection to the daemon")),
+            st.warnings
+                .iter()
+                .any(|w| w.contains("no connection to the daemon")),
             "{:?}",
             st.warnings
         );

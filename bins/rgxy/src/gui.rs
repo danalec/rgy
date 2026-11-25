@@ -482,8 +482,7 @@ impl Daemon {
         // in that source — one per launcher, searched in memory per key.
         let fallback = source.fallback().clone();
         let (outbox, inbox, started) = spawn_worker(move || DaemonWorker {
-            source: DaemonSource::with_window(endpoint, rgx, window, lang)
-                .with_fallback(fallback),
+            source: DaemonSource::with_window(endpoint, rgx, window, lang).with_fallback(fallback),
             wake,
             replies: None,
         });
@@ -1143,9 +1142,7 @@ fn on_key(state: &mut State, key: Key) -> Control {
     //
     // A daemon that is not there but whose names are searched locally is
     // not a missing answer: the keyboard stays open.
-    if state.status.daemon_missing()
-        && adds_to_the_query(key)
-        && !the_line_is_a_command(state, key)
+    if state.status.daemon_missing() && adds_to_the_query(key) && !the_line_is_a_command(state, key)
     {
         return paint(state);
     }
@@ -2916,9 +2913,14 @@ mod tests {
 
     type Queue = Rc<RefCell<Vec<Reply>>>;
 
+    /// What a scripted state hands back: the state, the queue, the
+    /// generations it was asked for and how many times the daemon was asked
+    /// who it is.
+    type Script = (State, Queue, Rc<RefCell<Vec<u64>>>, Rc<Cell<u32>>);
+
     /// A state fed by hand: the replies, the generations it asked for and
     /// how many times the daemon was asked who it is.
-    fn scripted() -> (State, Queue, Rc<RefCell<Vec<u64>>>, Rc<Cell<u32>>) {
+    fn scripted() -> Script {
         let (mut state, _) = recording();
         let queue: Queue = Rc::new(RefCell::new(Vec::new()));
         let asked = Rc::new(RefCell::new(Vec::new()));
@@ -2966,7 +2968,10 @@ mod tests {
         let line = status_line(&state);
         assert!(line.starts_with("Building local index"), "{line}");
         assert!(state.in_flight, "a notice is not an answer");
-        assert!(view(&state).latency.is_empty(), "no query has been timed yet");
+        assert!(
+            view(&state).latency.is_empty(),
+            "no query has been timed yet"
+        );
 
         state.lang = Lang::Portuguese;
         assert!(
@@ -3001,7 +3006,9 @@ mod tests {
 
         // The answer: the line goes back to normal and the meter holds the
         // query's time alone.
-        queue.borrow_mut().push(search_reply(state.generation, 1_000));
+        queue
+            .borrow_mut()
+            .push(search_reply(state.generation, 1_000));
         let _ = handle(&mut state, Event::Resize);
         assert!(!state.in_flight);
         assert_eq!(state.index_phase, None);
@@ -3067,8 +3074,14 @@ mod tests {
         let _ = handle(&mut state, Event::Resize);
         assert!(!state.in_flight);
         assert_eq!(state.index_phase, None);
-        assert!(state.app.results().is_empty(), "the stale rows are not shown");
-        assert!(view(&state).latency.is_empty(), "a stale time is not measured");
+        assert!(
+            state.app.results().is_empty(),
+            "the stale rows are not shown"
+        );
+        assert!(
+            view(&state).latency.is_empty(),
+            "a stale time is not measured"
+        );
         assert!(!status_line(&state).contains("local index"));
 
         let _ = handle(&mut state, Event::Tick);
@@ -3136,8 +3149,13 @@ mod tests {
                 let Request::Search { generation, .. } = request else {
                     return None;
                 };
-                let replies = self.replies.as_ref().expect("the thread attached the channel");
-                replies.send(Reply::Progress(Phase::Building)).expect("the window is there");
+                let replies = self
+                    .replies
+                    .as_ref()
+                    .expect("the thread attached the channel");
+                replies
+                    .send(Reply::Progress(Phase::Building))
+                    .expect("the window is there");
                 std::thread::sleep(std::time::Duration::from_millis(400));
                 Some(Reply::Search {
                     generation,

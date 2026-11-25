@@ -219,13 +219,8 @@ impl Local {
                 // The rules beside the cache are read, never written; a
                 // file that does not parse is the defaults.
                 let (rules, _) = Rules::beside(&self.index_path);
-                let idx = Index::build_with_rules(
-                    listings,
-                    0,
-                    now_secs(),
-                    self.shown.as_bytes(),
-                    &rules,
-                );
+                let idx =
+                    Index::build_with_rules(listings, 0, now_secs(), self.shown.as_bytes(), &rules);
                 self.live = Some(Live::with_root(idx, self.shown.as_bytes()));
                 self.origin = Origin::Scanned {
                     at: Instant::now(),
@@ -360,8 +355,7 @@ pub fn default_root() -> Option<PathBuf> {
     } else {
         ["HOME", "USERPROFILE"]
     };
-    let homes: Vec<Option<std::ffi::OsString>> =
-        names.iter().map(|name| std::env::var_os(name)).collect();
+    let homes: Vec<Option<std::ffi::OsString>> = names.iter().map(std::env::var_os).collect();
     choose_root(&homes, std::env::current_dir().ok())
 }
 
@@ -456,11 +450,18 @@ mod tests {
     fn a_walk_answers_a_name_in_the_folder() {
         let (root, cache) = tree("walk");
         let mut local = Local::with_cache(&root, cache);
-        assert!(!local.is_open(), "nothing is read before the first question");
+        assert!(
+            !local.is_open(),
+            "nothing is read before the first question"
+        );
         assert!(local.ensure());
         let (answer, _) = local.answer("invoice", 10);
         assert_eq!(answer.paths.len(), 1, "{:?}", answer.paths);
-        assert!(answer.paths[0].ends_with("invoice-march.txt"), "{:?}", answer.paths);
+        assert!(
+            answer.paths[0].ends_with("invoice-march.txt"),
+            "{:?}",
+            answer.paths
+        );
         assert!(
             Path::new(&answer.paths[0]).is_file(),
             "the path opens: {:?}",
@@ -470,8 +471,14 @@ mod tests {
         let status = local.status(Lang::English);
         assert!(status.done);
         assert!(status.snapshot.contains("index built"), "{status:?}");
-        assert!(!status.snapshot.contains(" ms"), "no duration in the sentence: {status:?}");
-        assert!(status.opened_in.is_some(), "the build time is kept: {status:?}");
+        assert!(
+            !status.snapshot.contains(" ms"),
+            "no duration in the sentence: {status:?}"
+        );
+        assert!(
+            status.opened_in.is_some(),
+            "the build time is kept: {status:?}"
+        );
         let label = status.took_label.as_deref().expect("a short label");
         assert!(label.starts_with("built in "), "{label}");
         let pt = local.status(Lang::Portuguese).took_label.expect("a label");
@@ -510,7 +517,11 @@ mod tests {
         let mut local = Local::with_cache(&root, cache);
         let mut said = Vec::new();
         assert!(local.ensure_with(&mut |p| said.push(p)));
-        assert_eq!(said, vec![Phase::Preparing, Phase::Searching], "no scan was made");
+        assert_eq!(
+            said,
+            vec![Phase::Preparing, Phase::Searching],
+            "no scan was made"
+        );
         let label = local.status(Lang::English).took_label.expect("a label");
         assert!(label.starts_with("cache read in "), "{label}");
         let _ = std::fs::remove_dir_all(root.parent().unwrap());
@@ -560,7 +571,11 @@ mod tests {
         std::fs::write(root.join("later-file.txt"), b"x").expect("a file");
         assert!(local.ensure());
         let (answer, _) = local.answer("later-file", 10);
-        assert!(answer.is_empty(), "the index is a snapshot: {:?}", answer.paths);
+        assert!(
+            answer.is_empty(),
+            "the index is a snapshot: {:?}",
+            answer.paths
+        );
         let _ = std::fs::remove_dir_all(root.parent().unwrap());
     }
 
@@ -573,7 +588,9 @@ mod tests {
             .expect("the walk");
         let mut idx = Index::build(listings, 0, now_secs(), spelled(&root).as_bytes());
         persist::save(&mut idx, &canonical, &cache).expect("the cache is saved");
-        let before = std::fs::metadata(&cache).expect("the cache is there").modified();
+        let before = std::fs::metadata(&cache)
+            .expect("the cache is there")
+            .modified();
         // A file made after the cache was saved: only a walk would find it.
         std::fs::write(root.join("after-the-cache.txt"), b"x").expect("a file");
 
@@ -588,15 +605,23 @@ mod tests {
         let (answer, _) = local.answer("notes", 10);
         assert_eq!(answer.paths.len(), 1, "{:?}", answer.paths);
         let (stale, _) = local.answer("after-the-cache", 10);
-        assert!(stale.is_empty(), "the snapshot is the cache: {:?}", stale.paths);
+        assert!(
+            stale.is_empty(),
+            "the snapshot is the cache: {:?}",
+            stale.paths
+        );
         assert_eq!(
-            std::fs::metadata(&cache).expect("still there").modified().ok(),
+            std::fs::metadata(&cache)
+                .expect("still there")
+                .modified()
+                .ok(),
             before.ok(),
             "the daemon's snapshot is not written from here"
         );
         // The daemon replaces its snapshot while this source is loaded; on
         // Windows that fails if the cache is still mapped.
-        idx.save(&cache).expect("the cache is replaced while the source is loaded");
+        idx.save(&cache)
+            .expect("the cache is replaced while the source is loaded");
         assert!(local.ensure());
         let _ = std::fs::remove_dir_all(root.parent().unwrap());
     }
@@ -616,11 +641,8 @@ mod tests {
     fn the_home_is_the_scope_and_the_current_folder_only_when_there_is_none() {
         let here = std::env::current_dir().expect("a current folder");
         let home = std::env::temp_dir();
-        let chosen = choose_root(
-            &[Some(home.clone().into_os_string())],
-            Some(here.clone()),
-        )
-        .expect("a scope");
+        let chosen = choose_root(&[Some(home.clone().into_os_string())], Some(here.clone()))
+            .expect("a scope");
         assert_eq!(chosen, PathBuf::from(spelled(&home)));
 
         // A home that is not a folder is no home.
