@@ -9,7 +9,7 @@
       nixpkgs,
     }:
     let
-      version = "0.1.10.4";
+      version = "0.1.10.5";
       base = "https://github.com/danalec/rgy/releases/download/rgy-v${version}";
 
       systems = [
@@ -22,7 +22,11 @@
       # One release asset per platform. The digests are the SHA-256 of the
       # archive itself, in SRI form, from the 0.1.10.4 release's
       # SHA256SUMS; `nix flake check` verifies them against the real
-      # downloads. Nothing rewrites them: step 4 of the release checklist
+      # downloads.
+      # The 0.1.10.5 archives are not built yet: the six
+      # hashes below are still the 0.1.10.4 ones, and the publish step
+      # does not rewrite them -- step 4 of the release checklist does, by
+      # hand, from the real SHA256SUMS. Nothing rewrites them: step 4 of the release checklist
       # does, by hand, from the release's own SHA256SUMS.
       assets = {
         x86_64-linux = {

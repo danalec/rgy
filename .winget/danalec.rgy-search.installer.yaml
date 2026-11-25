@@ -8,7 +8,7 @@
 # real archive is what stops a manifest that names one release and pins
 # another's digest from being published.
 PackageIdentifier: danalec.rgy-search
-PackageVersion: 0.1.10.4
+PackageVersion: 0.1.10.5
 MinimumOSVersion: 10.0.17763.0
 InstallerType: zip
 NestedInstallerType: portable
@@ -32,8 +32,8 @@ UpgradeBehavior: uninstallPrevious
 ReleaseDate: 2026-11-25
 Installers:
   - Architecture: x64
-    InstallerUrl: https://github.com/danalec/rgy/releases/download/rgy-v0.1.10.4/rgy-v0.1.10.4-x86_64-windows.zip
-    InstallerSha256: 301CB5D5C9EA84F2FF070C26442CA21C383964D94912E5F7E012CB909ABAC212
+    InstallerUrl: https://github.com/danalec/rgy/releases/download/rgy-v0.1.10.5/rgy-v0.1.10.5-x86_64-windows.zip
+    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
     # A portable install has no ARP entry, so the client has little to
     # correlate. Naming the files it puts down gives it a deeper check
     # without changing what is installed or where. DefaultInstallLocation
