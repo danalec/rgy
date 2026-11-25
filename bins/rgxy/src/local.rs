@@ -17,7 +17,9 @@
 //!
 //! # How
 //!
-//! The index is opened **once** per source, on the first real question:
+//! The index is opened **once** per source — by the background [`Prewarm`]
+//! task when the window's worker started one, otherwise on the first real
+//! question — in one of two ways:
 //!
 //! 1. the per-root cache (`persist::load_for`, read only — the daemon's
 //!    snapshot is never overwritten from here), when it is current;
@@ -34,6 +36,7 @@
 //! chose, and the caller does not hand it to the `rgx` fallback.
 
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
 use rgy_discovery::walk::KIND_DIR;
@@ -344,6 +347,87 @@ impl Local {
     }
 }
 
+/// One message of the prewarm task, in the order it sends them.
+#[cfg_attr(
+    not(any(windows, target_os = "linux", target_os = "freebsd", test)),
+    allow(dead_code)
+)]
+pub enum Warm {
+    /// The task is about to do the blocking work of this phase.
+    Phase(Phase),
+    /// The index is open (or failed, and says so in its status): it is the
+    /// one index of the launcher, handed over whole.
+    Ready(Box<Local>),
+    /// The daemon was not proven absent, or the task is gone: nothing comes.
+    Skipped,
+    /// Nothing yet.
+    Pending,
+}
+
+/// The one background task that opens the fallback index at launcher start.
+///
+/// It owns the [`Local`] while it is built and hands it over once, through a
+/// channel; whoever receives it owns the only copy, so there is one scan and
+/// no snapshot is shared. The task starts with a probe the caller supplies
+/// and warms only when that probe says the daemon is proven absent.
+#[cfg_attr(
+    not(any(windows, target_os = "linux", target_os = "freebsd", test)),
+    allow(dead_code)
+)]
+pub struct Prewarm {
+    messages: Receiver<Warm>,
+}
+
+// The index crosses to the task and back: a `Local` that stopped being `Send`
+// should fail here, not in a distant closure.
+const _: fn() = || {
+    fn is_send<T: Send>() {}
+    is_send::<Local>();
+};
+
+#[cfg_attr(
+    not(any(windows, target_os = "linux", target_os = "freebsd", test)),
+    allow(dead_code)
+)]
+impl Prewarm {
+    /// Start the task: `daemon_is_gone` first, then `make` and one open.
+    ///
+    /// One thread, once. `None` when the platform refuses it: the caller then
+    /// opens the index on the first question, as before.
+    pub fn start<M, P>(make: M, daemon_is_gone: P) -> Option<Prewarm>
+    where
+        M: FnOnce() -> Local + Send + 'static,
+        P: FnOnce() -> bool + Send + 'static,
+    {
+        let (tx, messages) = channel::<Warm>();
+        let body = move || {
+            if !daemon_is_gone() {
+                let _ = tx.send(Warm::Skipped);
+                return;
+            }
+            let mut local = make();
+            local.ensure_with(&mut |phase| {
+                let _ = tx.send(Warm::Phase(phase));
+            });
+            let _ = tx.send(Warm::Ready(Box::new(local)));
+        };
+        std::thread::Builder::new()
+            .name("rgxy-prewarm".to_string())
+            .spawn(body)
+            .ok()?;
+        Some(Prewarm { messages })
+    }
+
+    /// The next message, waiting at most `wait` for it.
+    pub fn next(&self, wait: Duration) -> Warm {
+        match self.messages.recv_timeout(wait) {
+            Ok(message) => message,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Warm::Pending,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Warm::Skipped,
+        }
+    }
+}
+
 /// The sentence the user reads: where the daemon was expected, and what is
 /// searched in its place.
 pub fn sentence(endpoint: &str, status: &LocalStatus, lang: Lang) -> String {
@@ -514,6 +598,64 @@ mod tests {
         let label = local.status(Lang::English).took_label.expect("a label");
         assert!(label.starts_with("cache read in "), "{label}");
         let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    /// Everything the task says, up to the end of its messages.
+    fn drain(warm: &Prewarm) -> (Vec<Phase>, Option<Box<Local>>) {
+        let mut phases = Vec::new();
+        for _ in 0..200 {
+            match warm.next(Duration::from_millis(100)) {
+                Warm::Phase(p) => phases.push(p),
+                Warm::Ready(local) => return (phases, Some(local)),
+                Warm::Skipped => return (phases, None),
+                Warm::Pending => {}
+            }
+        }
+        panic!("the prewarm task never finished");
+    }
+
+    #[test]
+    fn a_prewarm_hands_over_one_index_that_is_not_scanned_again() {
+        let (root, cache) = tree("prewarm");
+        let made = root.clone();
+        let warm = Prewarm::start(move || Local::with_cache(&made, cache), || true)
+            .expect("the thread starts");
+        let (phases, local) = drain(&warm);
+        assert_eq!(phases, vec![Phase::Preparing, Phase::Building, Phase::Searching]);
+        let mut local = local.expect("the index is handed over");
+        // A file made after the warm is not in the snapshot, and the first
+        // question neither scans again nor announces anything.
+        std::fs::write(root.join("later-file.txt"), b"x").expect("a file");
+        let mut said = Vec::new();
+        assert!(local.ensure_with(&mut |p| said.push(p)));
+        assert!(said.is_empty(), "{said:?}");
+        assert_eq!(local.answer("invoice", 10).0.paths.len(), 1);
+        assert!(local.answer("later-file", 10).0.is_empty());
+        let status = local.status(Lang::English);
+        assert!(status.done && status.opened_in.is_some(), "{status:?}");
+        // The task is over: the handle says nothing more is coming.
+        assert!(matches!(warm.next(Duration::ZERO), Warm::Skipped));
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn a_prewarm_without_a_proven_absence_scans_nothing() {
+        let (root, cache) = tree("prewarm-skip");
+        let built = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&built);
+        let base = root.parent().expect("the fixture has a base").to_path_buf();
+        let warm = Prewarm::start(
+            move || {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                Local::with_cache(&root, cache)
+            },
+            || false,
+        )
+        .expect("the thread starts");
+        let (phases, local) = drain(&warm);
+        assert!(phases.is_empty() && local.is_none());
+        assert!(!built.load(std::sync::atomic::Ordering::SeqCst), "no index was made");
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]

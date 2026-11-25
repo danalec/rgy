@@ -309,6 +309,11 @@ trait Worker {
     /// worker's thread, before the first question; the thread wakes the
     /// window after the worker has sent. The default sends nothing.
     fn attach(&mut self, _replies: Sender<Reply>) {}
+
+    /// Called once in the worker's thread, after `attach` and before the
+    /// first question, whether or not the window is ever shown. It must not
+    /// block: the questions wait behind it. The default does nothing.
+    fn start(&mut self) {}
 }
 
 /// The worker that asks the daemon.
@@ -330,6 +335,12 @@ struct DaemonWorker {
 impl Worker for DaemonWorker {
     fn attach(&mut self, replies: Sender<Reply>) {
         self.replies = Some(replies);
+    }
+
+    /// Open the fallback index in the background, for a hidden launcher too.
+    /// The source starts one task and returns: no scan is on this thread.
+    fn start(&mut self) {
+        self.source.prewarm();
     }
 
     fn answer(&mut self, request: Request) -> Option<Reply> {
@@ -402,6 +413,7 @@ where
     let body: ThreadBody = Box::new(move || {
         let mut worker = make();
         worker.attach(answers.clone());
+        worker.start();
         while let Ok(request) = requests.recv() {
             let Some(reply) = worker.answer(request) else {
                 continue;
@@ -1153,7 +1165,14 @@ fn on_key(state: &mut State, key: Key) -> Control {
     match key {
         Key::Char(c) => state.app.insert(c),
         Key::Backspace => state.app.backspace(),
-        Key::CtrlW => state.app.delete_word(),
+        Key::CtrlW | Key::CtrlBackspace => state.app.delete_word(),
+        Key::CtrlDelete => {
+            // Like `Delete`: nothing to delete costs no round-trip, and
+            // the key never falls into another action.
+            if !state.app.delete_word_forward() {
+                return paint(state);
+            }
+        }
         Key::CtrlU => state.app.clear_query(),
         Key::Left => {
             state.app.move_left();
@@ -1195,7 +1214,7 @@ fn on_key(state: &mut State, key: Key) -> Control {
             }
             return run_action(state, Action::Open);
         }
-        Key::CtrlEnter => return run_action(state, Action::OpenFolder),
+        Key::ShiftEnter => return run_action(state, Action::OpenFolder),
         Key::CtrlC => return run_action(state, Action::CopyPath),
         Key::CtrlV => {
             // The clipboard with nothing on it does not change the
@@ -3176,6 +3195,32 @@ mod tests {
         );
     }
 
+    /// A worker is started once, in its own thread, before any question: a
+    /// launcher that is never shown still warms its fallback index.
+    #[test]
+    fn a_worker_is_started_before_any_question_and_off_the_window_thread() {
+        struct Starts(Sender<std::thread::ThreadId>);
+        impl Worker for Starts {
+            fn start(&mut self) {
+                let _ = self.0.send(std::thread::current().id());
+            }
+            fn answer(&mut self, _request: Request) -> Option<Reply> {
+                None
+            }
+        }
+
+        let (tx, rx) = channel();
+        let _daemon = Daemon::with_worker(move || Starts(tx));
+        let id = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("start ran with no question and no window");
+        assert_ne!(id, std::thread::current().id(), "not on the window's thread");
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(100)).is_err(),
+            "start runs once"
+        );
+    }
+
     /// A keystroke does not wait for the daemon.
     ///
     /// The daemon can take seconds to answer, and a key handler that
@@ -3272,6 +3317,26 @@ mod tests {
             "the character before the caret went"
         );
         assert_eq!(state.app.query().caret(), 0, "the caret walked back");
+    }
+
+    /// Ctrl+Backspace is Ctrl+W; Ctrl+Delete takes the word after the caret.
+    #[test]
+    fn the_control_deletions_take_words() {
+        let mut state = empty();
+        for ch in "one two three".chars() {
+            state.app.insert(ch);
+        }
+        let _ = on_key(&mut state, Key::CtrlBackspace);
+        assert_eq!(state.app.query().text(), "one two ");
+        state.app.move_home();
+        state.app.move_right();
+        let _ = on_key(&mut state, Key::CtrlDelete);
+        assert_eq!(state.app.query().text(), "o two ");
+        assert_eq!(state.app.query().caret(), 1, "the caret stays");
+        // Nothing after the caret: nothing changes, nothing is asked.
+        state.app.move_end();
+        let _ = on_key(&mut state, Key::CtrlDelete);
+        assert_eq!(state.app.query().text(), "o two ");
     }
 
     /// A `Delete` that deletes nothing costs no round-trip.

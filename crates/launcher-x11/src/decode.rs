@@ -70,7 +70,10 @@ pub fn character_of(keysym: u64) -> Option<char> {
 /// modifier), and those fall back to [`key_of`]. Control and Alt keep the
 /// keysym path: a Ctrl+C is a command, not a control character, and an
 /// Alt+letter belongs to the window manager.
-pub fn typed_key(keysym: u64, ctrl: bool, alt: bool, text: &[u8]) -> Option<Key> {
+pub fn typed_key(keysym: u64, ctrl: bool, shift: bool, alt: bool, text: &[u8]) -> Option<Key> {
+    if keysym == x::XK_Return {
+        return enter_of(ctrl, shift, alt);
+    }
     if let (false, false, Some(&byte)) = (ctrl, alt, text.first()) {
         // `XLookupString` hands back Latin-1 bytes. Latin-1 is the
         // first 256 Unicode codepoints, so the byte *is* the char.
@@ -82,6 +85,21 @@ pub fn typed_key(keysym: u64, ctrl: bool, alt: bool, text: &[u8]) -> Option<Key>
     key_of(keysym, ctrl)
 }
 
+/// What Return means with the modifiers held.
+///
+/// Plain Return opens, Shift+Return opens the folder, and Control or Alt
+/// with Return is **nothing**: it is neither the open nor the folder, so
+/// a Ctrl+Enter pressed from habit does not submit or open anything.
+pub fn enter_of(ctrl: bool, shift: bool, alt: bool) -> Option<Key> {
+    if ctrl || alt {
+        None
+    } else if shift {
+        Some(Key::ShiftEnter)
+    } else {
+        Some(Key::Enter)
+    }
+}
+
 /// Turn a keysym and a modifier mask into the launcher's own key.
 ///
 /// `None` says the event is not a key the field sees: a modifier press, a
@@ -89,7 +107,9 @@ pub fn typed_key(keysym: u64, ctrl: bool, alt: bool, text: &[u8]) -> Option<Key>
 /// the daemon a question nobody asked.
 pub fn key_of(keysym: u64, ctrl: bool) -> Option<Key> {
     Some(match keysym {
+        x::XK_BackSpace if ctrl => Key::CtrlBackspace,
         x::XK_BackSpace => Key::Backspace,
+        x::XK_Delete if ctrl => Key::CtrlDelete,
         x::XK_Delete => Key::Delete,
         x::XK_Left => Key::Left,
         x::XK_Right => Key::Right,
@@ -99,13 +119,8 @@ pub fn key_of(keysym: u64, ctrl: bool) -> Option<Key> {
         x::XK_End => Key::End,
         x::XK_Page_Up => Key::PageUp,
         x::XK_Page_Down => Key::PageDown,
-        x::XK_Return => {
-            if ctrl {
-                Key::CtrlEnter
-            } else {
-                Key::Enter
-            }
-        }
+        // Control with Return is nothing; Shift is `typed_key`'s to read.
+        x::XK_Return => return enter_of(ctrl, false, false),
         x::XK_Escape => Key::Esc,
         x::XK_Tab => Key::Tab,
         // A modifier is not a key, and a function key is not either.
@@ -147,7 +162,7 @@ mod tests {
     #[test]
     fn a_shifted_period_is_the_command_prefix() {
         assert_eq!(
-            typed_key(u64::from(b'.'), false, false, b">"),
+            typed_key(u64::from(b'.'), false, true, false, b">"),
             Some(Key::Char('>'))
         );
     }
@@ -157,15 +172,15 @@ mod tests {
     #[test]
     fn shifted_letters_and_plain_keys_keep_their_spelling() {
         assert_eq!(
-            typed_key(u64::from(b'a'), false, false, b"A"),
+            typed_key(u64::from(b'a'), false, true, false, b"A"),
             Some(Key::Char('A'))
         );
         assert_eq!(
-            typed_key(u64::from(b'r'), false, false, b"r"),
+            typed_key(u64::from(b'r'), false, false, false, b"r"),
             Some(Key::Char('r'))
         );
         assert_eq!(
-            typed_key(u64::from(b'r'), false, false, b""),
+            typed_key(u64::from(b'r'), false, false, false, b""),
             Some(Key::Char('r'))
         );
     }
@@ -175,11 +190,11 @@ mod tests {
     #[test]
     fn control_and_alt_keep_the_keysym_path() {
         assert_eq!(
-            typed_key(u64::from(b'c'), true, false, &[0x03]),
+            typed_key(u64::from(b'c'), true, false, false, &[0x03]),
             Some(Key::CtrlC)
         );
         assert_eq!(
-            typed_key(u64::from(b'x'), false, true, b"x"),
+            typed_key(u64::from(b'x'), false, false, true, b"x"),
             Some(Key::Char('x'))
         );
     }
@@ -187,10 +202,16 @@ mod tests {
     /// Return and the arrows spell no text, so the keysym decides.
     #[test]
     fn a_key_that_spells_nothing_falls_back_to_the_keysym() {
-        assert_eq!(typed_key(x::XK_Return, false, false, b""), Some(Key::Enter));
-        assert_eq!(typed_key(x::XK_Left, false, false, b""), Some(Key::Left));
         assert_eq!(
-            typed_key(x::XK_BackSpace, false, false, b""),
+            typed_key(x::XK_Return, false, false, false, b""),
+            Some(Key::Enter)
+        );
+        assert_eq!(
+            typed_key(x::XK_Left, false, false, false, b""),
+            Some(Key::Left)
+        );
+        assert_eq!(
+            typed_key(x::XK_BackSpace, false, false, false, b""),
             Some(Key::Backspace)
         );
     }
@@ -198,7 +219,7 @@ mod tests {
     /// A Latin-1 byte is a character, not a control byte.
     #[test]
     fn a_latin1_letter_survives_the_lookup() {
-        assert_eq!(typed_key(0xe7, false, false, &[0xe7]), Some(Key::Char('ç')));
+        assert_eq!(typed_key(0xe7, false, false, false, &[0xe7]), Some(Key::Char('ç')));
     }
     /// The arrows, Home, End and the pages are the model's own keys.
     #[test]
@@ -217,11 +238,19 @@ mod tests {
         }
     }
 
-    /// Enter is an open; Ctrl+Enter opens the folder.
+    /// Enter is an open; Shift+Enter opens the folder; Control or Alt
+    /// with Enter is neither and must not submit.
     #[test]
-    fn ctrl_enter_is_not_enter() {
+    fn enter_is_plain_shifted_and_nothing_with_control_or_alt() {
+        let enter = |ctrl, shift, alt| typed_key(x::XK_Return, ctrl, shift, alt, b"\r");
+        assert_eq!(enter(false, false, false), Some(Key::Enter));
+        assert_eq!(enter(false, true, false), Some(Key::ShiftEnter));
+        assert_eq!(enter(true, false, false), None);
+        assert_eq!(enter(true, true, false), None);
+        assert_eq!(enter(false, false, true), None);
+        assert_eq!(enter(false, true, true), None);
         assert_eq!(key_of(x::XK_Return, false), Some(Key::Enter));
-        assert_eq!(key_of(x::XK_Return, true), Some(Key::CtrlEnter));
+        assert_eq!(key_of(x::XK_Return, true), None);
     }
 
     /// The control letters are actions, not characters.
@@ -239,6 +268,19 @@ mod tests {
             assert_eq!(key_of(c.to_ascii_uppercase() as u64, true), Some(key));
         }
         assert_eq!(key_of(b'z' as u64, true), None);
+    }
+
+    /// Ctrl+Backspace and Ctrl+Delete are word deletions; plain ones are not.
+    #[test]
+    fn the_control_deletions_are_their_own_keys() {
+        assert_eq!(key_of(x::XK_BackSpace, true), Some(Key::CtrlBackspace));
+        assert_eq!(key_of(x::XK_BackSpace, false), Some(Key::Backspace));
+        assert_eq!(key_of(x::XK_Delete, true), Some(Key::CtrlDelete));
+        assert_eq!(key_of(x::XK_Delete, false), Some(Key::Delete));
+        assert_eq!(
+            typed_key(x::XK_BackSpace, true, false, false, &[0x08]),
+            Some(Key::CtrlBackspace)
+        );
     }
 
     /// The same letter without Control is a character in the field.

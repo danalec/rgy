@@ -978,7 +978,8 @@ impl Window {
             } else {
                 &[][..]
             };
-            let key = decode::typed_key(keysym, ctrl, alt, text);
+            let shift = decode::shift_of(state);
+            let key = decode::typed_key(keysym, ctrl, shift, alt, text);
             if let Some(k) = key {
                 return self.deliver(Event::Key(k), on_event);
             }

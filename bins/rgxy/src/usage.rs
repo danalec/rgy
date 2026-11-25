@@ -78,10 +78,13 @@ fn english() -> String {
          \n\
          Both faces carry out the same actions: open a result, open its\n\
          folder, copy its path, preview its head and edit the settings.\n\
-         In the terminal Ctrl+O opens, Ctrl+Enter opens the folder,\n\
-         Ctrl+P previews, Ctrl+K opens the actions menu, Ctrl+S edits\n\
-         the settings and Ctrl+V pastes; Enter still prints the chosen\n\
-         path so it can be piped onward.",
+         In the window Shift+Enter opens the folder. In the terminal\n\
+         Ctrl+O opens, Ctrl+P previews, Ctrl+K opens the actions menu,\n\
+         Ctrl+S edits the settings and Ctrl+V pastes; Enter still prints\n\
+         the chosen path so it can be piped onward. The terminal opens\n\
+         the folder with >folder, and with Shift+Enter only where the\n\
+         terminal reports Shift (the Windows console does; most POSIX\n\
+         terminals send plain Enter). Ctrl+Enter does nothing.",
         version = env!("CARGO_PKG_VERSION"),
     )
 }
@@ -139,10 +142,14 @@ fn portuguese() -> String {
          \n\
          As duas faces executam as mesmas ações: abrir um resultado, abrir\n\
          a sua pasta, copiar o caminho, pré-visualizar o início e editar\n\
-         as configurações. No terminal Ctrl+O abre, Ctrl+Enter abre a\n\
-         pasta, Ctrl+P pré-visualiza, Ctrl+K abre o menu de ações, Ctrl+S\n\
-         edita as configurações e Ctrl+V cola; Enter continua a imprimir\n\
-         o caminho escolhido para poder ser encaminhado.",
+         as configurações. Na janela Shift+Enter abre a pasta. No\n\
+         terminal Ctrl+O abre, Ctrl+P pré-visualiza, Ctrl+K abre o menu\n\
+         de ações, Ctrl+S edita as configurações e Ctrl+V cola; Enter\n\
+         continua a imprimir o caminho escolhido para poder ser\n\
+         encaminhado. O terminal abre a pasta com >folder, e com\n\
+         Shift+Enter só onde o terminal informa o Shift (o console do\n\
+         Windows informa; a maioria dos terminais POSIX envia Enter\n\
+         simples). Ctrl+Enter não faz nada.",
         version = env!("CARGO_PKG_VERSION"),
     )
 }
@@ -221,6 +228,26 @@ mod tests {
             portuguese.contains("default: fzf ou sk no PATH"),
             "{portuguese}"
         );
+    }
+
+    /// The folder is Shift+Enter, and the help never sends the user to
+    /// Ctrl+Enter as the key that opens it.
+    #[test]
+    fn the_help_says_shift_enter_opens_the_folder() {
+        let english = english();
+        let portuguese = portuguese();
+        assert!(english.contains("Shift+Enter opens the folder"), "{english}");
+        assert!(english.contains("Ctrl+Enter does nothing"), "{english}");
+        assert!(
+            portuguese.contains("Shift+Enter abre a pasta"),
+            "{portuguese}"
+        );
+        assert!(
+            portuguese.contains("Ctrl+Enter não faz nada"),
+            "{portuguese}"
+        );
+        assert!(!english.contains("Ctrl+Enter opens"), "{english}");
+        assert!(!portuguese.contains("Ctrl+Enter abre"), "{portuguese}");
     }
 
     /// The help names the flags the command line has.

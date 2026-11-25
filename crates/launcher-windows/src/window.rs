@@ -161,8 +161,8 @@ pub enum Key {
     PageUp,
     PageDown,
     Enter,
-    /// Ctrl+Enter: open the folder that holds the result.
-    CtrlEnter,
+    /// Shift+Enter: open the folder that holds the result.
+    ShiftEnter,
     /// Ctrl+C: copy the path.
     CtrlC,
     /// Ctrl+V: paste the clipboard's text into the query.
@@ -173,6 +173,10 @@ pub enum Key {
     CtrlK,
     /// Ctrl+W: delete the word.
     CtrlW,
+    /// Ctrl+Backspace: delete the word before the caret, like Ctrl+W.
+    CtrlBackspace,
+    /// Ctrl+Delete: delete the word after the caret.
+    CtrlDelete,
     /// Ctrl+U: clear the query.
     CtrlU,
     Esc,
@@ -1901,7 +1905,7 @@ impl Window {
                 return Control::None;
             }
             if (msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN)
-                && let Some(key) = translate_key(msg, control_down())
+                && let Some(key) = translate_key(msg, control_down(), shift_down(), alt_down())
             {
                 return on_event(Event::Key(key));
             }
@@ -2395,7 +2399,9 @@ fn register_class() -> Result<(), String> {
             cbWndExtra: 0,
             hInstance: GetModuleHandleW(core::ptr::null()),
             hIcon: core::ptr::null_mut(),
-            hCursor: core::ptr::null_mut(),
+            // The shared standard arrow: with no class cursor the last
+            // cursor (a busy one, after an index build) lingers over us.
+            hCursor: LoadCursorW(core::ptr::null_mut(), IDC_ARROW),
             // No background brush: the accent policy paints the backdrop,
             // and a brush here would paint over it.
             hbrBackground: core::ptr::null_mut(),
@@ -2421,24 +2427,40 @@ fn control_down() -> bool {
     unsafe { GetKeyState(VK_CONTROL as i32) < 0 }
 }
 
+/// Whether a Shift key is down.
+fn shift_down() -> bool {
+    unsafe { GetKeyState(VK_SHIFT as i32) < 0 }
+}
+
+/// Whether an Alt key is down.
+fn alt_down() -> bool {
+    unsafe { GetKeyState(VK_MENU as i32) < 0 }
+}
+
 /// The control keys, from the system's own view of the keyboard.
 ///
-/// The Control state comes from the caller: the keyboard is read once,
+/// The modifier state comes from the caller: the keyboard is read once,
 /// here, and a translation that asked it again would be asking a
 /// question whose answer can change between the two reads.
-fn translate_key(msg: &MSG, ctrl: bool) -> Option<Key> {
+///
+/// Enter is three keys by its modifiers: plain Enter opens, Shift+Enter
+/// opens the folder, and Control or Alt with Enter is **nothing** — it is
+/// neither the open nor the folder, so a Ctrl+Enter pressed from habit
+/// does not submit or open anything.
+fn translate_key(msg: &MSG, ctrl: bool, shift: bool, alt: bool) -> Option<Key> {
     let vk = msg.wParam as u32;
     Some(match vk {
+        VK_BACK if ctrl => Key::CtrlBackspace,
         VK_BACK => Key::Backspace,
         VK_TAB => Key::Tab,
         VK_RETURN => {
-            if ctrl {
-                Key::CtrlEnter
-            } else {
-                Key::Enter
+            if ctrl || alt {
+                return None;
             }
+            if shift { Key::ShiftEnter } else { Key::Enter }
         }
         VK_ESCAPE => Key::Esc,
+        VK_DELETE if ctrl => Key::CtrlDelete,
         VK_DELETE => Key::Delete,
         VK_LEFT => Key::Left,
         VK_RIGHT => Key::Right,
@@ -2479,7 +2501,8 @@ fn translate_char(code: u16, pending: Option<u16>) -> (Option<Key>, Option<u16>)
     // reported as a key event: they would be typed twice. The tab is one
     // of them -- the key is already a key, and a tab inside a search box
     // is a character nobody typed.
-    if code < 0x20 {
+    // DEL (0x7f) is the one Ctrl+Backspace sends: not text either.
+    if code < 0x20 || code == 0x7f {
         return (None, None);
     }
     // The high surrogate: the first half of a character the platform
@@ -2612,16 +2635,61 @@ mod tests {
     #[test]
     fn the_paste_needs_the_control() {
         let msg = key_message(b'V' as u32);
-        assert_eq!(translate_key(&msg, true), Some(Key::CtrlV));
-        assert_eq!(translate_key(&msg, false), None);
+        assert_eq!(translate_key(&msg, true, false, false), Some(Key::CtrlV));
+        assert_eq!(translate_key(&msg, false, false, false), None);
+    }
+
+    /// Plain Enter opens, Shift+Enter opens the folder, and Control or
+    /// Alt with Enter is neither: it must not submit or open the folder.
+    #[test]
+    fn enter_is_plain_shifted_and_nothing_with_control_or_alt() {
+        let msg = key_message(VK_RETURN);
+        assert_eq!(translate_key(&msg, false, false, false), Some(Key::Enter));
+        assert_eq!(
+            translate_key(&msg, false, true, false),
+            Some(Key::ShiftEnter)
+        );
+        assert_eq!(translate_key(&msg, true, false, false), None);
+        assert_eq!(translate_key(&msg, true, true, false), None);
+        assert_eq!(translate_key(&msg, false, false, true), None);
+        assert_eq!(translate_key(&msg, false, true, true), None);
     }
 
     /// Ctrl+C is the copy, and it is the same shape: the Control decides.
     #[test]
     fn the_copy_needs_the_control() {
         let msg = key_message(b'C' as u32);
-        assert_eq!(translate_key(&msg, true), Some(Key::CtrlC));
-        assert_eq!(translate_key(&msg, false), None);
+        assert_eq!(translate_key(&msg, true, false, false), Some(Key::CtrlC));
+        assert_eq!(translate_key(&msg, false, false, false), None);
+    }
+
+    /// Ctrl+Backspace and Ctrl+Delete are word deletions; plain ones are not.
+    #[test]
+    fn the_control_deletions_are_their_own_keys() {
+        let back = key_message(VK_BACK);
+        assert_eq!(
+            translate_key(&back, true, false, false),
+            Some(Key::CtrlBackspace)
+        );
+        assert_eq!(
+            translate_key(&back, false, false, false),
+            Some(Key::Backspace)
+        );
+        let delete = key_message(VK_DELETE);
+        assert_eq!(
+            translate_key(&delete, true, false, false),
+            Some(Key::CtrlDelete)
+        );
+        assert_eq!(
+            translate_key(&delete, false, false, false),
+            Some(Key::Delete)
+        );
+    }
+
+    /// The DEL that comes with Ctrl+Backspace is not a character.
+    #[test]
+    fn the_delete_character_is_not_text() {
+        assert_eq!(translate_char(0x7f, None), (None, None));
     }
 
     /// The tab is a key, not a character.
@@ -2705,6 +2773,24 @@ mod tests {
         );
     }
     use super::*;
+
+    /// The window class carries the shared standard arrow.
+    ///
+    /// A class with no cursor leaves whatever cursor was last set, and a
+    /// busy one lingered over the launcher after an index build.
+    #[test]
+    fn the_class_carries_the_standard_arrow() {
+        register_class().expect("the class registers");
+        let arrow = unsafe { LoadCursorW(core::ptr::null_mut(), IDC_ARROW) };
+        assert!(!arrow.is_null(), "the platform has a standard arrow");
+        let mut wc: WNDCLASSEXW = unsafe { core::mem::zeroed() };
+        wc.cbSize = core::mem::size_of::<WNDCLASSEXW>() as u32;
+        let found = unsafe {
+            GetClassInfoExW(GetModuleHandleW(core::ptr::null()), CLASS_NAME.as_ptr(), &mut wc)
+        };
+        assert_ne!(found, 0, "the class is registered");
+        assert_eq!(wc.hCursor, arrow, "the class cursor is the shared arrow");
+    }
 
     /// The presented region is the part of the layer the picture covers.
     ///

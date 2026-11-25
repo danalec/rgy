@@ -457,6 +457,13 @@ impl App {
         self.query.delete_word();
     }
 
+    /// Delete the word after the caret.
+    ///
+    /// False when there was nothing to delete.
+    pub fn delete_word_forward(&mut self) -> bool {
+        self.query.delete_word_forward()
+    }
+
     /// Empty the query.
     pub fn clear_query(&mut self) {
         self.query.clear();
@@ -785,7 +792,7 @@ impl App {
     pub fn action_for(&self, key: &str) -> Option<Action> {
         match key {
             "enter" => Some(Action::Open),
-            "ctrl+enter" => Some(Action::OpenFolder),
+            "shift+enter" => Some(Action::OpenFolder),
             "ctrl+c" => Some(Action::CopyPath),
             "ctrl+p" => Some(Action::Preview),
             "ctrl+k" => Some(Action::Menu),
@@ -1035,7 +1042,11 @@ mod tests {
     fn the_keys_mean_the_actions() {
         let app = App::new();
         assert_eq!(app.action_for("enter"), Some(Action::Open));
-        assert_eq!(app.action_for("ctrl+enter"), Some(Action::OpenFolder));
+        assert_eq!(app.action_for("shift+enter"), Some(Action::OpenFolder));
+        // Ctrl+Enter and Alt+Enter are no longer the folder, and not Open.
+        assert_eq!(app.action_for("ctrl+enter"), None);
+        assert_eq!(app.action_for("alt+enter"), None);
+        assert_eq!(app.action_for("ctrl+shift+enter"), None);
         assert_eq!(app.action_for("ctrl+c"), Some(Action::CopyPath));
         assert_eq!(app.action_for("ctrl+p"), Some(Action::Preview));
         assert_eq!(app.action_for("ctrl+k"), Some(Action::Menu));

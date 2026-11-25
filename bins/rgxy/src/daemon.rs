@@ -35,7 +35,7 @@ use rgy_launcher::{Answer, Layer, Query, Source};
 use rgy_proto::client::Client;
 use rgy_proto::endpoint::Endpoint;
 
-use crate::local::{self, Fallback, Local, LocalStatus, Phase};
+use crate::local::{self, Fallback, Local, LocalStatus, Phase, Prewarm, Warm};
 
 /// How many names the content layer reads.
 ///
@@ -302,8 +302,9 @@ pub struct DaemonSource {
     lang: Lang,
     /// What happens to the name layer when the daemon is gone.
     fallback: Fallback,
-    /// The one local index of this source, opened on the first name
-    /// question that needs it and kept for the life of the source.
+    /// The one local index of this source, opened by the background task
+    /// when there is one, otherwise on the first name question that needs
+    /// it, and kept for the life of the source.
     local: Option<Local>,
     /// Whether the last failure proved the daemon is not there.
     ///
@@ -315,6 +316,31 @@ pub struct DaemonSource {
     /// worker uses it to say "Building local index…" while the scan runs).
     /// Never called while the daemon answers, nor for an open index.
     progress: Option<Box<dyn FnMut(Phase)>>,
+    /// The background task that is opening the fallback index, until its
+    /// index is adopted or it says there is none. Never set when strict.
+    warm: Option<Prewarm>,
+    /// The last phase the background task said, kept across polls so the
+    /// notice can say it while the task is still working. Only meaningful
+    /// while `warm` is set.
+    warm_phase: Option<Phase>,
+}
+
+/// How often a question that waits for the warm index asks the daemon again.
+const REPROBE_EVERY: Duration = Duration::from_millis(250);
+
+/// What one such probe may spend: only a reachable daemon matters, so a
+/// busy one answers "there" at once.
+const REPROBE_WINDOW: Duration = Duration::from_millis(100);
+
+/// Whether `endpoint` is proven absent: a connect that failed the way only
+/// a missing daemon fails. A connection, a timeout, a refusal that is not
+/// "nobody listens", an unsupported transport and a bad answer are all "not
+/// proven".
+fn daemon_is_gone(endpoint: &Endpoint, window: Duration) -> bool {
+    match Client::connect_within(endpoint, Some(Instant::now() + window)) {
+        Ok(_) => false,
+        Err(e) => presence(&e) == Presence::Gone,
+    }
 }
 
 impl DaemonSource {
@@ -354,7 +380,104 @@ impl DaemonSource {
             local: None,
             daemon_gone: false,
             progress: None,
+            warm: None,
+            warm_phase: None,
         }
+    }
+
+    /// Open the fallback index in the background, when the default daemon
+    /// is proven absent.
+    ///
+    /// For the resident window's worker, at its start and whether or not the
+    /// window is shown. The probe and the scan run on the task's own thread,
+    /// so neither stands in front of a query on this one. Nothing happens for
+    /// a strict source (`--endpoint`), when an index exists already, or when
+    /// the task is already running; the probe finding anything but a missing
+    /// daemon ends the task without a scan.
+    #[cfg_attr(
+        not(any(windows, target_os = "linux", target_os = "freebsd", test)),
+        allow(dead_code)
+    )]
+    pub fn prewarm(&mut self) {
+        let Fallback::Local(root) = &self.fallback else {
+            return;
+        };
+        if self.warm.is_some() || self.local.is_some() {
+            return;
+        }
+        let root = root.clone();
+        let endpoint = self.endpoint.clone();
+        let window = self.window;
+        self.warm = Prewarm::start(
+            move || Local::new(&root),
+            move || daemon_is_gone(&endpoint, window),
+        );
+    }
+
+    /// Say a phase to whoever listens.
+    fn say(&mut self, phase: Phase) {
+        if let Some(say) = self.progress.as_mut() {
+            say(phase);
+        }
+    }
+
+    /// Take what the task has finished, without waiting. The last phase it
+    /// reached is kept in `warm_phase` while it is still working.
+    fn poll_warm(&mut self) {
+        while let Some(warm) = self.warm.as_ref() {
+            match warm.next(Duration::ZERO) {
+                Warm::Phase(phase) => self.note_warm_phase(phase),
+                Warm::Ready(local) => self.adopt_warm(*local),
+                Warm::Skipped => self.end_warm(),
+                Warm::Pending => return,
+            }
+        }
+    }
+
+    /// Remember a phase of the task. `Searching` is its last word before the
+    /// index arrives and names no work, so it does not replace the phase.
+    fn note_warm_phase(&mut self, phase: Phase) {
+        if phase != Phase::Searching {
+            self.warm_phase = Some(phase);
+        }
+    }
+
+    /// The task is over and gave no index.
+    fn end_warm(&mut self) {
+        self.warm = None;
+        self.warm_phase = None;
+    }
+
+    /// The task is over and gave its index: it is the one index.
+    fn adopt_warm(&mut self, local: Local) {
+        self.local = Some(local);
+        self.end_warm();
+    }
+
+    /// Wait for the task's index, asking the daemon again while it does.
+    ///
+    /// Called only after this very question found the daemon absent. `true`
+    /// means a daemon is there now and the question belongs to it; the index
+    /// is kept either way. One task, one scan: nothing here scans.
+    fn await_warm(&mut self) -> bool {
+        let mut waited = false;
+        while let Some(warm) = self.warm.as_ref() {
+            match warm.next(REPROBE_EVERY) {
+                Warm::Phase(phase) => {
+                    self.note_warm_phase(phase);
+                    self.say(phase);
+                }
+                Warm::Ready(local) => self.adopt_warm(*local),
+                Warm::Skipped => self.end_warm(),
+                Warm::Pending => {
+                    waited = true;
+                    if !daemon_is_gone(&self.endpoint, REPROBE_WINDOW) {
+                        return true;
+                    }
+                }
+            }
+        }
+        waited && !daemon_is_gone(&self.endpoint, REPROBE_WINDOW)
     }
 
     /// Where the local index says what it is about to do, or `None`.
@@ -651,8 +774,25 @@ impl DaemonSource {
     /// the answer itself.
     fn announce_local(&mut self, extra: Vec<String>) -> Option<String> {
         let root = self.may_fall_back()?;
+        // A finished background index is what the line describes.
+        self.poll_warm();
+        let warming = self.warm.is_some();
+        let phase = self.warm_phase;
         let local = self.local.get_or_insert_with(|| Local::new(&root));
-        let shown = local.status(self.lang);
+        let mut shown = local.status(self.lang);
+        if warming && !shown.done {
+            // The scan is already under way in the background: the line says
+            // the phase the task reached, and never that the first search
+            // will build what is being built. No phase yet is the task still
+            // starting (it checks for the daemon first).
+            let text = Text::for_lang(self.lang);
+            shown.snapshot = match phase {
+                Some(Phase::Preparing) => text.local_warm_preparing,
+                Some(Phase::Building | Phase::Searching) => text.local_warm_building,
+                None => text.local_warm_starting,
+            }
+            .to_string();
+        }
         let sentence = local::sentence(&self.endpoint.describe(), &shown, self.lang);
         let mut st = self.status.borrow_mut();
         st.asked = true;
@@ -667,7 +807,8 @@ impl DaemonSource {
 
     /// The names, from the index in this process.
     ///
-    /// The index is opened by the first real question and never again: an
+    /// The index is opened by the background task when there is one, and
+    /// otherwise by the first real question; never again either way: an
     /// empty field is not a question and scans nothing. The content layer's
     /// scope is **not** touched — a local name result is not a scope the
     /// daemon chose.
@@ -676,6 +817,35 @@ impl DaemonSource {
             return Answer::empty();
         };
         let asked = !query.trim().is_empty();
+        // The daemon was just found absent. A background index that is
+        // finished is taken as it is; one that is still being made is waited
+        // for instead of scanned a second time, and a daemon that appears in
+        // the meantime answers the question. This is a loop and not a call
+        // back into `search_names`: every pass waits for the task (at least
+        // a re-probe period) and the task ends, so the stack never grows
+        // under a daemon that comes and goes.
+        if asked {
+            self.poll_warm();
+            while self.warm.is_some() {
+                if let Some(phase) = self.warm_phase {
+                    self.say(phase);
+                }
+                if !self.await_warm() {
+                    break;
+                }
+                // A daemon answered the probe: it has priority, over a fresh
+                // connection of its own.
+                if let Some(answer) = self.names_from_daemon(query, limit) {
+                    return answer;
+                }
+                if !self.daemon_gone {
+                    // Slow, refusing or answering badly: it is up, and
+                    // nothing is searched here over it.
+                    return Answer::empty();
+                }
+                // Gone again: the same task is still the wait.
+            }
+        }
         let ready = {
             let local = self.local.get_or_insert_with(|| Local::new(&root));
             let progress = &mut self.progress;
@@ -912,19 +1082,28 @@ impl DaemonSource {
         answer
     }
 
-    /// The names, from the daemon.
+    /// The names, from the daemon, and from the local index only when the
+    /// daemon is proven gone.
     fn search_names(&mut self, query: &str, limit: usize) -> Answer {
+        match self.names_from_daemon(query, limit) {
+            Some(answer) => answer,
+            // The daemon could not be reached, or failed in the middle of
+            // the question; its status is recorded. Only a daemon proven gone
+            // hands the names to the local index; a slow or refusing one
+            // keeps the empty answer and its own sentence.
+            None => self.local_names(query, limit),
+        }
+    }
+
+    /// The names, from the daemon alone: `None` when it could not answer
+    /// (what that says about it is in `daemon_gone` and the status).
+    fn names_from_daemon(&mut self, query: &str, limit: usize) -> Option<Answer> {
         let window = self.window;
         // The deadline is taken before the connect: the connect is part of
         // the answer, and a window that starts after it is a window that
         // stops answering for longer than the window it was given.
         let deadline = Instant::now() + window;
-        let Some(client) = self.client_within(Some(deadline)) else {
-            // The daemon could not be reached. Only a daemon proven gone
-            // hands the names to the local index; a slow or refusing one
-            // keeps the empty answer and its own sentence.
-            return self.local_names(query, limit);
-        };
+        let client = self.client_within(Some(deadline))?;
         match client.search_within(query, limit, left(deadline)) {
             Ok(outcome) => {
                 let answer = Answer {
@@ -952,7 +1131,7 @@ impl DaemonSource {
                 // The scope the fallback will use if the daemon goes away.
                 self.last_scope = answer.paths.clone();
                 self.last = answer.clone();
-                answer
+                Some(answer)
             }
             Err(e) => {
                 self.fail(&Failure::of(
@@ -961,7 +1140,7 @@ impl DaemonSource {
                 ));
                 // A daemon that went away in the middle of the question is
                 // gone (`fail` says so); one that answered badly is not.
-                self.local_names(query, limit)
+                None
             }
         }
     }
@@ -2764,6 +2943,200 @@ mod tests {
         let st = source.snapshot();
         assert_eq!(st.layer, Some(Layer::Content));
         assert!(st.backend.is_empty(), "{:?}", st.backend);
+        let _ = std::fs::remove_dir_all(home.parent().unwrap());
+    }
+
+    // --- the background warm of the local index ---------------------------
+
+    /// Take what the task has finished until it has nothing more to say.
+    fn settle(source: &mut DaemonSource) {
+        for _ in 0..1000 {
+            source.poll_warm();
+            if source.warm.is_none() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("the prewarm task never finished");
+    }
+
+    /// A task that opens the index of `home` after `delay`, counting its makes.
+    fn slow_warm(
+        home: &std::path::Path,
+        delay: Duration,
+        made: &std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Option<Prewarm> {
+        let (home, made) = (home.to_path_buf(), std::sync::Arc::clone(made));
+        Prewarm::start(
+            move || {
+                made.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                std::thread::sleep(delay);
+                Local::new(&home)
+            },
+            || true,
+        )
+    }
+
+    /// Only a daemon that cannot be reached is absent: a daemon that takes
+    /// the connection and says nothing, or says something wrong, is there.
+    #[test]
+    fn only_a_missing_daemon_is_proven_absent() {
+        let window = Duration::from_millis(300);
+        assert!(daemon_is_gone(&gone_endpoint(), window));
+        for script in [says_nothing as fn(Peer), says_an_error as fn(Peer)] {
+            let daemon = serve(script);
+            assert!(!daemon_is_gone(&daemon.endpoint, window), "the daemon is there");
+            daemon.join();
+        }
+    }
+
+    /// A launcher that is never shown has its index when the first question
+    /// comes: it is the one the task made, kept for the next questions, and
+    /// nothing is announced or scanned again.
+    #[test]
+    fn a_prewarmed_index_answers_the_first_question_and_is_kept() {
+        let home = a_home("prewarm");
+        let mut source = local_source(gone_endpoint(), &home);
+        source.prewarm();
+        assert!(source.warm.is_some(), "the task started with no window and no question");
+        settle(&mut source);
+        assert!(source.local.as_ref().is_some_and(Local::is_open));
+        // A file made after the warm is not in the one snapshot.
+        std::fs::write(home.join("invoice-april.txt"), b"x").expect("a file");
+        let phases = Rc::new(RefCell::new(Vec::new()));
+        let seen = Rc::clone(&phases);
+        source.set_progress(Some(Box::new(move |p| seen.borrow_mut().push(p))));
+        assert_eq!(source.search("invoice", 10).len(), 1);
+        assert_eq!(source.search("invoice", 10).len(), 1);
+        assert!(phases.borrow().is_empty(), "{:?}", phases.borrow());
+        let st = source.snapshot();
+        assert!(st.local_answered());
+        // The build time is the warm's own, and the meter holds the query.
+        assert!(st.local.as_ref().and_then(|l| l.opened_in).is_some(), "{:?}", st.local);
+        assert_eq!(st.layer, Some(Layer::Names));
+        let _ = std::fs::remove_dir_all(home.parent().unwrap());
+    }
+
+    /// A question that arrives while the task still works waits for it and
+    /// says its phases; there is one make, one scan and one index.
+    #[test]
+    fn a_question_during_the_warm_waits_for_it_and_does_not_scan_twice() {
+        let home = a_home("during");
+        let made = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut source = local_source(gone_endpoint(), &home);
+        source.warm = slow_warm(&home, Duration::from_millis(500), &made);
+        let phases = Rc::new(RefCell::new(Vec::new()));
+        let seen = Rc::clone(&phases);
+        source.set_progress(Some(Box::new(move |p| seen.borrow_mut().push(p))));
+        // An empty field is not a question and does not wait.
+        let began = Instant::now();
+        assert!(source.search("", 10).is_empty());
+        assert!(began.elapsed() < Duration::from_millis(400));
+        assert_eq!(source.search("invoice", 10).len(), 1);
+        assert!(source.warm.is_none(), "the index was taken");
+        assert_eq!(made.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            *phases.borrow(),
+            vec![Phase::Preparing, Phase::Building, Phase::Searching]
+        );
+        let _ = std::fs::remove_dir_all(home.parent().unwrap());
+    }
+
+    /// A daemon that starts while the index warms wins the wait, and the
+    /// index stays with the task for later.
+    #[test]
+    fn a_daemon_that_appears_during_the_warm_wins() {
+        let home = a_home("appears");
+        let made = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let daemon = serve(says_nothing);
+        let mut source = local_source(daemon.endpoint.clone(), &home);
+        source.warm = slow_warm(&home, Duration::from_millis(1500), &made);
+        let began = Instant::now();
+        assert!(source.await_warm(), "the daemon is there: the question is its");
+        assert!(began.elapsed() < Duration::from_millis(1200), "not the whole warm");
+        assert!(source.warm.is_some() && source.local.is_none());
+        drop(source);
+        daemon.join();
+        let _ = std::fs::remove_dir_all(home.parent().unwrap());
+    }
+
+    /// While the task works, the notice says so — in the phase it last
+    /// reached, kept across polls — and never that the first search builds
+    /// the index. Without a task the old sentence is the true one.
+    #[test]
+    fn the_notice_tells_the_warm_that_is_under_way() {
+        let home = a_home("notice");
+        let made = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut source = local_source(gone_endpoint(), &home);
+        source.warm = slow_warm(&home, Duration::from_millis(3000), &made);
+        // No phase yet: the task is still starting, and nothing is promised.
+        let said = source.ask_the_daemon().join(" | ");
+        assert!(said.contains("index starting in the background"), "{said}");
+        assert!(!said.contains("first search"), "{said}");
+        assert!(!said.contains("not scanned yet"), "{said}");
+        // The phase it reached stays on the line from poll to poll.
+        source.warm_phase = Some(Phase::Building);
+        for _ in 0..2 {
+            let said = source.ask_the_daemon().join(" | ");
+            assert!(said.contains("building the index in the background"), "{said}");
+        }
+        source.warm_phase = Some(Phase::Preparing);
+        let said = source.ask_the_daemon().join(" | ");
+        assert!(said.contains("preparing the index in the background"), "{said}");
+        let st = source.snapshot();
+        assert!(!st.local_answered(), "an index being made is not an answer");
+        // In the user's language too.
+        source.lang = Lang::Portuguese;
+        let said = source.ask_the_daemon().join(" | ");
+        assert!(said.contains("a preparar o índice em segundo plano"), "{said}");
+        // No task, no promise broken: the first question is what builds it.
+        let mut plain = local_source(gone_endpoint(), &home);
+        let said = plain.ask_the_daemon().join(" | ");
+        assert!(said.contains("not scanned yet"), "{said}");
+        let _ = std::fs::remove_dir_all(home.parent().unwrap());
+    }
+
+    /// A warm notice never speaks over a daemon that is there.
+    #[test]
+    fn a_stale_warm_notice_does_not_override_a_daemon_that_is_up() {
+        let home = a_home("notice-up");
+        let made = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let daemon = serve(says_nothing);
+        let mut source = DaemonSource::with_window(
+            daemon.endpoint.clone(),
+            None,
+            Duration::from_millis(300),
+            Lang::English,
+        )
+        .with_fallback(Fallback::Local(home.clone()));
+        source.warm = slow_warm(&home, Duration::from_millis(3000), &made);
+        source.warm_phase = Some(Phase::Building);
+        let said = source.ask_the_daemon().join(" | ");
+        assert!(!said.contains("background"), "{said}");
+        assert!(!source.daemon_gone);
+        assert!(source.snapshot().local.is_none());
+        drop(source);
+        daemon.join();
+        let _ = std::fs::remove_dir_all(home.parent().unwrap());
+    }
+
+    /// A daemon that is up (slow, or answering badly) and `--endpoint` never
+    /// start a scan: the task ends at the probe and nothing is opened.
+    #[test]
+    fn a_present_or_strict_source_never_warms() {
+        let home = a_home("never");
+        let mut strict = DaemonSource::new(gone_endpoint(), None, Lang::English);
+        strict.prewarm();
+        assert!(strict.warm.is_none(), "no task for --endpoint");
+
+        let daemon = serve(says_nothing);
+        let mut source = local_source(daemon.endpoint.clone(), &home);
+        source.prewarm();
+        assert!(source.warm.is_some(), "the probe is the task's own");
+        settle(&mut source);
+        assert!(source.local.is_none(), "no index was made over a daemon that is up");
+        drop(source);
+        daemon.join();
         let _ = std::fs::remove_dir_all(home.parent().unwrap());
     }
 }

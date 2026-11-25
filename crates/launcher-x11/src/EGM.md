@@ -72,7 +72,8 @@ on drop. Nothing else in the crate knows which kernel it is on.
 - `[icons.rs:decode_png]` — bit depth 8 and no interlacing, and anything else is `None`; the decoder refuses rather than guesses.
 - `[icons.rs:Icon::from_rgba]` — the scale-down is a coverage-weighted average, so a transparent pixel cannot darken the icon's colour.
 - `[decode.rs:typed_key]` — a printable key is what `XLookupString` spells, not the unshifted keysym: `Shift+.` must be `>` or every `>` command (settings, menu, preview) is unreachable. Control and Alt keep the keysym path.
-- `[decode.rs:key_of]` — control letters are actions before characters; a modifier keysym answers `None`.
+- `[decode.rs:enter_of]` — Return is `Enter`, Shift+Return is `ShiftEnter` (open folder), and Control or Alt with Return answers `None`: Ctrl+Enter neither submits nor opens the folder. `typed_key` takes `shift` for this and reads Return before the text path.
+- `[decode.rs:key_of]` — control letters are actions before characters; a modifier keysym answers `None`; Ctrl+Return answers `None`.
 - `[geometry.rs:spot_on]` — the window never falls outside the work area; `clamp_anchor` pins an anchor to 0..1000.
 - `[mark.rs:magnifier]` — the lens is a ring and the mark is the accent's blue; the same bytes the Windows tray uses.
 - `[sole.rs:socket_name]` — an abstract name on Linux, a `/tmp` path on FreeBSD; both carry the uid and a hash of `DISPLAY` so two sessions never collide.
