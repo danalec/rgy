@@ -184,9 +184,22 @@ Everything here is **prepared, not published**.
       It clones `danalec/homebrew-rgy`, commits the formula whose digests
       step 5 rewrote, and pushes `main`. No fork, no PR, no
       `Homebrew/homebrew-core`.
-- [ ] **Scoop bucket**: bump `danalec/scoop-alts/bucket/rgy.json` to
-      0.1.10.5 with the real `x86_64-windows.zip` hash. The `post_install`
-      prompt (register / register-and-start / do nothing) stays as it is.
+- [ ] **Scoop bucket**: every manifest of the owner's tools moves to the
+      release that names it, not just the first one. In
+      `danalec/scoop-alts/bucket/`: `rgy.json` (portable), `rgy-avx2.json`
+      and `rgy-znver4.json` (the two tuned Windows builds) carry this
+      release's `x86_64-windows.zip`, `avx2-windows.zip` and
+      `znver4-windows.zip` digests, and `rgx.json`, `rgx-avx2.json` and
+      `rgx-znver4.json` carry the rgx release's own three Windows digests.
+      The `post_install` prompt (register / register-and-start / do nothing)
+      stays as it is.
+      **The manifests are machine-written**: `python scripts/update-package.py
+      <name>` writes them, and its digests agree with the release's own
+      `SHA256SUMS` ✓ ✓ — so the machine writes them and a human checks them.
+      **The rule this step forgot twice**: the bucket is a set of manifests,
+      and a release that moves one of them moves all of them. The 0.1.10.4
+      release moved only `rgy.json` ✓ ✓ and the two tuned ones stayed at
+      0.1.10.2 ✓ ✓ for two releases ✓ ✓.
 - [ ] **winget**: PR #474460 is open, so its manifests are moved to the
       0.1.10.5 folder and its title and body are rewritten; it still waits
       for a moderator.
