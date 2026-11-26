@@ -129,9 +129,9 @@ one on the runner that has the platform.
 
 | platform | package | state |
 |---|---|---|
-| Windows | Scoop | **out** — `scoop bucket add danalec_scoop-alts https://github.com/danalec/scoop-alts` and `scoop install danalec_scoop-alts/rgy`. The same bucket carries `rgx`, the upstream engine this repository is built on |
+| Windows | Scoop | **out** — `scoop bucket add danalec_scoop-alts https://github.com/danalec/scoop-alts` and `scoop install danalec_scoop-alts/rgy`. The same bucket carries `rgx`, the upstream engine this repository is built on, and `rgy-git`: the same tree **built from source** on your own machine, with the SIMD your CPU carries — it needs Rust and the MSVC build tools, and the install compiles the tree (a couple of minutes) |
 | Windows | winget | the manifest in this repository validates and is refreshed by every release; the submission to `microsoft/winget-pkgs` ([#474460](https://github.com/microsoft/winget-pkgs/pull/474460)) is open awaiting a moderator — `winget install danalec.rgy-search` installs nothing until it merges |
-| Arch Linux | AUR | **out** — three binary packages at 0.1.10.5: `rgy-search-bin` (portable), `rgy-search-avx2-bin` and `rgy-search-znver4-bin`. They conflict, because all three install `/usr/bin/searchctl`: `yay -S rgy-search-bin` (or `paru -S`) installs one of them |
+| Arch Linux | AUR | **out** — three binary packages at 0.1.10.5: `rgy-search-bin` (portable), `rgy-search-avx2-bin` and `rgy-search-znver4-bin`. They conflict, because all three install `/usr/bin/searchctl`: `yay -S rgy-search-bin` (or `paru -S`) installs one of them. The AUR also carries `rgy-search-git`, the same tree **built from source** on your own machine, with the instruction set detected rather than asked about — the counterpart of the Scoop bucket's `rgy-git` |
 | macOS | Homebrew | the formula pins the real digests of both macOS archives; the tap is not published — `brew install danalec/rgy/rgy-search` installs nothing today |
 | any | crates.io | all thirty-two crates at 0.1.10 — `cargo install rgy-search --version 0.1.10` gives you `searchctl`; `rgy-searchd`, `rgy-autostart` and `rgxy` are separate crates |
 

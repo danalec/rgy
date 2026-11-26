@@ -65,7 +65,10 @@ whether the daemon is up, and the command that fixes it.
 - **Scoop** (Windows) installs this release from the owner's bucket, and the
   same bucket carries `rgx`, the upstream engine this repository is built on.
   Its `post_install` asks how you want the daemon enabled: register it for the
-  next logon, register it and start it now, or do nothing.
+  next logon, register it and start it now, or do nothing. The bucket also
+  carries **`rgy-git`**: the same tree built from source on your own machine,
+  with the SIMD your CPU carries. It needs Rust and the MSVC build tools, the
+  install compiles the tree, and the build directory goes away with it.
 
   ```sh
   scoop bucket add danalec_scoop-alts https://github.com/danalec/scoop-alts
@@ -79,6 +82,9 @@ whether the daemon is up, and the command that fixes it.
   another because all three install `/usr/bin/searchctl`. Their `.install`
   scriptlet asks the same post-install question and explains that a root
   package install cannot register a daemon in your user session.
+  The AUR carries **`rgy-search-git`** as well: the same tree built from
+  source on your own machine, with the instruction set detected rather than
+  asked about. It is the counterpart of the Scoop bucket's `rgy-git`.
 
   ```sh
   yay -S rgy-search-bin             # or paru -S rgy-search-bin
