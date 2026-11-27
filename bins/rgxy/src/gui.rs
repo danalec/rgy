@@ -150,6 +150,12 @@ const WRITE_QUEUE: usize = 16;
 /// The bounded pool that writes the stores off the window's thread.
 static WRITES: rgx::BoundedPool = rgx::BoundedPool::new(WRITE_WORKERS, WRITE_QUEUE);
 
+/// The writer of the dragged window's places: one worker and one place in
+/// the queue. Every job carries the whole map, so only the newest has to
+/// land, and a pool of its own never pushes another store's write out.
+#[cfg(windows)]
+static PLACEMENT_WRITES: rgx::BoundedPool = rgx::BoundedPool::new(1, 1);
+
 /// The armed hotkey: the shape the settings chose.
 ///
 /// The two shapes are two mechanisms — the double tap of a lone
@@ -571,6 +577,9 @@ struct State {
     /// already wearing — the colours, the seat, the width — and the
     /// next start reads the same answer back.
     settings: rgy_launcher::settings::Settings,
+    /// The keys `settings.json` holds: the panel shows them and does not
+    /// change them.
+    held: rgy_launcher::Overrides,
     /// The armed hotkey, when one is armed.
     ///
     /// The panel can change the choice while the launcher runs: the old
@@ -789,6 +798,7 @@ pub fn run(
     source: DaemonSource,
     options: &Options,
     settings: &rgy_launcher::settings::Settings,
+    held: rgy_launcher::Overrides,
     settings_note: Option<String>,
 ) -> Result<(), String> {
     // The language is the source's: the source says the sentences about the
@@ -863,6 +873,19 @@ pub fn run(
     if let Some(message) = settings_note {
         facts.push(message);
     }
+    // The places the window was dragged to are read once, here, before it
+    // is first shown.
+    #[cfg(windows)]
+    let placement_path = crate::placement_store::store_path();
+    #[cfg(windows)]
+    if let Some(path) = placement_path.as_deref() {
+        let loaded = crate::placement_store::load(path);
+        window.set_placements(loaded.placements);
+        if let Some(problem) = loaded.problem {
+            eprintln!("rgxy: {problem}");
+            facts.push(problem);
+        }
+    }
     // The compositor refused the window's own picture: the window is up
     // and it paints itself, without the translucency, and the line says
     // so. A window that is not what it was is a thing the user has to be
@@ -886,6 +909,21 @@ pub fn run(
 
     let (note_tx, notes): (Sender<String>, Receiver<String>) = channel();
     let (preview_tx, previews): (Sender<PreviewReply>, Receiver<PreviewReply>) = channel();
+    // A finished drag, or a reset, is written off the window's thread.
+    #[cfg(windows)]
+    if let Some(path) = placement_path {
+        let tx = note_tx.clone();
+        window.on_placements_changed(move |placements| {
+            let (path, placements, tx) = (path.clone(), placements.clone(), tx.clone());
+            PLACEMENT_WRITES.submit(Box::new(move || {
+                if let Err(reason) = crate::placement_store::save(&path, &placements) {
+                    let message = format!("state.json was not saved: {reason}");
+                    eprintln!("rgxy: {message}");
+                    let _ = tx.send(message);
+                }
+            }));
+        });
+    }
     // The settings panel draws the rows the launcher has, and the window
     // is sized for them while the panel is open: the count is the host's
     // (`SETTINGS`), and a panel whose count the geometry did not know was
@@ -895,6 +933,7 @@ pub fn run(
     let mut state = State {
         app,
         settings: settings.clone(),
+        held,
         arm,
         hwnd: window.hwnd(),
         rows_fit: rgy_launcher::app::rows_that_fit(window.work_area_height()),
@@ -1465,6 +1504,25 @@ enum Setting {
     Defaults,
 }
 
+impl Setting {
+    /// The settings key a row adjusts; the defaults row adjusts them all.
+    fn key(self) -> Option<&'static str> {
+        Some(match self {
+            Setting::Theme => "overlay.theme",
+            Setting::Width => "overlay.width",
+            Setting::Rows => "overlay.rows",
+            Setting::Across => "overlay.x",
+            Setting::Down => "overlay.y",
+            Setting::Alpha => "overlay.alpha",
+            Setting::Hotkey | Setting::HotkeyWindow => "hotkey",
+            Setting::Tui => "tui.theme",
+            Setting::Fzf => "fzf.theme",
+            Setting::FzfArgs => "fzf-arg",
+            Setting::Defaults => return None,
+        })
+    }
+}
+
 /// The rows of the settings panel, in the order the panel lists them.
 ///
 /// The order is the code's and the panel's one order: the rows are
@@ -1527,6 +1585,11 @@ fn settings_rows(state: &State) -> Vec<(String, String)> {
                 ),
                 Setting::Defaults => (text.settings_defaults, String::new()),
             };
+            // A row the hand-edited file holds says so: it will not step.
+            let value = match setting.key() {
+                Some(key) if state.held.holds(key) => format!("{value} [json]"),
+                _ => value,
+            };
             (label.to_string(), value)
         })
         .collect()
@@ -1563,6 +1626,14 @@ fn settings_key(state: &mut State, key: Key) -> Control {
 /// step on their row.
 fn adjust_setting(state: &mut State, dir: i32) {
     let index = state.app.settings_index().min(SETTINGS.len() - 1);
+    // A held key is the file's: nothing changes and nothing is saved.
+    if let Some(key) = SETTINGS[index].key()
+        && state.held.holds(key)
+    {
+        let text = Text::for_lang(state.lang);
+        state.note = Some(text.settings_held.replace("{key}", key));
+        return;
+    }
     match SETTINGS[index] {
         Setting::Theme => step_template(&mut state.settings.overlay.palette.template, dir),
         Setting::Width => {
@@ -1613,6 +1684,11 @@ fn adjust_setting(state: &mut State, dir: i32) {
         Setting::FzfArgs => {}
         Setting::Defaults => {
             state.settings = rgy_launcher::settings::Settings::default();
+            state.held.apply(&mut state.settings);
+            if !state.held.is_empty() {
+                let text = Text::for_lang(state.lang);
+                state.note = Some(text.settings_defaults_held.to_string());
+            }
             state.app.set_width(state.settings.overlay.width);
             state
                 .app
@@ -1696,6 +1772,7 @@ fn save_settings(state: &State) {
         return;
     };
     let settings = state.settings.clone();
+    let held = state.held.clone();
     let lang = state.lang;
     let tx = state.note_tx.clone();
     // One worker, in submission order: every job carries the whole of the
@@ -1703,7 +1780,7 @@ fn save_settings(state: &State) {
     // thread per keystroke would let an autorepeated setting grow the
     // process without bound.
     WRITES.submit(Box::new(move || {
-        if let Err(reason) = crate::settings_store::save(&path, &settings) {
+        if let Err(reason) = crate::settings_store::save_layered(&path, &settings, &held) {
             let message = Text::for_lang(lang)
                 .settings_not_saved
                 .replace("{reason}", &reason.to_string());
@@ -2343,6 +2420,7 @@ mod tests {
         let state = State {
             app: App::new(),
             settings: rgy_launcher::settings::Settings::default(),
+            held: rgy_launcher::Overrides::default(),
             arm: None,
             // A test has no window to hand to the re-arm, and none of the
             // panel's rows is adjusted in a test that does not say so.

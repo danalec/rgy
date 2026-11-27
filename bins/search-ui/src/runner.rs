@@ -21,7 +21,7 @@
 //! The trait lives here and not in the model because the model is
 //! `no_std` and knows nothing about a machine.
 
-use rgy_launcher::Settings;
+use rgy_launcher::{Overrides, Settings};
 
 /// What the terminal asks the machine to do.
 pub trait Runner {
@@ -51,8 +51,14 @@ pub trait Runner {
     /// and the key says so rather than inventing an empty paste.
     fn paste_text(&self) -> Option<String>;
 
-    /// The settings, as the file has them.
+    /// The settings in effect, as the files have them.
     fn settings(&self) -> Settings;
+
+    /// The keys a hand-edited file holds, as of the last
+    /// [`Runner::settings`]: the panel shows them and does not change them.
+    fn overrides(&self) -> Overrides {
+        Overrides::default()
+    }
 
     /// Write the settings back to the file.
     fn save_settings(&self, settings: &Settings) -> Result<(), String>;

@@ -33,6 +33,7 @@ pub mod actions;
 pub mod combo;
 pub mod hook;
 pub mod paint;
+pub mod placement;
 pub mod session;
 pub mod sole;
 

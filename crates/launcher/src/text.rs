@@ -393,6 +393,10 @@ vocabulary! {
         "as configurações não foram gravadas: {reason}";
     hotkey_not_armed => "the hotkey could not be armed: {reason}",
         "o atalho não pôde ser ativado: {reason}";
+    settings_held => "{key} is set in settings.json: edit it there",
+        "{key} está definido em settings.json: edite lá";
+    settings_defaults_held => "defaults restored, except the keys set in settings.json",
+        "padrões restaurados, exceto as chaves definidas em settings.json";
 
     // --- the command line ----------------------------------------------------
     pick_needs_a_query => "--pick needs --query: a picker filters the results of a search",

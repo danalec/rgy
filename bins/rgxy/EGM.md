@@ -25,9 +25,10 @@ runner.
 ## Invariants
 - `[Cargo.toml:[[bin]]]` — exactly one binary target, named `rgxy`; the package and the program carry the same name.
 - `[Cargo.toml:target.'cfg(windows)'.dependencies]` and `[Cargo.toml:target.'cfg(target_os = "linux")'.dependencies]` — one window backend per platform, both exporting the same interface; [main.rs:mod gui] and [main.rs:mod preview] are `#[cfg(any(windows, target_os = "linux"))]`, [main.rs:mod platform] names the backend the driver uses, and the launcher falls back to the terminal on other hosts ([main.rs:fn run_tui]).
-- Rolled up from [src](./src/EGM.md): [daemon.rs:enum Presence] (Gone / Slow / Answered), [daemon.rs:pub const LAUNCHER_WINDOW] (2 s), [mru.rs:const HEADER] (the usage-store version), [settings_store.rs:pub fn save] (atomic write), [gui.rs:const LIMIT] (50).
+- Rolled up from [src](./src/EGM.md): [daemon.rs:enum Presence] (Gone / Slow / Answered), [daemon.rs:pub const LAUNCHER_WINDOW] (2 s), [mru.rs:const HEADER] (the usage-store version), [settings_store.rs:pub fn save] (atomic write), [settings_store.rs:pub fn save_layered] (`settings.json` wins and is never rewritten), [gui.rs:const LIMIT] (50).
 
 ## Side Effects
+- Rolled up from [src](./src/EGM.md): [placement_store.rs:pub fn save] (Windows: `state.json` in the cache dir, after a window drag or reset).
 - Rolled up from [src](./src/EGM.md): [main.rs:fn main] (stdout/stderr, console code page), [daemon.rs:pub fn connect] (pipe/UDS client), [gui.rs:pub fn run] (window, hotkey hook, worker threads), [rgx.rs:pub fn grep] (spawns the `rgx` process), [mru.rs:pub fn save] and [settings_store.rs:pub fn save] (usage/settings files in the cache dir), [tools.rs:pub fn scan] (PATH scan), [lang.rs:pub fn from_env] (environment variables).
 
 ## Verification

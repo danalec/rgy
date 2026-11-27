@@ -24,6 +24,7 @@ use crate::preview;
 use crate::runner::{NoRunner, Runner};
 use crate::term::{self, Color, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, Paint};
 use rgy_launcher::Action as LauncherAction;
+use rgy_launcher::Overrides;
 use rgy_launcher::Settings;
 use rgy_launcher::TapKey;
 use rgy_launcher::latency::{LatencyMeter, duration};
@@ -315,6 +316,8 @@ struct App {
     runner: Box<dyn Runner>,
     /// The settings the editable panel reads and writes.
     settings: Settings,
+    /// The keys a hand-edited file holds, which the panel does not step.
+    held: Overrides,
     /// The interactive actions menu, when it is open.
     action_menu: Option<ActionMenu>,
     /// The selected row of the settings panel, when it is open.
@@ -418,6 +421,25 @@ enum Setting {
     FzfArgs,
     /// The way back to the faces as they were.
     Defaults,
+}
+
+impl Setting {
+    /// The settings key a row adjusts; the defaults row adjusts them all.
+    fn key(self) -> Option<&'static str> {
+        Some(match self {
+            Setting::Theme => "overlay.theme",
+            Setting::Width => "overlay.width",
+            Setting::Rows => "overlay.rows",
+            Setting::Across => "overlay.x",
+            Setting::Down => "overlay.y",
+            Setting::Alpha => "overlay.alpha",
+            Setting::Hotkey | Setting::HotkeyWindow => "hotkey",
+            Setting::Tui => "tui.theme",
+            Setting::Fzf => "fzf.theme",
+            Setting::FzfArgs => "fzf-arg",
+            Setting::Defaults => return None,
+        })
+    }
 }
 
 /// The rows of the settings panel, in the order the GUI lists them.
@@ -653,6 +675,7 @@ impl App {
             notice: None,
             runner: Box::new(NoRunner),
             settings: Settings::default(),
+            held: Overrides::default(),
             action_menu: None,
             settings_panel: None,
         };
@@ -696,6 +719,7 @@ impl App {
             notice: None,
             runner: Box::new(NoRunner),
             settings: Settings::default(),
+            held: Overrides::default(),
             action_menu: None,
             settings_panel: None,
         };
@@ -953,6 +977,7 @@ impl App {
         if action == LauncherAction::Settings {
             if self.runner.available() {
                 self.settings = self.runner.settings();
+                self.held = self.runner.overrides();
                 self.settings_panel = Some(0);
                 self.notice = None;
                 self.action_menu = None;
@@ -1188,6 +1213,11 @@ impl App {
                     ),
                     Setting::Defaults => (text.settings_defaults, String::new()),
                 };
+                // A row the hand-edited file holds says so: it will not step.
+                let value = match setting.key() {
+                    Some(key) if self.held.holds(key) => format!("{value} [json]"),
+                    _ => value,
+                };
                 (label.to_string(), value)
             })
             .collect()
@@ -1203,6 +1233,17 @@ impl App {
     /// `FzfArgs` is read from the file and has nothing to step.
     fn adjust_setting(&mut self, dir: i32) {
         let index = self.settings_panel.unwrap_or(0).min(SETTINGS.len() - 1);
+        // A held key is the file's: nothing changes and nothing is saved.
+        if let Some(key) = SETTINGS[index].key()
+            && self.held.holds(key)
+        {
+            let text = Text::for_lang(self.lang);
+            self.notice = Some(Notice::outcome(
+                text.settings,
+                text.settings_held.replace("{key}", key),
+            ));
+            return;
+        }
         match SETTINGS[index] {
             Setting::Theme => step_template(&mut self.settings.overlay.palette.template, dir),
             Setting::Width => {
@@ -1256,6 +1297,7 @@ impl App {
             Setting::FzfArgs => {}
             Setting::Defaults => {
                 self.settings = Settings::default();
+                self.held.apply(&mut self.settings);
                 self.palette = Palette::of(
                     Theme::named(&self.settings.tui.template).unwrap_or(Theme::MIDNIGHT),
                 );
@@ -1266,10 +1308,12 @@ impl App {
             Ok(()) => {
                 // A success notice does not hide the panel: `panel_rows`
                 // gives the settings panel priority over a plain notice.
-                self.notice = Some(Notice::outcome(
-                    text.settings,
-                    text.notice_settings_saved.to_string(),
-                ));
+                let said = if SETTINGS[index] == Setting::Defaults && !self.held.is_empty() {
+                    text.settings_defaults_held
+                } else {
+                    text.notice_settings_saved
+                };
+                self.notice = Some(Notice::outcome(text.settings, said.to_string()));
             }
             Err(reason) => {
                 self.notice = Some(Notice::outcome(
@@ -4313,6 +4357,29 @@ mod tests {
         let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
         assert_eq!(handle_key(&mut app, esc), Action::None);
         assert!(!app.has_notice());
+    }
+
+    /// A row the hand-edited file holds does not step and saves nothing,
+    /// and the defaults leave its value where the file put it.
+    #[test]
+    fn a_held_row_does_not_step_and_survives_the_defaults() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let store = Rc::new(RefCell::new(Settings::default()));
+        let mut app = with_runner(app_with("main"), calls.clone(), store);
+        app.run_action(LauncherAction::Settings);
+        app.held.set("overlay.theme", "nord");
+        app.held.apply(&mut app.settings);
+
+        app.adjust_setting(1);
+        assert_eq!(app.settings.overlay.palette.template, "nord");
+        assert!(!calls.borrow().iter().any(|c| c == "save"));
+        let notice = app.notice.as_ref().expect("the refusal is said");
+        assert!(notice.lines.join("\n").contains("settings.json"));
+
+        app.settings_panel = Some(SETTINGS.len() - 1);
+        app.adjust_setting(1);
+        assert_eq!(app.settings.overlay.palette.template, "nord");
+        assert!(calls.borrow().iter().any(|c| c == "save"));
     }
 
     /// The regression for the fallback: without a machine `>copy` still

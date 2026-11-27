@@ -23,8 +23,10 @@
 //!   is a sentence the terminal can show, not a panic. FreeBSD has the
 //!   X11 backend, so `open`/`open_folder` go through it there.
 
-use rgy_launcher::Settings;
+use std::cell::RefCell;
+
 use rgy_launcher::text::Lang;
+use rgy_launcher::{Overrides, Settings};
 use rgy_search_ui::Runner;
 
 use crate::settings_store;
@@ -32,12 +34,17 @@ use crate::settings_store;
 /// The terminal's machine, in the language the launcher speaks.
 pub struct TuiActions {
     lang: Lang,
+    /// The keys `settings.json` held when the settings were last read.
+    held: RefCell<Overrides>,
 }
 
 impl TuiActions {
     /// A runner that says its refusals in `lang`.
     pub fn new(lang: Lang) -> TuiActions {
-        TuiActions { lang }
+        TuiActions {
+            lang,
+            held: RefCell::new(Overrides::default()),
+        }
     }
 }
 
@@ -59,15 +66,20 @@ impl Runner for TuiActions {
     }
 
     fn settings(&self) -> Settings {
-        settings_store::store_path()
-            .and_then(|path| settings_store::load(&path).ok())
-            .unwrap_or_default()
+        let loaded = settings_store::current();
+        *self.held.borrow_mut() = loaded.held;
+        loaded.settings
+    }
+
+    fn overrides(&self) -> Overrides {
+        self.held.borrow().clone()
     }
 
     fn save_settings(&self, settings: &Settings) -> Result<(), String> {
         let path = settings_store::store_path()
             .ok_or_else(|| String::from("the settings file has no path"))?;
-        settings_store::save(&path, settings).map_err(|err| err.to_string())
+        settings_store::save_layered(&path, settings, &self.held.borrow())
+            .map_err(|err| err.to_string())
     }
 }
 

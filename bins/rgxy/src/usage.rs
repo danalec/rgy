@@ -74,7 +74,8 @@ fn english() -> String {
          >open >folder >copy >preview >menu >settings — commands; grep: —\n\
          the content of the files the name search chose. The settings\n\
          live in settings.tsv, beside the index, and >settings is the\n\
-         panel that writes it.\n\
+         panel that writes it. Keys set by hand in settings.json, in the\n\
+         same folder, win and are read-only in the panel.\n\
          \n\
          Both faces carry out the same actions: open a result, open its\n\
          folder, copy its path, preview its head and edit the settings.\n\
@@ -138,7 +139,9 @@ fn portuguese() -> String {
          >open >folder >copy >preview >menu >settings — comandos; grep: —\n\
          o conteúdo dos ficheiros que a busca de nomes escolheu. As\n\
          configurações vivem em settings.tsv, ao lado do índice, e\n\
-         >settings é o painel que o escreve.\n\
+         >settings é o painel que o escreve. As chaves definidas à mão\n\
+         em settings.json, na mesma pasta, prevalecem e o painel não as\n\
+         altera.\n\
          \n\
          As duas faces executam as mesmas ações: abrir um resultado, abrir\n\
          a sua pasta, copiar o caminho, pré-visualizar o início e editar\n\
