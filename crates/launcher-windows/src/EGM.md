@@ -1,7 +1,7 @@
 # crates/launcher-windows/src
 
 ## Overview
-The ten library sources of `rgy-launcher-windows`: the launcher's floating
+The library sources of `rgy-launcher-windows`: the launcher's floating
 Win32 overlay, drawn with GDI. The crate root declares `#![no_std]` followed
 by `#![cfg(windows)]` — the `no_std` attribute comes first so an emptied crate
 still declares `no_std` — and off Windows the crate is empty. The Win32 calls
@@ -38,7 +38,31 @@ only dependency is `rgy-launcher`, the model. The manifest declares no
   `[win.rs:console_process_list]` — hand-declared Win32 types, constants and
   calls.
 
+- `[lib.rs:pub mod placement]` with `[placement.rs:Anchor]`,
+  `[placement.rs:Placements]`, `[placement.rs:ANCHOR_SCALE]`;
+  `[window.rs:set_placements]`, `[window.rs:on_placements_changed]` — the
+  places the window was dragged to, by monitor. The crate stores nothing: the
+  host loads and saves them.
+
 ## Invariants
+- `[window.rs:is_on_grip]` — only the grip (`[placement.rs:on_grip]`, in the
+  padding above the query field) answers `WM_NCHITTEST` with `HTCAPTION`; the
+  platform's move loop drags, and `[paint.rs:grip]` marks it in the theme's
+  dim colour over the picture.
+- `[window.rs:finish_drag]` runs from the pump after `WM_EXITSIZEMOVE`, and
+  tells the host only when the window moved. `WM_DPICHANGED` is swallowed: the
+  scale is followed after the drag and on placing. The move loop dispatches to
+  the window procedure, so posted private messages and keys sent during a drag
+  are not seen by the pump.
+- `[window.rs:place]` uses the target monitor's saved anchor, else the
+  configured one (`[window.rs:spot_on]`). `[placement.rs:restore]` keeps the
+  whole window inside the work area, moving a low one up.
+- `[window.rs:forget_placement]` — a double click on the grip, or a view with a
+  new configured anchor while the window is visible, drops the current
+  monitor's saved place.
+- `[placement.rs:monitor_key]` — the monitor's device interface path
+  (`EnumDisplayDevicesW`), lowercased, chosen independently of enumeration
+  order; `device:<name>` only when there is no path.
 - `[lib.rs:no_std]` — `#![no_std]` is declared **before** `#![cfg(windows)]`;
   a crate-level `cfg` that empties the crate would otherwise leave it with no
   `no_std` to declare.

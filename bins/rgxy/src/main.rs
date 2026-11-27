@@ -40,6 +40,9 @@ mod local;
 mod mru;
 #[cfg(any(windows, target_os = "linux", target_os = "freebsd"))]
 mod preview;
+// The places the window was dragged to. Only the Windows window drags.
+#[cfg(windows)]
+mod placement_store;
 // The name the window driver knows the platform by.
 mod platform;
 mod rgx;
@@ -66,6 +69,7 @@ mod gui;
     not(any(windows, target_os = "linux", target_os = "freebsd")),
     allow(dead_code)
 )]
+mod settings_json;
 mod settings_store;
 
 use std::io::{IsTerminal, Write};
@@ -497,9 +501,11 @@ fn pick(
     // caller's, because the command line is the one the user typed. A
     // file that cannot be read is the defaults — the picker still runs,
     // in the colours the faces were drawn in before settings existed.
-    let settings = settings_store::store_path()
-        .and_then(|path| settings_store::load(&path).ok())
-        .unwrap_or_default();
+    let loaded = settings_store::current();
+    for problem in &loaded.problems {
+        eprintln!("rgxy: {problem}");
+    }
+    let settings = loaded.settings;
     let args = picker_args(&settings, options);
     let req = rgy_pick::Request {
         args: &args,
@@ -666,10 +672,11 @@ fn run_tui(mut source: DaemonSource, reason: Option<&str>, lang: Lang) -> Result
     // file's — a theme chosen for the terminal in the settings is the
     // one it comes up in — and a file that cannot be read is the palette
     // the interface was drawn in before settings existed.
-    let theme = settings_store::store_path()
-        .and_then(|path| settings_store::load(&path).ok())
-        .map(|settings| settings.tui.theme(rgy_launcher::Theme::MIDNIGHT))
-        .unwrap_or(rgy_launcher::Theme::MIDNIGHT);
+    let loaded = settings_store::current();
+    for problem in &loaded.problems {
+        eprintln!("rgxy: {problem}");
+    }
+    let theme = loaded.settings.tui.theme(rgy_launcher::Theme::MIDNIGHT);
     // The terminal gets the same machine the window has: opening a result,
     // opening its folder, the clipboard and the settings file are carried
     // out, not just described. Without this the terminal is a launcher that
@@ -761,34 +768,43 @@ fn run_window(
             (None, Some(reason))
         }
     };
-    // The settings are the file's, read once, here: the panel writes it,
-    // the next start reads it, and a file that cannot be read is the
-    // defaults plus a sentence on the line under the field.
-    let (settings, settings_note) = match settings_store::store_path() {
-        Some(path) => match settings_store::load(&path) {
-            Ok(settings) => (settings, None),
-            Err(err) => (
-                rgy_launcher::settings::Settings::default(),
-                Some(
-                    Text::for_lang(lang)
-                        .settings_not_read
-                        .replace("{err}", &err.to_string()),
-                ),
-            ),
-        },
-        None => (rgy_launcher::settings::Settings::default(), None),
-    };
+    let mut notes: Vec<String> = claim_note.into_iter().collect();
+    // The desktop launcher is the one that makes the first
+    // `settings.json`, and only after it holds the session's claim.
+    if let Some(path) = settings_store::store_path()
+        && let Err(err) = settings_store::create_json(&path)
+    {
+        eprintln!("rgxy: settings.json was not created: {err}");
+        notes.push(format!("settings.json was not created: {err}"));
+    }
+    // The settings are the files', read once, here: a file that cannot be
+    // read is left out, with a sentence on the line under the field.
+    let loaded = settings_store::current();
+    if let Some(err) = &loaded.error {
+        notes.push(
+            Text::for_lang(lang)
+                .settings_not_read
+                .replace("{err}", &err.to_string()),
+        );
+    }
+    // All of them go to stderr; the line under the field has room for one.
+    for problem in &loaded.problems {
+        eprintln!("rgxy: {problem}");
+    }
+    if let Some(first) = loaded.problems.first() {
+        notes.push(match loaded.problems.len() - 1 {
+            0 => first.clone(),
+            more => format!("{first} (+{more})"),
+        });
+    }
+    let settings_note = (!notes.is_empty()).then(|| notes.join("; "));
     // The launcher's own window: the window lives on the thread that
     // draws it, and it cannot wait the client's thirty seconds.
-    let settings_note = match (claim_note, settings_note) {
-        (Some(claim), Some(settings)) => Some(format!("{claim}; {settings}")),
-        (Some(claim), None) => Some(claim),
-        (None, settings) => settings,
-    };
     gui::run(
         DaemonSource::new(endpoint, rgx, lang).with_fallback(fallback),
         options,
-        &settings,
+        &loaded.settings,
+        loaded.held,
         settings_note,
     )
     .map(|_| ExitCode::SUCCESS)

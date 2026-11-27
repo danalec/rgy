@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The settings file: the one place the launcher's preferences live.
+//! The settings files: where the launcher's preferences live.
 //!
-//! The file is line-delimited text with a version header, the shape
-//! every store in this tree has, and it is **both faces of the
-//! settings**: the panel writes it, and a person editing it by hand
-//! changes the launcher on the next start. There is no second place the
-//! settings live, because two places are two that disagree.
+//! `settings.tsv` is line-delimited text with a version header, the shape
+//! every store in this tree has: the panel writes it, and a person
+//! editing it by hand changes the launcher on the next start. Over it
+//! lies `settings.json` ([`crate::settings_json`]), written by hand: a
+//! key it sets wins, and the panel neither changes it nor copies it into
+//! the stored file. The order is built-in defaults, then `settings.tsv`,
+//! then `settings.json`.
 //!
 //! The rules are the usage history's, with one difference: there is no
 //! merge. The history is many writers recording many uses — two
@@ -23,7 +25,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use rgy_launcher::settings::Settings;
+use rgy_launcher::Overrides;
+use rgy_launcher::settings::{Settings, copy_key};
+
+use crate::settings_json;
 
 /// The number that tells the temporary files apart.
 ///
@@ -107,9 +112,15 @@ pub fn save(path: &Path, settings: &Settings) -> std::io::Result<()> {
         }
         quarantine(path, cause)?;
     }
+    write_atomic(path, &settings.render())
+}
+
+/// Replace a file with these contents, whole or not at all: a temporary
+/// file beside it, then a rename over it.
+pub(crate) fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
     let id = TEMP_ID.fetch_add(1, Ordering::Relaxed);
     let temp = temp_path(path, id);
-    if let Err(err) = std::fs::write(&temp, settings.render()) {
+    if let Err(err) = std::fs::write(&temp, contents) {
         let _ = std::fs::remove_file(&temp);
         return Err(err);
     }
@@ -118,6 +129,127 @@ pub fn save(path: &Path, settings: &Settings) -> std::io::Result<()> {
         return Err(err);
     }
     Ok(())
+}
+
+/// The hand-edited file beside the settings file.
+pub fn json_path(path: &Path) -> PathBuf {
+    path.with_file_name("settings.json")
+}
+
+/// The settings in effect, and what the launcher has to say about them.
+pub struct Loaded {
+    /// The built-in defaults, under `settings.tsv`, under `settings.json`.
+    pub settings: Settings,
+    /// The keys `settings.json` holds.
+    pub held: Overrides,
+    /// Why `settings.tsv` was not read, when it was not.
+    #[cfg_attr(
+        not(any(windows, target_os = "linux", target_os = "freebsd")),
+        allow(dead_code)
+    )]
+    pub error: Option<std::io::Error>,
+    /// What could not be taken from `settings.json`.
+    pub problems: Vec<String>,
+}
+
+/// Read both files. Neither one being unreadable stops the other.
+pub fn load_layered(path: &Path) -> Loaded {
+    let (mut settings, error) = match load(path) {
+        Ok(settings) => (settings, None),
+        Err(err) => (Settings::default(), Some(err)),
+    };
+    let file = settings_json::read(&json_path(path));
+    file.held.apply(&mut settings);
+    Loaded {
+        settings,
+        held: file.held,
+        error,
+        problems: file.problems,
+    }
+}
+
+/// The settings in effect on this machine.
+pub fn current() -> Loaded {
+    match store_path() {
+        Some(path) => load_layered(&path),
+        None => Loaded {
+            settings: Settings::default(),
+            held: Overrides::default(),
+            error: None,
+            problems: Vec::new(),
+        },
+    }
+}
+
+/// Make `settings.json` where there is none, from what `settings.tsv`
+/// holds. The stored file is only read. One that cannot be read makes
+/// nothing: a copy of the defaults would pass for the user's settings.
+#[cfg_attr(
+    not(any(windows, target_os = "linux", target_os = "freebsd")),
+    allow(dead_code)
+)]
+pub fn create_json(path: &Path) -> std::io::Result<()> {
+    let json = json_path(path);
+    if std::fs::symlink_metadata(&json).is_ok() {
+        return Ok(());
+    }
+    if let Ok(settings) = load(path) {
+        settings_json::create_if_absent(&json, &settings)?;
+    }
+    Ok(())
+}
+
+/// Write what a panel holds, without taking `settings.json` into the
+/// stored file.
+///
+/// `held` is what the panel was loaded with. Those keys, and the keys the
+/// file sets by now, keep their **stored** values, so removing a key from
+/// `settings.json` brings back what was there. A panel change to a key
+/// the file started setting after the panel was loaded is not written,
+/// and is an error that says so; the other changes are written.
+pub fn save_layered(path: &Path, settings: &Settings, held: &Overrides) -> std::io::Result<()> {
+    let now = settings_json::read(&json_path(path)).held;
+    if held.is_empty() && now.is_empty() {
+        return save(path, settings);
+    }
+    let stored = match load(path) {
+        Ok(stored) => stored,
+        Err(err) if busy(&err) => return Err(err),
+        // `save` moves the broken file aside.
+        Err(_) => Settings::default(),
+    };
+    let mut out = settings.clone();
+    for key in held.keys() {
+        copy_key(&stored, &mut out, key);
+    }
+    let mut with_file = settings.clone();
+    now.apply(&mut with_file);
+    let mut refused = Vec::new();
+    for key in now.keys().filter(|key| !held.holds(key)) {
+        if !same_key(settings, &stored, key) && !same_key(settings, &with_file, key) {
+            refused.push(key);
+        }
+        copy_key(&stored, &mut out, key);
+    }
+    save(path, &out)?;
+    if refused.is_empty() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "settings.json now sets {}: that change was not saved; restart rgxy",
+            refused.join(", ")
+        )))
+    }
+}
+
+/// Whether two settings agree on one key.
+fn same_key(a: &Settings, b: &Settings, key: &str) -> bool {
+    let only = |from: &Settings| {
+        let mut settings = Settings::default();
+        copy_key(from, &mut settings, key);
+        settings
+    };
+    only(a) == only(b)
 }
 
 /// Whether the error says the file is held for a moment by another process.
@@ -228,6 +360,109 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir.join("settings.tsv")
+    }
+
+    /// The first `settings.json` is a copy that sets nothing, the stored
+    /// file is untouched, and an existing file is never written again.
+    #[test]
+    fn the_migration_makes_an_inert_file_once() {
+        let path = store("migration");
+        let mut settings = Settings::default();
+        settings.overlay.width = 780;
+        save(&path, &settings).expect("the stored file");
+        let before = std::fs::read(&path).unwrap();
+
+        create_json(&path).expect("the file is made");
+        let made = std::fs::read_to_string(json_path(&path)).unwrap();
+        assert!(made.contains("// \"overlay.width\": 780,"), "{made}");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let loaded = load_layered(&path);
+        assert!(loaded.held.is_empty() && loaded.problems.is_empty());
+        assert_eq!(loaded.settings, settings);
+
+        let mine = "// mine\n{ \"unknown\": 1, }\n";
+        std::fs::write(json_path(&path), mine).unwrap();
+        create_json(&path).expect("nothing to do");
+        assert_eq!(std::fs::read_to_string(json_path(&path)).unwrap(), mine);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// A stored file that cannot be read is not copied.
+    #[test]
+    fn a_broken_stored_file_makes_no_json() {
+        let path = store("migration-broken");
+        std::fs::write(&path, "# rgy settings v99\n").unwrap();
+        create_json(&path).expect("nothing to do");
+        assert!(!json_path(&path).exists());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// The JSON file wins per key, and a save neither copies it into the
+    /// stored file nor touches it.
+    #[test]
+    fn the_json_wins_and_a_save_preserves_both_layers() {
+        let path = store("layers");
+        let mut stored = Settings::default();
+        stored.overlay.width = 700;
+        stored.overlay.rows = 5;
+        save(&path, &stored).expect("the stored file");
+        let mine = "{\n // keep me\n \"overlay.width\": 900, \"later\": true,\n}\n";
+        std::fs::write(json_path(&path), mine).unwrap();
+
+        let mut loaded = load_layered(&path);
+        assert_eq!(loaded.settings.overlay.width, 900);
+        assert_eq!(loaded.settings.overlay.rows, 5);
+        assert_eq!(loaded.problems.len(), 1, "{:?}", loaded.problems);
+
+        loaded.settings.overlay.rows = 8;
+        save_layered(&path, &loaded.settings, &loaded.held).expect("saved");
+        let after = load(&path).unwrap();
+        assert_eq!((after.overlay.width, after.overlay.rows), (700, 8));
+        assert_eq!(std::fs::read_to_string(json_path(&path)).unwrap(), mine);
+
+        // The key taken out while the panel holds it: still not baked in.
+        std::fs::write(json_path(&path), "{}").unwrap();
+        save_layered(&path, &loaded.settings, &loaded.held).expect("saved");
+        assert_eq!(load(&path).unwrap().overlay.width, 700);
+        assert_eq!(load_layered(&path).settings.overlay.width, 700);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// A key the file starts setting after the load refuses a change out
+    /// loud, and lets an untouched one pass.
+    #[test]
+    fn a_key_set_after_the_load_is_not_silently_saved() {
+        let path = store("late");
+        let loaded = load_layered(&path);
+        std::fs::write(json_path(&path), "{\"overlay.width\": 900}").unwrap();
+
+        let mut settings = loaded.settings.clone();
+        settings.overlay.rows = 8;
+        save_layered(&path, &settings, &loaded.held).expect("width was not touched");
+
+        settings.overlay.width = 620;
+        let refused = save_layered(&path, &settings, &loaded.held).expect_err("held");
+        assert!(refused.to_string().contains("overlay.width"), "{refused}");
+        let after = load(&path).unwrap();
+        assert_eq!((after.overlay.width, after.overlay.rows), (600, 8));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// An invalid JSON file leaves the stored settings in effect.
+    #[test]
+    fn an_invalid_json_file_leaves_the_stored_settings() {
+        let path = store("invalid-json");
+        let mut stored = Settings::default();
+        stored.overlay.width = 700;
+        save(&path, &stored).expect("the stored file");
+        std::fs::write(json_path(&path), "{ nope").unwrap();
+        let loaded = load_layered(&path);
+        assert_eq!(loaded.settings, stored);
+        assert!(loaded.error.is_none() && loaded.held.is_empty());
+        assert_eq!(loaded.problems.len(), 1);
+        save_layered(&path, &stored, &loaded.held).expect("saved");
+        assert_eq!(std::fs::read_to_string(json_path(&path)).unwrap(), "{ nope");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     /// A file that is not there is the defaults, and not an error.

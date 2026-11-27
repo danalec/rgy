@@ -26,6 +26,11 @@
 //!
 //! # How it behaves
 //!
+//! The window is dragged by the grip above the field, and keeps where it
+//! was dropped for each monitor ([`crate::placement`]). A double click on
+//! the grip, or a change of the configured position, forgets the current
+//! monitor's.
+//!
 //! The window never takes the focus away from the window underneath for
 //! longer than it is on screen, and it is always above: `WS_EX_TOPMOST`
 //! and `WS_EX_TOOLWANDOW`, so it is not in the taskbar and not in the
@@ -47,6 +52,7 @@ use rgy_launcher::theme::Theme;
 use rgy_launcher::{Action, Layout, Mode, Preview, Row};
 
 use crate::paint::{self, Fonts, Icons};
+use crate::placement::{self, Anchor, Bounds, Placements};
 use crate::win::*;
 
 // A struct the platform writes is the platform's struct, whole. Its
@@ -460,6 +466,12 @@ struct State {
     /// sent — the icon's place is in the high word — and the word is taken
     /// out before it is read.
     tray_click: Option<UINT>,
+    /// Where the window was when the platform's move loop started.
+    drag_from: Option<RECT>,
+    /// A move loop that ended, waiting for the pump: where it started.
+    drag_ended: Option<RECT>,
+    /// A double click on the grip, waiting for the pump.
+    reset_asked: bool,
 }
 
 /// The window's own pixels, for a window that paints its own alpha.
@@ -683,6 +695,7 @@ impl Layer {
             // the window's state — a field written every frame and read
             // nowhere would only look like a resize used it.
             let painted = paint::paint(self.dc, view, false, icons, fonts, colours, scale, lang);
+            paint::grip(self.dc, painted.0, scale, colours);
             // Only the part of the layer the picture covers is handed to
             // the compositor. The picture is normally the larger of the
             // two; a smaller one would leave an unpainted strip, and
@@ -798,6 +811,9 @@ fn premultiplied(colour: u8, alpha: u8) -> u8 {
     ((colour as u32 * alpha as u32) / 255) as u8
 }
 
+/// What is told that the saved places changed.
+type PlacementsListener = Box<dyn FnMut(&Placements)>;
+
 /// The window.
 pub struct Window {
     hwnd: HWND,
@@ -839,6 +855,13 @@ pub struct Window {
     /// through the notification area, and a launcher that refused to start
     /// because a tray was busy would be a worse answer than no icon.
     tray: Option<crate::tray::Tray>,
+    /// Where the user dragged the window to, by monitor.
+    placements: Placements,
+    /// The saved place the window is on, when its monitor has one: it
+    /// stands in for the anchor until the window is placed again.
+    saved: Option<Anchor>,
+    /// Who is told that the saved places changed, to store them.
+    on_placements: Option<PlacementsListener>,
 }
 
 impl Window {
@@ -898,6 +921,9 @@ impl Window {
             pending_char: None,
             tray_error: None,
             tray_click: None,
+            drag_from: None,
+            drag_ended: None,
+            reset_asked: false,
         }));
         let state = match NonNull::new(raw) {
             Some(state) => state,
@@ -949,6 +975,9 @@ impl Window {
                 scale: SCALE_PERCENT,
                 anchor: DEFAULT_ANCHOR,
                 tray: None,
+                placements: Placements::new(),
+                saved: None,
+                on_placements: None,
             };
             // The icon goes into the notification area now that the window
             // exists: the shell's record holds the window's own handle, and
@@ -1216,6 +1245,12 @@ impl Window {
         // window re-places it here, where the size it will be is already
         // the size the control carries.
         if view.anchor != self.anchor {
+            // A position changed while the window is up is the user's
+            // newest word on where it goes: the dragged place of this
+            // monitor gives way to it.
+            if self.is_visible() {
+                self.forget_placement();
+            }
             self.set_anchor(view.anchor.0, view.anchor.1);
         }
         self.state_mut().view = view;
@@ -1368,18 +1403,132 @@ impl Window {
         }
     }
 
+    /// Take the places the user dragged the window to, by monitor.
+    ///
+    /// They are used from the next showing.
+    pub fn set_placements(&mut self, placements: Placements) {
+        self.placements = placements;
+    }
+
+    /// Say who stores the saved places when they change.
+    ///
+    /// The call is made on the window's thread, once for a finished drag or
+    /// a reset: whoever takes it must not block there.
+    pub fn on_placements_changed(&mut self, tell: impl FnMut(&Placements) + 'static) {
+        self.on_placements = Some(Box::new(tell));
+    }
+
+    fn placements_changed(&mut self) {
+        if let Some(tell) = self.on_placements.as_mut() {
+            tell(&self.placements);
+        }
+    }
+
+    /// The saved place of a monitor.
+    fn saved_on(&self, monitor: HMONITOR) -> Option<Anchor> {
+        // With nothing saved the platform is not asked which monitor it is.
+        if self.placements.is_empty() {
+            return None;
+        }
+        let key = placement::monitor_key(monitor)?;
+        self.placements.get(&key).copied()
+    }
+
+    /// Drop the saved place of the monitor the window is on.
+    fn forget_placement(&mut self) {
+        self.saved = None;
+        if let Some(key) = placement::monitor_key(self.target_monitor())
+            && self.placements.remove(&key).is_some()
+        {
+            self.placements_changed();
+        }
+    }
+
+    /// The move loop ended: keep where the window was dropped.
+    ///
+    /// `from` is where it started. A loop that moved nothing — a click on
+    /// the grip, or a move cancelled with Escape — saves nothing.
+    fn finish_drag(&mut self, from: RECT) {
+        let mut at = RECT::default();
+        if unsafe { GetWindowRect(self.hwnd, &mut at) } == 0
+            || (at.left, at.top) == (from.left, from.top)
+        {
+            return;
+        }
+        let monitor = unsafe { MonitorFromWindow(self.hwnd, MONITOR_DEFAULTTONEAREST) };
+        let work = work_area_of(monitor);
+        // A saved place before the scale is followed: the resize that
+        // brings must not cut the window to the room below the configured
+        // anchor.
+        let size = self.device_size();
+        self.saved = Some(placement::anchor_of(work, (at.left, at.top), size));
+        self.follow_the_monitor();
+        if unsafe { GetWindowRect(self.hwnd, &mut at) } == 0 {
+            return;
+        }
+        let anchor = placement::anchor_of(work, (at.left, at.top), self.device_size());
+        self.saved = Some(anchor);
+        self.settle();
+        // A monitor the platform will not name keeps the place only until
+        // the window is next placed.
+        if let Some(key) = placement::monitor_key(monitor) {
+            self.placements.insert(key, anchor);
+            self.placements_changed();
+        }
+        self.repaint();
+    }
+
+    /// Answer what the grip was asked, here in the pump where the move loop
+    /// and the window procedure have both returned.
+    fn answer_the_grip(&mut self) {
+        if let Some(from) = self.state_mut().drag_ended.take() {
+            self.finish_drag(from);
+        }
+        if core::mem::take(&mut self.state_mut().reset_asked) {
+            self.forget_placement();
+            self.place();
+            self.repaint();
+        }
+    }
+
+    /// Where a window of this size goes on the work area: its monitor's
+    /// saved place, or the configured anchor.
+    fn spot_for(&self, work: RECT, width: i32, height: i32) -> Bounds {
+        match self.saved {
+            Some(anchor) => placement::restore(work, width, height, anchor),
+            None => {
+                let spot = spot_on(work, width, height, self.anchor);
+                Bounds {
+                    x: spot.x,
+                    y: spot.y,
+                    width: spot.width,
+                    height: spot.height,
+                }
+            }
+        }
+    }
+
     /// Put the window where the user is looking.
     ///
     /// The monitor the cursor is on is the monitor the user is looking
-    /// at, and the window sits on that monitor's work area at the
-    /// anchor's place in it.
+    /// at, and the window sits on that monitor's work area at the place
+    /// saved for it, or at the anchor's place in it.
     fn place(&mut self) {
-        let spot = spot_on(
-            self.target_work_area(),
-            self.width,
-            self.height,
-            self.anchor,
-        );
+        self.saved = self.saved_on(self.target_monitor());
+        self.settle();
+        // The window was made on the monitor the process started on and
+        // moved to the monitor the user is looking at: a monitor has a
+        // scale of its own, and the picture has to be drawn at it — and
+        // placed again at the size that gives it.
+        if self.follow_the_monitor() {
+            self.settle();
+        }
+    }
+
+    /// Move and size the window to its spot.
+    fn settle(&mut self) {
+        let (width, height) = self.device_size();
+        let spot = self.spot_for(self.target_work_area(), width, height);
         // The spot may have cut the window, and the region is the
         // window's shape: it has to follow. The layer is the panel's own
         // bitmap, and a panel of another size is a panel of another
@@ -1402,10 +1551,6 @@ impl Window {
                 SWP_NOACTIVATE,
             );
         }
-        // The window was made on the monitor the process started on and
-        // moved to the monitor the user is looking at: a monitor has a
-        // scale of its own, and the picture has to be drawn at it.
-        self.follow_the_monitor();
     }
 
     /// Put the window at another place on its work area.
@@ -1427,16 +1572,18 @@ impl Window {
     /// a font is a size in device pixels, and the size of the old
     /// monitor's is not the size of this one's — and the window is
     /// sized again at the new scale.
-    fn follow_the_monitor(&mut self) {
+    ///
+    /// True when the scale changed.
+    fn follow_the_monitor(&mut self) -> bool {
         let dpi = unsafe { GetDpiForWindow(self.hwnd) };
         if dpi == 0 {
             // The platform would not say: the scale stays the one the
             // window was made with.
-            return;
+            return false;
         }
         let scale = scale_of(dpi);
         if scale == self.scale {
-            return;
+            return false;
         }
         self.scale = scale;
         self.state_mut().scale = scale;
@@ -1444,21 +1591,27 @@ impl Window {
         // And the window is sized again, at the new scale.
         let (width, height) = self.model;
         self.resize(width, height);
+        true
     }
 
-    /// The work area the window lives in.
+    /// The work area the window lives in: its target monitor's.
+    fn target_work_area(&self) -> RECT {
+        work_area_of(self.target_monitor())
+    }
+
+    /// The monitor the window lives on.
     ///
-    /// While the window is hidden it is the work area of the monitor the
+    /// While the window is hidden it is the monitor the
     /// cursor is on: the launcher opens where the user is looking, and
     /// the user is where the pointer is. Once the window is up it is the
-    /// work area of the monitor the window is on, because a window that
-    /// moved to another screen while the user is typing in it would be a
-    /// window the user cannot reach.
-    fn target_work_area(&self) -> RECT {
+    /// monitor the window is on, because a window that moved to another
+    /// screen while the user is typing in it would be a window the user
+    /// cannot reach.
+    fn target_monitor(&self) -> HMONITOR {
         if self.is_visible() {
-            own_work_area(self.hwnd)
+            unsafe { MonitorFromWindow(self.hwnd, MONITOR_DEFAULTTONEAREST) }
         } else {
-            work_area()
+            cursor_monitor()
         }
     }
 
@@ -1473,7 +1626,7 @@ impl Window {
         // The window is never taller than the room the work area has: the
         // model sizes it from the rows, and the rows have to fit between
         // the top of the area and the bottom of the screen.
-        let spot = spot_on(self.target_work_area(), width, height, self.anchor);
+        let spot = self.spot_for(self.target_work_area(), width, height);
         if spot.width == self.width && spot.height == self.height {
             return;
         }
@@ -1780,6 +1933,9 @@ impl Window {
                 if !self.apply(control) {
                     break;
                 }
+                // The grip: a finished drag is saved before anything can
+                // hide the window.
+                self.answer_the_grip();
                 // The user went somewhere else: the window gets out of the
                 // way, and the answer is given here, where the host is not
                 // inside anything.
@@ -2139,31 +2295,27 @@ fn spot_on(work: RECT, width: i32, height: i32, anchor: (u32, u32)) -> Spot {
     }
 }
 
-/// The work area of the monitor the cursor is on.
-///
-/// The area is the part of the monitor the taskbar and the other bars
-/// did not take, and a window that lives outside it is a window under
-/// the taskbar.
+/// The monitor the cursor is on, or null when the platform will not say
+/// where the cursor is.
 ///
 /// The cursor is the monitor the user is looking at: the launcher opens
 /// where the user is, and the user is where the pointer is. A launcher
 /// that opens on the wrong screen is worse than no launcher.
-fn work_area() -> RECT {
+fn cursor_monitor() -> HMONITOR {
     unsafe {
         let mut point = POINT { x: 0, y: 0 };
         if GetCursorPos(&mut point) == 0 {
-            return whole_screen();
+            return core::ptr::null_mut();
         }
-        work_area_of(MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST))
+        MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST)
     }
 }
 
-/// The work area of the monitor the window is on.
-fn own_work_area(hwnd: HWND) -> RECT {
-    unsafe { work_area_of(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)) }
-}
-
 /// The work area of a monitor.
+///
+/// The area is the part of the monitor the taskbar and the other bars
+/// did not take, and a window that lives outside it is a window under
+/// the taskbar.
 fn work_area_of(monitor: HMONITOR) -> RECT {
     unsafe {
         if monitor.is_null() {
@@ -2269,7 +2421,7 @@ unsafe extern "system" fn wnd_proc(
                         // The platform's own backdrop is behind this
                         // window, and the drawing leaves it alone.
                         None => {
-                            let _ = paint::paint(
+                            let (width, _) = paint::paint(
                                 hdc,
                                 &state.view,
                                 state.backdrop,
@@ -2279,6 +2431,7 @@ unsafe extern "system" fn wnd_proc(
                                 state.scale,
                                 state.lang,
                             );
+                            paint::grip(hdc, width, state.scale, &state.colours);
                         }
                     }
                 }
@@ -2347,12 +2500,81 @@ unsafe extern "system" fn wnd_proc(
             }
             0
         }
+        // The grip answers as a caption does, and the platform's own move
+        // loop does the dragging: capture, Escape to cancel and the screen
+        // edges are its business. The rest of the window stays client area.
+        WM_NCHITTEST => {
+            if unsafe { is_on_grip(hwnd, lparam) } {
+                HTCAPTION
+            } else {
+                unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+            }
+        }
+        // The low word is the hit-test answer.
+        WM_SETCURSOR if (lparam & 0xFFFF) == HTCAPTION => {
+            unsafe { SetCursor(LoadCursorW(core::ptr::null_mut(), IDC_SIZEALL)) };
+            1
+        }
+        // A caption's double click would be the platform's to maximise
+        // with: here it returns the window to the configured position.
+        WM_NCLBUTTONDBLCLK if wparam as LRESULT == HTCAPTION => {
+            if let Some(state) = unsafe { state_of(hwnd) } {
+                // SAFETY: the window's own thread and its own state.
+                unsafe { (*state).reset_asked = true };
+                unsafe { PostMessageW(hwnd, WM_NULL, 0, 0) };
+            }
+            0
+        }
+        // The move loop runs inside the pump's dispatch, so the host cannot
+        // paint or size the window until it has ended.
+        WM_ENTERSIZEMOVE => {
+            if let Some(state) = unsafe { state_of(hwnd) } {
+                let mut rect = RECT::default();
+                if unsafe { GetWindowRect(hwnd, &mut rect) } != 0 {
+                    // SAFETY: the window's own thread and its own state.
+                    unsafe { (*state).drag_from = Some(rect) };
+                }
+            }
+            0
+        }
+        WM_EXITSIZEMOVE => {
+            if let Some(state) = unsafe { state_of(hwnd) } {
+                // SAFETY: the window's own thread and its own state.
+                unsafe { (*state).drag_ended = (*state).drag_from.take() };
+                unsafe { PostMessageW(hwnd, WM_NULL, 0, 0) };
+            }
+            0
+        }
+        // Crossing to a monitor of another scale does not resize or move
+        // the window under the pointer: the scale is followed when the drag
+        // has ended, and when the window is next placed.
+        WM_DPICHANGED => 0,
         WM_DESTROY => {
             unsafe { PostQuitMessage(0) };
             0
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
+}
+
+/// Whether a mouse message's screen point is on the window's grip.
+unsafe fn is_on_grip(hwnd: HWND, lparam: LPARAM) -> bool {
+    let Some(state) = (unsafe { state_of(hwnd) }) else {
+        return false;
+    };
+    let mut rect = RECT::default();
+    if unsafe { GetWindowRect(hwnd, &mut rect) } == 0 {
+        return false;
+    }
+    // SAFETY: the window's own thread and its own state.
+    let (view_width, scale) = unsafe { ((*state).view.width, (*state).scale) };
+    let point = placement::point_of(lparam);
+    placement::on_grip(
+        placement::picture_width(view_width, scale),
+        scale,
+        point.x - rect.left,
+        point.y - rect.top,
+    )
 }
 
 /// The window's state, from the window's own user data.
@@ -3591,6 +3813,29 @@ mod tests {
         // a suite that leaves a window up is a suite that leaves the
         // keyboard on a window nobody is looking at.
         window.hide();
+    }
+
+    /// The platform is told that the grip is a caption, and that the rest
+    /// of the window is not.
+    #[test]
+    fn only_the_grip_moves_the_window() {
+        const HTCLIENT: LRESULT = 1;
+        let window = Window::new("rgxy-test").expect("the window was made");
+        let hwnd = window.hwnd();
+        let mut rect = RECT::default();
+        unsafe { GetWindowRect(hwnd, &mut rect) };
+        let picture = placement::picture_width(window.view().width, window.scale);
+        let ask = |x: i32, y: i32| {
+            let x = (rect.left + x) as u16 as u32;
+            let y = (rect.top + y) as u16 as u32;
+            let packed = ((y << 16) | x) as LPARAM;
+            unsafe { SendMessageW(hwnd, WM_NCHITTEST, 0, packed) }
+        };
+        let bar = placement::grip_bar(picture, window.scale);
+        assert_eq!(ask(picture / 2, bar.top), HTCAPTION);
+        let field = Layout::default().scaled(window.scale).input_top() as i32;
+        assert_eq!(ask(picture / 2, field + 10), HTCLIENT, "the query field");
+        assert_eq!(ask(10, bar.top), HTCLIENT, "beside the grip");
     }
 
     /// The window speaks English until it is told otherwise.

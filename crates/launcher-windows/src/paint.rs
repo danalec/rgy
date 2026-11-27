@@ -916,6 +916,25 @@ pub unsafe fn paint(
     (width, height)
 }
 
+/// The mark the window is dragged by: a short bar in the theme's dim
+/// colour, in the padding above the field. The window draws it over the
+/// picture, which is the picture's own width wide.
+///
+/// # Safety
+///
+/// `hdc` must be a device context the thread may draw on.
+pub(crate) unsafe fn grip(hdc: HDC, picture: i32, scale: u32, colours: &Colours) {
+    let bar = crate::placement::grip_bar(picture, scale);
+    fill(
+        hdc,
+        bar.left,
+        bar.top,
+        bar.right - bar.left,
+        bar.bottom - bar.top,
+        colours.dim,
+    );
+}
+
 /// The figures of the meter, as the window draws them: the chart of the
 /// last few dozen answers, and the percentiles beside it.
 ///

@@ -10,8 +10,8 @@ empty off Windows and still `no_std`. All Win32 calls are hand-written in
 `src/win.rs`.
 
 ## Subdirectories & Boundaries
-- [src](./src/EGM.md) — the ten `.rs` sources: the window, the paint surface,
-  the keyboard hook, the actions, the tray, the single-instance guard and the
+- [src](./src/EGM.md) — the `.rs` sources: the window, the paint surface,
+  the per-monitor placement, the keyboard hook, the actions, the tray, the single-instance guard and the
   Win32 seam.
 
 ## Interface
@@ -20,6 +20,8 @@ empty off Windows and still `no_std`. All Win32 calls are hand-written in
   `[lib.rs:pub use sole::{Sole, Taken}]`,
   `[lib.rs:session_available]`, `[lib.rs:put_the_console_away]` (from `src`).
 - `[window.rs:Window]`, `[hook.rs:Hook]` (from `src`).
+- `[placement.rs:Placements]` — the per-monitor places the window is dragged
+  to, held by the window and stored by the host (from `src`).
 
 ## Invariants
 - `[lib.rs:no_std]` — `#![no_std]` comes before `#![cfg(windows)]`; a

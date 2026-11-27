@@ -1253,17 +1253,93 @@ registered: the socket on Linux, macOS and FreeBSD, the named pipe on Windows.
 
 ### The settings
 
-Everything the launcher looks like is one file: `settings.tsv`, in the
-same folder as the index (`%LOCALAPPDATA%\rgy` on Windows, `~/.cache/rgy`
-elsewhere). The panel writes it and a hand can too: a file edited by hand
-is read on the next start, and the file the panel writes is the same one.
+The settings live in the same folder as the index (`%LOCALAPPDATA%\rgy` on
+Windows, `~/.cache/rgy` elsewhere), in two files:
+
+| order | where | who writes it |
+|---|---|---|
+| 1 (lowest) | built-in defaults | — |
+| 2 | `settings.tsv` | the panel, or a hand |
+| 3 (wins) | `settings.json` | a hand only |
+
+#### `settings.json`
+
+When there is no `settings.json`, the desktop launcher writes one at start,
+holding the current settings **commented out**: it changes nothing until a
+line is uncommented. `settings.tsv` is left as it is. The terminal interface
+and `--pick` read the file but do not create it. If `settings.tsv` cannot be
+read, no file is made.
+
+```jsonc
+{
+  "version": 1,
+  "overlay.theme": "nord",
+  "overlay.width": 780,          // a number, without quotes
+  "overlay.x": 500,
+  "overlay.y": 120,
+  "overlay.alpha": 240,
+  "overlay.colour.accent": "#ff8800",
+  "hotkey": "combo ctrl+alt+space",
+  "fzf-arg": ["--height", "80%"], // trailing commas are allowed
+}
+```
+
+- The file is one flat object. The key names, values and ranges are those of
+  the table below, except that `fzf-arg` is one list of strings, which
+  replaces the stored list. `//` and `/* */` comments are allowed.
+- rgy never rewrites an existing file, so comments and unknown keys stay.
+- A key set here is read-only in both panels: its row shows `[json]`, and
+  changing it says where to edit it. **Restore defaults** leaves it in force.
+  The panel does not change the value `settings.tsv` holds underneath, so
+  removing the key brings that value back.
+- Restart `rgxy` after editing the file. A panel change to a key added while
+  it was running is reported as not saved.
+- A file that is not valid, or has a `version` other than `1`, is ignored as
+  a whole. An unknown key or a wrong value is skipped on its own; a number out
+  of range is clamped. The window shows the first such problem; all of them go
+  to stderr (the terminal prints them before it opens).
+
+#### Moving the window (Windows)
+
+Drag the short bar at the top of the window, above the search field. The
+cursor turns into the move cursor over it; `Esc` during a drag cancels it.
+On release the position is saved for the monitor the window ended on. Each
+time the window opens it goes to the monitor under the pointer, at that
+monitor's saved position, or at `overlay.x` / `overlay.y` when it has none.
+
+- To go back to the configured position on the current monitor, double-click
+  the bar. Changing the position in `>settings` does the same (so does
+  **Restore defaults**, when it changes the position), and then applies the
+  new value. Other monitors keep theirs. Editing `settings.json` or
+  `settings.tsv` by hand does not clear a saved position.
+- Positions are in `state.json`, beside the settings files, relative to the
+  monitor's work area. The window is kept wholly inside that area: after a
+  change of resolution, scale or taskbar, or when results make it taller, a
+  window saved low is moved up. Dragging never writes `settings.tsv` or
+  `settings.json`.
+- rgy writes `state.json` itself. It is read at start only; one that cannot be
+  read is ignored with a message, and the next save replaces it. Deleting it
+  while `rgxy` is closed resets every monitor.
+- A monitor is known by its device interface path, which can change when it is
+  moved to another port, dock or adapter; the configured position is then used
+  until the window is dragged again. Where Windows gives no path, the display's
+  name (`\\.\DISPLAY1`) is used, which another monitor can inherit after a
+  reconnection or restart.
+- While a drag is in progress the window takes no typing and the hotkey does
+  nothing. The number of result rows is still worked out at start from the
+  configured position. Quitting right after a drag may lose that save.
+
+The Linux and FreeBSD window and the terminal interface cannot be dragged this
+way.
+
+#### The panel and `settings.tsv`
 
 Type `>settings` in the bar: `↑`/`↓` choose the row, `←`/`→` and `Enter`
 adjust it, `Esc` closes — and every other key is the field's, so typing
 closes the panel and lands. An adjustment is worn at once: the theme, the
 width, the seat, the glass, the key. The last row restores the defaults.
 
-The keys the file knows:
+The keys both files know:
 
 | key | what it holds |
 |---|---|
@@ -1298,8 +1374,9 @@ is one line each. The picker's theme becomes `fzf`'s own `--color` flags
 free arguments are the file's `fzf-arg` lines: they come after the
 colours, and the command line's `--fzf-arg` is the last word.
 
-A file that cannot be read is the defaults plus a sentence on the line
-under the field — the launcher still comes up.
+A `settings.tsv` that cannot be read is replaced by the defaults (with
+`settings.json` still over them) plus a sentence on the line under the field —
+the launcher still comes up.
 
 ### The two faces
 

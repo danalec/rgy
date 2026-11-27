@@ -41,7 +41,7 @@ pub use layer::{Layer, Split};
 pub use layout::Layout;
 pub use query::{Query, ShortFilter};
 pub use results::{Results, Row};
-pub use settings::{Fzf, Hotkey, Overlay, Settings, TapKey};
+pub use settings::{Fzf, Hotkey, Overlay, Overrides, Settings, TapKey};
 pub use source::{Answer, Source};
 pub use text::{Lang, Text};
 pub use theme::{Palette, Rgb, Theme};

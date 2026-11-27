@@ -21,7 +21,7 @@ references in the directory are inside `#[cfg(test)]` test code in `app.rs`.
   `[lib.rs:pub use commands::{COMMANDS, Command}]`, `[lib.rs:pub use hotkey::DoubleCtrl]`,
   `[lib.rs:pub use latency::{Latency, LatencyMeter}]`, `[lib.rs:pub use layer::{Layer, Split}]`,
   `[lib.rs:pub use layout::Layout]`, `[lib.rs:pub use query::{Query, ShortFilter}]`,
-  `[lib.rs:pub use results::{Results, Row}]`, `[lib.rs:pub use settings::{Fzf, Hotkey, Overlay, Settings, TapKey}]`,
+  `[lib.rs:pub use results::{Results, Row}]`, `[lib.rs:pub use settings::{Fzf, Hotkey, Overlay, Overrides, Settings, TapKey}]` (`Overrides` and `[settings.rs:pub fn copy_key]`: the keys a hand-edited layer holds, read-only to the panels),
   `[lib.rs:pub use source::{Answer, Source}]`, `[lib.rs:pub use text::{Lang, Text}]`,
   `[lib.rs:pub use theme::{Palette, Rgb, Theme}]`,
   `[lib.rs:pub use tools::{ContentBackend, content_backend}]` — the re-exported

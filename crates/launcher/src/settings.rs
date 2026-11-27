@@ -16,9 +16,9 @@
 //! made the launcher refuse to start would be a setting the user could
 //! not fix from the launcher.
 //!
-//! The panel and the file are the same store: the panel writes this
-//! file, and a file edited by hand is read on the next start. There is
-//! no second place the settings live.
+//! The panel writes this file, and a file edited by hand is read on the
+//! next start. A host may lay a second, hand-edited file over it: the
+//! keys that file sets are [`Overrides`], read-only to the panel.
 
 use alloc::string::{String, ToString as _};
 use alloc::vec::Vec;
@@ -537,6 +537,108 @@ impl Settings {
                 }
             }
             _ => false,
+        }
+    }
+}
+
+/// The keys a hand-edited file holds over the settings, with their values.
+///
+/// A held key is **read-only** to the panels: the file that holds it is
+/// never rewritten, so a panel that appeared to change it would show a
+/// value that is gone at the next start. The keys are the ones
+/// [`Settings::set`] knows; `fzf-arg` is the whole list of arguments.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Overrides {
+    /// The held keys, each once.
+    keys: Vec<String>,
+    /// The held values; a field whose key is not held means nothing.
+    values: Settings,
+}
+
+impl Overrides {
+    /// Hold one scalar or colour key. The value is read as
+    /// [`Settings::set`] reads it, so the caller validates it first.
+    pub fn set(&mut self, key: &str, value: &str) {
+        if self.values.set(key, value) {
+            self.hold(key);
+        }
+    }
+
+    /// Hold the picker's arguments, replacing the whole list.
+    pub fn set_fzf_args(&mut self, args: Vec<String>) {
+        self.values.fzf.args = args;
+        self.hold("fzf-arg");
+    }
+
+    fn hold(&mut self, key: &str) {
+        if !self.holds(key) {
+            self.keys.push(key.to_string());
+        }
+    }
+
+    /// Whether a key is held.
+    pub fn holds(&self, key: &str) -> bool {
+        self.keys.iter().any(|held| held == key)
+    }
+
+    /// Whether nothing is held.
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+
+    /// The held keys.
+    pub fn keys(&self) -> impl Iterator<Item = &str> {
+        self.keys.iter().map(String::as_str)
+    }
+
+    /// Put every held value over the settings.
+    pub fn apply(&self, settings: &mut Settings) {
+        for key in &self.keys {
+            copy_key(&self.values, settings, key);
+        }
+    }
+}
+
+/// Make one key of `to` what it is in `from`.
+///
+/// A colour `from` does not override is removed from `to`: "no override"
+/// is a value too. A key nobody knows changes nothing.
+pub fn copy_key(from: &Settings, to: &mut Settings, key: &str) {
+    match key {
+        "overlay.theme" => to
+            .overlay
+            .palette
+            .template
+            .clone_from(&from.overlay.palette.template),
+        "tui.theme" => to.tui.template.clone_from(&from.tui.template),
+        "fzf.theme" => to
+            .fzf
+            .palette
+            .template
+            .clone_from(&from.fzf.palette.template),
+        "overlay.width" => to.overlay.width = from.overlay.width,
+        "overlay.rows" => to.overlay.rows = from.overlay.rows,
+        "overlay.x" => to.overlay.x = from.overlay.x,
+        "overlay.y" => to.overlay.y = from.overlay.y,
+        "overlay.alpha" => to.overlay.alpha = from.overlay.alpha,
+        "hotkey" => to.overlay.hotkey = from.overlay.hotkey,
+        "fzf-arg" => to.fzf.args.clone_from(&from.fzf.args),
+        _ => {
+            let Some((face, role)) = key.split_once(".colour.") else {
+                return;
+            };
+            let (source, target) = match face {
+                "overlay" => (&from.overlay.palette, &mut to.overlay.palette),
+                "tui" => (&from.tui, &mut to.tui),
+                "fzf" => (&from.fzf.palette, &mut to.fzf.palette),
+                _ => return,
+            };
+            match source.overrides.iter().find(|(known, _)| *known == role) {
+                Some((_, colour)) => {
+                    let _ = target.set_by_name(role, *colour);
+                }
+                None => target.overrides.retain(|(known, _)| *known != role),
+            }
         }
     }
 }

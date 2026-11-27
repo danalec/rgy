@@ -134,6 +134,33 @@ pub struct MONITORINFO {
     pub dwFlags: DWORD,
 }
 
+/// [`MONITORINFO`] with the display's device name behind it: the platform
+/// fills the name in when the size it is given is this struct's.
+#[repr(C)]
+pub struct MONITORINFOEXW {
+    pub info: MONITORINFO,
+    pub szDevice: [u16; 32],
+}
+
+/// What the platform says about a display device, or a monitor on one.
+#[repr(C)]
+pub struct DISPLAY_DEVICEW {
+    pub cb: DWORD,
+    pub DeviceName: [u16; 32],
+    pub DeviceString: [u16; 128],
+    pub StateFlags: DWORD,
+    /// For a monitor asked with [`EDD_GET_DEVICE_INTERFACE_NAME`], its
+    /// device interface path.
+    pub DeviceID: [u16; 128],
+    pub DeviceKey: [u16; 128],
+}
+
+const _: () = assert!(core::mem::size_of::<MONITORINFOEXW>() == 104);
+const _: () = assert!(core::mem::offset_of!(MONITORINFOEXW, szDevice) == 40);
+const _: () = assert!(core::mem::size_of::<DISPLAY_DEVICEW>() == 840);
+const _: () = assert!(core::mem::offset_of!(DISPLAY_DEVICEW, StateFlags) == 324);
+const _: () = assert!(core::mem::offset_of!(DISPLAY_DEVICEW, DeviceID) == 328);
+
 /// The platform's own identifier, as the shell carries it.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -314,6 +341,25 @@ pub const WM_RBUTTONUP: UINT = 0x0205;
 pub const WM_CONTEXTMENU: UINT = 0x007B;
 /// The message with no meaning, sent to make the thread look once.
 pub const WM_NULL: UINT = 0x0000;
+/// The platform asks what part of the window a point is on.
+pub const WM_NCHITTEST: UINT = 0x0084;
+/// A double click on a part of the window that is not the client area.
+pub const WM_NCLBUTTONDBLCLK: UINT = 0x00A3;
+/// The platform asks which cursor to show.
+pub const WM_SETCURSOR: UINT = 0x0020;
+/// The platform's own move loop started, and ended.
+pub const WM_ENTERSIZEMOVE: UINT = 0x0231;
+pub const WM_EXITSIZEMOVE: UINT = 0x0232;
+/// The window's monitor, and with it its scale, changed.
+pub const WM_DPICHANGED: UINT = 0x02E0;
+/// The hit-test answer for the part a window is moved by.
+pub const HTCAPTION: LRESULT = 2;
+/// The four-way move cursor, a shared system resource.
+pub const IDC_SIZEALL: *const u16 = 32646 as *const u16;
+/// Ask for a monitor's device interface path.
+pub const EDD_GET_DEVICE_INTERFACE_NAME: DWORD = 0x0000_0001;
+/// The device is active.
+pub const DISPLAY_DEVICE_ACTIVE: DWORD = 0x0000_0001;
 
 /// What the shell is told to do with the icon.
 pub const NIM_ADD: DWORD = 0x0000_0000;
@@ -640,6 +686,17 @@ unsafe extern "system" {
     /// What the platform says about a monitor.
     pub fn GetMonitorInfoW(hMonitor: HMONITOR, lpmi: *mut MONITORINFO) -> BOOL;
 
+    /// The display devices, or the monitors of one when it is named.
+    pub fn EnumDisplayDevicesW(
+        lpDevice: *const u16,
+        iDevNum: DWORD,
+        lpDisplayDevice: *mut DISPLAY_DEVICEW,
+        dwFlags: DWORD,
+    ) -> BOOL;
+
+    /// Show a cursor.
+    pub fn SetCursor(hCursor: HANDLE) -> HANDLE;
+
     pub fn SetTimer(hWnd: HWND, nIDEvent: usize, uElapse: u32, lpTimerFunc: *mut c_void) -> usize;
 
     pub fn KillTimer(hWnd: HWND, uIDEvent: usize) -> i32;
@@ -798,6 +855,9 @@ unsafe extern "system" {
         lpszClass: *const u16,
         lpwcx: *mut WNDCLASSEXW,
     ) -> BOOL;
+
+    /// Hand a message to a window's procedure, and take its answer.
+    pub fn SendMessageW(hWnd: HWND, Msg: UINT, wParam: WPARAM, lParam: LPARAM) -> LRESULT;
 }
 
 #[link(name = "gdi32")]
